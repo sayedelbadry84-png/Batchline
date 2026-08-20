@@ -91,6 +91,7 @@ model MixDesign {
   components   MixComponent[]
   reservations Reservation[]
   batchTickets BatchTicket[]
+  certificates ComplianceCertificate[]
 }
 
 model Material {
@@ -190,6 +191,7 @@ model Employee {
   updatedAt      DateTime  @updatedAt
 
   trips Trip[]
+  sampledTestBatches TestBatch[]
 }
 
 // ---------------------------------------------------------------------------
@@ -263,10 +265,17 @@ model Trip {
   dischargeStart    DateTime?
   dischargeEnd      DateTime?
   volumeDeliveredM3 Float?
+  // Driver-app delivery confirmation. The photo is stored as a data URL for
+  // this phase (no object storage wired up yet) — fine for demo volumes,
+  // swap for a real blob store (S3-compatible) before production traffic.
+  deliveryPhotoDataUrl String?
+  deliverySignedBy     String?
+  deliverySignedAt     DateTime?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
   drumReturn DrumReturn?
+  testBatches TestBatch[]
 }
 
 model DrumReturn {
@@ -278,6 +287,50 @@ model DrumReturn {
   disposition        String   // NO_CHARGE, REDISPATCHED, PARTIAL_CREDIT, FULL_WASTE
   note               String?
   createdAt          DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — Quality & Compliance
+// ---------------------------------------------------------------------------
+
+model TestBatch {
+  id                String    @id @default(cuid())
+  tripId            String
+  trip              Trip      @relation(fields: [tripId], references: [id])
+  sampleType        String    @default("CYLINDER") // CYLINDER, CUBE, SLUMP_ONLY
+  sampleTime        DateTime  @default(now())
+  slumpMeasuredMm   Float?
+  airContentPct     Float?
+  concreteTempC     Float?
+  sampledById       String?
+  sampledBy         Employee? @relation(fields: [sampledById], references: [id])
+  createdAt         DateTime  @default(now())
+
+  labResults LabResult[]
+}
+
+model LabResult {
+  id                 String    @id @default(cuid())
+  testBatchId        String
+  testBatch          TestBatch @relation(fields: [testBatchId], references: [id], onDelete: Cascade)
+  ageDays            Int
+  breakStrengthMpa   Float
+  targetStrengthMpa  Float
+  passFail           String    // PASS, FAIL
+  testedOn           DateTime  @default(now())
+  createdAt          DateTime  @default(now())
+}
+
+model ComplianceCertificate {
+  id            String    @id @default(cuid())
+  mixId         String
+  mix           MixDesign @relation(fields: [mixId], references: [id])
+  standardRef   String
+  issuedDate    DateTime
+  expiryDate    DateTime
+  issuingBody   String
+  documentUrl   String?
+  createdAt     DateTime  @default(now())
 }
 
 model AuditEvent {

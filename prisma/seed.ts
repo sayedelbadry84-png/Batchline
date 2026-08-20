@@ -108,6 +108,16 @@ async function main() {
     ],
   });
 
+  await prisma.complianceCertificate.create({
+    data: {
+      mixId: mix.id,
+      standardRef: "ES 4756-1 / EN 206",
+      issuingBody: "Egyptian Organization for Standardization & Quality",
+      issuedDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 200),
+      expiryDate: new Date(Date.now() + 1000 * 60 * 60 * 24 * 45),
+    },
+  });
+
   await prisma.truck.createMany({
     data: [
       { plantId: plant.id, code: "MX-14", drumCapacityM3: 8, maxAgitationRpm: 14, gpsDeviceId: "GPS-114", status: "ACTIVE" },

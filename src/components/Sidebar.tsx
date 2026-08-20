@@ -15,6 +15,7 @@ const MODULES = [
   { href: "/suppliers", label: "Suppliers", num: "08" },
   { href: "/projects", label: "Projects", num: "09" },
   { href: "/employees", label: "Employees", num: "10" },
+  { href: "/quality", label: "Quality & Compliance", num: "11" },
   { href: "/plants", label: "Plant Management", num: "12" },
 ];
 
@@ -53,6 +54,19 @@ export function Sidebar() {
           </Link>
         );
       })}
+
+      <div className="mt-4 border-t border-border pt-4">
+        <Link
+          href="/driver"
+          className="flex items-center gap-2 rounded-md px-3 py-2 text-sm text-ink-muted hover:bg-surface-alt hover:text-ink"
+        >
+          <span className="font-mono text-xs text-ink-faint">↗</span>
+          Driver App
+        </Link>
+        <p className="px-3 pt-1 text-[0.68rem] text-ink-faint">
+          Separate mobile-first surface for drivers.
+        </p>
+      </div>
     </nav>
   );
 }
