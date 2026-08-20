@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createTruck, setTruckStatus } from "./actions";
 
 const statusChip: Record<string, string> = {
@@ -9,6 +10,8 @@ const statusChip: Record<string, string> = {
 };
 
 export default async function FleetPage() {
+  await requirePageAccess("fleet");
+
   const [trucks, drivers, plants] = await Promise.all([
     prisma.truck.findMany({
       orderBy: { createdAt: "asc" },

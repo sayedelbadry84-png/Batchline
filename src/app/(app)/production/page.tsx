@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { releaseBatchTicket } from "./actions";
 
 const statusChip: Record<string, string> = {
@@ -11,6 +12,8 @@ const statusChip: Record<string, string> = {
 };
 
 export default async function ProductionPage() {
+  await requirePageAccess("production");
+
   const [readyReservations, activeTickets, recentTickets] = await Promise.all([
     prisma.reservation.findMany({
       where: { status: "CONFIRMED" },

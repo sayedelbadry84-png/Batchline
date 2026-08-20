@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
@@ -11,6 +12,8 @@ function fmt(n: number | null, digits = 1, suffix = "") {
 }
 
 export default async function ReportsPage() {
+  await requirePageAccess("reports");
+
   // Server-rendered snapshot at request time, not a re-rendering client
   // component — see the same pattern (and rationale) in (app)/page.tsx.
   // eslint-disable-next-line react-hooks/purity

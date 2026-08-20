@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createSilo, updateSiloLevel } from "./actions";
 
 function levelColor(pct: number, minPct: number) {
@@ -9,6 +10,8 @@ function levelColor(pct: number, minPct: number) {
 }
 
 export default async function SilosPage() {
+  await requirePageAccess("silos");
+
   const [silos, plants] = await Promise.all([
     prisma.silo.findMany({ include: { plant: true }, orderBy: { createdAt: "asc" } }),
     prisma.plant.findMany({ orderBy: { name: "asc" } }),

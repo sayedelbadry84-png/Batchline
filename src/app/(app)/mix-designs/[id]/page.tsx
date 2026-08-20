@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { addComponent, setMixStatus } from "../actions";
 
 export default async function MixDesignDetailPage({
@@ -8,6 +9,7 @@ export default async function MixDesignDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  await requirePageAccess("mix-designs");
   const { id } = await params;
 
   const [mix, materials] = await Promise.all([

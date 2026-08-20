@@ -1,8 +1,11 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createPlant, updatePlantThresholds } from "./actions";
 
 export default async function PlantsPage() {
+  await requirePageAccess("plants");
+
   const plants = await prisma.plant.findMany({
     orderBy: { createdAt: "asc" },
     include: { _count: { select: { silos: true, employees: true, projects: true } } },

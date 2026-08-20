@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { DrumTimer } from "@/components/DrumTimer";
 import { advanceTrip, closeTripFull, closeTripWithReturn } from "./actions";
 
@@ -19,6 +20,8 @@ const dispositionChip: Record<string, string> = {
 };
 
 export default async function TripsPage() {
+  await requirePageAccess("trips");
+
   const [openTrips, closedTrips] = await Promise.all([
     prisma.trip.findMany({
       where: { status: { not: "CLOSED" } },

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createMixDesign } from "./actions";
 
 const statusChip: Record<string, string> = {
@@ -11,6 +12,8 @@ const statusChip: Record<string, string> = {
 };
 
 export default async function MixDesignsPage() {
+  await requirePageAccess("mix-designs");
+
   const mixes = await prisma.mixDesign.findMany({
     orderBy: { createdAt: "asc" },
     include: { _count: { select: { components: true } } },

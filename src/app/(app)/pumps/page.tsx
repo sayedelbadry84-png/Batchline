@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createPump, schedulePump, updateAssignmentStatus } from "./actions";
 
 const statusChip: Record<string, string> = {
@@ -10,6 +11,8 @@ const statusChip: Record<string, string> = {
 };
 
 export default async function PumpsPage() {
+  await requirePageAccess("pumps");
+
   const [pumps, assignments, unassignedReservations, plants] = await Promise.all([
     prisma.pump.findMany({ orderBy: { createdAt: "asc" }, include: { plant: true } }),
     prisma.pumpAssignment.findMany({

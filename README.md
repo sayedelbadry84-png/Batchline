@@ -136,16 +136,22 @@ driver app (`/driver`) automatically instead of the back office.
   actor id/name/role from the session automatically (previously every call
   site had to pass a role string by hand, which meant "who did this" wasn't
   actually verified — only asserted per call site).
+- **Page-level read authorization**, not just action gating: `src/lib/permissions.ts`
+  is a single `MODULE_ROLES` map that both the sidebar (hides links) and
+  every page (`requirePageAccess()`, redirecting to `/access-denied`)
+  enforce — one source of truth, so the menu can't drift from what's
+  actually allowed. Closes the gap an earlier version of this README called
+  out: an Accountant navigating straight to a Mix Design URL the sidebar
+  hides now gets redirected to `/access-denied` instead of being able to
+  view (only not act on) the page.
 
 ## Not yet implemented (see the rollout plan)
 
-RBAC enforcement is real but *partial*: it covers the Server Actions listed
-above, not full page-level read authorization — a logged-in Accountant can
-still open a Mix Design or Production URL directly (nav just doesn't link
-there for them) even though the mutating actions on that page correctly
-reject their role. Extending `requireRole` checks to every remaining action,
-and adding page-level read gating, is the natural next increment rather than
-a redesign.
+`requireRole` covers the highest-value mutating actions per module (see
+above), not literally every Server Action in the app — a role that can
+*view* a module (per `MODULE_ROLES`) can currently perform any write on it
+unless that specific action has its own guard. Extending coverage action by
+action is the natural next increment.
 
 The PLC/batching-scale and weighbridge integrations are still simulated
 through manual entry (Production's "record actuals" form stands in for a

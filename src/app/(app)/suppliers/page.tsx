@@ -1,8 +1,11 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createSupplier, createMaterial } from "./actions";
 
 export default async function SuppliersPage() {
+  await requirePageAccess("suppliers");
+
   const [suppliers, materials] = await Promise.all([
     prisma.supplier.findMany({ orderBy: { createdAt: "asc" }, include: { _count: { select: { materials: true } } } }),
     prisma.material.findMany({ orderBy: { createdAt: "asc" }, include: { supplier: true } }),

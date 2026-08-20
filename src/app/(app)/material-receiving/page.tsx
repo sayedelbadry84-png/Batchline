@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createReceipt, setQcStatus } from "./actions";
 
 const qcChip: Record<string, string> = {
@@ -10,6 +11,8 @@ const qcChip: Record<string, string> = {
 };
 
 export default async function MaterialReceivingPage() {
+  await requirePageAccess("material-receiving");
+
   const [receipts, plants, suppliers, materials, silos, hoppers] = await Promise.all([
     prisma.materialReceipt.findMany({
       orderBy: { receivedAt: "desc" },

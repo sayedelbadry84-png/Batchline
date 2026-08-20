@@ -1,8 +1,11 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createProject } from "./actions";
 
 export default async function ProjectsPage() {
+  await requirePageAccess("projects");
+
   const [projects, customers, plants] = await Promise.all([
     prisma.project.findMany({
       orderBy: { createdAt: "asc" },

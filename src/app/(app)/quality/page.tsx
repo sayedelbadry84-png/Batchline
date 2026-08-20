@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createTestBatch, addLabResult, createCertificate } from "./actions";
 
 function daysUntil(date: Date) {
@@ -7,6 +8,8 @@ function daysUntil(date: Date) {
 }
 
 export default async function QualityPage() {
+  await requirePageAccess("quality");
+
   const [testBatches, sampleableTrips, employees, certificates, mixes] = await Promise.all([
     prisma.testBatch.findMany({
       orderBy: { sampleTime: "desc" },

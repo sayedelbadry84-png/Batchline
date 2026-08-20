@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createEmployee } from "./actions";
 
 const ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DRIVER", "DISPATCHER", "ADMIN"];
@@ -13,6 +14,8 @@ function expiryFlag(date: Date | null) {
 }
 
 export default async function EmployeesPage() {
+  await requirePageAccess("employees");
+
   const [employees, plants] = await Promise.all([
     prisma.employee.findMany({ orderBy: { createdAt: "asc" }, include: { plant: true } }),
     prisma.plant.findMany({ orderBy: { name: "asc" } }),

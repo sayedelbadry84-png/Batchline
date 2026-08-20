@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { createReservation } from "./actions";
 
 const statusChip: Record<string, string> = {
@@ -12,6 +13,8 @@ const statusChip: Record<string, string> = {
 };
 
 export default async function ReservationsPage() {
+  await requirePageAccess("reservations");
+
   const [reservations, projects, mixes] = await Promise.all([
     prisma.reservation.findMany({
       orderBy: { pourWindowStart: "asc" },

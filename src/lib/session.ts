@@ -1,6 +1,8 @@
 import "server-only";
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
+import { canAccessModule, type ModuleKey } from "@/lib/permissions";
 
 export const SESSION_COOKIE = "batchline_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -62,4 +64,19 @@ export function requireRole(user: CurrentUser | null, allowed: string[]) {
   if (!allowed.includes(user.role)) {
     throw new Error(`Role ${user.role} is not permitted to perform this action.`);
   }
+}
+
+/**
+ * Page-level counterpart to requireRole: call at the top of a Server
+ * Component page to actually enforce what the sidebar only hints at by
+ * hiding a link. A role that can't act on a module shouldn't be able to
+ * read it either just because the (app) layout confirmed they're logged in.
+ */
+export async function requirePageAccess(moduleKey: ModuleKey) {
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
+  if (!canAccessModule(user.role, moduleKey)) {
+    redirect(`/access-denied?module=${moduleKey}`);
+  }
+  return user;
 }

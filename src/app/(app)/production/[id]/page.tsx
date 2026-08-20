@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
 import { recordActuals, completeBatch, startTrip } from "../actions";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
@@ -11,6 +12,7 @@ export default async function BatchTicketPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  await requirePageAccess("production");
   const { id } = await params;
 
   const ticket = await prisma.batchTicket.findUnique({
