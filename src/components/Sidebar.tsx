@@ -1,0 +1,55 @@
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+
+const MODULES = [
+  { href: "/", label: "Dashboard", num: "00" },
+  { href: "/mix-designs", label: "Mix Design", num: "01" },
+  { href: "/reservations", label: "Reservations", num: "02" },
+  { href: "/silos", label: "Silos", num: "06" },
+  { href: "/customers", label: "Customers", num: "07" },
+  { href: "/suppliers", label: "Suppliers", num: "08" },
+  { href: "/projects", label: "Projects", num: "09" },
+  { href: "/employees", label: "Employees", num: "10" },
+  { href: "/plants", label: "Plant Management", num: "12" },
+];
+
+export function Sidebar() {
+  const pathname = usePathname();
+
+  return (
+    <nav className="sticky top-0 flex h-screen w-60 shrink-0 flex-col gap-1 overflow-y-auto border-r border-border px-4 py-6">
+      <div className="mb-1 flex items-baseline gap-2">
+        <span className="font-display text-xl font-semibold tracking-tight">
+          Batchline
+        </span>
+      </div>
+      <div className="mb-6 font-mono text-[0.65rem] tracking-widest text-ink-faint uppercase">
+        Plant Operations
+      </div>
+      {MODULES.map((m) => {
+        const active =
+          m.href === "/" ? pathname === "/" : pathname.startsWith(m.href);
+        return (
+          <Link
+            key={m.href}
+            href={m.href}
+            className={`flex items-center gap-3 rounded-md border-l-2 px-3 py-2 text-sm ${
+              active
+                ? "border-accent bg-surface-alt font-medium text-ink"
+                : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
+            }`}
+          >
+            <span
+              className={`font-mono text-xs ${active ? "text-accent-strong" : "text-ink-faint"}`}
+            >
+              {m.num}
+            </span>
+            {m.label}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}

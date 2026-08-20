@@ -1,0 +1,51 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #f2f4f5;
+  --surface: #ffffff;
+  --surface-alt: #e7ebed;
+  --border: #d2d8db;
+  --ink: #1b2027;
+  --ink-muted: #59636d;
+  --ink-faint: #8b959d;
+  --accent: #d9761e;
+  --accent-strong: #b85e13;
+  --accent-soft: #fbe6d2;
+  --good: #2f7a50;
+  --good-soft: #dff0e6;
+  --warn: #b5790f;
+  --warn-soft: #fbedd3;
+  --critical: #b33b26;
+  --critical-soft: #fadbd3;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-alt: var(--surface-alt);
+  --color-border: var(--border);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-good: var(--good);
+  --color-good-soft: var(--good-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-critical: var(--critical);
+  --color-critical-soft: var(--critical-soft);
+  --font-display: var(--font-oswald);
+  --font-sans: var(--font-plex-sans);
+  --font-mono: var(--font-plex-mono);
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}

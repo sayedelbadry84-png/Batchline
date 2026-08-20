@@ -1,0 +1,195 @@
+// Batchline data model — Phase 1 (Foundation)
+// Dev datasource is SQLite for zero-setup local running; swap provider to
+// "postgresql" and DATABASE_URL to a Postgres connection string for production.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Role is a plain string (SQLite has no native enum support); valid values
+// are enforced in application code: ADMIN, PLANT_OPERATOR, QUALITY_SUPERVISOR,
+// ACCOUNTANT, DRIVER, CUSTOMER.
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         String
+  plantId      String?
+  plant        Plant?   @relation(fields: [plantId], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  auditEvents  AuditEvent[]
+}
+
+model Plant {
+  id        String   @id @default(cuid())
+  name      String
+  city      String
+  currency  String   @default("EGP")
+  timezone  String   @default("Africa/Cairo")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users      User[]
+  silos      Silo[]
+  hoppers    Hopper[]
+  employees  Employee[]
+  projects   Project[]
+}
+
+model Silo {
+  id               String   @id @default(cuid())
+  plantId          String
+  plant            Plant    @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  name             String
+  materialType     String
+  capacityTons     Float
+  currentLevelTons Float    @default(0)
+  minThresholdPct  Float    @default(15)
+  lastCalibration  DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model Hopper {
+  id               String   @id @default(cuid())
+  plantId          String
+  plant            Plant    @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  name             String
+  aggregateType    String
+  capacityTons     Float
+  currentLevelTons Float    @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model MixDesign {
+  id             String   @id @default(cuid())
+  code           String   @unique
+  grade          String
+  exposureClass  String?
+  slumpTargetMm  Float
+  wcRatio        Float
+  yieldTargetM3  Float    @default(1)
+  status         String   @default("DRAFT") // DRAFT, PENDING_APPROVAL, APPROVED, RETIRED
+  standardCost   Float?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  components   MixComponent[]
+  reservations Reservation[]
+}
+
+model Material {
+  id               String   @id @default(cuid())
+  name             String
+  type             String   // CEMENT, FLY_ASH, SAND, COARSE_AGGREGATE, ADMIXTURE, WATER
+  specificGravity  Float?
+  absorptionPct    Float?
+  supplierId       String?
+  supplier         Supplier? @relation(fields: [supplierId], references: [id])
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  mixComponents    MixComponent[]
+}
+
+model MixComponent {
+  id                 String    @id @default(cuid())
+  mixId              String
+  mix                MixDesign @relation(fields: [mixId], references: [id], onDelete: Cascade)
+  materialId         String
+  material           Material  @relation(fields: [materialId], references: [id])
+  designMassKgPerM3  Float
+  tolerancePct       Float     @default(2)
+
+  @@unique([mixId, materialId])
+}
+
+model Customer {
+  id            String   @id @default(cuid())
+  legalName     String
+  taxId         String?
+  creditLimit   Float    @default(0)
+  paymentTerms  String   @default("Net 30")
+  contactEmail  String?
+  contactPhone  String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  projects Project[]
+}
+
+model Supplier {
+  id               String   @id @default(cuid())
+  name             String
+  materialCatalog  String?
+  leadTimeDays     Int?
+  rejectionRatePct Float    @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  materials Material[]
+}
+
+model Project {
+  id                  String   @id @default(cuid())
+  name                String
+  customerId          String
+  customer            Customer @relation(fields: [customerId], references: [id])
+  plantId             String
+  plant               Plant    @relation(fields: [plantId], references: [id])
+  siteAddress         String
+  contractedVolumeM3  Float?
+  status              String   @default("ACTIVE")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  reservations Reservation[]
+}
+
+model Reservation {
+  id                 String    @id @default(cuid())
+  projectId          String
+  project            Project   @relation(fields: [projectId], references: [id])
+  mixId              String
+  mix                MixDesign @relation(fields: [mixId], references: [id])
+  requestedVolumeM3  Float
+  pourWindowStart    DateTime
+  status             String    @default("REQUESTED") // REQUESTED, CONFIRMED, IN_PRODUCTION, DELIVERED, CANCELLED
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+}
+
+model Employee {
+  id             String    @id @default(cuid())
+  plantId        String
+  plant          Plant     @relation(fields: [plantId], references: [id])
+  name           String
+  role           String
+  licenseExpiry  DateTime?
+  shiftPattern   String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model AuditEvent {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id])
+  role       String
+  module     String
+  recordId   String
+  field      String?
+  beforeValue String?
+  afterValue  String?
+  reasonCode  String?
+  createdAt   DateTime @default(now())
+}
