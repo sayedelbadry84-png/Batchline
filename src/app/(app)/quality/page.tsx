@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { getDictionary } from "@/lib/i18n";
 import { createTestBatch, addLabResult, createCertificate } from "./actions";
 
 function daysUntil(date: Date) {
@@ -9,6 +10,8 @@ function daysUntil(date: Date) {
 
 export default async function QualityPage() {
   await requirePageAccess("quality");
+  const { dict } = await getDictionary();
+  const m = dict.modules.quality;
 
   const [testBatches, sampleableTrips, employees, certificates, mixes] = await Promise.all([
     prisma.testBatch.findMany({
@@ -33,13 +36,9 @@ export default async function QualityPage() {
   return (
     <div className="flex flex-col gap-8">
       <header>
-        <div className={ui.eyebrow}>Modules — Quality &amp; Compliance</div>
-        <h1 className={ui.h1}>Test batches, lab results &amp; certificates</h1>
-        <p className={ui.intro}>
-          Every cylinder traces back to one trip, one truck, one driver, and
-          one batch ticket — a strength failure can be chased to a specific
-          load without cross-referencing paperwork.
-        </p>
+        <div className={ui.eyebrow}>{m.eyebrow}</div>
+        <h1 className={ui.h1}>{m.title}</h1>
+        <p className={ui.intro}>{m.intro}</p>
       </header>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
@@ -49,16 +48,16 @@ export default async function QualityPage() {
               <div className="flex items-start justify-between">
                 <div>
                   <div className="font-medium">
-                    {tb.sampleType} — {tb.trip.batchTicket.reservation.project.name}
+                    {dict.sampleTypes[tb.sampleType as keyof typeof dict.sampleTypes] ?? tb.sampleType} — {tb.trip.batchTicket.reservation.project.name}
                   </div>
                   <div className="text-xs text-ink-muted">
-                    {tb.trip.batchTicket.mix.code} · {tb.trip.batchTicket.ticketNumber} · sampled{" "}
-                    {new Date(tb.sampleTime).toLocaleString()} {tb.sampledBy ? `by ${tb.sampledBy.name}` : ""}
+                    <span dir="ltr">{tb.trip.batchTicket.mix.code} · {tb.trip.batchTicket.ticketNumber}</span> · {m.sampledAt(new Date(tb.sampleTime).toLocaleString())}{" "}
+                    {tb.sampledBy ? m.by(tb.sampledBy.name) : ""}
                   </div>
                 </div>
-                <div className="font-mono text-xs text-ink-muted tabular">
-                  {tb.slumpMeasuredMm != null && <div>slump {tb.slumpMeasuredMm}mm</div>}
-                  {tb.airContentPct != null && <div>air {tb.airContentPct}%</div>}
+                <div className="font-mono text-xs text-ink-muted tabular" dir="ltr">
+                  {tb.slumpMeasuredMm != null && <div>{m.slump(tb.slumpMeasuredMm)}</div>}
+                  {tb.airContentPct != null && <div>{m.air(tb.airContentPct)}</div>}
                   {tb.concreteTempC != null && <div>{tb.concreteTempC}°C</div>}
                 </div>
               </div>
@@ -66,10 +65,10 @@ export default async function QualityPage() {
               <table className={`${ui.table} mt-3`}>
                 <thead>
                   <tr>
-                    <th className={ui.th}>Age</th>
-                    <th className={ui.th}>Break strength</th>
-                    <th className={ui.th}>Target</th>
-                    <th className={ui.th}>Result</th>
+                    <th className={ui.th}>{m.col.age}</th>
+                    <th className={ui.th}>{m.col.breakStrength}</th>
+                    <th className={ui.th}>{m.col.target}</th>
+                    <th className={ui.th}>{m.col.result}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -82,7 +81,7 @@ export default async function QualityPage() {
                         <span
                           className={`${ui.chip} ${r.passFail === "PASS" ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}
                         >
-                          {r.passFail}
+                          {dict.status[r.passFail as keyof typeof dict.status] ?? r.passFail}
                         </span>
                       </td>
                     </tr>
@@ -90,7 +89,7 @@ export default async function QualityPage() {
                   {tb.labResults.length === 0 && (
                     <tr>
                       <td className={ui.td} colSpan={4}>
-                        <span className="text-ink-muted">No break results yet.</span>
+                        <span className="text-ink-muted">{m.emptyResults}</span>
                       </td>
                     </tr>
                   )}
@@ -100,56 +99,54 @@ export default async function QualityPage() {
               <form action={addLabResult} className="mt-3 flex flex-wrap items-end gap-2">
                 <input type="hidden" name="testBatchId" value={tb.id} />
                 <div>
-                  <label className={ui.label}>Age (days)</label>
+                  <label className={ui.label}>{m.fResult.ageDays}</label>
                   <input name="ageDays" type="number" defaultValue={28} className="w-20 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                 </div>
                 <div>
-                  <label className={ui.label}>Break strength (MPa)</label>
+                  <label className={ui.label}>{m.fResult.breakStrength}</label>
                   <input name="breakStrengthMpa" type="number" step="0.1" required className="w-28 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                 </div>
                 <div>
-                  <label className={ui.label}>Target strength (MPa)</label>
+                  <label className={ui.label}>{m.fResult.targetStrength}</label>
                   <input name="targetStrengthMpa" type="number" step="0.1" required className="w-28 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                 </div>
                 <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">
-                  Record result
+                  {m.recordResult}
                 </button>
               </form>
             </div>
           ))}
           {testBatches.length === 0 && (
-            <div className={`${ui.card} text-sm text-ink-muted`}>No test batches sampled yet.</div>
+            <div className={`${ui.card} text-sm text-ink-muted`}>{m.emptyBatches}</div>
           )}
         </div>
 
         <form action={createTestBatch} className={`${ui.card} flex flex-col gap-3`}>
-          <h2 className="font-display text-lg font-semibold">Sample a test batch</h2>
+          <h2 className="font-display text-lg font-semibold">{m.sampleTitle}</h2>
           <div>
-            <label className={ui.label}>Trip</label>
+            <label className={ui.label}>{m.fSample.trip}</label>
             <select name="tripId" required className={ui.select}>
-              <option value="">Select trip…</option>
+              <option value="">{dict.field.selectTrip}</option>
               {sampleableTrips.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.batchTicket.ticketNumber} — {t.batchTicket.reservation.project.name}
                 </option>
               ))}
             </select>
-            {sampleableTrips.length === 0 && (
-              <p className="mt-1 text-xs text-warn">No trips discharging or closed yet.</p>
-            )}
+            {sampleableTrips.length === 0 && <p className="mt-1 text-xs text-warn">{m.noTripsAvailable}</p>}
           </div>
           <div>
-            <label className={ui.label}>Sample type</label>
+            <label className={ui.label}>{m.fSample.sampleType}</label>
             <select name="sampleType" className={ui.select}>
-              <option value="CYLINDER">Cylinder</option>
-              <option value="CUBE">Cube</option>
-              <option value="SLUMP_ONLY">Slump only</option>
+              <option value="CYLINDER">{dict.sampleTypes.CYLINDER}</option>
+              <option value="CUBE">{dict.sampleTypes.CUBE}</option>
+              <option value="SLUMP_ONLY">{dict.sampleTypes.SLUMP_ONLY}</option>
             </select>
           </div>
           <div>
-            <label className={ui.label}>Sampled by</label>
+            <label className={ui.label}>{m.fSample.sampledBy}</label>
             <select name="sampledById" className={ui.select}>
-              <option value="">Unassigned</option>
+              <option value="">{dict.field.unassigned}</option>
               {employees.map((e) => (
                 <option key={e.id} value={e.id}>
                   {e.name}
@@ -158,33 +155,33 @@ export default async function QualityPage() {
             </select>
           </div>
           <div>
-            <label className={ui.label}>Slump measured (mm)</label>
+            <label className={ui.label}>{m.fSample.slump}</label>
             <input name="slumpMeasuredMm" type="number" className={ui.input} />
           </div>
           <div>
-            <label className={ui.label}>Air content (%)</label>
+            <label className={ui.label}>{m.fSample.air}</label>
             <input name="airContentPct" type="number" step="0.1" className={ui.input} />
           </div>
           <div>
-            <label className={ui.label}>Concrete temp (°C)</label>
+            <label className={ui.label}>{m.fSample.temp}</label>
             <input name="concreteTempC" type="number" step="0.1" className={ui.input} />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
-            Log sample
+            {m.logSample}
           </button>
         </form>
       </div>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
         <div className={ui.card}>
-          <h2 className="mb-3 font-display text-lg font-semibold">Compliance certificates</h2>
+          <h2 className="mb-3 font-display text-lg font-semibold">{m.certsTitle}</h2>
           <table className={ui.table}>
             <thead>
               <tr>
-                <th className={ui.th}>Mix</th>
-                <th className={ui.th}>Standard</th>
-                <th className={ui.th}>Issuing body</th>
-                <th className={ui.th}>Expiry</th>
+                <th className={ui.th}>{m.colCerts.mix}</th>
+                <th className={ui.th}>{m.colCerts.standard}</th>
+                <th className={ui.th}>{m.colCerts.issuingBody}</th>
+                <th className={ui.th}>{m.colCerts.expiry}</th>
               </tr>
             </thead>
             <tbody>
@@ -192,14 +189,14 @@ export default async function QualityPage() {
                 const remaining = daysUntil(c.expiryDate);
                 return (
                   <tr key={c.id}>
-                    <td className={`${ui.td} font-mono text-xs`}>{c.mix.code}</td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{c.mix.code}</td>
                     <td className={ui.td}>{c.standardRef}</td>
                     <td className={ui.td}>{c.issuingBody}</td>
                     <td className={ui.td}>
                       {new Date(c.expiryDate).toLocaleDateString()}
-                      {remaining < 0 && <span className={`${ui.chip} bg-critical-soft text-critical ms-2`}>expired</span>}
+                      {remaining < 0 && <span className={`${ui.chip} bg-critical-soft text-critical ms-2`}>{m.expired}</span>}
                       {remaining >= 0 && remaining <= 60 && (
-                        <span className={`${ui.chip} bg-warn-soft text-warn ms-2`}>{remaining}d left</span>
+                        <span className={`${ui.chip} bg-warn-soft text-warn ms-2`}>{m.daysLeft(remaining)}</span>
                       )}
                     </td>
                   </tr>
@@ -208,7 +205,7 @@ export default async function QualityPage() {
               {certificates.length === 0 && (
                 <tr>
                   <td className={ui.td} colSpan={4}>
-                    <span className="text-ink-muted">No certificates on file.</span>
+                    <span className="text-ink-muted">{m.emptyCerts}</span>
                   </td>
                 </tr>
               )}
@@ -217,40 +214,40 @@ export default async function QualityPage() {
         </div>
 
         <form action={createCertificate} className={`${ui.card} flex flex-col gap-3`}>
-          <h2 className="font-display text-lg font-semibold">New certificate</h2>
+          <h2 className="font-display text-lg font-semibold">{m.newCertTitle}</h2>
           <div>
-            <label className={ui.label}>Mix design</label>
+            <label className={ui.label}>{m.fCert.mix}</label>
             <select name="mixId" required className={ui.select}>
-              <option value="">Select mix…</option>
-              {mixes.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.code}
+              <option value="">{dict.field.selectMix}</option>
+              {mixes.map((mx) => (
+                <option key={mx.id} value={mx.id}>
+                  {mx.code}
                 </option>
               ))}
             </select>
           </div>
           <div>
-            <label className={ui.label}>Standard reference</label>
-            <input name="standardRef" required className={ui.input} placeholder="ES 4756-1 / EN 206" />
+            <label className={ui.label}>{m.fCert.standardRef}</label>
+            <input name="standardRef" required className={ui.input} placeholder="ES 4756-1 / EN 206" dir="ltr" />
           </div>
           <div>
-            <label className={ui.label}>Issuing body</label>
+            <label className={ui.label}>{m.fCert.issuingBody}</label>
             <input name="issuingBody" required className={ui.input} placeholder="Egyptian Organization for Standardization" />
           </div>
           <div>
-            <label className={ui.label}>Issued date</label>
+            <label className={ui.label}>{m.fCert.issuedDate}</label>
             <input name="issuedDate" type="date" required className={ui.input} />
           </div>
           <div>
-            <label className={ui.label}>Expiry date</label>
+            <label className={ui.label}>{m.fCert.expiryDate}</label>
             <input name="expiryDate" type="date" required className={ui.input} />
           </div>
           <div>
-            <label className={ui.label}>Document link (optional)</label>
-            <input name="documentUrl" className={ui.input} placeholder="https://…" />
+            <label className={ui.label}>{m.fCert.documentUrl}</label>
+            <input name="documentUrl" className={ui.input} placeholder="https://…" dir="ltr" />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
-            Add certificate
+            {m.addCert}
           </button>
         </form>
       </div>

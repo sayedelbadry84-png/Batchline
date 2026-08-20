@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { getDictionary } from "@/lib/i18n";
 import { createReceipt, setQcStatus } from "./actions";
 
 const qcChip: Record<string, string> = {
@@ -12,6 +13,8 @@ const qcChip: Record<string, string> = {
 
 export default async function MaterialReceivingPage() {
   await requirePageAccess("material-receiving");
+  const { dict } = await getDictionary();
+  const m = dict.modules.materialReceiving;
 
   const [receipts, plants, suppliers, materials, silos, hoppers] = await Promise.all([
     prisma.materialReceipt.findMany({
@@ -28,26 +31,22 @@ export default async function MaterialReceivingPage() {
   return (
     <div className="flex flex-col gap-8">
       <header>
-        <div className={ui.eyebrow}>Module 04 — Material Receiving</div>
-        <h1 className={ui.h1}>Incoming deliveries</h1>
-        <p className={ui.intro}>
-          Weighbridge-verified receipt against a purchase order. Net weight
-          is computed from gross and tare, never entered directly — nothing
-          reaches silo or hopper inventory until quality control passes it.
-        </p>
+        <div className={ui.eyebrow}>{m.eyebrow}</div>
+        <h1 className={ui.h1}>{m.title}</h1>
+        <p className={ui.intro}>{m.intro}</p>
       </header>
 
       <div className={ui.card}>
         <table className={ui.table}>
           <thead>
             <tr>
-              <th className={ui.th}>Received</th>
-              <th className={ui.th}>Supplier / material</th>
-              <th className={ui.th}>PO</th>
-              <th className={ui.th}>Net weight</th>
-              <th className={ui.th}>Variance vs PO</th>
-              <th className={ui.th}>Destination</th>
-              <th className={ui.th}>QC status</th>
+              <th className={ui.th}>{m.col.received}</th>
+              <th className={ui.th}>{m.col.supplierMaterial}</th>
+              <th className={ui.th}>{m.col.po}</th>
+              <th className={ui.th}>{m.col.netWeight}</th>
+              <th className={ui.th}>{m.col.variance}</th>
+              <th className={ui.th}>{m.col.destination}</th>
+              <th className={ui.th}>{m.col.qcStatus}</th>
               <th className={ui.th}></th>
             </tr>
           </thead>
@@ -61,10 +60,10 @@ export default async function MaterialReceivingPage() {
                     {r.supplier.name}
                     <div className="text-xs text-ink-muted">{r.material.name}</div>
                   </td>
-                  <td className={`${ui.td} font-mono text-xs`}>{r.poNumber || "—"}</td>
+                  <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.poNumber || "—"}</td>
                   <td className={`${ui.td} font-mono tabular`}>
                     {r.netWeightKg.toFixed(0)} kg
-                    {r.moisturePct != null && <div className="text-xs text-ink-faint">moisture {r.moisturePct}%</div>}
+                    {r.moisturePct != null && <div className="text-xs text-ink-faint">{m.moisture(r.moisturePct)}</div>}
                   </td>
                   <td className={`${ui.td} font-mono tabular`}>
                     {variancePct != null ? (
@@ -73,12 +72,12 @@ export default async function MaterialReceivingPage() {
                         {variancePct.toFixed(1)}%
                       </span>
                     ) : (
-                      <span className="text-ink-faint">no PO qty</span>
+                      <span className="text-ink-faint">{m.noPoQty}</span>
                     )}
                   </td>
                   <td className={ui.td}>{r.destinationSilo?.name || r.destinationHopper?.name || "—"}</td>
                   <td className={ui.td}>
-                    <span className={`${ui.chip} ${qcChip[r.qcStatus] ?? ""}`}>{r.qcStatus}</span>
+                    <span className={`${ui.chip} ${qcChip[r.qcStatus] ?? ""}`}>{dict.status[r.qcStatus as keyof typeof dict.status] ?? r.qcStatus}</span>
                   </td>
                   <td className={ui.td}>
                     {r.qcStatus !== "PASSED" && r.qcStatus !== "REJECTED" && (
@@ -87,27 +86,27 @@ export default async function MaterialReceivingPage() {
                           <input type="hidden" name="id" value={r.id} />
                           <input type="hidden" name="status" value="PASSED" />
                           <button className="rounded-md border border-good bg-good-soft px-2 py-1 text-xs text-good hover:opacity-80">
-                            Pass
+                            {m.pass}
                           </button>
                         </form>
                         <form action={setQcStatus}>
                           <input type="hidden" name="id" value={r.id} />
                           <input type="hidden" name="status" value="HELD" />
                           <button className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt">
-                            Hold
+                            {m.hold}
                           </button>
                         </form>
                         <form action={setQcStatus}>
                           <input type="hidden" name="id" value={r.id} />
                           <input type="hidden" name="status" value="REJECTED" />
                           <button className="rounded-md border border-critical bg-critical-soft px-2 py-1 text-xs text-critical hover:opacity-80">
-                            Reject
+                            {m.reject}
                           </button>
                         </form>
                       </div>
                     )}
                     {r.qcStatus === "PASSED" && (
-                      <span className="text-xs text-ink-faint">posted to inventory</span>
+                      <span className="text-xs text-ink-faint">{m.postedToInventory}</span>
                     )}
                   </td>
                 </tr>
@@ -116,7 +115,7 @@ export default async function MaterialReceivingPage() {
             {receipts.length === 0 && (
               <tr>
                 <td className={ui.td} colSpan={8}>
-                  <span className="text-ink-muted">No deliveries received yet.</span>
+                  <span className="text-ink-muted">{m.empty}</span>
                 </td>
               </tr>
             )}
@@ -125,11 +124,11 @@ export default async function MaterialReceivingPage() {
       </div>
 
       <form action={createReceipt} className={`${ui.card} grid grid-cols-3 gap-4`}>
-        <h2 className="col-span-3 font-display text-lg font-semibold">Capture weighbridge ticket</h2>
+        <h2 className="col-span-3 font-display text-lg font-semibold">{m.captureTitle}</h2>
         <div>
-          <label className={ui.label}>Plant</label>
+          <label className={ui.label}>{dict.field.plant}</label>
           <select name="plantId" required className={ui.select}>
-            <option value="">Select plant…</option>
+            <option value="">{dict.field.selectPlant}</option>
             {plants.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
@@ -138,9 +137,9 @@ export default async function MaterialReceivingPage() {
           </select>
         </div>
         <div>
-          <label className={ui.label}>Supplier</label>
+          <label className={ui.label}>{m.f.supplier}</label>
           <select name="supplierId" required className={ui.select}>
-            <option value="">Select supplier…</option>
+            <option value="">{dict.field.selectSupplier}</option>
             {suppliers.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
@@ -149,51 +148,51 @@ export default async function MaterialReceivingPage() {
           </select>
         </div>
         <div>
-          <label className={ui.label}>Material</label>
+          <label className={ui.label}>{m.f.material}</label>
           <select name="materialId" required className={ui.select}>
-            <option value="">Select material…</option>
-            {materials.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
+            <option value="">{dict.field.selectMaterial}</option>
+            {materials.map((mt) => (
+              <option key={mt.id} value={mt.id}>
+                {mt.name}
               </option>
             ))}
           </select>
         </div>
         <div>
-          <label className={ui.label}>PO number</label>
-          <input name="poNumber" className={ui.input} placeholder="PO-4471" />
+          <label className={ui.label}>{m.f.poNumber}</label>
+          <input name="poNumber" className={ui.input} placeholder="PO-4471" dir="ltr" />
         </div>
         <div>
-          <label className={ui.label}>Ordered quantity (kg)</label>
+          <label className={ui.label}>{m.f.orderedQty}</label>
           <input name="orderedMassKg" type="number" step="1" className={ui.input} />
         </div>
         <div>
-          <label className={ui.label}>Moisture at receipt (%)</label>
+          <label className={ui.label}>{m.f.moisture}</label>
           <input name="moisturePct" type="number" step="0.1" className={ui.input} />
         </div>
         <div>
-          <label className={ui.label}>Gross weight (kg)</label>
+          <label className={ui.label}>{m.f.grossWeight}</label>
           <input name="grossWeightKg" type="number" step="1" required className={ui.input} />
         </div>
         <div>
-          <label className={ui.label}>Tare weight (kg)</label>
+          <label className={ui.label}>{m.f.tareWeight}</label>
           <input name="tareWeightKg" type="number" step="1" required className={ui.input} />
         </div>
         <div>
-          <label className={ui.label}>Destination silo</label>
+          <label className={ui.label}>{m.f.destSilo}</label>
           <select name="destinationSiloId" className={ui.select}>
-            <option value="">None</option>
+            <option value="">{dict.field.none}</option>
             {silos.map((s) => (
               <option key={s.id} value={s.id}>
-                {s.name} ({s.materialType})
+                {s.name} ({dict.materialTypes[s.materialType as keyof typeof dict.materialTypes] ?? s.materialType})
               </option>
             ))}
           </select>
         </div>
         <div>
-          <label className={ui.label}>Destination hopper</label>
+          <label className={ui.label}>{m.f.destHopper}</label>
           <select name="destinationHopperId" className={ui.select}>
-            <option value="">None</option>
+            <option value="">{dict.field.none}</option>
             {hoppers.map((h) => (
               <option key={h.id} value={h.id}>
                 {h.name} ({h.aggregateType})
@@ -202,7 +201,7 @@ export default async function MaterialReceivingPage() {
           </select>
         </div>
         <button type="submit" className={`${ui.button} col-span-3 justify-self-start`}>
-          Capture receipt
+          {m.capture}
         </button>
       </form>
     </div>

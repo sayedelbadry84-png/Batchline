@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { getDictionary } from "@/lib/i18n";
 import { createSilo, updateSiloLevel } from "./actions";
 
 function levelColor(pct: number, minPct: number) {
@@ -11,6 +12,8 @@ function levelColor(pct: number, minPct: number) {
 
 export default async function SilosPage() {
   await requirePageAccess("silos");
+  const { dict } = await getDictionary();
+  const m = dict.modules.silos;
 
   const [silos, plants] = await Promise.all([
     prisma.silo.findMany({ include: { plant: true }, orderBy: { createdAt: "asc" } }),
@@ -20,13 +23,9 @@ export default async function SilosPage() {
   return (
     <div className="flex flex-col gap-8">
       <header>
-        <div className={ui.eyebrow}>Module 06 — Silos</div>
-        <h1 className={ui.h1}>Silo status</h1>
-        <p className={ui.intro}>
-          Live cement, fly ash and SCM inventory by tank. A silo at or below
-          its configured threshold is flagged red; below double the threshold,
-          amber — matching the alert logic on the Production dashboard.
-        </p>
+        <div className={ui.eyebrow}>{m.eyebrow}</div>
+        <h1 className={ui.h1}>{m.title}</h1>
+        <p className={ui.intro}>{m.intro}</p>
       </header>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
@@ -38,7 +37,7 @@ export default async function SilosPage() {
                 <div className="w-40 shrink-0">
                   <div className="font-medium">{s.name}</div>
                   <div className="text-xs text-ink-muted">
-                    {s.plant.name} · {s.materialType}
+                    {s.plant.name} · {dict.materialTypes[s.materialType as keyof typeof dict.materialTypes] ?? s.materialType}
                   </div>
                 </div>
                 <div className="h-2.5 flex-1 overflow-hidden rounded-full border border-border bg-surface-alt">
@@ -47,12 +46,10 @@ export default async function SilosPage() {
                     style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
                   />
                 </div>
-                <div className="w-40 shrink-0 font-mono text-xs text-ink-muted tabular">
+                <div className="w-40 shrink-0 font-mono text-xs text-ink-muted tabular" dir="ltr">
                   {s.currentLevelTons.toFixed(1)} / {s.capacityTons.toFixed(1)} t ({pct.toFixed(0)}%)
                   <div className="text-ink-faint">
-                    {s.lastSensorReadingAt
-                      ? `sensor ${new Date(s.lastSensorReadingAt).toLocaleTimeString()}`
-                      : "no sensor feed"}
+                    {s.lastSensorReadingAt ? m.sensorAt(new Date(s.lastSensorReadingAt).toLocaleTimeString()) : m.noSensorFeed}
                   </div>
                 </div>
                 <form action={updateSiloLevel} className="flex shrink-0 items-center gap-1">
@@ -65,23 +62,21 @@ export default async function SilosPage() {
                     className="w-20 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs"
                   />
                   <button className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt">
-                    Update
+                    {m.update}
                   </button>
                 </form>
               </div>
             );
           })}
-          {silos.length === 0 && (
-            <p className="text-sm text-ink-muted">No silos configured yet.</p>
-          )}
+          {silos.length === 0 && <p className="text-sm text-ink-muted">{m.empty}</p>}
         </div>
 
         <form action={createSilo} className={`${ui.card} flex flex-col gap-3`}>
-          <h2 className="font-display text-lg font-semibold">New silo</h2>
+          <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
           <div>
-            <label className={ui.label}>Plant</label>
+            <label className={ui.label}>{dict.field.plant}</label>
             <select name="plantId" required className={ui.select}>
-              <option value="">Select plant…</option>
+              <option value="">{dict.field.selectPlant}</option>
               {plants.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -90,32 +85,32 @@ export default async function SilosPage() {
             </select>
           </div>
           <div>
-            <label className={ui.label}>Name</label>
-            <input name="name" required className={ui.input} placeholder="S-1" />
+            <label className={ui.label}>{m.f.name}</label>
+            <input name="name" required className={ui.input} placeholder="S-1" dir="ltr" />
           </div>
           <div>
-            <label className={ui.label}>Material type</label>
+            <label className={ui.label}>{m.f.materialType}</label>
             <select name="materialType" required className={ui.select}>
-              <option value="CEMENT">Cement (OPC)</option>
-              <option value="FLY_ASH">Fly ash</option>
-              <option value="SLAG">GGBS / slag</option>
-              <option value="SILICA_FUME">Silica fume</option>
+              <option value="CEMENT">{dict.materialTypes.CEMENT}</option>
+              <option value="FLY_ASH">{dict.materialTypes.FLY_ASH}</option>
+              <option value="SLAG">{dict.materialTypes.SLAG}</option>
+              <option value="SILICA_FUME">{dict.materialTypes.SILICA_FUME}</option>
             </select>
           </div>
           <div>
-            <label className={ui.label}>Capacity (tons)</label>
+            <label className={ui.label}>{m.f.capacity}</label>
             <input name="capacityTons" type="number" step="0.1" required className={ui.input} />
           </div>
           <div>
-            <label className={ui.label}>Current level (tons)</label>
+            <label className={ui.label}>{m.f.currentLevel}</label>
             <input name="currentLevelTons" type="number" step="0.1" defaultValue={0} className={ui.input} />
           </div>
           <div>
-            <label className={ui.label}>Low-level threshold (%)</label>
+            <label className={ui.label}>{m.f.threshold}</label>
             <input name="minThresholdPct" type="number" step="1" defaultValue={15} className={ui.input} />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
-            Add silo
+            {m.add}
           </button>
         </form>
       </div>

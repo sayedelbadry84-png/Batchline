@@ -8,7 +8,8 @@ This codebase covers all 12 modules from the original system scope, across
 **Phase 1 (Foundation)**, **Phase 2 (Production + Fleet)**, **Phase 3
 (Quality & Compliance + driver mobile app)**, **Phase 4 (Pumps + integration
 webhooks + Reports/KPIs)**, **Phase 5 (real authentication + RBAC
-enforcement, and Arabic/RTL localization)**, and **Material Receiving**
+enforcement, and full Arabic/RTL localization across every page)**, and
+**Material Receiving**
 (built out of sequence to close a gap in the original module list) — a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
@@ -160,16 +161,36 @@ driver app (`/driver`) automatically instead of the back office.
   both render correctly in one string — a batch ticket mixing Arabic labels
   with Latin-numeral measurements (e.g. "7 m³") doesn't need a script
   switch, matching how these tickets actually look in practice.
-- Fully localized as one complete, verified slice: login, the back-office
-  sidebar/nav, the dashboard, and the entire driver app (trip list, trip
-  detail, delivery confirmation) — including the directional details, not
-  just text: the sidebar's active-link indicator and its border against the
-  main content use logical properties (`border-s-2`, `border-e`) so they
-  land on the correct side automatically, table headers use `text-start`,
-  and the driver app's back arrow flips (`←`/`→`) with direction. Verified
-  live: logged in as a driver, switched to Arabic, and completed a full
-  delivery confirmation — RTL layout, Arabic labels, and the Arabic
+- **The entire app is localized**, not just the highest-traffic surfaces:
+  login, the sidebar/nav, the dashboard, the driver app, and all 16
+  back-office pages (every module from Mix Design through Reports) — every
+  heading, table column, form label, button, and empty-state message reads
+  from `src/lib/i18n/dictionaries/{ar,en}.ts`. Status/role/material-type
+  enum values (e.g. `APPROVED`, `QUALITY_SUPERVISOR`, `COARSE_AGGREGATE`)
+  translate through one shared map (`dict.status`, `dict.roles`,
+  `dict.materialTypes`) reused everywhere that value appears, so a status
+  chip means the same thing in Arabic on every screen it's rendered on.
+  User-entered data (names, codes, addresses) is deliberately left
+  untranslated — only UI chrome is localized.
+- Directional details, not just text: the sidebar's active-link indicator
+  and its border against the main content use logical properties
+  (`border-s-2`, `border-e`) so they land on the correct side automatically,
+  every table header uses `text-start` (fixed once in the shared `ui.ts`
+  pattern, not per page), codes/emails/GPS coordinates/currency values get
+  an explicit `dir="ltr"` island so they don't reverse inside RTL text, and
+  the driver app's back arrow flips (`←`/`→`) with direction.
+- Verified live, not just visually: logged in as Plant Operator in Arabic
+  and walked Mix Design (yield-factor math still correct at 0.961 m³),
+  released a real batch ticket (targets computed correctly, status showed
+  "تم الإصدار"), and checked Silos, Trips, Quality (certificate expiry
+  showed "متبقٍ 45 يوم"), and Reports — zero console/server errors on any
+  of them. Separately switched back to English on the same pages to confirm
+  no regression. Logged in as a driver, switched to Arabic, and completed a
+  full delivery confirmation — RTL layout, Arabic labels, and the Arabic
   signed-by name (`م. أحمد سمير`) all the way through to the database.
+  Confirmed page-level RBAC (`/access-denied`) still enforces correctly
+  under localization — an Accountant hitting a Plant-Operator-only page in
+  Arabic gets the same block as in English.
 - One real bug found and fixed along the way: the dictionary object holds
   formatter functions for a few messages (e.g. `delivered(m3) => "Delivered
   ${m3} m³"`, since the volume has to be interpolated) — passing the *whole*
@@ -180,13 +201,6 @@ driver app (`/driver`) automatically instead of the back office.
   each Client Component actually needs.
 
 ## Not yet implemented (see the rollout plan)
-
-Arabic/RTL covers the highest-traffic surfaces (login, nav, dashboard,
-driver app) as a complete, tested slice — the back-office data-entry pages
-(Mix Design, Production, Silos, and the rest of the 12-module list) are not
-translated yet and still render in English/LTR regardless of locale. Adding
-them is mechanical (the `dict`/`requirePageAccess` pattern is already
-established) rather than a new design problem.
 
 `requireRole` covers the highest-value mutating actions per module (see
 above), not literally every Server Action in the app — a role that can
@@ -200,8 +214,7 @@ real scale readout). Financial reporting (revenue per m³, material cost
 variance, AR aging) needs a pricing/invoicing data model (customer price
 lists, invoices, payments) that doesn't exist yet — the Reports page says so
 explicitly rather than showing a fabricated number. Multi-currency exists at
-the data level (`Plant.currency`) but nothing converts or displays it yet;
-Arabic/RTL localization hasn't been started.
+the data level (`Plant.currency`) but nothing converts or displays it yet.
 
 A few simplifications worth knowing about: batch completion picks the
 *first* matching silo/hopper for a material type rather than an

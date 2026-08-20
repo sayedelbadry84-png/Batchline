@@ -1,10 +1,13 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { getDictionary } from "@/lib/i18n";
 import { createPlant, updatePlantThresholds } from "./actions";
 
 export default async function PlantsPage() {
   await requirePageAccess("plants");
+  const { dict } = await getDictionary();
+  const m = dict.modules.plants;
 
   const plants = await prisma.plant.findMany({
     orderBy: { createdAt: "asc" },
@@ -14,12 +17,9 @@ export default async function PlantsPage() {
   return (
     <div className="flex flex-col gap-8">
       <header>
-        <div className={ui.eyebrow}>Module 12 — Plant Management</div>
-        <h1 className={ui.h1}>Plants</h1>
-        <p className={ui.intro}>
-          Every silo, employee, and project is scoped to a plant. Register a
-          plant here before configuring its silos or assigning staff.
-        </p>
+        <div className={ui.eyebrow}>{m.eyebrow}</div>
+        <h1 className={ui.h1}>{m.title}</h1>
+        <p className={ui.intro}>{m.intro}</p>
       </header>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
@@ -27,12 +27,12 @@ export default async function PlantsPage() {
           <table className={ui.table}>
             <thead>
               <tr>
-                <th className={ui.th}>Plant</th>
-                <th className={ui.th}>City</th>
-                <th className={ui.th}>Currency</th>
-                <th className={ui.th}>Silos</th>
-                <th className={ui.th}>Employees</th>
-                <th className={ui.th}>Projects</th>
+                <th className={ui.th}>{m.col.plant}</th>
+                <th className={ui.th}>{m.col.city}</th>
+                <th className={ui.th}>{m.col.currency}</th>
+                <th className={ui.th}>{m.col.silos}</th>
+                <th className={ui.th}>{m.col.employees}</th>
+                <th className={ui.th}>{m.col.projects}</th>
               </tr>
             </thead>
             <tbody>
@@ -40,7 +40,7 @@ export default async function PlantsPage() {
                 <tr key={p.id}>
                   <td className={`${ui.td} font-medium`}>{p.name}</td>
                   <td className={ui.td}>{p.city}</td>
-                  <td className={`${ui.td} font-mono`}>{p.currency}</td>
+                  <td className={`${ui.td} font-mono`} dir="ltr">{p.currency}</td>
                   <td className={`${ui.td} font-mono tabular`}>{p._count.silos}</td>
                   <td className={`${ui.td} font-mono tabular`}>{p._count.employees}</td>
                   <td className={`${ui.td} font-mono tabular`}>{p._count.projects}</td>
@@ -49,9 +49,7 @@ export default async function PlantsPage() {
               {plants.length === 0 && (
                 <tr>
                   <td className={ui.td} colSpan={6}>
-                    <span className="text-ink-muted">
-                      No plants yet — add your first one.
-                    </span>
+                    <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>
               )}
@@ -60,35 +58,32 @@ export default async function PlantsPage() {
         </div>
 
         <form action={createPlant} className={`${ui.card} flex flex-col gap-3`}>
-          <h2 className="font-display text-lg font-semibold">New plant</h2>
+          <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
           <div>
-            <label className={ui.label}>Name</label>
+            <label className={ui.label}>{m.f.name}</label>
             <input name="name" required className={ui.input} placeholder="Plant 02 — 6th of October" />
           </div>
           <div>
-            <label className={ui.label}>City</label>
+            <label className={ui.label}>{m.f.city}</label>
             <input name="city" required className={ui.input} placeholder="6th of October City" />
           </div>
           <div>
-            <label className={ui.label}>Currency</label>
-            <input name="currency" defaultValue="EGP" className={ui.input} />
+            <label className={ui.label}>{m.f.currency}</label>
+            <input name="currency" defaultValue="EGP" className={ui.input} dir="ltr" />
           </div>
           <div>
-            <label className={ui.label}>Timezone</label>
-            <input name="timezone" defaultValue="Africa/Cairo" className={ui.input} />
+            <label className={ui.label}>{m.f.timezone}</label>
+            <input name="timezone" defaultValue="Africa/Cairo" className={ui.input} dir="ltr" />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
-            Add plant
+            {m.add}
           </button>
         </form>
       </div>
 
       <div className={ui.card}>
-        <h2 className="mb-1 font-display text-lg font-semibold">Batching tolerance &amp; alert thresholds</h2>
-        <p className="mb-3 text-sm text-ink-muted">
-          Drives the drum-timer alert on the Trip Board and the return/discount
-          policy when a trip closes with unused concrete.
-        </p>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.thresholdsTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.thresholdsIntro}</p>
         <div className="flex flex-col gap-3">
           {plants.map((p) => (
             <form
@@ -99,7 +94,7 @@ export default async function PlantsPage() {
               <input type="hidden" name="id" value={p.id} />
               <div className="min-w-32 font-medium">{p.name}</div>
               <div>
-                <label className={ui.label}>Drum timer limit (min)</label>
+                <label className={ui.label}>{m.drumLimit}</label>
                 <input
                   name="drumTimerLimitMinutes"
                   type="number"
@@ -108,7 +103,7 @@ export default async function PlantsPage() {
                 />
               </div>
               <div>
-                <label className={ui.label}>Return absorption threshold (m³)</label>
+                <label className={ui.label}>{m.returnThreshold}</label>
                 <input
                   name="returnAbsorptionThresholdM3"
                   type="number"
@@ -118,7 +113,7 @@ export default async function PlantsPage() {
                 />
               </div>
               <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">
-                Save
+                {m.save}
               </button>
             </form>
           ))}

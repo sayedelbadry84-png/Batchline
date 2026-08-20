@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { getDictionary } from "@/lib/i18n";
 import { createReservation } from "./actions";
 
 const statusChip: Record<string, string> = {
@@ -14,6 +15,8 @@ const statusChip: Record<string, string> = {
 
 export default async function ReservationsPage() {
   await requirePageAccess("reservations");
+  const { dict } = await getDictionary();
+  const m = dict.modules.reservations;
 
   const [reservations, projects, mixes] = await Promise.all([
     prisma.reservation.findMany({
@@ -27,13 +30,9 @@ export default async function ReservationsPage() {
   return (
     <div className="flex flex-col gap-8">
       <header>
-        <div className={ui.eyebrow}>Module 02 — Reservations</div>
-        <h1 className={ui.h1}>Delivery schedule</h1>
-        <p className={ui.intro}>
-          Order intake against a project, mix, and pour window. A reservation
-          for a customer with no credit limit set is auto-flagged for
-          accounts review rather than silently confirmed.
-        </p>
+        <div className={ui.eyebrow}>{m.eyebrow}</div>
+        <h1 className={ui.h1}>{m.title}</h1>
+        <p className={ui.intro}>{m.intro}</p>
       </header>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
@@ -41,11 +40,11 @@ export default async function ReservationsPage() {
           <table className={ui.table}>
             <thead>
               <tr>
-                <th className={ui.th}>Pour window</th>
-                <th className={ui.th}>Project</th>
-                <th className={ui.th}>Mix</th>
-                <th className={ui.th}>Volume</th>
-                <th className={ui.th}>Status</th>
+                <th className={ui.th}>{m.col.pourWindow}</th>
+                <th className={ui.th}>{m.col.project}</th>
+                <th className={ui.th}>{m.col.mix}</th>
+                <th className={ui.th}>{m.col.volume}</th>
+                <th className={ui.th}>{m.col.status}</th>
               </tr>
             </thead>
             <tbody>
@@ -58,17 +57,17 @@ export default async function ReservationsPage() {
                     {r.project.name}
                     <div className="text-xs text-ink-muted">{r.project.customer.legalName}</div>
                   </td>
-                  <td className={`${ui.td} font-mono text-xs`}>{r.mix.code}</td>
+                  <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.mix.code}</td>
                   <td className={`${ui.td} font-mono tabular`}>{r.requestedVolumeM3} m³</td>
                   <td className={ui.td}>
-                    <span className={`${ui.chip} ${statusChip[r.status] ?? ""}`}>{r.status}</span>
+                    <span className={`${ui.chip} ${statusChip[r.status] ?? ""}`}>{dict.status[r.status as keyof typeof dict.status] ?? r.status}</span>
                   </td>
                 </tr>
               ))}
               {reservations.length === 0 && (
                 <tr>
                   <td className={ui.td} colSpan={5}>
-                    <span className="text-ink-muted">No reservations yet.</span>
+                    <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>
               )}
@@ -77,11 +76,11 @@ export default async function ReservationsPage() {
         </div>
 
         <form action={createReservation} className={`${ui.card} flex flex-col gap-3`}>
-          <h2 className="font-display text-lg font-semibold">New reservation</h2>
+          <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
           <div>
-            <label className={ui.label}>Project</label>
+            <label className={ui.label}>{m.f.project}</label>
             <select name="projectId" required className={ui.select}>
-              <option value="">Select project…</option>
+              <option value="">{dict.field.selectProject}</option>
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name} — {p.customer.legalName}
@@ -90,31 +89,27 @@ export default async function ReservationsPage() {
             </select>
           </div>
           <div>
-            <label className={ui.label}>Mix design</label>
+            <label className={ui.label}>{m.f.mix}</label>
             <select name="mixId" required className={ui.select}>
-              <option value="">Select approved mix…</option>
-              {mixes.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.code} — {m.grade}
+              <option value="">{dict.field.selectMix}</option>
+              {mixes.map((mx) => (
+                <option key={mx.id} value={mx.id}>
+                  {mx.code} — {mx.grade}
                 </option>
               ))}
             </select>
-            {mixes.length === 0 && (
-              <p className="mt-1 text-xs text-warn">
-                No mix is marked APPROVED yet — approve one in Mix Design first.
-              </p>
-            )}
+            {mixes.length === 0 && <p className="mt-1 text-xs text-warn">{m.noApprovedMix}</p>}
           </div>
           <div>
-            <label className={ui.label}>Requested volume (m³)</label>
+            <label className={ui.label}>{m.f.volume}</label>
             <input name="requestedVolumeM3" type="number" step="0.5" required className={ui.input} />
           </div>
           <div>
-            <label className={ui.label}>Pour window start</label>
+            <label className={ui.label}>{m.f.pourStart}</label>
             <input name="pourWindowStart" type="datetime-local" required className={ui.input} />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
-            Create reservation
+            {m.create}
           </button>
         </form>
       </div>

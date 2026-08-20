@@ -1,10 +1,13 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { getDictionary } from "@/lib/i18n";
 import { createProject } from "./actions";
 
 export default async function ProjectsPage() {
   await requirePageAccess("projects");
+  const { dict } = await getDictionary();
+  const m = dict.modules.projects;
 
   const [projects, customers, plants] = await Promise.all([
     prisma.project.findMany({
@@ -18,12 +21,9 @@ export default async function ProjectsPage() {
   return (
     <div className="flex flex-col gap-8">
       <header>
-        <div className={ui.eyebrow}>Module 09 — Projects</div>
-        <h1 className={ui.h1}>Projects</h1>
-        <p className={ui.intro}>
-          Groups reservations under a job site, tracked against a contracted
-          volume.
-        </p>
+        <div className={ui.eyebrow}>{m.eyebrow}</div>
+        <h1 className={ui.h1}>{m.title}</h1>
+        <p className={ui.intro}>{m.intro}</p>
       </header>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
@@ -31,12 +31,12 @@ export default async function ProjectsPage() {
           <table className={ui.table}>
             <thead>
               <tr>
-                <th className={ui.th}>Project</th>
-                <th className={ui.th}>Customer</th>
-                <th className={ui.th}>Plant</th>
-                <th className={ui.th}>Contracted m³</th>
-                <th className={ui.th}>Reservations</th>
-                <th className={ui.th}>Status</th>
+                <th className={ui.th}>{m.col.project}</th>
+                <th className={ui.th}>{m.col.customer}</th>
+                <th className={ui.th}>{m.col.plant}</th>
+                <th className={ui.th}>{m.col.contracted}</th>
+                <th className={ui.th}>{m.col.reservations}</th>
+                <th className={ui.th}>{m.col.status}</th>
               </tr>
             </thead>
             <tbody>
@@ -51,14 +51,14 @@ export default async function ProjectsPage() {
                   <td className={`${ui.td} font-mono tabular`}>{p.contractedVolumeM3 ?? "—"}</td>
                   <td className={`${ui.td} font-mono tabular`}>{p._count.reservations}</td>
                   <td className={ui.td}>
-                    <span className={`${ui.chip} bg-surface-alt text-ink-muted`}>{p.status}</span>
+                    <span className={`${ui.chip} bg-surface-alt text-ink-muted`}>{dict.status[p.status as keyof typeof dict.status] ?? p.status}</span>
                   </td>
                 </tr>
               ))}
               {projects.length === 0 && (
                 <tr>
                   <td className={ui.td} colSpan={6}>
-                    <span className="text-ink-muted">No projects yet.</span>
+                    <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>
               )}
@@ -67,15 +67,15 @@ export default async function ProjectsPage() {
         </div>
 
         <form action={createProject} className={`${ui.card} flex flex-col gap-3`}>
-          <h2 className="font-display text-lg font-semibold">New project</h2>
+          <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
           <div>
-            <label className={ui.label}>Name</label>
+            <label className={ui.label}>{m.f.name}</label>
             <input name="name" required className={ui.input} placeholder="Nile Towers — Phase 2" />
           </div>
           <div>
-            <label className={ui.label}>Customer</label>
+            <label className={ui.label}>{m.f.customer}</label>
             <select name="customerId" required className={ui.select}>
-              <option value="">Select customer…</option>
+              <option value="">{dict.field.selectCustomer}</option>
               {customers.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.legalName}
@@ -84,9 +84,9 @@ export default async function ProjectsPage() {
             </select>
           </div>
           <div>
-            <label className={ui.label}>Plant</label>
+            <label className={ui.label}>{m.f.plant}</label>
             <select name="plantId" required className={ui.select}>
-              <option value="">Select plant…</option>
+              <option value="">{dict.field.selectPlant}</option>
               {plants.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -95,15 +95,15 @@ export default async function ProjectsPage() {
             </select>
           </div>
           <div>
-            <label className={ui.label}>Site address</label>
+            <label className={ui.label}>{m.f.siteAddress}</label>
             <input name="siteAddress" required className={ui.input} />
           </div>
           <div>
-            <label className={ui.label}>Contracted volume (m³)</label>
+            <label className={ui.label}>{m.f.contractedVolume}</label>
             <input name="contractedVolumeM3" type="number" step="1" className={ui.input} />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
-            Add project
+            {m.add}
           </button>
         </form>
       </div>

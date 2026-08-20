@@ -1,20 +1,28 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { getDictionary } from "@/lib/i18n";
 import { createEmployee } from "./actions";
 
-const ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DRIVER", "DISPATCHER", "ADMIN"];
+const ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DRIVER", "DISPATCHER", "ADMIN"] as const;
 
-function expiryFlag(date: Date | null) {
+// Pure and outside the component body on purpose — takes "now" and the
+// translated labels as arguments instead of closing over Date.now()/dict,
+// so it stays a plain, side-effect-free helper.
+function expiryFlag(date: Date | null, nowMs: number, labels: { expired: string; daysLeft: (n: number) => string }) {
   if (!date) return null;
-  const days = Math.ceil((date.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-  if (days < 0) return { label: "expired", cls: "bg-critical-soft text-critical" };
-  if (days <= 30) return { label: `${days}d left`, cls: "bg-warn-soft text-warn" };
+  const days = Math.ceil((date.getTime() - nowMs) / (1000 * 60 * 60 * 24));
+  if (days < 0) return { label: labels.expired, cls: "bg-critical-soft text-critical" };
+  if (days <= 30) return { label: labels.daysLeft(days), cls: "bg-warn-soft text-warn" };
   return null;
 }
 
 export default async function EmployeesPage() {
   await requirePageAccess("employees");
+  const { dict } = await getDictionary();
+  const m = dict.modules.employees;
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
 
   const [employees, plants] = await Promise.all([
     prisma.employee.findMany({ orderBy: { createdAt: "asc" }, include: { plant: true } }),
@@ -24,12 +32,9 @@ export default async function EmployeesPage() {
   return (
     <div className="flex flex-col gap-8">
       <header>
-        <div className={ui.eyebrow}>Module 10 — Employees</div>
-        <h1 className={ui.h1}>Employee directory</h1>
-        <p className={ui.intro}>
-          Plant staff and their certifications. Licenses expiring within 30
-          days are flagged.
-        </p>
+        <div className={ui.eyebrow}>{m.eyebrow}</div>
+        <h1 className={ui.h1}>{m.title}</h1>
+        <p className={ui.intro}>{m.intro}</p>
       </header>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
@@ -37,20 +42,20 @@ export default async function EmployeesPage() {
           <table className={ui.table}>
             <thead>
               <tr>
-                <th className={ui.th}>Name</th>
-                <th className={ui.th}>Role</th>
-                <th className={ui.th}>Plant</th>
-                <th className={ui.th}>Shift</th>
-                <th className={ui.th}>License</th>
+                <th className={ui.th}>{m.col.name}</th>
+                <th className={ui.th}>{m.col.role}</th>
+                <th className={ui.th}>{m.col.plant}</th>
+                <th className={ui.th}>{m.col.shift}</th>
+                <th className={ui.th}>{m.col.license}</th>
               </tr>
             </thead>
             <tbody>
               {employees.map((e) => {
-                const flag = expiryFlag(e.licenseExpiry);
+                const flag = expiryFlag(e.licenseExpiry, nowMs, m);
                 return (
                   <tr key={e.id}>
                     <td className={`${ui.td} font-medium`}>{e.name}</td>
-                    <td className={`${ui.td} font-mono text-xs`}>{e.role}</td>
+                    <td className={`${ui.td} font-mono text-xs`}>{dict.roles[e.role as keyof typeof dict.roles] ?? e.role}</td>
                     <td className={ui.td}>{e.plant.name}</td>
                     <td className={ui.td}>{e.shiftPattern || "—"}</td>
                     <td className={ui.td}>
@@ -63,7 +68,7 @@ export default async function EmployeesPage() {
               {employees.length === 0 && (
                 <tr>
                   <td className={ui.td} colSpan={5}>
-                    <span className="text-ink-muted">No employees yet.</span>
+                    <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>
               )}
@@ -72,11 +77,11 @@ export default async function EmployeesPage() {
         </div>
 
         <form action={createEmployee} className={`${ui.card} flex flex-col gap-3`}>
-          <h2 className="font-display text-lg font-semibold">New employee</h2>
+          <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
           <div>
-            <label className={ui.label}>Plant</label>
+            <label className={ui.label}>{dict.field.plant}</label>
             <select name="plantId" required className={ui.select}>
-              <option value="">Select plant…</option>
+              <option value="">{dict.field.selectPlant}</option>
               {plants.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -85,29 +90,29 @@ export default async function EmployeesPage() {
             </select>
           </div>
           <div>
-            <label className={ui.label}>Name</label>
+            <label className={ui.label}>{m.f.name}</label>
             <input name="name" required className={ui.input} />
           </div>
           <div>
-            <label className={ui.label}>Role</label>
+            <label className={ui.label}>{m.f.role}</label>
             <select name="role" required className={ui.select}>
               {ROLES.map((r) => (
                 <option key={r} value={r}>
-                  {r.replaceAll("_", " ")}
+                  {dict.roles[r]}
                 </option>
               ))}
             </select>
           </div>
           <div>
-            <label className={ui.label}>Shift pattern</label>
-            <input name="shiftPattern" className={ui.input} placeholder="Day / 6am–6pm" />
+            <label className={ui.label}>{m.f.shiftPattern}</label>
+            <input name="shiftPattern" className={ui.input} placeholder="Day / 6am–6pm" dir="ltr" />
           </div>
           <div>
-            <label className={ui.label}>License / cert expiry</label>
+            <label className={ui.label}>{m.f.licenseExpiry}</label>
             <input name="licenseExpiry" type="date" className={ui.input} />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
-            Add employee
+            {m.add}
           </button>
         </form>
       </div>

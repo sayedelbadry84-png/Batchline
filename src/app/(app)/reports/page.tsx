@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { getDictionary } from "@/lib/i18n";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
@@ -13,6 +14,8 @@ function fmt(n: number | null, digits = 1, suffix = "") {
 
 export default async function ReportsPage() {
   await requirePageAccess("reports");
+  const { dict } = await getDictionary();
+  const m = dict.modules.reports;
 
   // Server-rendered snapshot at request time, not a re-rendering client
   // component — see the same pattern (and rationale) in (app)/page.tsx.
@@ -95,114 +98,102 @@ export default async function ReportsPage() {
   return (
     <div className="flex flex-col gap-8">
       <header>
-        <div className={ui.eyebrow}>Reports &amp; KPIs</div>
-        <h1 className={ui.h1}>Plant metrics</h1>
-        <p className={ui.intro}>
-          Computed live from the same records every other screen writes to —
-          no separate reporting database, no placeholder numbers. Metrics
-          show &ldquo;—&rdquo; rather than a fabricated value when there isn&apos;t
-          enough data yet.
-        </p>
+        <div className={ui.eyebrow}>{m.eyebrow}</div>
+        <h1 className={ui.h1}>{m.title}</h1>
+        <p className={ui.intro}>{m.intro}</p>
       </header>
 
       <div>
-        <h2 className="mb-3 font-display text-lg font-semibold">Production</h2>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.productionTitle}</h2>
         <div className="grid grid-cols-4 gap-4">
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{fmt(producedToday, 1, " m³")}</div>
-            <div className="mt-1 text-sm text-ink-muted">Produced today</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.producedToday}</div>
           </div>
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{fmt(produced7d, 1, " m³")}</div>
-            <div className="mt-1 text-sm text-ink-muted">Produced, last 7 days</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.produced7d}</div>
           </div>
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{fmt(avgAbsDeviation, 2, "%")}</div>
-            <div className="mt-1 text-sm text-ink-muted">Avg. batch deviation</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.avgDeviation}</div>
           </div>
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{completedTickets.length}</div>
-            <div className="mt-1 text-sm text-ink-muted">Batches completed (all time)</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.batchesCompleted}</div>
           </div>
         </div>
       </div>
 
       <div>
-        <h2 className="mb-3 font-display text-lg font-semibold">Quality</h2>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.qualityTitle}</h2>
         <div className="grid grid-cols-4 gap-4">
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{fmt(cylinderPassRate, 1, "%")}</div>
-            <div className="mt-1 text-sm text-ink-muted">Cylinder pass rate</div>
-            <div className="mt-1 text-xs text-ink-faint">{labResults.length} results on file</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.cylinderPassRate}</div>
+            <div className="mt-1 text-xs text-ink-faint">{m.resultsOnFile(labResults.length)}</div>
           </div>
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{fmt(slumpConformanceRate, 1, "%")}</div>
-            <div className="mt-1 text-sm text-ink-muted">Slump conformance</div>
-            <div className="mt-1 text-xs text-ink-faint">±{SLUMP_TOLERANCE_MM}mm band, {slumpChecked.length} samples</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.slumpConformance}</div>
+            <div className="mt-1 text-xs text-ink-faint">{m.slumpBand(SLUMP_TOLERANCE_MM, slumpChecked.length)}</div>
           </div>
         </div>
       </div>
 
       <div>
-        <h2 className="mb-3 font-display text-lg font-semibold">Fleet &amp; logistics</h2>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.fleetTitle}</h2>
         <div className="grid grid-cols-4 gap-4">
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{fmt(returnRate, 1, "%")}</div>
-            <div className="mt-1 text-sm text-ink-muted">Return rate</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.returnRate}</div>
           </div>
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{fmt(avgCycleTimeMin, 0, " min")}</div>
-            <div className="mt-1 text-sm text-ink-muted">Avg. truck cycle time</div>
-            <div className="mt-1 text-xs text-ink-faint">batch → discharge complete</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.avgCycleTime}</div>
+            <div className="mt-1 text-xs text-ink-faint">{m.cycleNote}</div>
           </div>
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{closedTrips.length}</div>
-            <div className="mt-1 text-sm text-ink-muted">Trips closed (all time)</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.tripsClosed}</div>
           </div>
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{arrivalsTracked.length}</div>
-            <div className="mt-1 text-sm text-ink-muted">Arrivals GPS/time-stamped</div>
-            <div className="mt-1 text-xs text-ink-faint">on-time rate needs a scheduled-arrival field, not yet modeled</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.arrivalsTracked}</div>
+            <div className="mt-1 text-xs text-ink-faint">{m.onTimeNote}</div>
           </div>
         </div>
       </div>
 
       <div>
-        <h2 className="mb-3 font-display text-lg font-semibold">Inventory</h2>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.inventoryTitle}</h2>
         <div className={ui.card}>
           <table className={ui.table}>
             <thead>
               <tr>
-                <th className={ui.th}>Silo</th>
-                <th className={ui.th}>Material</th>
-                <th className={ui.th}>Current level</th>
-                <th className={ui.th}>Days of cover</th>
+                <th className={ui.th}>{m.col.silo}</th>
+                <th className={ui.th}>{m.col.material}</th>
+                <th className={ui.th}>{m.col.currentLevel}</th>
+                <th className={ui.th}>{m.col.daysOfCover}</th>
               </tr>
             </thead>
             <tbody>
               {siloRows.map((s) => (
                 <tr key={s.id}>
                   <td className={`${ui.td} font-medium`}>{s.name}</td>
-                  <td className={`${ui.td} font-mono text-xs`}>{s.materialType}</td>
+                  <td className={`${ui.td} font-mono text-xs`}>{dict.materialTypes[s.materialType as keyof typeof dict.materialTypes] ?? s.materialType}</td>
                   <td className={`${ui.td} font-mono tabular`}>{s.currentLevelTons.toFixed(1)} t</td>
                   <td className={`${ui.td} font-mono tabular`}>{fmt(s.daysOfCover, 1, " d")}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <p className="mt-2 text-xs text-ink-muted">
-            Based on consumption over the last 7 days — a silo with no recent
-            batches shows &ldquo;—&rdquo; rather than an infinite runway.
-          </p>
+          <p className="mt-2 text-xs text-ink-muted">{m.inventoryNote}</p>
         </div>
       </div>
 
       <div className="rounded-xl border border-dashed border-border p-5 text-sm text-ink-muted">
-        <b className="text-ink">Not shown here yet:</b> revenue per m³, material
-        cost variance, and AR aging. Those need a pricing/invoicing data
-        model (customer price lists, invoices, payments) that hasn&apos;t
-        been built — showing a number for them now would mean fabricating
-        it. That&apos;s Financial/Invoicing, a later phase.
+        <b className="text-ink">{m.notShownTitle}</b> {m.notShownBody}
       </div>
     </div>
   );
