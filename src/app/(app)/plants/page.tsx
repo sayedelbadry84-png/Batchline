@@ -1,13 +1,19 @@
+import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createPlant, updatePlantThresholds } from "./actions";
+import { createPlant, updatePlant, updatePlantThresholds } from "./actions";
 
-export default async function PlantsPage() {
+export default async function PlantsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ edit?: string }>;
+}) {
   await requirePageAccess("plants");
   const { dict } = await getDictionary();
   const m = dict.modules.plants;
+  const { edit: editId } = await searchParams;
 
   const plants = await prisma.plant.findMany({
     orderBy: { createdAt: "asc" },
@@ -33,22 +39,58 @@ export default async function PlantsPage() {
                 <th className={ui.th}>{m.col.silos}</th>
                 <th className={ui.th}>{m.col.employees}</th>
                 <th className={ui.th}>{m.col.projects}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
               </tr>
             </thead>
             <tbody>
-              {plants.map((p) => (
-                <tr key={p.id}>
-                  <td className={`${ui.td} font-medium`}>{p.name}</td>
-                  <td className={ui.td}>{p.city}</td>
-                  <td className={`${ui.td} font-mono`} dir="ltr">{p.currency}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{p._count.silos}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{p._count.employees}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{p._count.projects}</td>
-                </tr>
-              ))}
+              {plants.map((p) =>
+                editId === p.id ? (
+                  <tr key={p.id}>
+                    <td className={ui.td} colSpan={7}>
+                      <form action={updatePlant} className="flex flex-wrap items-end gap-2">
+                        <input type="hidden" name="id" value={p.id} />
+                        <div>
+                          <label className={ui.label}>{m.f.name}</label>
+                          <input name="name" defaultValue={p.name} required className={`${ui.input} w-40`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.city}</label>
+                          <input name="city" defaultValue={p.city} required className={`${ui.input} w-36`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.currency}</label>
+                          <input name="currency" defaultValue={p.currency} className={`${ui.input} w-20`} dir="ltr" />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.timezone}</label>
+                          <input name="timezone" defaultValue={p.timezone} className={`${ui.input} w-36`} dir="ltr" />
+                        </div>
+                        <button className={ui.button}>{dict.field.save}</button>
+                        <Link href="/plants" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                          {dict.field.cancel}
+                        </Link>
+                      </form>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={p.id}>
+                    <td className={`${ui.td} font-medium`}>{p.name}</td>
+                    <td className={ui.td}>{p.city}</td>
+                    <td className={`${ui.td} font-mono`} dir="ltr">{p.currency}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{p._count.silos}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{p._count.employees}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{p._count.projects}</td>
+                    <td className={ui.td}>
+                      <Link href={`/plants?edit=${p.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {dict.field.edit}
+                      </Link>
+                    </td>
+                  </tr>
+                )
+              )}
               {plants.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={6}>
+                  <td className={ui.td} colSpan={7}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>

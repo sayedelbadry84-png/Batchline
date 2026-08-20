@@ -1,17 +1,23 @@
+import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createTestBatch, addLabResult, createCertificate } from "./actions";
+import { createTestBatch, addLabResult, createCertificate, updateCertificate } from "./actions";
 
 function daysUntil(date: Date) {
   return Math.ceil((date.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
 }
 
-export default async function QualityPage() {
+export default async function QualityPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ editCert?: string }>;
+}) {
   await requirePageAccess("quality");
   const { dict } = await getDictionary();
   const m = dict.modules.quality;
+  const { editCert: editCertId } = await searchParams;
 
   const [testBatches, sampleableTrips, employees, certificates, mixes] = await Promise.all([
     prisma.testBatch.findMany({
@@ -182,11 +188,55 @@ export default async function QualityPage() {
                 <th className={ui.th}>{m.colCerts.standard}</th>
                 <th className={ui.th}>{m.colCerts.issuingBody}</th>
                 <th className={ui.th}>{m.colCerts.expiry}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
               </tr>
             </thead>
             <tbody>
               {certificates.map((c) => {
                 const remaining = daysUntil(c.expiryDate);
+                if (editCertId === c.id) {
+                  return (
+                    <tr key={c.id}>
+                      <td className={ui.td} colSpan={5}>
+                        <form action={updateCertificate} className="flex flex-wrap items-end gap-2">
+                          <input type="hidden" name="id" value={c.id} />
+                          <div>
+                            <label className={ui.label}>{m.fCert.mix}</label>
+                            <select name="mixId" defaultValue={c.mixId} required className={`${ui.select} w-36`}>
+                              {mixes.map((mx) => (
+                                <option key={mx.id} value={mx.id}>{mx.code}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.fCert.standardRef}</label>
+                            <input name="standardRef" defaultValue={c.standardRef} required className={`${ui.input} w-32`} dir="ltr" />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.fCert.issuingBody}</label>
+                            <input name="issuingBody" defaultValue={c.issuingBody} required className={`${ui.input} w-44`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.fCert.issuedDate}</label>
+                            <input name="issuedDate" type="date" defaultValue={new Date(c.issuedDate).toISOString().slice(0, 10)} required className={`${ui.input} w-36`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.fCert.expiryDate}</label>
+                            <input name="expiryDate" type="date" defaultValue={new Date(c.expiryDate).toISOString().slice(0, 10)} required className={`${ui.input} w-36`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.fCert.documentUrl}</label>
+                            <input name="documentUrl" defaultValue={c.documentUrl ?? ""} className={`${ui.input} w-40`} dir="ltr" />
+                          </div>
+                          <button className={ui.button}>{dict.field.save}</button>
+                          <Link href="/quality" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                            {dict.field.cancel}
+                          </Link>
+                        </form>
+                      </td>
+                    </tr>
+                  );
+                }
                 return (
                   <tr key={c.id}>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{c.mix.code}</td>
@@ -199,12 +249,17 @@ export default async function QualityPage() {
                         <span className={`${ui.chip} bg-warn-soft text-warn ms-2`}>{m.daysLeft(remaining)}</span>
                       )}
                     </td>
+                    <td className={ui.td}>
+                      <Link href={`/quality?editCert=${c.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {dict.field.edit}
+                      </Link>
+                    </td>
                   </tr>
                 );
               })}
               {certificates.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={4}>
+                  <td className={ui.td} colSpan={5}>
                     <span className="text-ink-muted">{m.emptyCerts}</span>
                   </td>
                 </tr>

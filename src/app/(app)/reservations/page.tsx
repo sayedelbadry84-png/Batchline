@@ -1,8 +1,9 @@
+import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createReservation } from "./actions";
+import { createReservation, updateReservation } from "./actions";
 
 const statusChip: Record<string, string> = {
   REQUESTED: "bg-surface-alt text-ink-muted",
@@ -13,10 +14,15 @@ const statusChip: Record<string, string> = {
   CANCELLED: "bg-critical-soft text-critical",
 };
 
-export default async function ReservationsPage() {
+export default async function ReservationsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ edit?: string }>;
+}) {
   await requirePageAccess("reservations");
   const { dict } = await getDictionary();
   const m = dict.modules.reservations;
+  const { edit: editId } = await searchParams;
 
   const [reservationsRaw, projects, mixes] = await Promise.all([
     prisma.reservation.findMany({
@@ -54,32 +60,88 @@ export default async function ReservationsPage() {
                 <th className={ui.th}>{m.col.mix}</th>
                 <th className={ui.th}>{m.col.volume}</th>
                 <th className={ui.th}>{m.col.status}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
               </tr>
             </thead>
             <tbody>
-              {reservations.map((r) => (
-                <tr key={r.id}>
-                  <td className={`${ui.td} font-mono text-xs tabular`}>
-                    {new Date(r.pourWindowStart).toLocaleString()}
-                  </td>
-                  <td className={ui.td}>
-                    {r.project.name}
-                    <div className="text-xs text-ink-muted">{r.project.customer.legalName}</div>
-                  </td>
-                  <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.mix.code}</td>
-                  <td className={`${ui.td} font-mono tabular`}>
-                    {r.released > 0 && r.released < r.requestedVolumeM3
-                      ? `${r.released} / ${r.requestedVolumeM3} m³`
-                      : `${r.requestedVolumeM3} m³`}
-                  </td>
-                  <td className={ui.td}>
-                    <span className={`${ui.chip} ${statusChip[r.status] ?? ""}`}>{dict.status[r.status as keyof typeof dict.status] ?? r.status}</span>
-                  </td>
-                </tr>
-              ))}
+              {reservations.map((r) => {
+                const editable = r.released === 0 && ["REQUESTED", "CONFIRMED", "ON_HOLD"].includes(r.status);
+                if (editId === r.id && editable) {
+                  return (
+                    <tr key={r.id}>
+                      <td className={ui.td} colSpan={6}>
+                        <form action={updateReservation} className="flex flex-wrap items-end gap-2">
+                          <input type="hidden" name="id" value={r.id} />
+                          <div>
+                            <label className={ui.label}>{m.f.project}</label>
+                            <select name="projectId" defaultValue={r.projectId} required className={`${ui.select} w-44`}>
+                              {projects.map((p) => (
+                                <option key={p.id} value={p.id}>{p.name} — {p.customer.legalName}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.mix}</label>
+                            <select name="mixId" defaultValue={r.mixId} required className={`${ui.select} w-36`}>
+                              {mixes.map((mx) => (
+                                <option key={mx.id} value={mx.id}>{mx.code} — {mx.grade}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.volume}</label>
+                            <input name="requestedVolumeM3" type="number" step="0.5" defaultValue={r.requestedVolumeM3} required className={`${ui.input} w-24`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.pourStart}</label>
+                            <input
+                              name="pourWindowStart"
+                              type="datetime-local"
+                              defaultValue={new Date(r.pourWindowStart).toISOString().slice(0, 16)}
+                              required
+                              className={`${ui.input} w-48`}
+                            />
+                          </div>
+                          <button className={ui.button}>{dict.field.save}</button>
+                          <Link href="/reservations" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                            {dict.field.cancel}
+                          </Link>
+                        </form>
+                      </td>
+                    </tr>
+                  );
+                }
+                return (
+                  <tr key={r.id}>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>
+                      {new Date(r.pourWindowStart).toLocaleString()}
+                    </td>
+                    <td className={ui.td}>
+                      {r.project.name}
+                      <div className="text-xs text-ink-muted">{r.project.customer.legalName}</div>
+                    </td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.mix.code}</td>
+                    <td className={`${ui.td} font-mono tabular`}>
+                      {r.released > 0 && r.released < r.requestedVolumeM3
+                        ? `${r.released} / ${r.requestedVolumeM3} m³`
+                        : `${r.requestedVolumeM3} m³`}
+                    </td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${statusChip[r.status] ?? ""}`}>{dict.status[r.status as keyof typeof dict.status] ?? r.status}</span>
+                    </td>
+                    <td className={ui.td}>
+                      {editable && (
+                        <Link href={`/reservations?edit=${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                          {dict.field.edit}
+                        </Link>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
               {reservations.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={5}>
+                  <td className={ui.td} colSpan={6}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>

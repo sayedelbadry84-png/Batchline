@@ -28,6 +28,31 @@ export async function createSilo(formData: FormData) {
   revalidatePath("/silos");
 }
 
+export async function updateSilo(formData: FormData) {
+  const id = String(formData.get("id") ?? "");
+  const plantId = String(formData.get("plantId") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  const materialType = String(formData.get("materialType") ?? "").trim();
+  const capacityTons = Number(formData.get("capacityTons") ?? 0);
+  const minThresholdPct = Number(formData.get("minThresholdPct") ?? 15);
+
+  if (!id || !plantId || !name || !materialType || !capacityTons) return;
+
+  await prisma.silo.update({
+    where: { id },
+    data: { plantId, name, materialType, capacityTons, minThresholdPct },
+  });
+
+  await logAudit({
+    module: "Silos",
+    recordId: id,
+    afterValue: `${name} / ${materialType} / ${capacityTons}t`,
+    reasonCode: "SILO_UPDATED",
+  });
+
+  revalidatePath("/silos");
+}
+
 export async function updateSiloLevel(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);

@@ -21,6 +21,26 @@ export async function createTruck(formData: FormData) {
   revalidatePath("/fleet");
 }
 
+export async function updateTruck(formData: FormData) {
+  const id = String(formData.get("id") ?? "");
+  const plantId = String(formData.get("plantId") ?? "");
+  const code = String(formData.get("code") ?? "").trim();
+  const drumCapacityM3 = Number(formData.get("drumCapacityM3") ?? 0);
+  const maxAgitationRpm = Number(formData.get("maxAgitationRpm") ?? 0) || null;
+  const gpsDeviceId = String(formData.get("gpsDeviceId") ?? "").trim();
+  const status = String(formData.get("status") ?? "ACTIVE");
+
+  if (!id || !plantId || !code || !drumCapacityM3) return;
+
+  await prisma.truck.update({
+    where: { id },
+    data: { plantId, code, drumCapacityM3, maxAgitationRpm, gpsDeviceId, status },
+  });
+
+  await logAudit({ module: "Fleet", recordId: id, afterValue: code, reasonCode: "TRUCK_UPDATED" });
+  revalidatePath("/fleet");
+}
+
 export async function setTruckStatus(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "");

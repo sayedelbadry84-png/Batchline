@@ -220,6 +220,34 @@ driver app (`/driver`) automatically instead of the back office.
   reads. Fixed by passing only the plain-string slices (`nav`, `common`)
   each Client Component actually needs.
 
+**Edit everywhere (master data)**
+- Every master-data screen — Plants, Customers, Suppliers (+ their Material
+  catalog), Projects, Employees, Fleet (truck core fields, alongside the
+  existing quick status form), Pumps (core fields, alongside assignment
+  status), Silos (core fields, alongside the existing level reading form),
+  Mix Design (header fields + per-component mass/tolerance, reusing the
+  existing upsert), Reservations (pre-production fields only — see below),
+  and Compliance Certificates — now has an **Edit** action next to every row,
+  not just Create. The pattern is consistent everywhere: click Edit
+  (`?edit=<id>` in the URL), the row becomes an inline form pre-filled with
+  its current values, Save posts to an `updateX` Server Action and
+  re-renders the row, Cancel discards and returns to the plain list — no
+  client state, matching the rest of the app's server-first design.
+- **Reservations are only editable before any volume has shipped.** Once a
+  batch ticket has been released against a reservation — even a single
+  partial one — its mix, volume, and project become read-only (no Edit link
+  shown, and `updateReservation` re-checks this server-side rather than
+  trusting the UI) because retargeting a reservation after tickets already
+  exist against it would silently invalidate volumes and tolerances that
+  were already computed and possibly delivered.
+- **Deliberately still not editable** — audit-sensitive records where "the
+  history is the point": Material Receiving once captured (weighbridge
+  gross/tare/net), Test Batches and Lab Results, Trip transactional fields
+  (only status advances), Drum Returns, and Batch Ticket component actuals
+  after a batch reaches COMPLETE. Opening these up would let someone quietly
+  rewrite a measurement after the fact, which defeats the audit trail this
+  app is built around.
+
 ## Not yet implemented (see the rollout plan)
 
 `requireRole` covers the highest-value mutating actions per module (see

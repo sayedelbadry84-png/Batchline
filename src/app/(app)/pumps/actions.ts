@@ -22,6 +22,27 @@ export async function createPump(formData: FormData) {
   revalidatePath("/pumps");
 }
 
+export async function updatePump(formData: FormData) {
+  const id = String(formData.get("id") ?? "");
+  const plantId = String(formData.get("plantId") ?? "");
+  const code = String(formData.get("code") ?? "").trim();
+  const pumpType = String(formData.get("pumpType") ?? "BOOM");
+  const reachM = Number(formData.get("reachM") ?? 0) || null;
+  const hourlyRate = Number(formData.get("hourlyRate") ?? 0);
+  const standbyRate = Number(formData.get("standbyRate") ?? 0) || null;
+  const status = String(formData.get("status") ?? "ACTIVE");
+
+  if (!id || !plantId || !code || !hourlyRate) return;
+
+  await prisma.pump.update({
+    where: { id },
+    data: { plantId, code, pumpType, reachM, hourlyRate, standbyRate, status },
+  });
+
+  await logAudit({ module: "Pumps", recordId: id, afterValue: code, reasonCode: "PUMP_UPDATED" });
+  revalidatePath("/pumps");
+}
+
 export async function schedulePump(formData: FormData) {
   const pumpId = String(formData.get("pumpId") ?? "");
   const reservationId = String(formData.get("reservationId") ?? "");

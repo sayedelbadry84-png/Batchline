@@ -27,6 +27,32 @@ export async function createPlant(formData: FormData) {
   revalidatePath("/plants");
 }
 
+export async function updatePlant(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  const city = String(formData.get("city") ?? "").trim();
+  const currency = String(formData.get("currency") ?? "").trim();
+  const timezone = String(formData.get("timezone") ?? "").trim();
+  if (!id || !name || !city) return;
+
+  const before = await prisma.plant.findUnique({ where: { id } });
+  await prisma.plant.update({ where: { id }, data: { name, city, currency, timezone } });
+
+  await logAudit({
+    module: "PlantManagement",
+    recordId: id,
+    field: "name/city/currency/timezone",
+    beforeValue: `${before?.name} / ${before?.city} / ${before?.currency} / ${before?.timezone}`,
+    afterValue: `${name} / ${city} / ${currency} / ${timezone}`,
+    reasonCode: "PLANT_UPDATED",
+  });
+
+  revalidatePath("/plants");
+}
+
 export async function updatePlantThresholds(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);

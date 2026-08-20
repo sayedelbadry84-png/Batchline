@@ -25,6 +25,28 @@ export async function createMixDesign(formData: FormData) {
   redirect(`/mix-designs/${mix.id}`);
 }
 
+export async function updateMixDesign(formData: FormData) {
+  const mixId = String(formData.get("mixId") ?? "");
+  const code = String(formData.get("code") ?? "").trim();
+  const grade = String(formData.get("grade") ?? "").trim();
+  const exposureClass = String(formData.get("exposureClass") ?? "").trim();
+  const slumpTargetMm = Number(formData.get("slumpTargetMm") ?? 0);
+  const wcRatio = Number(formData.get("wcRatio") ?? 0);
+  const yieldTargetM3 = Number(formData.get("yieldTargetM3") ?? 1);
+  const standardCost = Number(formData.get("standardCost") ?? 0) || null;
+
+  if (!mixId || !code || !grade) return;
+
+  await prisma.mixDesign.update({
+    where: { id: mixId },
+    data: { code, grade, exposureClass, slumpTargetMm, wcRatio, yieldTargetM3, standardCost },
+  });
+
+  await logAudit({ module: "MixDesign", recordId: mixId, afterValue: code, reasonCode: "MIX_UPDATED" });
+  revalidatePath(`/mix-designs/${mixId}`);
+  revalidatePath("/mix-designs");
+}
+
 export async function addComponent(formData: FormData) {
   const mixId = String(formData.get("mixId") ?? "");
   const materialId = String(formData.get("materialId") ?? "");

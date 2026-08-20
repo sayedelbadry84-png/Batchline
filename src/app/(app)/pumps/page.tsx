@@ -1,8 +1,9 @@
+import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createPump, schedulePump, updateAssignmentStatus } from "./actions";
+import { createPump, schedulePump, updateAssignmentStatus, updatePump } from "./actions";
 
 const statusChip: Record<string, string> = {
   SCHEDULED: "bg-info-soft text-ink",
@@ -11,10 +12,15 @@ const statusChip: Record<string, string> = {
   CANCELLED: "bg-critical-soft text-critical",
 };
 
-export default async function PumpsPage() {
+export default async function PumpsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ edit?: string }>;
+}) {
   await requirePageAccess("pumps");
   const { dict } = await getDictionary();
   const m = dict.modules.pumps;
+  const { edit: editId } = await searchParams;
 
   const [pumps, assignments, unassignedReservations, plants] = await Promise.all([
     prisma.pump.findMany({ orderBy: { createdAt: "asc" }, include: { plant: true } }),
@@ -49,26 +55,86 @@ export default async function PumpsPage() {
                 <th className={ui.th}>{m.col.reach}</th>
                 <th className={ui.th}>{m.col.rate}</th>
                 <th className={ui.th}>{m.col.status}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
               </tr>
             </thead>
             <tbody>
-              {pumps.map((p) => (
-                <tr key={p.id}>
-                  <td className={`${ui.td} font-medium`} dir="ltr">{p.code}</td>
-                  <td className={ui.td}>{p.plant.name}</td>
-                  <td className={`${ui.td} font-mono text-xs`}>{dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{p.reachM ? `${p.reachM} m` : "—"}</td>
-                  <td className={`${ui.td} font-mono tabular`} dir="ltr">
-                    {p.hourlyRate}{m.perHour}{p.standbyRate ? m.standbySuffix(p.standbyRate) : ""}
-                  </td>
-                  <td className={ui.td}>
-                    <span className={`${ui.chip} bg-surface-alt text-ink-muted`}>{dict.status[p.status as keyof typeof dict.status] ?? p.status}</span>
-                  </td>
-                </tr>
-              ))}
+              {pumps.map((p) =>
+                editId === p.id ? (
+                  <tr key={p.id}>
+                    <td className={ui.td} colSpan={7}>
+                      <form action={updatePump} className="flex flex-wrap items-end gap-2">
+                        <input type="hidden" name="id" value={p.id} />
+                        <div>
+                          <label className={ui.label}>{dict.field.plant}</label>
+                          <select name="plantId" defaultValue={p.plantId} required className={`${ui.select} w-36`}>
+                            {plants.map((pl) => (
+                              <option key={pl.id} value={pl.id}>{pl.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.code}</label>
+                          <input name="code" defaultValue={p.code} required className={`${ui.input} w-24`} dir="ltr" />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.type}</label>
+                          <select name="pumpType" defaultValue={p.pumpType} className={`${ui.select} w-32`}>
+                            <option value="BOOM">{dict.pumpTypes.BOOM}</option>
+                            <option value="LINE">{dict.pumpTypes.LINE}</option>
+                            <option value="STATIONARY">{dict.pumpTypes.STATIONARY}</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.reach}</label>
+                          <input name="reachM" type="number" step="0.5" defaultValue={p.reachM ?? undefined} className={`${ui.input} w-20`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.hourlyRate}</label>
+                          <input name="hourlyRate" type="number" step="1" defaultValue={p.hourlyRate} required className={`${ui.input} w-24`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.standbyRate}</label>
+                          <input name="standbyRate" type="number" step="1" defaultValue={p.standbyRate ?? undefined} className={`${ui.input} w-24`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.col.status}</label>
+                          <select name="status" defaultValue={p.status} className={`${ui.select} w-36`}>
+                            <option value="ACTIVE">{dict.status.ACTIVE}</option>
+                            <option value="MAINTENANCE">{dict.status.MAINTENANCE}</option>
+                            <option value="OUT_OF_SERVICE">{dict.status.OUT_OF_SERVICE}</option>
+                          </select>
+                        </div>
+                        <button className={ui.button}>{dict.field.save}</button>
+                        <Link href="/pumps" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                          {dict.field.cancel}
+                        </Link>
+                      </form>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={p.id}>
+                    <td className={`${ui.td} font-medium`} dir="ltr">{p.code}</td>
+                    <td className={ui.td}>{p.plant.name}</td>
+                    <td className={`${ui.td} font-mono text-xs`}>{dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{p.reachM ? `${p.reachM} m` : "—"}</td>
+                    <td className={`${ui.td} font-mono tabular`} dir="ltr">
+                      {p.hourlyRate}{m.perHour}{p.standbyRate ? m.standbySuffix(p.standbyRate) : ""}
+                    </td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} bg-surface-alt text-ink-muted`}>{dict.status[p.status as keyof typeof dict.status] ?? p.status}</span>
+                    </td>
+                    <td className={ui.td}>
+                      <Link href={`/pumps?edit=${p.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {dict.field.edit}
+                      </Link>
+                    </td>
+                  </tr>
+                )
+              )}
               {pumps.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={6}>
+                  <td className={ui.td} colSpan={7}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>

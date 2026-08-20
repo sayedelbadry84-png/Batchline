@@ -1,8 +1,9 @@
+import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createEmployee } from "./actions";
+import { createEmployee, updateEmployee } from "./actions";
 
 const ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DRIVER", "DISPATCHER", "ADMIN"] as const;
 
@@ -17,10 +18,15 @@ function expiryFlag(date: Date | null, nowMs: number, labels: { expired: string;
   return null;
 }
 
-export default async function EmployeesPage() {
+export default async function EmployeesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ edit?: string }>;
+}) {
   await requirePageAccess("employees");
   const { dict } = await getDictionary();
   const m = dict.modules.employees;
+  const { edit: editId } = await searchParams;
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
 
@@ -47,11 +53,60 @@ export default async function EmployeesPage() {
                 <th className={ui.th}>{m.col.plant}</th>
                 <th className={ui.th}>{m.col.shift}</th>
                 <th className={ui.th}>{m.col.license}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
               </tr>
             </thead>
             <tbody>
               {employees.map((e) => {
                 const flag = expiryFlag(e.licenseExpiry, nowMs, m);
+                if (editId === e.id) {
+                  return (
+                    <tr key={e.id}>
+                      <td className={ui.td} colSpan={6}>
+                        <form action={updateEmployee} className="flex flex-wrap items-end gap-2">
+                          <input type="hidden" name="id" value={e.id} />
+                          <div>
+                            <label className={ui.label}>{dict.field.plant}</label>
+                            <select name="plantId" defaultValue={e.plantId} required className={`${ui.select} w-36`}>
+                              {plants.map((p) => (
+                                <option key={p.id} value={p.id}>{p.name}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.name}</label>
+                            <input name="name" defaultValue={e.name} required className={`${ui.input} w-40`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.role}</label>
+                            <select name="role" defaultValue={e.role} required className={`${ui.select} w-40`}>
+                              {ROLES.map((r) => (
+                                <option key={r} value={r}>{dict.roles[r]}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.shiftPattern}</label>
+                            <input name="shiftPattern" defaultValue={e.shiftPattern ?? ""} className={`${ui.input} w-32`} dir="ltr" />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.licenseExpiry}</label>
+                            <input
+                              name="licenseExpiry"
+                              type="date"
+                              defaultValue={e.licenseExpiry ? new Date(e.licenseExpiry).toISOString().slice(0, 10) : ""}
+                              className={`${ui.input} w-40`}
+                            />
+                          </div>
+                          <button className={ui.button}>{dict.field.save}</button>
+                          <Link href="/employees" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                            {dict.field.cancel}
+                          </Link>
+                        </form>
+                      </td>
+                    </tr>
+                  );
+                }
                 return (
                   <tr key={e.id}>
                     <td className={`${ui.td} font-medium`}>{e.name}</td>
@@ -62,12 +117,17 @@ export default async function EmployeesPage() {
                       {e.licenseExpiry ? new Date(e.licenseExpiry).toLocaleDateString() : "—"}
                       {flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>}
                     </td>
+                    <td className={ui.td}>
+                      <Link href={`/employees?edit=${e.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {dict.field.edit}
+                      </Link>
+                    </td>
                   </tr>
                 );
               })}
               {employees.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={5}>
+                  <td className={ui.td} colSpan={6}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>

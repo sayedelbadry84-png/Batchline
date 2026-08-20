@@ -92,3 +92,39 @@ export async function createCertificate(formData: FormData) {
 
   revalidatePath("/quality");
 }
+
+export async function updateCertificate(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const mixId = String(formData.get("mixId") ?? "");
+  const standardRef = String(formData.get("standardRef") ?? "").trim();
+  const issuedDateRaw = String(formData.get("issuedDate") ?? "");
+  const expiryDateRaw = String(formData.get("expiryDate") ?? "");
+  const issuingBody = String(formData.get("issuingBody") ?? "").trim();
+  const documentUrl = String(formData.get("documentUrl") ?? "").trim() || null;
+
+  if (!id || !mixId || !standardRef || !issuedDateRaw || !expiryDateRaw || !issuingBody) return;
+
+  await prisma.complianceCertificate.update({
+    where: { id },
+    data: {
+      mixId,
+      standardRef,
+      issuingBody,
+      documentUrl,
+      issuedDate: new Date(issuedDateRaw),
+      expiryDate: new Date(expiryDateRaw),
+    },
+  });
+
+  await logAudit({
+    module: "Quality",
+    recordId: id,
+    afterValue: `${standardRef} — ${issuingBody}`,
+    reasonCode: "CERTIFICATE_UPDATED",
+  });
+
+  revalidatePath("/quality");
+}

@@ -1,17 +1,21 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { addComponent, setMixStatus } from "../actions";
+import { addComponent, setMixStatus, updateMixDesign } from "../actions";
 
 export default async function MixDesignDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ editComponent?: string; edit?: string }>;
 }) {
   await requirePageAccess("mix-designs");
   const { id } = await params;
+  const { editComponent: editComponentId, edit: editingFields } = await searchParams;
   const { dict } = await getDictionary();
   const m = dict.modules.mixDesigns;
   const d = m.detail;
@@ -43,15 +47,56 @@ export default async function MixDesignDetailPage({
   return (
     <div className="flex flex-col gap-8">
       <header className="flex items-start justify-between gap-4">
-        <div>
-          <div className={ui.eyebrow}>{m.eyebrow}</div>
-          <h1 className={ui.h1} dir="ltr">
-            {mix.code} <span className="text-ink-muted">— {mix.grade}</span>
-          </h1>
-          <p className={ui.intro}>
-            {d.exposure(mix.exposureClass || "—")} · {d.slumpTarget(mix.slumpTargetMm)} · {d.wc(mix.wcRatio)}
-          </p>
-        </div>
+        {editingFields ? (
+          <form action={updateMixDesign} className={`${ui.card} flex flex-1 flex-wrap items-end gap-2`}>
+            <input type="hidden" name="mixId" value={mix.id} />
+            <div>
+              <label className={ui.label}>{m.f.code}</label>
+              <input name="code" defaultValue={mix.code} required className={`${ui.input} w-32`} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.grade}</label>
+              <input name="grade" defaultValue={mix.grade} required className={`${ui.input} w-28`} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.exposureClass}</label>
+              <input name="exposureClass" defaultValue={mix.exposureClass ?? ""} className={`${ui.input} w-24`} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.slumpTarget}</label>
+              <input name="slumpTargetMm" type="number" defaultValue={mix.slumpTargetMm} className={`${ui.input} w-24`} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.wcRatio}</label>
+              <input name="wcRatio" type="number" step="0.01" defaultValue={mix.wcRatio} className={`${ui.input} w-20`} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.yieldTarget}</label>
+              <input name="yieldTargetM3" type="number" step="0.01" defaultValue={mix.yieldTargetM3} className={`${ui.input} w-20`} />
+            </div>
+            <div>
+              <label className={ui.label}>{d.standardCost}</label>
+              <input name="standardCost" type="number" step="0.01" defaultValue={mix.standardCost ?? undefined} className={`${ui.input} w-24`} />
+            </div>
+            <button className={ui.button}>{dict.field.save}</button>
+            <Link href={`/mix-designs/${mix.id}`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+              {dict.field.cancel}
+            </Link>
+          </form>
+        ) : (
+          <div>
+            <div className={ui.eyebrow}>{m.eyebrow}</div>
+            <h1 className={ui.h1} dir="ltr">
+              {mix.code} <span className="text-ink-muted">— {mix.grade}</span>
+            </h1>
+            <p className={ui.intro}>
+              {d.exposure(mix.exposureClass || "—")} · {d.slumpTarget(mix.slumpTargetMm)} · {d.wc(mix.wcRatio)}
+            </p>
+            <Link href={`/mix-designs/${mix.id}?edit=1`} className="mt-1 inline-block text-xs font-medium text-accent-strong hover:underline">
+              {dict.field.edit}
+            </Link>
+          </div>
+        )}
         <form action={setMixStatus} className="flex items-center gap-2">
           <input type="hidden" name="mixId" value={mix.id} />
           <select name="status" defaultValue={mix.status} className={`${ui.select} w-44`}>
@@ -97,21 +142,51 @@ export default async function MixDesignDetailPage({
                 <th className={ui.th}>{d.col.designMass}</th>
                 <th className={ui.th}>{d.col.tolerance}</th>
                 <th className={ui.th}>{d.col.sg}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
               </tr>
             </thead>
             <tbody>
-              {mix.components.map((c) => (
-                <tr key={c.id}>
-                  <td className={`${ui.td} font-medium`}>{c.material.name}</td>
-                  <td className={`${ui.td} font-mono text-xs`}>{dict.materialTypes[c.material.type as keyof typeof dict.materialTypes] ?? c.material.type}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{c.designMassKgPerM3.toFixed(1)}</td>
-                  <td className={`${ui.td} font-mono tabular`}>±{c.tolerancePct}%</td>
-                  <td className={`${ui.td} font-mono tabular`}>{c.material.specificGravity ?? "—"}</td>
-                </tr>
-              ))}
+              {mix.components.map((c) =>
+                editComponentId === c.materialId ? (
+                  <tr key={c.id}>
+                    <td className={ui.td} colSpan={6}>
+                      <form action={addComponent} className="flex flex-wrap items-end gap-2">
+                        <input type="hidden" name="mixId" value={mix.id} />
+                        <input type="hidden" name="materialId" value={c.materialId} />
+                        <div className="text-sm font-medium">{c.material.name}</div>
+                        <div>
+                          <label className={ui.label}>{d.designMassField}</label>
+                          <input name="designMassKgPerM3" type="number" step="0.1" defaultValue={c.designMassKgPerM3} required className={`${ui.input} w-24`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{d.toleranceField}</label>
+                          <input name="tolerancePct" type="number" step="0.5" defaultValue={c.tolerancePct} className={`${ui.input} w-20`} />
+                        </div>
+                        <button className={ui.button}>{dict.field.save}</button>
+                        <Link href={`/mix-designs/${mix.id}`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                          {dict.field.cancel}
+                        </Link>
+                      </form>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={c.id}>
+                    <td className={`${ui.td} font-medium`}>{c.material.name}</td>
+                    <td className={`${ui.td} font-mono text-xs`}>{dict.materialTypes[c.material.type as keyof typeof dict.materialTypes] ?? c.material.type}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{c.designMassKgPerM3.toFixed(1)}</td>
+                    <td className={`${ui.td} font-mono tabular`}>±{c.tolerancePct}%</td>
+                    <td className={`${ui.td} font-mono tabular`}>{c.material.specificGravity ?? "—"}</td>
+                    <td className={ui.td}>
+                      <Link href={`/mix-designs/${mix.id}?editComponent=${c.materialId}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {dict.field.edit}
+                      </Link>
+                    </td>
+                  </tr>
+                )
+              )}
               {mix.components.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={5}>
+                  <td className={ui.td} colSpan={6}>
                     <span className="text-ink-muted">{d.emptyComponents}</span>
                   </td>
                 </tr>

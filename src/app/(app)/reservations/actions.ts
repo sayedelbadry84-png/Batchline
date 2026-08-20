@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getRemainingVolumeM3 } from "@/lib/reservations";
 import { revalidatePath } from "next/cache";
 
 export async function createReservation(formData: FormData) {
@@ -33,6 +34,42 @@ export async function createReservation(formData: FormData) {
     recordId: reservation.id,
     afterValue: `${requestedVolumeM3} m3`,
     reasonCode: overCreditLimit ? "CREDIT_HOLD" : "RESERVATION_CREATED",
+  });
+
+  revalidatePath("/reservations");
+}
+
+// Only editable before any volume has been dispatched — once a batch ticket
+// has been released against it, changing the mix or requested volume would
+// silently invalidate tickets/tolerances already computed off the old
+// numbers, so the action re-checks this server-side rather than trusting
+// the UI to only show Edit when it's safe.
+export async function updateReservation(formData: FormData) {
+  const id = String(formData.get("id") ?? "");
+  const projectId = String(formData.get("projectId") ?? "");
+  const mixId = String(formData.get("mixId") ?? "");
+  const requestedVolumeM3 = Number(formData.get("requestedVolumeM3") ?? 0);
+  const pourWindowStartRaw = String(formData.get("pourWindowStart") ?? "");
+
+  if (!id || !projectId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw) return;
+
+  const reservation = await prisma.reservation.findUnique({ where: { id } });
+  if (!reservation) return;
+  if (!["REQUESTED", "CONFIRMED", "ON_HOLD"].includes(reservation.status)) return;
+
+  const remaining = await getRemainingVolumeM3(id, reservation.requestedVolumeM3);
+  if (remaining < reservation.requestedVolumeM3) return; // something has already been released
+
+  await prisma.reservation.update({
+    where: { id },
+    data: { projectId, mixId, requestedVolumeM3, pourWindowStart: new Date(pourWindowStartRaw) },
+  });
+
+  await logAudit({
+    module: "Reservations",
+    recordId: id,
+    afterValue: `${requestedVolumeM3} m3`,
+    reasonCode: "RESERVATION_UPDATED",
   });
 
   revalidatePath("/reservations");

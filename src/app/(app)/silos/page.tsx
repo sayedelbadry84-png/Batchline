@@ -1,8 +1,9 @@
+import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createSilo, updateSiloLevel } from "./actions";
+import { createSilo, updateSilo, updateSiloLevel } from "./actions";
 
 function levelColor(pct: number, minPct: number) {
   if (pct <= minPct) return "bg-critical";
@@ -10,10 +11,15 @@ function levelColor(pct: number, minPct: number) {
   return "bg-good";
 }
 
-export default async function SilosPage() {
+export default async function SilosPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ edit?: string }>;
+}) {
   await requirePageAccess("silos");
   const { dict } = await getDictionary();
   const m = dict.modules.silos;
+  const { edit: editId } = await searchParams;
 
   const [silos, plants] = await Promise.all([
     prisma.silo.findMany({ include: { plant: true }, orderBy: { createdAt: "asc" } }),
@@ -32,6 +38,46 @@ export default async function SilosPage() {
         <div className={`${ui.card} flex flex-col gap-4`}>
           {silos.map((s) => {
             const pct = s.capacityTons > 0 ? (s.currentLevelTons / s.capacityTons) * 100 : 0;
+            if (editId === s.id) {
+              return (
+                <form key={s.id} action={updateSilo} className="flex flex-wrap items-end gap-2 border-b border-border pb-4 last:border-0 last:pb-0">
+                  <input type="hidden" name="id" value={s.id} />
+                  <div>
+                    <label className={ui.label}>{dict.field.plant}</label>
+                    <select name="plantId" defaultValue={s.plantId} required className={`${ui.select} w-36`}>
+                      {plants.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className={ui.label}>{m.f.name}</label>
+                    <input name="name" defaultValue={s.name} required className={`${ui.input} w-24`} dir="ltr" />
+                  </div>
+                  <div>
+                    <label className={ui.label}>{m.f.materialType}</label>
+                    <select name="materialType" defaultValue={s.materialType} required className={`${ui.select} w-36`}>
+                      <option value="CEMENT">{dict.materialTypes.CEMENT}</option>
+                      <option value="FLY_ASH">{dict.materialTypes.FLY_ASH}</option>
+                      <option value="SLAG">{dict.materialTypes.SLAG}</option>
+                      <option value="SILICA_FUME">{dict.materialTypes.SILICA_FUME}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className={ui.label}>{m.f.capacity}</label>
+                    <input name="capacityTons" type="number" step="0.1" defaultValue={s.capacityTons} required className={`${ui.input} w-24`} />
+                  </div>
+                  <div>
+                    <label className={ui.label}>{m.f.threshold}</label>
+                    <input name="minThresholdPct" type="number" step="1" defaultValue={s.minThresholdPct} className={`${ui.input} w-20`} />
+                  </div>
+                  <button className={ui.button}>{dict.field.save}</button>
+                  <Link href="/silos" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                    {dict.field.cancel}
+                  </Link>
+                </form>
+              );
+            }
             return (
               <div key={s.id} className="flex items-center gap-4">
                 <div className="w-40 shrink-0">
@@ -65,6 +111,9 @@ export default async function SilosPage() {
                     {m.update}
                   </button>
                 </form>
+                <Link href={`/silos?edit=${s.id}`} className="shrink-0 text-xs font-medium text-accent-strong hover:underline">
+                  {dict.field.edit}
+                </Link>
               </div>
             );
           })}
