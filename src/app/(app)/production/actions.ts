@@ -167,14 +167,28 @@ export async function startTrip(formData: FormData) {
   const driverId = String(formData.get("driverId") ?? "");
   if (!batchTicketId || !truckId || !driverId) return;
 
-  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId } });
+  const ticket = await prisma.batchTicket.findUnique({
+    where: { id: batchTicketId },
+    include: { reservation: true },
+  });
   if (!ticket) return;
+
+  // Pump crew/unit only apply when the reservation was booked for pump
+  // delivery — ignore anything submitted for a chute delivery so a stray
+  // pump doesn't attach itself to a trip that never used one.
+  const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
+  const pumpId = isPumpDelivery ? String(formData.get("pumpId") ?? "").trim() || null : null;
+  const pumpOperatorName = isPumpDelivery ? String(formData.get("pumpOperatorName") ?? "").trim() || null : null;
+  const pumpAssistantName = isPumpDelivery ? String(formData.get("pumpAssistantName") ?? "").trim() || null : null;
 
   const trip = await prisma.trip.create({
     data: {
       batchTicketId,
       truckId,
       driverId,
+      pumpId,
+      pumpOperatorName,
+      pumpAssistantName,
       status: "LOADING",
       batchTime: ticket.batchCompletedAt ?? new Date(),
     },

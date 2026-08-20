@@ -327,6 +327,14 @@ model Trip {
   truck             Truck        @relation(fields: [truckId], references: [id])
   driverId          String
   driver            Employee     @relation(fields: [driverId], references: [id])
+  // Only set when the reservation's delivery method is PUMP — the specific
+  // pump unit and crew placing this load, as distinct from the pump
+  // booking calendar (PumpAssignment), which schedules a pump against a
+  // reservation for billing hours rather than recording who ran it.
+  pumpId            String?
+  pump              Pump?        @relation(fields: [pumpId], references: [id])
+  pumpOperatorName  String?
+  pumpAssistantName String?
   status            String       @default("LOADING") // LOADING, IN_TRANSIT, ON_SITE, DISCHARGING, CLOSED
   batchTime         DateTime     @default(now())
   departTime        DateTime?
@@ -420,6 +428,7 @@ model Pump {
   updatedAt    DateTime @updatedAt
 
   assignments PumpAssignment[]
+  trips       Trip[]
 }
 
 model PumpAssignment {

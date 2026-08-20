@@ -25,19 +25,23 @@ export default async function BatchTicketPage({
       reservation: { include: { project: { include: { customer: true, plant: true } } } },
       mix: { include: { components: true } },
       components: { include: { material: true } },
-      trip: { include: { truck: true, driver: true } },
+      trip: { include: { truck: true, driver: true, pump: true } },
     },
   });
   if (!ticket) notFound();
 
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
+  const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
 
-  const [trucks, drivers] = ticket.status === "COMPLETE" && !ticket.trip
+  const [trucks, drivers, pumps] = ticket.status === "COMPLETE" && !ticket.trip
     ? await Promise.all([
         prisma.truck.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" }, orderBy: { code: "asc" } }),
         prisma.employee.findMany({ where: { plantId: ticket.plantId, role: "DRIVER" }, orderBy: { name: "asc" } }),
+        isPumpDelivery
+          ? prisma.pump.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" }, orderBy: { code: "asc" } })
+          : Promise.resolve([]),
       ])
-    : [[], []];
+    : [[], [], []];
 
   return (
     <div className="flex flex-col gap-8">
@@ -175,6 +179,32 @@ export default async function BatchTicketPage({
               </select>
             </div>
           </div>
+          {isPumpDelivery && (
+            <div className="border-t border-border pt-3">
+              <p className="mb-2 text-xs text-ink-muted">{d.pumpDeliveryNote}</p>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className={ui.label}>{d.pump}</label>
+                  <select name="pumpId" required className={ui.select}>
+                    <option value="">{dict.field.selectPump}</option>
+                    {pumps.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.code} ({dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className={ui.label}>{d.pumpOperator}</label>
+                  <input name="pumpOperatorName" required className={ui.input} />
+                </div>
+                <div>
+                  <label className={ui.label}>{d.pumpAssistant}</label>
+                  <input name="pumpAssistantName" className={ui.input} />
+                </div>
+              </div>
+            </div>
+          )}
           <button type="submit" className={`${ui.button} self-start`}>
             {d.startTrip}
           </button>
@@ -187,6 +217,14 @@ export default async function BatchTicketPage({
             <h2 className="font-display text-lg font-semibold">{d.tripStatus(dict.status[ticket.trip.status as keyof typeof dict.status] ?? ticket.trip.status)}</h2>
             <p className="text-sm text-ink-muted">
               {ticket.trip.truck.code} · {ticket.trip.driver.name}
+              {ticket.trip.pump && (
+                <>
+                  {" · "}
+                  {ticket.trip.pump.code}
+                  {ticket.trip.pumpOperatorName && ` · ${ticket.trip.pumpOperatorName}`}
+                  {ticket.trip.pumpAssistantName && ` · ${ticket.trip.pumpAssistantName}`}
+                </>
+              )}
             </p>
           </div>
           <Link href="/trips" className="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt">

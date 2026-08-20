@@ -264,6 +264,25 @@ driver app (`/driver`) automatically instead of the back office.
   delivery method get their own columns since dispatch actually needs them
   at a glance.
 
+**Pump crew on trip start**
+- Starting a trip from a completed batch ticket (Production → "Assign truck
+  & start trip") already picked a truck and driver; it now also picks the
+  pump unit and crew — but only when the reservation behind the ticket was
+  booked for pump delivery. A chute-delivery reservation still shows just
+  Truck/Driver, unchanged.
+- Added `pumpId` (→ `Pump`), `pumpOperatorName`, and `pumpAssistantName` to
+  `Trip`, deliberately separate from `PumpAssignment` (the pump booking
+  calendar on the Pumps screen) — that model schedules a pump against a
+  reservation for billing hours, this records who actually ran which pump
+  on a specific delivery. `startTrip` ignores any pump fields submitted for
+  a chute delivery rather than trusting the form, so a stray value can't
+  attach a pump to a trip that never used one.
+- Verified live: started a trip on a pump-delivery reservation and
+  confirmed the pump code, operator, and assistant all round-tripped onto
+  the ticket's trip summary ("MX-08 · Hassan Zaki · PMP-1 · Eng. Sameh ·
+  Youssef"); confirmed a chute-delivery ticket's assign form has no pump
+  section at all — no regression on the common case.
+
 ## Not yet implemented (see the rollout plan)
 
 `requireRole` covers the highest-value mutating actions per module (see
