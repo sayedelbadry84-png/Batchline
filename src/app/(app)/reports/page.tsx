@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
+import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
@@ -54,6 +55,25 @@ export default async function ReportsPage() {
   const weighedComponents = completedTickets.flatMap((t) => t.components).filter((c) => c.actualMassKg != null);
   const deviations = weighedComponents.map((c) => Math.abs(((c.actualMassKg! - c.targetMassKg) / c.targetMassKg) * 100));
   const avgAbsDeviation = deviations.length ? deviations.reduce((a, b) => a + b, 0) / deviations.length : null;
+
+  // --- Anomaly detection: statistical outliers + directional drift per
+  // material, over the same weighed-component data the deviation average
+  // above already uses (see src/lib/anomaly.ts for the method). ---
+  const byMaterial = new Map<string, { materialName: string; samples: DeviationSample[] }>();
+  for (const ticket of completedTickets) {
+    if (!ticket.batchCompletedAt) continue;
+    for (const c of ticket.components) {
+      if (c.actualMassKg == null) continue;
+      const entry = byMaterial.get(c.materialId) ?? { materialName: c.material.name, samples: [] };
+      entry.samples.push({
+        ticketNumber: ticket.ticketNumber,
+        completedAt: ticket.batchCompletedAt,
+        deviationPct: ((c.actualMassKg - c.targetMassKg) / c.targetMassKg) * 100,
+      });
+      byMaterial.set(c.materialId, entry);
+    }
+  }
+  const anomalies = detectAnomalies(byMaterial);
 
   // --- Quality ---
   const passCount = labResults.filter((r) => r.passFail === "PASS").length;
@@ -140,6 +160,30 @@ export default async function ReportsPage() {
             <div className="font-mono text-2xl tabular">{completedTickets.length}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.batchesCompleted}</div>
           </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.anomaliesTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.anomaliesIntro}</p>
+        <div className="flex flex-col gap-2">
+          {anomalies.map((a, i) => (
+            <div key={i} className={`${ui.card} flex items-center justify-between gap-4 py-3`}>
+              <div>
+                <span className={`${ui.chip} ${a.type === "OUTLIER" ? "bg-critical-soft text-critical" : "bg-warn-soft text-warn"} me-2`}>
+                  {a.type === "OUTLIER" ? m.outlierBadge : m.driftBadge}
+                </span>
+                <span className="text-sm">
+                  {a.type === "OUTLIER"
+                    ? m.outlierFlag(a.materialName, a.ticketNumber, a.deviationPct, a.zScore)
+                    : m.driftFlag(a.materialName, a.direction === "OVER" ? m.overLabel : m.underLabel, a.windowSize, a.thresholdPct)}
+                </span>
+              </div>
+            </div>
+          ))}
+          {anomalies.length === 0 && (
+            <div className={`${ui.card} text-sm text-ink-muted`}>{m.emptyAnomalies}</div>
+          )}
         </div>
       </div>
 

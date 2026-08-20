@@ -10,8 +10,10 @@ This codebase covers all 12 modules from the original system scope plus a
 Compliance + driver mobile app)**, **Phase 4 (Pumps + integration webhooks
 + Reports/KPIs)**, **Phase 5 (real authentication + RBAC enforcement, and
 full Arabic/RTL localization across every page)**, **Phase 6 (Billing —
-customer pricing, invoicing, and AR)**, and **Material Receiving** (built
-out of sequence to close a gap in the original module list) — a real
+customer pricing, invoicing, and AR)**, **Phase 8 (first AI decision-layer
+feature — statistical anomaly detection on batch deviations)**, and
+**Material Receiving** (built out of sequence to close a gap in the
+original module list) — a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -323,11 +325,54 @@ driver app (`/driver`) automatically instead of the back office.
   `PAID` with amount due at 0. Confirmed the Reports tiles picked up the
   same numbers (17,500 invoiced, 7,500 AR outstanding, 0 overdue since the
   due date hadn't passed) before the final payment. Confirmed in Arabic too.
-- **Known limitation, by design for this pass**: there's no way to cancel
-  or edit a generated invoice yet (only create → send → pay). Getting the
-  price wrong before sending currently means living with it or handling it
-  outside the system — a `cancelInvoice` action is the natural next step
-  if that turns out to matter in practice.
+- **`cancelInvoice`** closes the gap noted above: an invoice can be voided
+  from `DRAFT` or `SENT`, but only *before any payment is recorded* — once
+  real money has been logged against it, cancelling would orphan that
+  payment, and reconciling that is a manual step outside this pass's scope
+  (the action just refuses). Cancelling doesn't delete the invoice — the
+  header (number, total, dates, `CANCELLED` status) stays on file as the
+  audit record of what was generated, while its line items are removed so
+  the deliveries they billed become "ready to invoice" again (a trip can
+  only carry one `InvoiceLine` — that's how "already billed" is detected).
+  There's still no way to *edit* a wrong invoice in place, by design —
+  cancel and regenerate is the supported path, not silently rewriting a
+  number after the fact. Verified live: cancelled a draft `25,000 EGP`
+  invoice, confirmed its one delivery reappeared in "Ready to invoice" and
+  the cancelled invoice kept showing its original total in the list, then
+  generated a fresh invoice for the same delivery successfully.
+
+**Phase 8 — AI decision layer (first feature: anomaly detection)**
+- Per the strategic review's own advice — prove the AI layer with a small,
+  data-already-exists win before investing in anything that needs an
+  external model or API — Reports now runs two statistical checks over the
+  same weighed-component deviation data the existing "avg. batch deviation"
+  metric already reads, no new data collection required
+  (`src/lib/anomaly.ts`, a pure function, no external calls):
+  - **Outlier**: a single reading whose z-score against that material's own
+    historical mean/stddev exceeds 2.5, checked only among each material's
+    5 most recent readings (an outlier from months ago isn't actionable
+    today).
+  - **Drift**: the last 3 readings for a material all landing on the same
+    side of target past ±1.5%, even when none of them individually looks
+    dramatic — closer to what an actual scale-calibration problem produces
+    than a one-off spike is.
+- Surfaced as an "Anomaly alerts" card on Reports, right under the
+  production tiles it's derived from — a chip per flag naming the material,
+  the batch ticket, and a plain-language reason, or an explicit empty state
+  rather than nothing at all when there's nothing to flag.
+- **A real bug surfaced while verifying this**: `recordActuals` treated a
+  blank scale-reading field as `Number("") === 0` — recording "weighed at
+  0kg" instead of "not weighed yet" for any component the operator hadn't
+  gotten to. That silently distorted the pre-existing average-deviation
+  metric too, not just the new anomaly check. Fixed by skipping blank
+  fields the same way a genuinely absent field is already skipped.
+- Verified live: ran three consecutive batches with cement actuals
+  deliberately biased +3% over target (other components left unweighed).
+  Before the `recordActuals` fix, every component showed a false DRIFT flag
+  (blanks were reading as -100% deviation) and the average deviation showed
+  an absurd 80.6%; after the fix, only cement was flagged — correctly
+  reading "the last 3 batches all ran over target by more than 1.5%" — and
+  the average deviation dropped to a realistic 3.00%. Confirmed in Arabic.
 
 ## Not yet implemented (see the rollout plan)
 

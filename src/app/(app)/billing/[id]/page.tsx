@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { markInvoiceSent, recordPayment } from "../actions";
+import { markInvoiceSent, recordPayment, cancelInvoice } from "../actions";
 
 const statusChip: Record<string, string> = {
   DRAFT: "bg-surface-alt text-ink-muted",
@@ -38,6 +38,7 @@ export default async function InvoiceDetailPage({
   const paid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
   const amountDue = Math.max(0, invoice.total - paid);
   const canRecordPayment = invoice.status === "SENT" || invoice.status === "DRAFT";
+  const canCancel = (invoice.status === "DRAFT" || invoice.status === "SENT") && invoice.payments.length === 0;
 
   return (
     <div className="flex flex-col gap-8">
@@ -94,6 +95,13 @@ export default async function InvoiceDetailPage({
                 <td className={`${ui.td} font-mono tabular`} dir="ltr">{l.lineTotal.toLocaleString()}</td>
               </tr>
             ))}
+            {invoice.lines.length === 0 && (
+              <tr>
+                <td className={ui.td} colSpan={4}>
+                  <span className="text-ink-muted">{d.emptyLinesCancelled}</span>
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
         <div className="mt-3 flex justify-end gap-8 border-t border-border pt-3 text-sm">
@@ -140,6 +148,16 @@ export default async function InvoiceDetailPage({
               <input type="hidden" name="id" value={invoice.id} />
               <span className="text-sm text-ink-muted">{invoice.invoiceNumber}</span>
               <button type="submit" className={ui.button}>{d.markSent}</button>
+            </form>
+          )}
+
+          {canCancel && (
+            <form action={cancelInvoice} className={`${ui.card} flex items-center justify-between`}>
+              <input type="hidden" name="id" value={invoice.id} />
+              <span className="text-xs text-ink-muted">{d.cancelHint}</span>
+              <button type="submit" className="rounded-md border border-critical px-4 py-2 text-sm font-medium text-critical hover:bg-critical-soft">
+                {d.cancelInvoice}
+              </button>
             </form>
           )}
 

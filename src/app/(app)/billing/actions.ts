@@ -129,6 +129,42 @@ export async function markInvoiceSent(formData: FormData) {
   revalidatePath("/billing");
 }
 
+// Voids an invoice rather than deleting it — the header (number, total,
+// dates, CANCELLED status) stays on file as the audit record of what was
+// generated and why it didn't stand. Its line items are removed so the
+// trips they billed become "ready to invoice" again (a trip can only carry
+// one InvoiceLine — that's how "already billed" is detected), rather than
+// staying stuck against a voided invoice forever. Refused once a payment
+// exists: that money is real and cancelling would orphan it — reconciling
+// that is a manual step outside this pass's scope.
+export async function cancelInvoice(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const invoice = await prisma.invoice.findUnique({ where: { id }, include: { payments: true } });
+  if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID" || invoice.payments.length > 0) return;
+
+  await prisma.$transaction([
+    prisma.invoiceLine.deleteMany({ where: { invoiceId: id } }),
+    prisma.invoice.update({ where: { id }, data: { status: "CANCELLED" } }),
+  ]);
+
+  await logAudit({
+    module: "Billing",
+    recordId: id,
+    field: "status",
+    beforeValue: invoice.status,
+    afterValue: "CANCELLED",
+    reasonCode: "INVOICE_CANCELLED",
+  });
+
+  revalidatePath(`/billing/${id}`);
+  revalidatePath("/billing");
+}
+
 export async function recordPayment(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["ACCOUNTANT", "ADMIN"]);

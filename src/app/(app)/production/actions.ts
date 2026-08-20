@@ -79,7 +79,9 @@ export async function recordActuals(formData: FormData) {
   for (const c of components) {
     const rawActual = formData.get(`actual_${c.id}`);
     const rawMoisture = formData.get(`moisture_${c.id}`);
-    if (rawActual === null) continue;
+    // A blank field means "not weighed yet", not "weighed at 0kg" — Number("")
+    // is 0, which would otherwise record a real (and wildly wrong) reading.
+    if (rawActual === null || rawActual === "") continue;
 
     const moisturePct = AGGREGATE_TYPES.has(c.material.type) && rawMoisture !== null ? Number(rawMoisture) : null;
     const enteredMass = Number(rawActual);
