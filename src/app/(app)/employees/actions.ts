@@ -2,9 +2,13 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 export async function createEmployee(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ADMIN"]);
+
   const plantId = String(formData.get("plantId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "").trim();

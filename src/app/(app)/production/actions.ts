@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -92,6 +93,9 @@ export async function recordActuals(formData: FormData) {
 }
 
 export async function completeBatch(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   if (!batchTicketId) return;
 

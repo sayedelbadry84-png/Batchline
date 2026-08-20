@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
 
@@ -99,12 +100,39 @@ async function main() {
     },
   });
 
-  await prisma.employee.createMany({
+  const empAhmed = await prisma.employee.create({
+    data: { plantId: plant.id, name: "Ahmed Farouk", role: "PLANT_OPERATOR", shiftPattern: "Day / 6am–6pm" },
+  });
+  const empMona = await prisma.employee.create({
+    data: { plantId: plant.id, name: "Mona Ezzat", role: "QUALITY_SUPERVISOR", shiftPattern: "Day / 8am–4pm" },
+  });
+  const empNour = await prisma.employee.create({
+    data: { plantId: plant.id, name: "Nourhan Sami", role: "ACCOUNTANT", shiftPattern: "Day / 9am–5pm" },
+  });
+  const empKarim = await prisma.employee.create({
+    data: {
+      plantId: plant.id, name: "Karim Adel", role: "DRIVER", shiftPattern: "Day / 6am–6pm",
+      licenseNumber: "DL-88213", licenseExpiry: new Date(Date.now() + 1000 * 60 * 60 * 24 * 20),
+    },
+  });
+  const empHassan = await prisma.employee.create({
+    data: {
+      plantId: plant.id, name: "Hassan Zaki", role: "DRIVER", shiftPattern: "Day / 6am–6pm",
+      licenseNumber: "DL-77410", licenseExpiry: new Date(Date.now() + 1000 * 60 * 60 * 24 * 400),
+    },
+  });
+
+  // Dev-only seeded logins — same password for every account, printed to
+  // the console below. Never do this for a real deployment.
+  const DEV_PASSWORD_HASH = await bcrypt.hash("batchline123", 10);
+  await prisma.user.createMany({
     data: [
-      { plantId: plant.id, name: "Ahmed Farouk", role: "PLANT_OPERATOR", shiftPattern: "Day / 6am–6pm" },
-      { plantId: plant.id, name: "Mona Ezzat", role: "QUALITY_SUPERVISOR", shiftPattern: "Day / 8am–4pm" },
-      { plantId: plant.id, name: "Karim Adel", role: "DRIVER", shiftPattern: "Day / 6am–6pm", licenseNumber: "DL-88213", licenseExpiry: new Date(Date.now() + 1000 * 60 * 60 * 24 * 20) },
-      { plantId: plant.id, name: "Hassan Zaki", role: "DRIVER", shiftPattern: "Day / 6am–6pm", licenseNumber: "DL-77410", licenseExpiry: new Date(Date.now() + 1000 * 60 * 60 * 24 * 400) },
+      { email: "plant.operator@batchline.dev", name: "Ahmed Farouk", passwordHash: DEV_PASSWORD_HASH, role: "PLANT_OPERATOR", plantId: plant.id, employeeId: empAhmed.id },
+      { email: "quality@batchline.dev", name: "Mona Ezzat", passwordHash: DEV_PASSWORD_HASH, role: "QUALITY_SUPERVISOR", plantId: plant.id, employeeId: empMona.id },
+      { email: "accountant@batchline.dev", name: "Nourhan Sami", passwordHash: DEV_PASSWORD_HASH, role: "ACCOUNTANT", plantId: plant.id, employeeId: empNour.id },
+      { email: "admin@batchline.dev", name: "Batchline Admin", passwordHash: DEV_PASSWORD_HASH, role: "ADMIN", plantId: plant.id },
+      { email: "karim.driver@batchline.dev", name: "Karim Adel", passwordHash: DEV_PASSWORD_HASH, role: "DRIVER", plantId: plant.id, employeeId: empKarim.id },
+      { email: "hassan.driver@batchline.dev", name: "Hassan Zaki", passwordHash: DEV_PASSWORD_HASH, role: "DRIVER", plantId: plant.id, employeeId: empHassan.id },
     ],
   });
 
@@ -150,7 +178,7 @@ async function main() {
     },
   });
 
-  console.log("Seed complete.");
+  console.log("Seed complete. Log in at /login with any seeded email and password 'batchline123'.");
 }
 
 main()

@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 export async function createPlant(formData: FormData) {
@@ -27,6 +28,9 @@ export async function createPlant(formData: FormData) {
 }
 
 export async function updatePlantThresholds(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const drumTimerLimitMinutes = Number(formData.get("drumTimerLimitMinutes") ?? 90);
   const returnAbsorptionThresholdM3 = Number(formData.get("returnAbsorptionThresholdM3") ?? 0.2);
@@ -42,7 +46,6 @@ export async function updatePlantThresholds(formData: FormData) {
     beforeValue: `${before?.drumTimerLimitMinutes}min / ${before?.returnAbsorptionThresholdM3}m3`,
     afterValue: `${drumTimerLimitMinutes}min / ${returnAbsorptionThresholdM3}m3`,
     reasonCode: "TOLERANCE_UPDATED",
-    role: "PLANT_OPERATOR",
   });
 
   revalidatePath("/plants");

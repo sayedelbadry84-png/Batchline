@@ -1,7 +1,7 @@
-import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
+import { getCurrentUser } from "@/lib/session";
 import { DrumTimer } from "@/components/DrumTimer";
 import {
   driverAdvanceTrip,
@@ -22,9 +22,9 @@ export default async function DriverTripPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const store = await cookies();
-  const driverId = store.get("batchline_driver_id")?.value;
-  if (!driverId) redirect("/driver");
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
+  if (user.role !== "DRIVER" || !user.employeeId) redirect("/driver");
 
   const trip = await prisma.trip.findUnique({
     where: { id },
@@ -38,7 +38,7 @@ export default async function DriverTripPage({
     },
   });
   if (!trip) notFound();
-  if (trip.driverId !== driverId) redirect("/driver");
+  if (trip.driverId !== user.employeeId) redirect("/driver");
 
   const project = trip.batchTicket.reservation.project;
 

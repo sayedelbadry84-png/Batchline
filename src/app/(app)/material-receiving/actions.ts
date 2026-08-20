@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 export async function createReceipt(formData: FormData) {
@@ -48,6 +49,9 @@ export async function createReceipt(formData: FormData) {
 }
 
 export async function setQcStatus(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "");
   if (!id || !status) return;
@@ -92,7 +96,6 @@ export async function setQcStatus(formData: FormData) {
     beforeValue: receipt.qcStatus,
     afterValue: status,
     reasonCode: shouldPost ? "QC_PASSED_POSTED_TO_INVENTORY" : "QC_STATUS_UPDATED",
-    role: "QUALITY_SUPERVISOR",
   });
 
   revalidatePath("/material-receiving");

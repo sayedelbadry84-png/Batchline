@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -49,7 +50,12 @@ export async function addComponent(formData: FormData) {
   revalidatePath(`/mix-designs/${mixId}`);
 }
 
+// Approving a mix design is the gate before it can be batched — restricted
+// to the role that owns quality sign-off, per the RBAC matrix.
 export async function setMixStatus(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+
   const mixId = String(formData.get("mixId") ?? "");
   const status = String(formData.get("status") ?? "");
   if (!mixId || !status) return;
@@ -64,7 +70,6 @@ export async function setMixStatus(formData: FormData) {
     beforeValue: before?.status,
     afterValue: status,
     reasonCode: "STATUS_CHANGE",
-    role: "QUALITY_SUPERVISOR",
   });
 
   revalidatePath(`/mix-designs/${mixId}`);

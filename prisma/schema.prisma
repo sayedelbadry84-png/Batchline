@@ -22,10 +22,23 @@ model User {
   role         String
   plantId      String?
   plant        Plant?   @relation(fields: [plantId], references: [id])
+  // Links a DRIVER-role account to their Employee record, so the driver app
+  // resolves "my trips" from the logged-in session instead of a picker.
+  employeeId   String?  @unique
+  employee     Employee? @relation(fields: [employeeId], references: [id])
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   auditEvents  AuditEvent[]
+  sessions     Session[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
 }
 
 model Plant {
@@ -204,6 +217,7 @@ model Employee {
 
   trips Trip[]
   sampledTestBatches TestBatch[]
+  user User?
 }
 
 // ---------------------------------------------------------------------------
