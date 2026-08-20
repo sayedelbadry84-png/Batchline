@@ -16,6 +16,7 @@ export const MODULE_ROLES = {
   employees: ["ADMIN"],
   pumps: ["PLANT_OPERATOR", "ADMIN"],
   plants: ["PLANT_OPERATOR", "ADMIN"],
+  billing: ["ACCOUNTANT", "ADMIN"],
   trips: ["PLANT_OPERATOR", "ADMIN"],
   quality: ["QUALITY_SUPERVISOR", "PLANT_OPERATOR", "ADMIN"],
   reports: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "ADMIN"],

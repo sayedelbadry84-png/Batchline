@@ -114,6 +114,7 @@ model MixDesign {
   reservations Reservation[]
   batchTickets BatchTicket[]
   certificates ComplianceCertificate[]
+  priceListEntries PriceListEntry[]
 }
 
 model Material {
@@ -155,7 +156,9 @@ model Customer {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  projects Project[]
+  projects   Project[]
+  priceListEntries PriceListEntry[]
+  invoices   Invoice[]
 }
 
 model Supplier {
@@ -185,6 +188,7 @@ model Project {
   updatedAt           DateTime @updatedAt
 
   reservations Reservation[]
+  invoices     Invoice[]
 }
 
 model Reservation {
@@ -353,6 +357,7 @@ model Trip {
 
   drumReturn DrumReturn?
   testBatches TestBatch[]
+  invoiceLine InvoiceLine?
 }
 
 model DrumReturn {
@@ -442,6 +447,75 @@ model PumpAssignment {
   status          String      @default("SCHEDULED") // SCHEDULED, ON_SITE, COMPLETE, CANCELLED
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 — Billing (pricing, invoicing, AR)
+// ---------------------------------------------------------------------------
+
+model PriceListEntry {
+  id         String    @id @default(cuid())
+  customerId String
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  mixId      String
+  mix        MixDesign @relation(fields: [mixId], references: [id])
+  pricePerM3 Float
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([customerId, mixId])
+}
+
+// One invoice per generation run against a project's not-yet-invoiced closed
+// trips — see generateInvoiceForProject. Status is a simple linear flow
+// (DRAFT -> SENT -> PAID, or CANCELLED); "overdue" is deliberately NOT a
+// stored status — it's derived at display time from dueDate + payments, the
+// same pattern the app already uses for certificate expiry, so there's no
+// background job to keep it in sync.
+model Invoice {
+  id            String   @id @default(cuid())
+  invoiceNumber String   @unique
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id])
+  projectId     String?
+  project       Project? @relation(fields: [projectId], references: [id])
+  status        String   @default("DRAFT") // DRAFT, SENT, PAID, CANCELLED
+  issueDate     DateTime @default(now())
+  dueDate       DateTime
+  subtotal      Float
+  total         Float
+  currency      String   @default("EGP")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  lines    InvoiceLine[]
+  payments Payment[]
+}
+
+// One line per delivered trip — the delivery ticket is the natural billing
+// unit in ready-mix, not the reservation (a split reservation bills as
+// several lines, possibly across several invoices).
+model InvoiceLine {
+  id          String  @id @default(cuid())
+  invoiceId   String
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  tripId      String  @unique
+  trip        Trip    @relation(fields: [tripId], references: [id])
+  description String
+  volumeM3    Float
+  unitPrice   Float
+  lineTotal   Float
+}
+
+model Payment {
+  id        String   @id @default(cuid())
+  invoiceId String
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amount    Float
+  paidAt    DateTime @default(now())
+  method    String?  // CASH, BANK_TRANSFER, CHEQUE
+  reference String?
+  createdAt DateTime @default(now())
 }
 
 model AuditEvent {

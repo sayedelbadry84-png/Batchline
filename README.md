@@ -4,13 +4,14 @@ Ready-mix concrete plant operations platform. Design spec: see the published
 Batchline artifact from this project's planning session for the full system
 design (all 12 modules, business rules, integrations, RBAC, rollout plan).
 
-This codebase covers all 12 modules from the original system scope, across
-**Phase 1 (Foundation)**, **Phase 2 (Production + Fleet)**, **Phase 3
-(Quality & Compliance + driver mobile app)**, **Phase 4 (Pumps + integration
-webhooks + Reports/KPIs)**, **Phase 5 (real authentication + RBAC
-enforcement, and full Arabic/RTL localization across every page)**, and
-**Material Receiving**
-(built out of sequence to close a gap in the original module list) — a real
+This codebase covers all 12 modules from the original system scope plus a
+13th (Billing) added to close the commercial gap, across **Phase 1
+(Foundation)**, **Phase 2 (Production + Fleet)**, **Phase 3 (Quality &
+Compliance + driver mobile app)**, **Phase 4 (Pumps + integration webhooks
++ Reports/KPIs)**, **Phase 5 (real authentication + RBAC enforcement, and
+full Arabic/RTL localization across every page)**, **Phase 6 (Billing —
+customer pricing, invoicing, and AR)**, and **Material Receiving** (built
+out of sequence to close a gap in the original module list) — a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -283,6 +284,51 @@ driver app (`/driver`) automatically instead of the back office.
   Youssef"); confirmed a chute-delivery ticket's assign form has no pump
   section at all — no regression on the common case.
 
+**Phase 6 — Billing (pricing, invoicing, AR)**
+- A new 13th module, `/billing`, closes the commercial gap the README used
+  to call out explicitly on the Reports page: a customer price list
+  (`PriceListEntry`, one price per m³ per customer+mix), invoice generation
+  against closed deliveries, and payment tracking through to AR.
+- **The delivery ticket is the billing unit, not the reservation** — a
+  split reservation dispatched as several truckloads bills as several
+  lines, possibly across separate invoices, matching how the split-batch
+  dispatch model above already treats a reservation as many independent
+  deliveries. `/billing` groups every closed trip that isn't on an invoice
+  yet by project, and only offers "Generate invoice" once every mix
+  involved has a price on file for that customer — a project short a price
+  shows exactly which mix code is missing instead of guessing or silently
+  invoicing at zero.
+- Invoice status is a plain `DRAFT → SENT → PAID` flow (plus `CANCELLED`).
+  "Overdue" is deliberately **not** a stored status — it's computed at
+  display time from `dueDate` and the sum of recorded payments, the same
+  pattern the app already uses for compliance-certificate expiry, so there
+  is no background job required to keep it in sync. A payment that brings
+  the paid total to (or past) the invoice total flips it to `PAID`
+  automatically; partial payments just reduce the amount due.
+- The due date comes from the customer's own `paymentTerms` field (e.g.
+  "Net 30") via a small parser that pulls the number out of the free-text
+  string, falling back to 30 days for anything that doesn't parse (a term
+  like "Due on receipt" typed by hand shouldn't crash invoice generation).
+- The Reports page's Billing section is now real, computed from the same
+  `Invoice`/`Payment` tables the `/billing` screen writes to: revenue
+  invoiced this month, AR outstanding, and AR overdue. The disclaimer box
+  is narrowed to what's still genuinely absent — revenue *per m³* and
+  material cost variance, which need a cost-accounting layer this phase
+  didn't build — rather than the old blanket "no financial metrics" note.
+- Verified live end to end: released and delivered a batch, set a price,
+  generated an invoice (`INV-2026-0001`, 7 m³ × 2,500 = 17,500, due date
+  correctly 30 days out from a "Net 30" customer), marked it sent, recorded
+  a partial payment (amount due dropped from 17,500 to 7,500, status
+  correctly stayed `SENT`), then a second payment that flipped it to
+  `PAID` with amount due at 0. Confirmed the Reports tiles picked up the
+  same numbers (17,500 invoiced, 7,500 AR outstanding, 0 overdue since the
+  due date hadn't passed) before the final payment. Confirmed in Arabic too.
+- **Known limitation, by design for this pass**: there's no way to cancel
+  or edit a generated invoice yet (only create → send → pay). Getting the
+  price wrong before sending currently means living with it or handling it
+  outside the system — a `cancelInvoice` action is the natural next step
+  if that turns out to matter in practice.
+
 ## Not yet implemented (see the rollout plan)
 
 `requireRole` covers the highest-value mutating actions per module (see
@@ -293,11 +339,15 @@ action is the natural next increment.
 
 The PLC/batching-scale and weighbridge integrations are still simulated
 through manual entry (Production's "record actuals" form stands in for a
-real scale readout). Financial reporting (revenue per m³, material cost
-variance, AR aging) needs a pricing/invoicing data model (customer price
-lists, invoices, payments) that doesn't exist yet — the Reports page says so
-explicitly rather than showing a fabricated number. Multi-currency exists at
-the data level (`Plant.currency`) but nothing converts or displays it yet.
+real scale readout). Financial reporting now covers invoiced revenue and AR
+aging (Phase 6, above); revenue *per m³* and material cost variance still
+need a cost-accounting layer (standard vs. actual material cost per batch)
+that hasn't been built — the Reports page says so explicitly rather than
+showing a fabricated number. Invoices also have no cancel/edit path yet
+(see Phase 6's known limitation). Multi-currency exists at the data level
+(`Plant.currency`, and invoices inherit their project's plant currency) but
+nothing converts between currencies or displays a consolidated multi-plant
+total yet.
 
 A few simplifications worth knowing about: batch completion picks the
 *first* matching silo/hopper for a material type rather than an

@@ -23,7 +23,7 @@ export default async function ReportsPage() {
   const nowMs = Date.now();
   const since = new Date(nowMs - SEVEN_DAYS_MS);
 
-  const [completedTickets, closedTrips, labResults, testBatches, silos] = await Promise.all([
+  const [completedTickets, closedTrips, labResults, testBatches, silos, invoices] = await Promise.all([
     prisma.batchTicket.findMany({
       where: { status: "COMPLETE" },
       include: { components: { include: { material: true } } },
@@ -37,6 +37,7 @@ export default async function ReportsPage() {
       include: { trip: { include: { batchTicket: { include: { mix: true } } } } },
     }),
     prisma.silo.findMany(),
+    prisma.invoice.findMany({ where: { status: { not: "CANCELLED" } }, include: { payments: true } }),
   ]);
 
   // --- Production ---
@@ -94,6 +95,23 @@ export default async function ReportsPage() {
     const daysOfCover = dailyTons > 0 ? s.currentLevelTons / dailyTons : null;
     return { ...s, daysOfCover };
   });
+
+  // --- Billing (revenue currently invoiced, AR outstanding/overdue) ---
+  const monthStart = new Date(nowMs);
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const invoicedThisMonth = invoices
+    .filter((inv) => inv.issueDate >= monthStart)
+    .reduce((sum, inv) => sum + inv.total, 0);
+
+  const sentInvoices = invoices.filter((inv) => inv.status === "SENT");
+  const arOutstanding = sentInvoices.reduce(
+    (sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)),
+    0,
+  );
+  const arOverdue = sentInvoices
+    .filter((inv) => inv.dueDate.getTime() < nowMs)
+    .reduce((sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)), 0);
 
   return (
     <div className="flex flex-col gap-8">
@@ -189,6 +207,25 @@ export default async function ReportsPage() {
             </tbody>
           </table>
           <p className="mt-2 text-xs text-ink-muted">{m.inventoryNote}</p>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.billingTitle}</h2>
+        <div className="grid grid-cols-3 gap-4">
+          <div className={ui.card}>
+            <div className="font-mono text-2xl tabular" dir="ltr">{invoicedThisMonth.toLocaleString()}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.revenueThisMonth}</div>
+            <div className="mt-1 text-xs text-ink-faint">{m.invoiceCount(invoices.filter((inv) => inv.issueDate >= monthStart).length)}</div>
+          </div>
+          <div className={ui.card}>
+            <div className="font-mono text-2xl tabular" dir="ltr">{arOutstanding.toLocaleString()}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.arOutstanding}</div>
+          </div>
+          <div className={ui.card}>
+            <div className={`font-mono text-2xl tabular ${arOverdue > 0 ? "text-critical" : ""}`} dir="ltr">{arOverdue.toLocaleString()}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.arOverdue}</div>
+          </div>
         </div>
       </div>
 
