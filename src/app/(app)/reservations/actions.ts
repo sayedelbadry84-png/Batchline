@@ -5,6 +5,20 @@ import { logAudit } from "@/lib/audit";
 import { getRemainingVolumeM3 } from "@/lib/reservations";
 import { revalidatePath } from "next/cache";
 
+// Shared by create and update — the pour-order details captured at intake,
+// separate from the core project/mix/volume/window fields.
+function readPourDetails(formData: FormData) {
+  return {
+    slumpRequestedMm: Number(formData.get("slumpRequestedMm") ?? 0) || null,
+    temperatureC: Number(formData.get("temperatureC") ?? 0) || null,
+    siteLocation: String(formData.get("siteLocation") ?? "").trim() || null,
+    siteContactName: String(formData.get("siteContactName") ?? "").trim() || null,
+    siteContactPhone: String(formData.get("siteContactPhone") ?? "").trim() || null,
+    deliveryMethod: String(formData.get("deliveryMethod") ?? "CHUTE"),
+    structuralElement: String(formData.get("structuralElement") ?? "").trim() || null,
+  };
+}
+
 export async function createReservation(formData: FormData) {
   const projectId = String(formData.get("projectId") ?? "");
   const mixId = String(formData.get("mixId") ?? "");
@@ -26,6 +40,7 @@ export async function createReservation(formData: FormData) {
       requestedVolumeM3,
       pourWindowStart: new Date(pourWindowStartRaw),
       status: overCreditLimit ? "ON_HOLD" : "CONFIRMED",
+      ...readPourDetails(formData),
     },
   });
 
@@ -62,7 +77,13 @@ export async function updateReservation(formData: FormData) {
 
   await prisma.reservation.update({
     where: { id },
-    data: { projectId, mixId, requestedVolumeM3, pourWindowStart: new Date(pourWindowStartRaw) },
+    data: {
+      projectId,
+      mixId,
+      requestedVolumeM3,
+      pourWindowStart: new Date(pourWindowStartRaw),
+      ...readPourDetails(formData),
+    },
   });
 
   await logAudit({

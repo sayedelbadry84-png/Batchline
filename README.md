@@ -248,6 +248,22 @@ driver app (`/driver`) automatically instead of the back office.
   rewrite a measurement after the fact, which defeats the audit trail this
   app is built around.
 
+**Pour-order details on Reservations**
+- A reservation now captures the details a real delivery ticket needs beyond
+  project/mix/volume/window: requested slump (mm, independent of the mix
+  design's own slump target — site conditions can call for an on-the-day
+  adjustment, e.g. a pump mix run wetter than the design), expected
+  temperature, the specific pour location on site (distinct from the
+  project's site address), a site contact name and phone number, delivery
+  method (pump or chute), and the structural element being poured (e.g.
+  "Column C12" / "Slab L3"). All optional, all editable via the same
+  Edit-everywhere pattern above.
+- The Reservations table surfaces them compactly rather than adding a wall
+  of columns: pour location/contact/phone sit under the project name,
+  slump/temperature sit under the volume, and structural element and
+  delivery method get their own columns since dispatch actually needs them
+  at a glance.
+
 ## Not yet implemented (see the rollout plan)
 
 `requireRole` covers the highest-value mutating actions per module (see

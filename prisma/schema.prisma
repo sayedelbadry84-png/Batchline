@@ -196,6 +196,16 @@ model Reservation {
   requestedVolumeM3  Float
   pourWindowStart    DateTime
   status             String    @default("REQUESTED") // REQUESTED, CONFIRMED, IN_PRODUCTION, DELIVERED, CANCELLED
+  // Pour-order details captured at intake — distinct from the mix design's
+  // own slump target, since site conditions can call for an adjustment on
+  // the day (e.g. a pump mix run wetter than the design slump).
+  slumpRequestedMm   Float?
+  temperatureC       Float?
+  siteLocation       String?
+  siteContactName    String?
+  siteContactPhone   String?
+  deliveryMethod     String?   @default("CHUTE") // PUMP, CHUTE
+  structuralElement  String?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 

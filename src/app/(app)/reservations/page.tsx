@@ -59,6 +59,8 @@ export default async function ReservationsPage({
                 <th className={ui.th}>{m.col.project}</th>
                 <th className={ui.th}>{m.col.mix}</th>
                 <th className={ui.th}>{m.col.volume}</th>
+                <th className={ui.th}>{m.col.element}</th>
+                <th className={ui.th}>{m.col.delivery}</th>
                 <th className={ui.th}>{m.col.status}</th>
                 <th className={ui.th}>{dict.field.actions}</th>
               </tr>
@@ -69,7 +71,7 @@ export default async function ReservationsPage({
                 if (editId === r.id && editable) {
                   return (
                     <tr key={r.id}>
-                      <td className={ui.td} colSpan={6}>
+                      <td className={ui.td} colSpan={8}>
                         <form action={updateReservation} className="flex flex-wrap items-end gap-2">
                           <input type="hidden" name="id" value={r.id} />
                           <div>
@@ -102,6 +104,37 @@ export default async function ReservationsPage({
                               className={`${ui.input} w-48`}
                             />
                           </div>
+                          <div>
+                            <label className={ui.label}>{m.f.structuralElement}</label>
+                            <input name="structuralElement" defaultValue={r.structuralElement ?? ""} className={`${ui.input} w-32`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.deliveryMethod}</label>
+                            <select name="deliveryMethod" defaultValue={r.deliveryMethod ?? "CHUTE"} className={`${ui.select} w-28`}>
+                              <option value="CHUTE">{dict.deliveryMethods.CHUTE}</option>
+                              <option value="PUMP">{dict.deliveryMethods.PUMP}</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.slump}</label>
+                            <input name="slumpRequestedMm" type="number" defaultValue={r.slumpRequestedMm ?? undefined} className={`${ui.input} w-24`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.temperature}</label>
+                            <input name="temperatureC" type="number" step="0.5" defaultValue={r.temperatureC ?? undefined} className={`${ui.input} w-24`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.siteLocation}</label>
+                            <input name="siteLocation" defaultValue={r.siteLocation ?? ""} className={`${ui.input} w-40`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.siteContactName}</label>
+                            <input name="siteContactName" defaultValue={r.siteContactName ?? ""} className={`${ui.input} w-32`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.siteContactPhone}</label>
+                            <input name="siteContactPhone" defaultValue={r.siteContactPhone ?? ""} className={`${ui.input} w-32`} dir="ltr" />
+                          </div>
                           <button className={ui.button}>{dict.field.save}</button>
                           <Link href="/reservations" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
                             {dict.field.cancel}
@@ -119,12 +152,31 @@ export default async function ReservationsPage({
                     <td className={ui.td}>
                       {r.project.name}
                       <div className="text-xs text-ink-muted">{r.project.customer.legalName}</div>
+                      {(r.siteLocation || r.siteContactName || r.siteContactPhone) && (
+                        <div className="text-xs text-ink-muted">
+                          {[r.siteLocation, r.siteContactName, r.siteContactPhone].filter(Boolean).join(" · ")}
+                        </div>
+                      )}
                     </td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.mix.code}</td>
                     <td className={`${ui.td} font-mono tabular`}>
                       {r.released > 0 && r.released < r.requestedVolumeM3
                         ? `${r.released} / ${r.requestedVolumeM3} m³`
                         : `${r.requestedVolumeM3} m³`}
+                      {(r.slumpRequestedMm != null || r.temperatureC != null) && (
+                        <div className="font-normal text-xs text-ink-muted">
+                          {[
+                            r.slumpRequestedMm != null ? `${r.slumpRequestedMm} mm` : null,
+                            r.temperatureC != null ? `${r.temperatureC}°C` : null,
+                          ].filter(Boolean).join(" · ")}
+                        </div>
+                      )}
+                    </td>
+                    <td className={ui.td}>{r.structuralElement || "—"}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} bg-surface-alt text-ink-muted`}>
+                        {dict.deliveryMethods[(r.deliveryMethod ?? "CHUTE") as keyof typeof dict.deliveryMethods] ?? r.deliveryMethod}
+                      </span>
                     </td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${statusChip[r.status] ?? ""}`}>{dict.status[r.status as keyof typeof dict.status] ?? r.status}</span>
@@ -141,7 +193,7 @@ export default async function ReservationsPage({
               })}
               {reservations.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={6}>
+                  <td className={ui.td} colSpan={8}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>
@@ -182,6 +234,37 @@ export default async function ReservationsPage({
           <div>
             <label className={ui.label}>{m.f.pourStart}</label>
             <input name="pourWindowStart" type="datetime-local" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.structuralElement}</label>
+            <input name="structuralElement" className={ui.input} placeholder="Column C12 / Slab L3" />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.deliveryMethod}</label>
+            <select name="deliveryMethod" defaultValue="CHUTE" className={ui.select}>
+              <option value="CHUTE">{dict.deliveryMethods.CHUTE}</option>
+              <option value="PUMP">{dict.deliveryMethods.PUMP}</option>
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.slump}</label>
+            <input name="slumpRequestedMm" type="number" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.temperature}</label>
+            <input name="temperatureC" type="number" step="0.5" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.siteLocation}</label>
+            <input name="siteLocation" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.siteContactName}</label>
+            <input name="siteContactName" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.siteContactPhone}</label>
+            <input name="siteContactPhone" className={ui.input} dir="ltr" />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
             {m.create}
