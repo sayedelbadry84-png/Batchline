@@ -53,7 +53,7 @@ export default async function FleetPage() {
                   <td className={`${ui.td} font-medium`}>
                     {t.code}
                     {t.trips.length > 0 && (
-                      <span className={`${ui.chip} bg-accent-soft text-accent-strong ml-2`}>on trip</span>
+                      <span className={`${ui.chip} bg-accent-soft text-accent-strong ms-2`}>on trip</span>
                     )}
                   </td>
                   <td className={ui.td}>{t.plant.name}</td>

@@ -7,7 +7,7 @@ export const ui = {
   intro: "mt-1 max-w-2xl text-sm text-ink-muted",
   card: "rounded-xl border border-border bg-surface p-6 shadow-sm",
   table: "w-full border-collapse text-sm",
-  th: "border-b border-border bg-surface-alt px-3 py-2 text-left font-mono text-[0.68rem] tracking-wide text-ink-muted uppercase",
+  th: "border-b border-border bg-surface-alt px-3 py-2 text-start font-mono text-[0.68rem] tracking-wide text-ink-muted uppercase",
   td: "border-b border-border px-3 py-2.5",
   input:
     "w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-accent",

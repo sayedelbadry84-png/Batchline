@@ -37,7 +37,11 @@
   --color-critical: var(--critical);
   --color-critical-soft: var(--critical-soft);
   --font-display: var(--font-oswald);
-  --font-sans: var(--font-plex-sans);
+  /* Latin glyphs render in IBM Plex Sans, Arabic glyphs fall back to its
+     Arabic companion automatically — mixed-script text (e.g. Arabic labels
+     around Latin-numeral measurements on a batch ticket) renders correctly
+     without switching stacks based on `dir`. */
+  --font-sans: var(--font-plex-sans), var(--font-plex-sans-arabic);
   --font-mono: var(--font-plex-mono);
 }
 

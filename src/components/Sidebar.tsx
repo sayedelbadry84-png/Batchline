@@ -3,46 +3,64 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { logout } from "@/app/login/actions";
+import { setLocale } from "@/app/locale-actions";
 import { canAccessModule, type ModuleKey } from "@/lib/permissions";
+import type { Dictionary } from "@/lib/i18n";
+import type { Locale } from "@/lib/i18n/config";
 
-// Numbered to match the 12-module system scope. Visibility here comes from
-// the same MODULE_ROLES map the pages enforce with requirePageAccess — one
+// Numbered to match the 12-module system scope. Visibility comes from the
+// same MODULE_ROLES map the pages enforce with requirePageAccess — one
 // source of truth, so the menu can't drift from what's actually allowed.
-const MODULES: { href: string; label: string; num: string; key: ModuleKey }[] = [
-  { href: "/", label: "Dashboard", num: "00", key: "dashboard" },
-  { href: "/mix-designs", label: "Mix Design", num: "01", key: "mix-designs" },
-  { href: "/reservations", label: "Reservations", num: "02", key: "reservations" },
-  { href: "/production", label: "Production", num: "03", key: "production" },
-  { href: "/material-receiving", label: "Material Receiving", num: "04", key: "material-receiving" },
-  { href: "/fleet", label: "Fleet", num: "05", key: "fleet" },
-  { href: "/silos", label: "Silos", num: "06", key: "silos" },
-  { href: "/customers", label: "Customers", num: "07", key: "customers" },
-  { href: "/suppliers", label: "Suppliers", num: "08", key: "suppliers" },
-  { href: "/projects", label: "Projects", num: "09", key: "projects" },
-  { href: "/employees", label: "Employees", num: "10", key: "employees" },
-  { href: "/pumps", label: "Pumps", num: "11", key: "pumps" },
-  { href: "/plants", label: "Plant Management", num: "12", key: "plants" },
+// `labelKey` maps to nav — labels are never hardcoded English here.
+const MODULES: { href: string; num: string; key: ModuleKey; labelKey: keyof Dictionary["nav"] }[] = [
+  { href: "/", num: "00", key: "dashboard", labelKey: "dashboard" },
+  { href: "/mix-designs", num: "01", key: "mix-designs", labelKey: "mixDesigns" },
+  { href: "/reservations", num: "02", key: "reservations", labelKey: "reservations" },
+  { href: "/production", num: "03", key: "production", labelKey: "production" },
+  { href: "/material-receiving", num: "04", key: "material-receiving", labelKey: "materialReceiving" },
+  { href: "/fleet", num: "05", key: "fleet", labelKey: "fleet" },
+  { href: "/silos", num: "06", key: "silos", labelKey: "silos" },
+  { href: "/customers", num: "07", key: "customers", labelKey: "customers" },
+  { href: "/suppliers", num: "08", key: "suppliers", labelKey: "suppliers" },
+  { href: "/projects", num: "09", key: "projects", labelKey: "projects" },
+  { href: "/employees", num: "10", key: "employees", labelKey: "employees" },
+  { href: "/pumps", num: "11", key: "pumps", labelKey: "pumps" },
+  { href: "/plants", num: "12", key: "plants", labelKey: "plants" },
 ];
 
-const VIEWS: { href: string; label: string; key: ModuleKey }[] = [
-  { href: "/trips", label: "Trip Board", key: "trips" },
-  { href: "/quality", label: "Quality & Compliance", key: "quality" },
-  { href: "/reports", label: "Reports & KPIs", key: "reports" },
+const VIEWS: { href: string; key: ModuleKey; labelKey: keyof Dictionary["nav"] }[] = [
+  { href: "/trips", key: "trips", labelKey: "trips" },
+  { href: "/quality", key: "quality", labelKey: "quality" },
+  { href: "/reports", key: "reports", labelKey: "reports" },
 ];
 
-export function Sidebar({ user }: { user: { name: string; role: string } }) {
+export function Sidebar({
+  user,
+  nav,
+  common,
+  locale,
+}: {
+  user: { name: string; role: string };
+  // Only the plain-string slices this Client Component needs — never pass
+  // the whole Dictionary across the boundary, since other sections (e.g.
+  // dashboard, driver) hold formatter functions that can't be serialized
+  // to a Client Component.
+  nav: Dictionary["nav"];
+  common: Dictionary["common"];
+  locale: Locale;
+}) {
   const pathname = usePathname();
   const canSee = (key: ModuleKey) => canAccessModule(user.role, key);
 
   return (
-    <nav className="sticky top-0 flex h-screen w-60 shrink-0 flex-col gap-1 overflow-y-auto border-r border-border px-4 py-6">
+    <nav className="sticky top-0 flex h-screen w-60 shrink-0 flex-col gap-1 overflow-y-auto border-e border-border px-4 py-6">
       <div className="mb-1 flex items-baseline gap-2">
         <span className="font-display text-xl font-semibold tracking-tight">
           Batchline
         </span>
       </div>
       <div className="mb-6 font-mono text-[0.65rem] tracking-widest text-ink-faint uppercase">
-        Plant Operations
+        {nav.section}
       </div>
       {MODULES.filter((m) => canSee(m.key)).map((m) => {
         const active =
@@ -51,7 +69,7 @@ export function Sidebar({ user }: { user: { name: string; role: string } }) {
           <Link
             key={m.href}
             href={m.href}
-            className={`flex items-center gap-3 rounded-md border-l-2 px-3 py-2 text-sm ${
+            className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
               active
                 ? "border-accent bg-surface-alt font-medium text-ink"
                 : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
@@ -62,14 +80,14 @@ export function Sidebar({ user }: { user: { name: string; role: string } }) {
             >
               {m.num}
             </span>
-            {m.label}
+            {nav[m.labelKey]}
           </Link>
         );
       })}
 
       <div className="mt-4 border-t border-border pt-4">
         <div className="mb-1 px-3 font-mono text-[0.65rem] tracking-widest text-ink-faint uppercase">
-          Live views
+          {nav.liveViews}
         </div>
         {VIEWS.filter((v) => canSee(v.key)).map((v) => {
           const active = pathname.startsWith(v.href);
@@ -77,13 +95,13 @@ export function Sidebar({ user }: { user: { name: string; role: string } }) {
             <Link
               key={v.href}
               href={v.href}
-              className={`flex items-center gap-3 rounded-md border-l-2 px-3 py-2 text-sm ${
+              className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
                 active
                   ? "border-accent bg-surface-alt font-medium text-ink"
                   : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
               }`}
             >
-              {v.label}
+              {nav[v.labelKey]}
             </Link>
           );
         })}
@@ -94,11 +112,19 @@ export function Sidebar({ user }: { user: { name: string; role: string } }) {
           <div className="text-sm font-medium">{user.name}</div>
           <div className="font-mono text-[0.68rem] text-ink-faint">{user.role.replaceAll("_", " ")}</div>
         </div>
-        <form action={logout}>
-          <button className="w-full rounded-md border border-border px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-alt hover:text-ink">
-            Sign out
-          </button>
-        </form>
+        <div className="flex gap-2">
+          <form action={logout} className="flex-1">
+            <button className="w-full rounded-md border border-border px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-alt hover:text-ink">
+              {nav.signOut}
+            </button>
+          </form>
+          <form action={setLocale}>
+            <input type="hidden" name="locale" value={locale === "ar" ? "en" : "ar"} />
+            <button className="rounded-md border border-border px-3 py-1.5 font-mono text-xs text-ink-muted hover:bg-surface-alt hover:text-ink">
+              {common.switchLocale}
+            </button>
+          </form>
+        </div>
       </div>
     </nav>
   );

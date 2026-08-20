@@ -55,7 +55,7 @@ export default async function EmployeesPage() {
                     <td className={ui.td}>{e.shiftPattern || "—"}</td>
                     <td className={ui.td}>
                       {e.licenseExpiry ? new Date(e.licenseExpiry).toLocaleDateString() : "—"}
-                      {flag && <span className={`${ui.chip} ${flag.cls} ml-2`}>{flag.label}</span>}
+                      {flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>}
                     </td>
                   </tr>
                 );

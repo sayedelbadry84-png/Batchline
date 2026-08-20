@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
+import { getDictionary } from "@/lib/i18n";
 import { DrumTimer } from "@/components/DrumTimer";
 import {
   driverAdvanceTrip,
@@ -9,12 +10,6 @@ import {
   confirmDeliveryFull,
   confirmDeliveryWithReturn,
 } from "../../actions";
-
-const nextActionLabel: Record<string, string> = {
-  LOADING: "Confirm loaded — depart",
-  IN_TRANSIT: "Confirm arrival on site",
-  ON_SITE: "Start discharge",
-};
 
 export default async function DriverTripPage({
   params,
@@ -25,6 +20,10 @@ export default async function DriverTripPage({
   const user = await getCurrentUser();
   if (!user) redirect("/login");
   if (user.role !== "DRIVER" || !user.employeeId) redirect("/driver");
+
+  const { locale, dict } = await getDictionary();
+  const d = dict.driver;
+  const backArrow = locale === "ar" ? "→" : "←";
 
   const trip = await prisma.trip.findUnique({
     where: { id },
@@ -41,15 +40,17 @@ export default async function DriverTripPage({
   if (trip.driverId !== user.employeeId) redirect("/driver");
 
   const project = trip.batchTicket.reservation.project;
+  const statusLabel =
+    trip.status in d.status ? d.status[trip.status as keyof typeof d.status] : trip.status;
 
   return (
     <div className="mx-auto flex min-h-screen max-w-sm flex-col gap-5 bg-bg px-5 py-6">
       <Link href="/driver" className="text-xs text-ink-muted">
-        ← Back to trips
+        {backArrow} {d.backToTrips}
       </Link>
 
       <div>
-        <div className="font-mono text-xs tracking-widest text-accent-strong uppercase">
+        <div className="font-mono text-xs tracking-widest text-accent-strong uppercase" dir="ltr">
           {trip.batchTicket.ticketNumber}
         </div>
         <h1 className="font-display text-xl font-semibold">{project.name}</h1>
@@ -60,12 +61,12 @@ export default async function DriverTripPage({
 
       <div className="rounded-xl border border-border bg-surface p-4 shadow-sm">
         <div className="flex items-center justify-between">
-          <span className="text-sm font-medium">{trip.status.replaceAll("_", " ")}</span>
+          <span className="text-sm font-medium">{statusLabel}</span>
           {trip.status !== "CLOSED" && (
             <DrumTimer batchTimeIso={trip.batchTime.toISOString()} limitMinutes={trip.batchTicket.plant.drumTimerLimitMinutes} />
           )}
         </div>
-        <div className="mt-2 text-xs text-ink-muted">
+        <div className="mt-2 text-xs text-ink-muted" dir="ltr">
           {trip.truck.code} · {project.siteAddress}
         </div>
       </div>
@@ -74,7 +75,7 @@ export default async function DriverTripPage({
         <form action={driverAdvanceTrip}>
           <input type="hidden" name="tripId" value={trip.id} />
           <button className="w-full rounded-md bg-accent px-4 py-3 text-base font-medium text-white">
-            {nextActionLabel[trip.status]}
+            {d.nextAction[trip.status as keyof typeof d.nextAction]}
           </button>
         </form>
       )}
@@ -82,14 +83,14 @@ export default async function DriverTripPage({
       {trip.status === "DISCHARGING" && (
         <>
           <form action={uploadDeliveryPhoto} className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-4">
-            <div className="text-sm font-medium">Delivery photo</div>
+            <div className="text-sm font-medium">{d.deliveryPhoto}</div>
             <input type="hidden" name="tripId" value={trip.id} />
             {trip.deliveryPhotoDataUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={trip.deliveryPhotoDataUrl} alt="Delivery" className="rounded-lg border border-border" />
+              <img src={trip.deliveryPhotoDataUrl} alt={d.deliveryPhoto} className="rounded-lg border border-border" />
             ) : (
               <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-border text-ink-faint">
-                No photo yet
+                {d.noPhotoYet}
               </div>
             )}
             <input
@@ -99,30 +100,30 @@ export default async function DriverTripPage({
               capture="environment"
               className="text-xs"
             />
-            <button className="rounded-md border border-border py-2 text-sm">Upload photo</button>
+            <button className="rounded-md border border-border py-2 text-sm">{d.uploadPhoto}</button>
           </form>
 
           <form action={confirmDeliveryFull} className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-4">
-            <div className="text-sm font-medium">Confirm delivery — full load</div>
+            <div className="text-sm font-medium">{d.confirmFullTitle}</div>
             <input type="hidden" name="tripId" value={trip.id} />
             <input
               name="signedBy"
               required
-              placeholder="Site contact name"
+              placeholder={d.siteContactName}
               className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
             />
             <button className="rounded-md bg-accent px-4 py-2.5 text-sm font-medium text-white">
-              Full load used — confirm
+              {d.confirmFullButton}
             </button>
           </form>
 
           <form action={confirmDeliveryWithReturn} className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-4">
-            <div className="text-sm font-medium">Confirm delivery — with return</div>
+            <div className="text-sm font-medium">{d.confirmReturnTitle}</div>
             <input type="hidden" name="tripId" value={trip.id} />
             <input
               name="signedBy"
               required
-              placeholder="Site contact name"
+              placeholder={d.siteContactName}
               className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
             />
             <input
@@ -130,11 +131,11 @@ export default async function DriverTripPage({
               type="number"
               step="0.1"
               required
-              placeholder="Returned volume (m³)"
+              placeholder={d.returnedVolume}
               className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
             />
             <button className="rounded-md bg-warn-soft px-4 py-2.5 text-sm font-medium text-warn">
-              Log return &amp; confirm
+              {d.confirmReturnButton}
             </button>
           </form>
         </>
@@ -142,15 +143,18 @@ export default async function DriverTripPage({
 
       {trip.status === "CLOSED" && (
         <div className="rounded-xl border border-border bg-surface p-4 text-sm">
-          <div className="font-medium">Delivered {trip.volumeDeliveredM3?.toFixed(1)} m³</div>
+          <div className="font-medium">{d.delivered(trip.volumeDeliveredM3?.toFixed(1) ?? "0.0")}</div>
           {trip.drumReturn && (
             <div className="mt-1 text-xs text-ink-muted">
-              {trip.drumReturn.returnedVolumeM3} m³ returned — {trip.drumReturn.disposition}
+              {d.returnedNote(trip.drumReturn.returnedVolumeM3, trip.drumReturn.disposition)}
             </div>
           )}
           {trip.deliverySignedBy && (
             <div className="mt-1 text-xs text-ink-muted">
-              Signed by {trip.deliverySignedBy} at {trip.deliverySignedAt ? new Date(trip.deliverySignedAt).toLocaleTimeString() : ""}
+              {d.signedBy(
+                trip.deliverySignedBy,
+                trip.deliverySignedAt ? new Date(trip.deliverySignedAt).toLocaleTimeString() : "",
+              )}
             </div>
           )}
         </div>

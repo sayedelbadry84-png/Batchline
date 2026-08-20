@@ -197,9 +197,9 @@ export default async function QualityPage() {
                     <td className={ui.td}>{c.issuingBody}</td>
                     <td className={ui.td}>
                       {new Date(c.expiryDate).toLocaleDateString()}
-                      {remaining < 0 && <span className={`${ui.chip} bg-critical-soft text-critical ml-2`}>expired</span>}
+                      {remaining < 0 && <span className={`${ui.chip} bg-critical-soft text-critical ms-2`}>expired</span>}
                       {remaining >= 0 && remaining <= 60 && (
-                        <span className={`${ui.chip} bg-warn-soft text-warn ml-2`}>{remaining}d left</span>
+                        <span className={`${ui.chip} bg-warn-soft text-warn ms-2`}>{remaining}d left</span>
                       )}
                     </td>
                   </tr>
