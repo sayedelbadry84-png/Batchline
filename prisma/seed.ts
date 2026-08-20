@@ -103,7 +103,16 @@ async function main() {
     data: [
       { plantId: plant.id, name: "Ahmed Farouk", role: "PLANT_OPERATOR", shiftPattern: "Day / 6am–6pm" },
       { plantId: plant.id, name: "Mona Ezzat", role: "QUALITY_SUPERVISOR", shiftPattern: "Day / 8am–4pm" },
-      { plantId: plant.id, name: "Karim Adel", role: "DRIVER", shiftPattern: "Day / 6am–6pm", licenseExpiry: new Date(Date.now() + 1000 * 60 * 60 * 24 * 20) },
+      { plantId: plant.id, name: "Karim Adel", role: "DRIVER", shiftPattern: "Day / 6am–6pm", licenseNumber: "DL-88213", licenseExpiry: new Date(Date.now() + 1000 * 60 * 60 * 24 * 20) },
+      { plantId: plant.id, name: "Hassan Zaki", role: "DRIVER", shiftPattern: "Day / 6am–6pm", licenseNumber: "DL-77410", licenseExpiry: new Date(Date.now() + 1000 * 60 * 60 * 24 * 400) },
+    ],
+  });
+
+  await prisma.truck.createMany({
+    data: [
+      { plantId: plant.id, code: "MX-14", drumCapacityM3: 8, maxAgitationRpm: 14, gpsDeviceId: "GPS-114", status: "ACTIVE" },
+      { plantId: plant.id, code: "MX-08", drumCapacityM3: 7, maxAgitationRpm: 14, gpsDeviceId: "GPS-108", status: "ACTIVE" },
+      { plantId: plant.id, code: "MX-21", drumCapacityM3: 9, maxAgitationRpm: 12, gpsDeviceId: "GPS-121", status: "MAINTENANCE" },
     ],
   });
 

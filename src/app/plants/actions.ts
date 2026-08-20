@@ -25,3 +25,25 @@ export async function createPlant(formData: FormData) {
 
   revalidatePath("/plants");
 }
+
+export async function updatePlantThresholds(formData: FormData) {
+  const id = String(formData.get("id") ?? "");
+  const drumTimerLimitMinutes = Number(formData.get("drumTimerLimitMinutes") ?? 90);
+  const returnAbsorptionThresholdM3 = Number(formData.get("returnAbsorptionThresholdM3") ?? 0.2);
+  if (!id) return;
+
+  const before = await prisma.plant.findUnique({ where: { id } });
+  await prisma.plant.update({ where: { id }, data: { drumTimerLimitMinutes, returnAbsorptionThresholdM3 } });
+
+  await logAudit({
+    module: "PlantManagement",
+    recordId: id,
+    field: "thresholds",
+    beforeValue: `${before?.drumTimerLimitMinutes}min / ${before?.returnAbsorptionThresholdM3}m3`,
+    afterValue: `${drumTimerLimitMinutes}min / ${returnAbsorptionThresholdM3}m3`,
+    reasonCode: "TOLERANCE_UPDATED",
+    role: "PLANT_OPERATOR",
+  });
+
+  revalidatePath("/plants");
+}

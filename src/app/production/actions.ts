@@ -1,0 +1,173 @@
+"use server";
+
+import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+
+// Aggregate-family materials get moisture-corrected at batch time; cement,
+// admixture and water do not (this mirrors the moisture-correction rule in
+// the Batchline design spec — only aggregates carry surface moisture).
+const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
+
+export async function releaseBatchTicket(formData: FormData) {
+  const reservationId = String(formData.get("reservationId") ?? "");
+  if (!reservationId) return;
+
+  const reservation = await prisma.reservation.findUnique({
+    where: { id: reservationId },
+    include: { project: true, mix: { include: { components: true } } },
+  });
+  if (!reservation) return;
+
+  const plantId = reservation.project.plantId;
+  const ticketCount = await prisma.batchTicket.count({ where: { plantId } });
+  const ticketNumber = `BT-${new Date().getFullYear()}-${String(ticketCount + 1).padStart(4, "0")}`;
+
+  const ticket = await prisma.batchTicket.create({
+    data: {
+      reservationId,
+      mixId: reservation.mixId,
+      plantId,
+      ticketNumber,
+      volumeM3: reservation.requestedVolumeM3,
+      status: "RELEASED",
+      components: {
+        create: reservation.mix.components.map((c) => ({
+          materialId: c.materialId,
+          targetMassKg: c.designMassKgPerM3 * reservation.requestedVolumeM3,
+        })),
+      },
+    },
+  });
+
+  await prisma.reservation.update({ where: { id: reservationId }, data: { status: "IN_PRODUCTION" } });
+
+  await logAudit({
+    module: "Production",
+    recordId: ticket.id,
+    afterValue: ticketNumber,
+    reasonCode: "BATCH_RELEASED",
+  });
+
+  revalidatePath("/production");
+  revalidatePath("/reservations");
+  redirect(`/production/${ticket.id}`);
+}
+
+export async function recordActuals(formData: FormData) {
+  const batchTicketId = String(formData.get("batchTicketId") ?? "");
+  if (!batchTicketId) return;
+
+  const components = await prisma.batchComponentActual.findMany({
+    where: { batchTicketId },
+    include: { material: true },
+  });
+
+  for (const c of components) {
+    const rawActual = formData.get(`actual_${c.id}`);
+    const rawMoisture = formData.get(`moisture_${c.id}`);
+    if (rawActual === null) continue;
+
+    const moisturePct = AGGREGATE_TYPES.has(c.material.type) && rawMoisture !== null ? Number(rawMoisture) : null;
+    const enteredMass = Number(rawActual);
+    if (!Number.isFinite(enteredMass)) continue;
+
+    await prisma.batchComponentActual.update({
+      where: { id: c.id },
+      data: { actualMassKg: enteredMass, moisturePct },
+    });
+  }
+
+  await prisma.batchTicket.update({ where: { id: batchTicketId }, data: { status: "BATCHING" } });
+
+  await logAudit({
+    module: "Production",
+    recordId: batchTicketId,
+    field: "actuals",
+    reasonCode: "ACTUALS_RECORDED",
+  });
+
+  revalidatePath(`/production/${batchTicketId}`);
+}
+
+export async function completeBatch(formData: FormData) {
+  const batchTicketId = String(formData.get("batchTicketId") ?? "");
+  if (!batchTicketId) return;
+
+  const ticket = await prisma.batchTicket.findUnique({
+    where: { id: batchTicketId },
+    include: { components: { include: { material: true } }, plant: { include: { silos: true, hoppers: true } } },
+  });
+  if (!ticket || ticket.status === "COMPLETE") return;
+
+  // Deduct actual (or target, if never weighed) mass from the matching silo
+  // or hopper — the same inventory the Silos screen and dashboard alerts read.
+  for (const c of ticket.components) {
+    const massKg = c.actualMassKg ?? c.targetMassKg;
+    const massTons = massKg / 1000;
+
+    if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
+      const silo = ticket.plant.silos.find((s) => s.materialType === c.material.type);
+      if (silo) {
+        await prisma.silo.update({
+          where: { id: silo.id },
+          data: { currentLevelTons: Math.max(0, silo.currentLevelTons - massTons) },
+        });
+      }
+    } else if (AGGREGATE_TYPES.has(c.material.type)) {
+      const hopper = ticket.plant.hoppers.find((h) =>
+        c.material.type === "SAND" ? h.aggregateType === "SAND" : h.aggregateType.startsWith("COARSE"),
+      );
+      if (hopper) {
+        await prisma.hopper.update({
+          where: { id: hopper.id },
+          data: { currentLevelTons: Math.max(0, hopper.currentLevelTons - massTons) },
+        });
+      }
+    }
+  }
+
+  await prisma.batchTicket.update({
+    where: { id: batchTicketId },
+    data: { status: "COMPLETE", batchCompletedAt: new Date() },
+  });
+
+  await logAudit({
+    module: "Production",
+    recordId: batchTicketId,
+    field: "status",
+    afterValue: "COMPLETE",
+    reasonCode: "BATCH_COMPLETE_INVENTORY_DEDUCTED",
+  });
+
+  revalidatePath(`/production/${batchTicketId}`);
+  revalidatePath("/silos");
+  revalidatePath("/");
+}
+
+export async function startTrip(formData: FormData) {
+  const batchTicketId = String(formData.get("batchTicketId") ?? "");
+  const truckId = String(formData.get("truckId") ?? "");
+  const driverId = String(formData.get("driverId") ?? "");
+  if (!batchTicketId || !truckId || !driverId) return;
+
+  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId } });
+  if (!ticket) return;
+
+  const trip = await prisma.trip.create({
+    data: {
+      batchTicketId,
+      truckId,
+      driverId,
+      status: "LOADING",
+      batchTime: ticket.batchCompletedAt ?? new Date(),
+    },
+  });
+
+  await logAudit({ module: "Fleet", recordId: trip.id, afterValue: "LOADING", reasonCode: "TRIP_STARTED" });
+
+  revalidatePath(`/production/${batchTicketId}`);
+  revalidatePath("/trips");
+  redirect("/trips");
+}

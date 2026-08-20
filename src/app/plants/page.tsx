@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
-import { createPlant } from "./actions";
+import { createPlant, updatePlantThresholds } from "./actions";
 
 export default async function PlantsPage() {
   const plants = await prisma.plant.findMany({
@@ -78,6 +78,48 @@ export default async function PlantsPage() {
             Add plant
           </button>
         </form>
+      </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-1 font-display text-lg font-semibold">Batching tolerance &amp; alert thresholds</h2>
+        <p className="mb-3 text-sm text-ink-muted">
+          Drives the drum-timer alert on the Trip Board and the return/discount
+          policy when a trip closes with unused concrete.
+        </p>
+        <div className="flex flex-col gap-3">
+          {plants.map((p) => (
+            <form
+              key={p.id}
+              action={updatePlantThresholds}
+              className="flex flex-wrap items-end gap-4 border-b border-border pb-3 last:border-0 last:pb-0"
+            >
+              <input type="hidden" name="id" value={p.id} />
+              <div className="min-w-32 font-medium">{p.name}</div>
+              <div>
+                <label className={ui.label}>Drum timer limit (min)</label>
+                <input
+                  name="drumTimerLimitMinutes"
+                  type="number"
+                  defaultValue={p.drumTimerLimitMinutes}
+                  className="w-28 rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+                />
+              </div>
+              <div>
+                <label className={ui.label}>Return absorption threshold (m³)</label>
+                <input
+                  name="returnAbsorptionThresholdM3"
+                  type="number"
+                  step="0.1"
+                  defaultValue={p.returnAbsorptionThresholdM3}
+                  className="w-28 rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+                />
+              </div>
+              <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">
+                Save
+              </button>
+            </form>
+          ))}
+        </div>
       </div>
     </div>
   );

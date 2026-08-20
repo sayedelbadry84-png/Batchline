@@ -34,6 +34,9 @@ model Plant {
   city      String
   currency  String   @default("EGP")
   timezone  String   @default("Africa/Cairo")
+  // Batching tolerance & alert configuration (Module 12 — Plant Management).
+  drumTimerLimitMinutes     Int   @default(90)
+  returnAbsorptionThresholdM3 Float @default(0.2)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -42,6 +45,8 @@ model Plant {
   hoppers    Hopper[]
   employees  Employee[]
   projects   Project[]
+  trucks     Truck[]
+  batchTickets BatchTicket[]
 }
 
 model Silo {
@@ -85,6 +90,7 @@ model MixDesign {
 
   components   MixComponent[]
   reservations Reservation[]
+  batchTickets BatchTicket[]
 }
 
 model Material {
@@ -99,6 +105,7 @@ model Material {
   updatedAt        DateTime @updatedAt
 
   mixComponents    MixComponent[]
+  batchActuals     BatchComponentActual[]
 }
 
 model MixComponent {
@@ -166,6 +173,8 @@ model Reservation {
   status             String    @default("REQUESTED") // REQUESTED, CONFIRMED, IN_PRODUCTION, DELIVERED, CANCELLED
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
+
+  batchTickets BatchTicket[]
 }
 
 model Employee {
@@ -174,10 +183,101 @@ model Employee {
   plant          Plant     @relation(fields: [plantId], references: [id])
   name           String
   role           String
+  licenseNumber  String?
   licenseExpiry  DateTime?
   shiftPattern   String?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
+
+  trips Trip[]
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Production & Fleet
+// ---------------------------------------------------------------------------
+
+model Truck {
+  id                 String   @id @default(cuid())
+  plantId            String
+  plant              Plant    @relation(fields: [plantId], references: [id])
+  code               String
+  drumCapacityM3     Float
+  maxAgitationRpm    Float?
+  gpsDeviceId        String?
+  status             String   @default("ACTIVE") // ACTIVE, MAINTENANCE, OUT_OF_SERVICE
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  trips Trip[]
+}
+
+// A batch ticket is released against a confirmed reservation. Component
+// targets are snapshotted from the mix design at release time (scaled to
+// the requested volume) so a later mix-design edit never silently changes
+// a ticket that has already been batched.
+model BatchTicket {
+  id                String    @id @default(cuid())
+  reservationId     String
+  reservation       Reservation @relation(fields: [reservationId], references: [id])
+  mixId             String
+  mix               MixDesign @relation(fields: [mixId], references: [id])
+  plantId           String
+  plant             Plant     @relation(fields: [plantId], references: [id])
+  ticketNumber      String    @unique
+  volumeM3          Float
+  status            String    @default("RELEASED") // RELEASED, BATCHING, COMPLETE, CANCELLED
+  releasedAt        DateTime  @default(now())
+  batchCompletedAt  DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  components BatchComponentActual[]
+  trip       Trip?
+}
+
+model BatchComponentActual {
+  id              String      @id @default(cuid())
+  batchTicketId   String
+  batchTicket     BatchTicket @relation(fields: [batchTicketId], references: [id], onDelete: Cascade)
+  materialId      String
+  material        Material    @relation(fields: [materialId], references: [id])
+  targetMassKg    Float
+  actualMassKg    Float?
+  moisturePct     Float?
+
+  @@unique([batchTicketId, materialId])
+}
+
+model Trip {
+  id                String       @id @default(cuid())
+  batchTicketId     String       @unique
+  batchTicket       BatchTicket  @relation(fields: [batchTicketId], references: [id])
+  truckId           String
+  truck             Truck        @relation(fields: [truckId], references: [id])
+  driverId          String
+  driver            Employee     @relation(fields: [driverId], references: [id])
+  status            String       @default("LOADING") // LOADING, IN_TRANSIT, ON_SITE, DISCHARGING, CLOSED
+  batchTime         DateTime     @default(now())
+  departTime        DateTime?
+  arriveTime        DateTime?
+  dischargeStart    DateTime?
+  dischargeEnd      DateTime?
+  volumeDeliveredM3 Float?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  drumReturn DrumReturn?
+}
+
+model DrumReturn {
+  id                 String   @id @default(cuid())
+  tripId             String   @unique
+  trip               Trip     @relation(fields: [tripId], references: [id])
+  returnedVolumeM3   Float
+  minutesSinceBatch  Int
+  disposition        String   // NO_CHARGE, REDISPATCHED, PARTIAL_CREDIT, FULL_WASTE
+  note               String?
+  createdAt          DateTime @default(now())
 }
 
 model AuditEvent {
