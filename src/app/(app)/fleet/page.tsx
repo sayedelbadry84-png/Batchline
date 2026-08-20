@@ -40,6 +40,7 @@ export default async function FleetPage() {
                 <th className={ui.th}>Drum capacity</th>
                 <th className={ui.th}>Max RPM</th>
                 <th className={ui.th}>GPS device</th>
+                <th className={ui.th}>Last position</th>
                 <th className={ui.th}>Status</th>
               </tr>
             </thead>
@@ -56,6 +57,16 @@ export default async function FleetPage() {
                   <td className={`${ui.td} font-mono tabular`}>{t.drumCapacityM3} m³</td>
                   <td className={`${ui.td} font-mono tabular`}>{t.maxAgitationRpm ?? "—"}</td>
                   <td className={`${ui.td} font-mono text-xs`}>{t.gpsDeviceId || "—"}</td>
+                  <td className={`${ui.td} font-mono text-xs`}>
+                    {t.lastLat != null && t.lastLng != null ? (
+                      <>
+                        {t.lastLat.toFixed(4)}, {t.lastLng.toFixed(4)}
+                        <div className="text-ink-faint">{t.lastPingAt ? new Date(t.lastPingAt).toLocaleTimeString() : ""}</div>
+                      </>
+                    ) : (
+                      <span className="text-ink-faint">no ping yet</span>
+                    )}
+                  </td>
                   <td className={ui.td}>
                     <form action={setTruckStatus} className="flex items-center gap-2">
                       <input type="hidden" name="id" value={t.id} />
@@ -77,7 +88,7 @@ export default async function FleetPage() {
               ))}
               {trucks.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={6}>
+                  <td className={ui.td} colSpan={7}>
                     <span className="text-ink-muted">No trucks yet.</span>
                   </td>
                 </tr>

@@ -47,6 +47,7 @@ model Plant {
   projects   Project[]
   trucks     Truck[]
   batchTickets BatchTicket[]
+  pumps      Pump[]
 }
 
 model Silo {
@@ -59,6 +60,9 @@ model Silo {
   currentLevelTons Float    @default(0)
   minThresholdPct  Float    @default(15)
   lastCalibration  DateTime?
+  // Populated by the SCADA sensor-reading webhook (see /api/scada/silo-reading)
+  // to distinguish a sensor-fed level from a manual dashboard override.
+  lastSensorReadingAt DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 }
@@ -176,6 +180,7 @@ model Reservation {
   updatedAt          DateTime  @updatedAt
 
   batchTickets BatchTicket[]
+  pumpAssignment PumpAssignment?
 }
 
 model Employee {
@@ -207,6 +212,10 @@ model Truck {
   maxAgitationRpm    Float?
   gpsDeviceId        String?
   status             String   @default("ACTIVE") // ACTIVE, MAINTENANCE, OUT_OF_SERVICE
+  // Populated by the GPS telematics webhook (see /api/telematics/ping).
+  lastLat            Float?
+  lastLng            Float?
+  lastPingAt         DateTime?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
@@ -331,6 +340,39 @@ model ComplianceCertificate {
   issuingBody   String
   documentUrl   String?
   createdAt     DateTime  @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Pumps
+// ---------------------------------------------------------------------------
+
+model Pump {
+  id           String   @id @default(cuid())
+  plantId      String
+  plant        Plant    @relation(fields: [plantId], references: [id])
+  code         String
+  pumpType     String   // BOOM, LINE, STATIONARY
+  reachM       Float?
+  hourlyRate   Float
+  standbyRate  Float?
+  status       String   @default("ACTIVE") // ACTIVE, MAINTENANCE, OUT_OF_SERVICE
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignments PumpAssignment[]
+}
+
+model PumpAssignment {
+  id              String      @id @default(cuid())
+  pumpId          String
+  pump            Pump        @relation(fields: [pumpId], references: [id])
+  reservationId   String      @unique
+  reservation     Reservation @relation(fields: [reservationId], references: [id])
+  scheduledStart  DateTime
+  billedHours     Float?
+  status          String      @default("SCHEDULED") // SCHEDULED, ON_SITE, COMPLETE, CANCELLED
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
 }
 
 model AuditEvent {

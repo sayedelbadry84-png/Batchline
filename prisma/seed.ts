@@ -126,6 +126,13 @@ async function main() {
     ],
   });
 
+  await prisma.pump.createMany({
+    data: [
+      { plantId: plant.id, code: "PMP-1", pumpType: "BOOM", reachM: 37, hourlyRate: 850, standbyRate: 400, status: "ACTIVE" },
+      { plantId: plant.id, code: "PMP-2", pumpType: "LINE", reachM: 60, hourlyRate: 500, standbyRate: 250, status: "ACTIVE" },
+    ],
+  });
+
   console.log("Seed complete.");
 }
 

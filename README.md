@@ -5,10 +5,11 @@ Batchline artifact from this project's planning session for the full system
 design (all 12 modules, business rules, integrations, RBAC, rollout plan).
 
 This codebase covers **Phase 1 (Foundation)**, **Phase 2 (Production +
-Fleet)**, and **Phase 3 (Quality & Compliance + driver mobile app)** of that
-rollout — a real database, real CRUD, and the batching physics (yield
-factor, tolerance, drum timer, return policy) actually computing from live
-data, not placeholders.
+Fleet)**, **Phase 3 (Quality & Compliance + driver mobile app)**, and
+**Phase 4 (Pumps + integration webhooks + Reports/KPIs)** of that rollout —
+a real database, real CRUD, and the batching physics (yield factor,
+tolerance, drum timer, return policy, plant KPIs) actually computing from
+live data, not placeholders.
 
 ## Stack
 
@@ -87,15 +88,38 @@ app (pick "Karim Adel" or "Hassan Zaki" — there's no login yet, see below).
 - **Audit trail** — every write across all three phases logs
   actor/role/module/record/reason to `AuditEvent`
 
+**Phase 4 — Pumps, integration webhooks, Reports & KPIs**
+- **Pumps** — pump registry (boom/line/stationary, reach, hourly + standby
+  rate) and a booking calendar that schedules a pump against a reservation
+- **Integration webhooks** — `POST /api/telematics/ping` (GPS provider →
+  truck location, identified by `gpsDeviceId`) and `POST
+  /api/scada/silo-reading` (sensor-fed silo level, distinct from the manual
+  dashboard override) — real endpoints, tested directly with `curl`, not
+  mocked UI. Results surface on the Fleet and Silos screens (last position,
+  "sensor 9:47 PM" vs "no sensor feed").
+- **Reports & KPIs** (`/reports`) — daily/7-day production volume, average
+  batch deviation, cylinder pass rate, slump conformance, return rate,
+  average truck cycle time, and silo days-of-cover, all computed live from
+  the same tables every other screen writes to. Verified against
+  hand-calculated expected values. Revenue/cost/AR metrics are deliberately
+  absent — see below.
+
 ## Not yet implemented (see the rollout plan)
 
-Pumps and the PLC/SCADA/GPS/weighbridge hardware integrations are Phase 4+
-and not built yet. Auth/session-based RBAC is also not wired up — the driver
-app uses a cookie-based "pick yourself" flow standing in for a real login,
-and back-office routes are open. A few simplifications worth knowing about:
-batch completion picks the *first* matching silo/hopper for a material type
-rather than an operator-chosen one; delivered volume before a return is the
-reservation's requested volume rather than a measured unit-weight test; and
-the delivery photo is stored as a base64 data URL in the database (fine for
-demo volumes — swap for real object storage, e.g. S3-compatible, before
-production traffic).
+The PLC/batching-scale and weighbridge integrations are still simulated
+through manual entry (Production's "record actuals" form stands in for a
+real scale readout). Auth/session-based RBAC is also not wired up — the
+driver app uses a cookie-based "pick yourself" flow standing in for a real
+login, and back-office routes are open. Financial reporting (revenue per m³,
+material cost variance, AR aging) needs a pricing/invoicing data model
+(customer price lists, invoices, payments) that doesn't exist yet — the
+Reports page says so explicitly rather than showing a fabricated number.
+
+A few simplifications worth knowing about: batch completion picks the
+*first* matching silo/hopper for a material type rather than an
+operator-chosen one (Reports' silo days-of-cover inherits the same
+limitation when two silos share a material type); delivered volume before a
+return is the reservation's requested volume rather than a measured
+unit-weight test; and the delivery photo is stored as a base64 data URL in
+the database (fine for demo volumes — swap for real object storage, e.g.
+S3-compatible, before production traffic).

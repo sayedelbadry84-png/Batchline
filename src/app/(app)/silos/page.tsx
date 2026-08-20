@@ -46,6 +46,11 @@ export default async function SilosPage() {
                 </div>
                 <div className="w-40 shrink-0 font-mono text-xs text-ink-muted tabular">
                   {s.currentLevelTons.toFixed(1)} / {s.capacityTons.toFixed(1)} t ({pct.toFixed(0)}%)
+                  <div className="text-ink-faint">
+                    {s.lastSensorReadingAt
+                      ? `sensor ${new Date(s.lastSensorReadingAt).toLocaleTimeString()}`
+                      : "no sensor feed"}
+                  </div>
                 </div>
                 <form action={updateSiloLevel} className="flex shrink-0 items-center gap-1">
                   <input type="hidden" name="id" value={s.id} />
