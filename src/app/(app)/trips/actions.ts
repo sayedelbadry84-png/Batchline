@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { isReservationFullyDelivered } from "@/lib/reservations";
 import { revalidatePath } from "next/cache";
 
 const NEXT_STATUS: Record<string, string> = {
@@ -41,7 +42,12 @@ export async function closeTripFull(formData: FormData) {
     where: { id: tripId },
     data: { status: "CLOSED", dischargeEnd: new Date(), volumeDeliveredM3: trip.batchTicket.volumeM3 },
   });
-  await prisma.reservation.update({ where: { id: trip.batchTicket.reservationId }, data: { status: "DELIVERED" } });
+
+  // Only the reservation's LAST truck load flips it to DELIVERED — a split
+  // load isn't done just because one of its many trips closed.
+  if (await isReservationFullyDelivered(trip.batchTicket.reservationId)) {
+    await prisma.reservation.update({ where: { id: trip.batchTicket.reservationId }, data: { status: "DELIVERED" } });
+  }
 
   await logAudit({ module: "Fleet", recordId: tripId, field: "status", afterValue: "CLOSED", reasonCode: "TRIP_CLOSED_FULL_LOAD" });
 
@@ -87,11 +93,16 @@ export async function closeTripWithReturn(formData: FormData) {
     prisma.drumReturn.create({
       data: { tripId, returnedVolumeM3, minutesSinceBatch, disposition },
     }),
-    prisma.reservation.update({
+  ]);
+
+  // Only the reservation's LAST truck load flips it to DELIVERED — a split
+  // load isn't done just because one of its many trips closed.
+  if (await isReservationFullyDelivered(trip.batchTicket.reservationId)) {
+    await prisma.reservation.update({
       where: { id: trip.batchTicket.reservationId },
       data: { status: "DELIVERED" },
-    }),
-  ]);
+    });
+  }
 
   await logAudit({
     module: "Fleet",

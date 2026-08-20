@@ -76,6 +76,26 @@ driver app (`/driver`) automatically instead of the back office.
   closing with a return applies the design spec's return & discount policy
   (no charge under the absorption threshold, partial credit above it, full
   waste past the drum-timer window)
+- **Split / partial batch loading** — a reservation's requested volume is
+  rarely one truckload, so Production releases batch tickets against a
+  reservation's *remaining* undispatched volume (`src/lib/reservations.ts`),
+  not its full requested volume. The operator enters how much this load
+  should carry (defaulted to the full remainder, capped at it); the released
+  ticket's mix components are scaled to that partial volume, and the
+  reservation only flips from `CONFIRMED`/`IN_PRODUCTION` to `DELIVERED` once
+  every released ticket has a closed trip *and* the sum of released volume
+  meets the requested volume — a fix from the prior behavior, which marked a
+  reservation `DELIVERED` as soon as any one of its trips closed, wrongly
+  closing out reservations that still had undispatched volume. The
+  Reservations and Production screens both show `released / requested m³`
+  instead of a single static volume once a reservation has partial releases.
+  Verified live: a 200 m³ reservation released as an 8 m³ ticket correctly
+  showed "192 / 200 m³ remaining" and stayed in the ready-to-release list
+  (previously it would have disappeared once its status left `CONFIRMED`);
+  closing that trip kept the reservation `IN_PRODUCTION` rather than
+  `DELIVERED`; a normal single-load 7 m³ reservation still flips to
+  `DELIVERED` on its one trip closing, confirming no regression on the
+  common case.
 
 **Phase 3 — Quality & Compliance + driver mobile app**
 - **Test Batches & Lab Results** — sample a trip (slump, air content, temp),

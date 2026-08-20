@@ -18,14 +18,23 @@ export default async function ReservationsPage() {
   const { dict } = await getDictionary();
   const m = dict.modules.reservations;
 
-  const [reservations, projects, mixes] = await Promise.all([
+  const [reservationsRaw, projects, mixes] = await Promise.all([
     prisma.reservation.findMany({
       orderBy: { pourWindowStart: "asc" },
-      include: { project: { include: { customer: true } }, mix: true },
+      include: {
+        project: { include: { customer: true } },
+        mix: true,
+        batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
+      },
     }),
     prisma.project.findMany({ orderBy: { name: "asc" }, include: { customer: true } }),
     prisma.mixDesign.findMany({ where: { status: "APPROVED" }, orderBy: { code: "asc" } }),
   ]);
+
+  const reservations = reservationsRaw.map((r) => ({
+    ...r,
+    released: r.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0),
+  }));
 
   return (
     <div className="flex flex-col gap-8">
@@ -58,7 +67,11 @@ export default async function ReservationsPage() {
                     <div className="text-xs text-ink-muted">{r.project.customer.legalName}</div>
                   </td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.mix.code}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{r.requestedVolumeM3} m³</td>
+                  <td className={`${ui.td} font-mono tabular`}>
+                    {r.released > 0 && r.released < r.requestedVolumeM3
+                      ? `${r.released} / ${r.requestedVolumeM3} m³`
+                      : `${r.requestedVolumeM3} m³`}
+                  </td>
                   <td className={ui.td}>
                     <span className={`${ui.chip} ${statusChip[r.status] ?? ""}`}>{dict.status[r.status as keyof typeof dict.status] ?? r.status}</span>
                   </td>

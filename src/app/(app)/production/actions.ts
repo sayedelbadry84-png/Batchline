@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
+import { getRemainingVolumeM3 } from "@/lib/reservations";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -11,15 +12,23 @@ import { redirect } from "next/navigation";
 // the Batchline design spec — only aggregates carry surface moisture).
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
+// A reservation's requested volume is a target, not a single truck load —
+// a 200 m³ pour goes out as many partial tickets (one per truck), each
+// deducting from what's left, until the reservation is fully dispatched.
 export async function releaseBatchTicket(formData: FormData) {
   const reservationId = String(formData.get("reservationId") ?? "");
-  if (!reservationId) return;
+  const requestedVolume = Number(formData.get("volumeM3") ?? 0);
+  if (!reservationId || !requestedVolume || requestedVolume <= 0) return;
 
   const reservation = await prisma.reservation.findUnique({
     where: { id: reservationId },
     include: { project: true, mix: { include: { components: true } } },
   });
   if (!reservation) return;
+
+  const remaining = await getRemainingVolumeM3(reservationId, reservation.requestedVolumeM3);
+  const volumeM3 = Math.min(requestedVolume, remaining);
+  if (volumeM3 <= 0) return;
 
   const plantId = reservation.project.plantId;
   const ticketCount = await prisma.batchTicket.count({ where: { plantId } });
@@ -31,23 +40,25 @@ export async function releaseBatchTicket(formData: FormData) {
       mixId: reservation.mixId,
       plantId,
       ticketNumber,
-      volumeM3: reservation.requestedVolumeM3,
+      volumeM3,
       status: "RELEASED",
       components: {
         create: reservation.mix.components.map((c) => ({
           materialId: c.materialId,
-          targetMassKg: c.designMassKgPerM3 * reservation.requestedVolumeM3,
+          targetMassKg: c.designMassKgPerM3 * volumeM3,
         })),
       },
     },
   });
 
-  await prisma.reservation.update({ where: { id: reservationId }, data: { status: "IN_PRODUCTION" } });
+  if (reservation.status !== "IN_PRODUCTION") {
+    await prisma.reservation.update({ where: { id: reservationId }, data: { status: "IN_PRODUCTION" } });
+  }
 
   await logAudit({
     module: "Production",
     recordId: ticket.id,
-    afterValue: ticketNumber,
+    afterValue: `${ticketNumber} — ${volumeM3} m3`,
     reasonCode: "BATCH_RELEASED",
   });
 

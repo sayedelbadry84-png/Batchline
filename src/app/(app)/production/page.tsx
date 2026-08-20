@@ -17,10 +17,14 @@ export default async function ProductionPage() {
   const { dict } = await getDictionary();
   const m = dict.modules.production;
 
-  const [readyReservations, activeTickets, recentTickets] = await Promise.all([
+  const [readyReservationsRaw, activeTickets, recentTickets] = await Promise.all([
     prisma.reservation.findMany({
-      where: { status: "CONFIRMED" },
-      include: { project: { include: { customer: true } }, mix: true },
+      where: { status: { in: ["CONFIRMED", "IN_PRODUCTION"] } },
+      include: {
+        project: { include: { customer: true } },
+        mix: true,
+        batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
+      },
       orderBy: { pourWindowStart: "asc" },
     }),
     prisma.batchTicket.findMany({
@@ -35,6 +39,13 @@ export default async function ProductionPage() {
       take: 5,
     }),
   ]);
+
+  const readyReservations = readyReservationsRaw
+    .map((r) => {
+      const released = r.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0);
+      return { ...r, released, remaining: Math.max(0, r.requestedVolumeM3 - released) };
+    })
+    .filter((r) => r.remaining > 0.001);
 
   return (
     <div className="flex flex-col gap-8">
@@ -52,7 +63,7 @@ export default async function ProductionPage() {
               <tr>
                 <th className={ui.th}>{m.col.project}</th>
                 <th className={ui.th}>{m.col.mix}</th>
-                <th className={ui.th}>{m.col.volume}</th>
+                <th className={ui.th}>{m.col.remaining}</th>
                 <th className={ui.th}></th>
               </tr>
             </thead>
@@ -64,10 +75,23 @@ export default async function ProductionPage() {
                     <div className="text-xs text-ink-muted">{r.project.customer.legalName}</div>
                   </td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.mix.code}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{r.requestedVolumeM3} m³</td>
+                  <td className={`${ui.td} font-mono tabular`}>
+                    {r.remaining} / {r.requestedVolumeM3} m³
+                    {r.released > 0 && (
+                      <div className="font-normal text-xs text-ink-muted">{m.releasedOf(r.released, r.requestedVolumeM3)}</div>
+                    )}
+                  </td>
                   <td className={ui.td}>
-                    <form action={releaseBatchTicket}>
+                    <form action={releaseBatchTicket} className="flex items-center gap-1">
                       <input type="hidden" name="reservationId" value={r.id} />
+                      <input
+                        name="volumeM3"
+                        type="number"
+                        step="0.5"
+                        max={r.remaining}
+                        defaultValue={r.remaining}
+                        className="w-20 rounded-md border border-border bg-surface px-2 py-1.5 font-mono text-xs"
+                      />
                       <button className={ui.button}>{m.release}</button>
                     </form>
                   </td>

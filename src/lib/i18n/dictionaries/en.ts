@@ -227,9 +227,10 @@ const en: typeof ar = {
       intro:
         "Release a confirmed reservation as a batch ticket, record scale readings against target, and complete the batch — inventory is deducted from the real silo/hopper levels the moment a batch completes.",
       readyTitle: "Ready to release",
-      col: { project: "Project", mix: "Mix", volume: "Volume" },
-      release: "Release batch",
-      emptyReady: "No confirmed reservations waiting.",
+      col: { project: "Project", mix: "Mix", volume: "Volume", remaining: "Remaining" },
+      release: "Release",
+      releasedOf: (released: number, total: number) => `${released} of ${total} m³ released`,
+      emptyReady: "No reservations need further batches.",
       activeTitle: "Active tickets",
       colTicket: { ticket: "Ticket", project: "Project", status: "Status" },
       emptyActive: "No tickets in progress.",

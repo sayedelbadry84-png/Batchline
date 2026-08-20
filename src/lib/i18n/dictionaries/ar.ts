@@ -228,9 +228,10 @@ const ar = {
       intro:
         "أصدر حجزًا مؤكدًا كبطاقة خلط، سجّل قراءات الميزان مقابل المستهدف، وأكمل الدفعة — يُخصم المخزون من مستويات الصوامع والحاويات الفعلية لحظة الإكمال.",
       readyTitle: "جاهز للإصدار",
-      col: { project: "المشروع", mix: "الخلطة", volume: "الكمية" },
-      release: "إصدار الدفعة",
-      emptyReady: "لا توجد حجوزات مؤكدة بالانتظار.",
+      col: { project: "المشروع", mix: "الخلطة", volume: "الكمية", remaining: "المتبقي" },
+      release: "إصدار",
+      releasedOf: (released: number, total: number) => `أُصدر ${released} من ${total} م³`,
+      emptyReady: "لا توجد حجوزات بحاجة لدفعات إضافية.",
       activeTitle: "البطاقات النشطة",
       colTicket: { ticket: "البطاقة", project: "المشروع", status: "الحالة" },
       emptyActive: "لا توجد بطاقات قيد التنفيذ.",
