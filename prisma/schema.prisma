@@ -48,6 +48,7 @@ model Plant {
   trucks     Truck[]
   batchTickets BatchTicket[]
   pumps      Pump[]
+  materialReceipts MaterialReceipt[]
 }
 
 model Silo {
@@ -65,6 +66,8 @@ model Silo {
   lastSensorReadingAt DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+
+  receipts MaterialReceipt[]
 }
 
 model Hopper {
@@ -77,6 +80,8 @@ model Hopper {
   currentLevelTons Float    @default(0)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+
+  receipts MaterialReceipt[]
 }
 
 model MixDesign {
@@ -111,6 +116,7 @@ model Material {
 
   mixComponents    MixComponent[]
   batchActuals     BatchComponentActual[]
+  receipts         MaterialReceipt[]
 }
 
 model MixComponent {
@@ -149,6 +155,7 @@ model Supplier {
   updatedAt        DateTime @updatedAt
 
   materials Material[]
+  materialReceipts MaterialReceipt[]
 }
 
 model Project {
@@ -197,6 +204,35 @@ model Employee {
 
   trips Trip[]
   sampledTestBatches TestBatch[]
+}
+
+// ---------------------------------------------------------------------------
+// Material Receiving
+// ---------------------------------------------------------------------------
+
+model MaterialReceipt {
+  id                 String    @id @default(cuid())
+  plantId            String
+  plant              Plant     @relation(fields: [plantId], references: [id])
+  supplierId         String
+  supplier           Supplier  @relation(fields: [supplierId], references: [id])
+  materialId         String
+  material           Material  @relation(fields: [materialId], references: [id])
+  poNumber           String?
+  orderedMassKg      Float?
+  grossWeightKg      Float
+  tareWeightKg       Float
+  netWeightKg        Float
+  moisturePct        Float?
+  qcStatus           String    @default("PENDING") // PENDING, PASSED, HELD, REJECTED
+  postedToInventory  Boolean   @default(false)
+  destinationSiloId  String?
+  destinationSilo    Silo?     @relation(fields: [destinationSiloId], references: [id])
+  destinationHopperId String?
+  destinationHopper  Hopper?   @relation(fields: [destinationHopperId], references: [id])
+  receivedAt         DateTime  @default(now())
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 }
 
 // ---------------------------------------------------------------------------

@@ -133,6 +133,23 @@ async function main() {
     ],
   });
 
+  const siloS3 = await prisma.silo.findFirstOrThrow({ where: { plantId: plant.id, name: "S-3" } });
+  await prisma.materialReceipt.create({
+    data: {
+      plantId: plant.id,
+      supplierId: cementSupplier.id,
+      materialId: cement.id,
+      poNumber: "PO-4471",
+      orderedMassKg: 30000,
+      grossWeightKg: 42800,
+      tareWeightKg: 13100,
+      netWeightKg: 42800 - 13100,
+      moisturePct: 0,
+      destinationSiloId: siloS3.id,
+      qcStatus: "PENDING",
+    },
+  });
+
   console.log("Seed complete.");
 }
 

@@ -4,12 +4,14 @@ Ready-mix concrete plant operations platform. Design spec: see the published
 Batchline artifact from this project's planning session for the full system
 design (all 12 modules, business rules, integrations, RBAC, rollout plan).
 
-This codebase covers **Phase 1 (Foundation)**, **Phase 2 (Production +
-Fleet)**, **Phase 3 (Quality & Compliance + driver mobile app)**, and
-**Phase 4 (Pumps + integration webhooks + Reports/KPIs)** of that rollout —
-a real database, real CRUD, and the batching physics (yield factor,
-tolerance, drum timer, return policy, plant KPIs) actually computing from
-live data, not placeholders.
+This codebase covers all 12 modules from the original system scope, across
+**Phase 1 (Foundation)**, **Phase 2 (Production + Fleet)**, **Phase 3
+(Quality & Compliance + driver mobile app)**, **Phase 4 (Pumps + integration
+webhooks + Reports/KPIs)**, and **Material Receiving** (built out of
+sequence to close a gap in the original module list) — a real database,
+real CRUD, and the batching physics (yield factor, tolerance, drum timer,
+return policy, plant KPIs) actually computing from live data, not
+placeholders.
 
 ## Stack
 
@@ -103,6 +105,13 @@ app (pick "Karim Adel" or "Hassan Zaki" — there's no login yet, see below).
   the same tables every other screen writes to. Verified against
   hand-calculated expected values. Revenue/cost/AR metrics are deliberately
   absent — see below.
+
+**Material Receiving**
+- Weighbridge-style capture (gross/tare weight, net computed — never entered
+  directly) against a supplier PO, with a variance-vs-PO flag beyond ±2%
+- A QC gate: a receipt sits at `PENDING` until Quality passes, holds, or
+  rejects it — **nothing reaches silo or hopper inventory until QC passes
+  it**, mirroring the same posting pattern as completing a production batch
 
 ## Not yet implemented (see the rollout plan)
 

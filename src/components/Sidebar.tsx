@@ -3,13 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-// Numbered to match the 12-module system scope. Material Receiving (04) is
-// not built yet, so it's deliberately absent rather than linking to a 404.
+// Numbered to match the 12-module system scope.
 const MODULES = [
   { href: "/", label: "Dashboard", num: "00" },
   { href: "/mix-designs", label: "Mix Design", num: "01" },
   { href: "/reservations", label: "Reservations", num: "02" },
   { href: "/production", label: "Production", num: "03" },
+  { href: "/material-receiving", label: "Material Receiving", num: "04" },
   { href: "/fleet", label: "Fleet", num: "05" },
   { href: "/silos", label: "Silos", num: "06" },
   { href: "/customers", label: "Customers", num: "07" },
