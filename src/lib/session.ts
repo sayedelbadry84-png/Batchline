@@ -16,6 +16,12 @@ export async function createSession(userId: string) {
     path: "/",
     httpOnly: true,
     sameSite: "lax",
+    // Never send the session cookie over a plain-HTTP fallback once this is
+    // reachable beyond localhost — NODE_ENV is "production" for `next
+    // build`/`next start` (what a real deployment runs), "development" for
+    // `next dev`, so this stays off for local HTTP dev without needing a
+    // separate flag to remember to flip.
+    secure: process.env.NODE_ENV === "production",
     expires: session.expiresAt,
   });
 }

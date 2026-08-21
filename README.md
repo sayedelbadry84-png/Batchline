@@ -781,6 +781,15 @@ driver app (`/driver`) automatically instead of the back office.
   field renders on the Plants page and the maintenance column renders on
   both Fleet and Pumps. Confirmed in Arabic throughout.
 
+**Go-live hardening — secure session cookie**
+- The session cookie now sets `secure: true` whenever `NODE_ENV` is
+  `"production"` (what `next build`/`next start` runs — i.e. any real
+  deployment), so it's never sent over a plain-HTTP fallback once the app
+  is reachable beyond localhost. Off for local `next dev`, where there's
+  no HTTPS to require. Prompted by walking through what's actually needed
+  to put Batchline on the public internet (see the deployment guide
+  referenced in this session) rather than a standalone finding.
+
 ## Not yet implemented (see the rollout plan)
 
 Coverage gaps beyond what Phase 11 closed: rate limiting exists for login
