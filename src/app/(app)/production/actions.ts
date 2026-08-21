@@ -175,6 +175,12 @@ export async function startTrip(formData: FormData) {
   });
   if (!ticket) return;
 
+  // Re-check server-side rather than trusting the picker only offered
+  // free trucks — a second tab or a stale page could still submit a truck
+  // that picked up another open trip in the meantime.
+  const truckBusy = await prisma.trip.findFirst({ where: { truckId, status: { not: "CLOSED" } } });
+  if (truckBusy) return;
+
   // Pump crew/unit only apply when the reservation was booked for pump
   // delivery — ignore anything submitted for a chute delivery so a stray
   // pump doesn't attach itself to a trip that never used one.

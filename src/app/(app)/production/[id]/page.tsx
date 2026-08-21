@@ -5,6 +5,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { recordActuals, completeBatch, startTrip } from "../actions";
+import { rankTrucksForVolume } from "@/lib/dispatch";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -33,15 +34,23 @@ export default async function BatchTicketPage({
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
 
-  const [trucks, drivers, pumps] = ticket.status === "COMPLETE" && !ticket.trip
+  const [trucksRaw, drivers, pumps] = ticket.status === "COMPLETE" && !ticket.trip
     ? await Promise.all([
-        prisma.truck.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" }, orderBy: { code: "asc" } }),
+        prisma.truck.findMany({
+          // A truck already on an open trip elsewhere can't be assigned
+          // here too — matches the guarantee the Fleet page's own intro
+          // text makes ("can't be double-booked from Production").
+          where: { plantId: ticket.plantId, status: "ACTIVE", trips: { none: { status: { not: "CLOSED" } } } },
+          orderBy: { code: "asc" },
+        }),
         prisma.employee.findMany({ where: { plantId: ticket.plantId, role: "DRIVER" }, orderBy: { name: "asc" } }),
         isPumpDelivery
           ? prisma.pump.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" }, orderBy: { code: "asc" } })
           : Promise.resolve([]),
       ])
     : [[], [], []];
+
+  const trucks = rankTrucksForVolume(trucksRaw, ticket.volumeM3);
 
   return (
     <div className="flex flex-col gap-8">
@@ -163,9 +172,12 @@ export default async function BatchTicketPage({
                 {trucks.map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.code} ({t.drumCapacityM3} m³)
+                    {t.recommended ? ` — ${d.bestFit}` : ""}
+                    {t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}
                   </option>
                 ))}
               </select>
+              {trucks.length === 0 && <p className="mt-1 text-xs text-warn">{d.noTrucksAvailable}</p>}
             </div>
             <div>
               <label className={ui.label}>{d.driver}</label>

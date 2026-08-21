@@ -11,9 +11,10 @@ Compliance + driver mobile app)**, **Phase 4 (Pumps + integration webhooks
 + Reports/KPIs)**, **Phase 5 (real authentication + RBAC enforcement, and
 full Arabic/RTL localization across every page)**, **Phase 6 (Billing —
 customer pricing, invoicing, and AR)**, **Phase 8 (AI decision layer —
-statistical anomaly detection on batch deviations, and early-age strength
-prediction)**, and **Material Receiving** (built out of sequence to close
-a gap in the original module list) — a real
+statistical anomaly detection on batch deviations, early-age strength
+prediction, and best-fit truck ranking for dispatch)**, and **Material
+Receiving** (built out of sequence to close a gap in the original module
+list) — a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -411,6 +412,34 @@ driver app (`/driver`) automatically instead of the back office.
   23.1 MPa" (15 ÷ 0.65 ≈ 23.1) — correctly flagged as below target.
   Regression math (ordinary least squares) verified independently against
   known sample data outside the app. Confirmed in English and Arabic.
+
+**Fleet double-booking gap fixed; Phase 8's third feature: truck-fit ranking**
+- Building the third AI feature surfaced a real bug: the Fleet page's own
+  intro text has always claimed "trucks currently on an open trip can't be
+  double-booked from Production," but nothing actually enforced it — the
+  truck picker on a completed batch ticket, and `startTrip` itself, never
+  checked whether a truck was already carrying another open trip. Fixed at
+  both layers: the picker's query now excludes any truck with a non-`CLOSED`
+  trip (`trips: { none: { status: { not: "CLOSED" } } }`), and `startTrip`
+  re-checks the same condition server-side rather than trusting the picker
+  only offered free trucks — a second tab or a stale page shouldn't be able
+  to double-book one anyway.
+- With that gap closed, it was worth ranking the (now genuinely available)
+  trucks instead of a plain alphabetical list —
+  `src/lib/dispatch.ts`, a pure function, no external data: trucks that can
+  carry the ticket's full volume in one load are ranked by smallest leftover
+  capacity (least wasted capacity first, tagged "best fit"); trucks too
+  small for the load sort separately, largest-first, and are labeled with
+  exactly how many m³ short they are rather than silently offered as
+  equal — still selectable, since a split delivery across multiple trucks
+  is sometimes the real answer, just not silently presented as a good fit.
+- Verified live: a 7 m³ ticket correctly ranked the exact-capacity 7 m³
+  truck first as "best fit," ahead of an 8 m³ truck; after assigning that
+  truck to a trip, a second ticket's picker correctly excluded it (only the
+  8 m³ truck remained) — confirming the double-booking fix; a 15 m³ ticket
+  against only an 8 m³ truck available correctly showed "8 m³ — 7.0 m³
+  short of the load" rather than silently offering it as adequate.
+  Confirmed in English and Arabic.
 
 ## Not yet implemented (see the rollout plan)
 
