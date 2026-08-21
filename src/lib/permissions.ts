@@ -15,6 +15,7 @@ export const MODULE_ROLES = {
   suppliers: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
   projects: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   employees: ["ADMIN"],
+  users: ["ADMIN"],
   pumps: ["PLANT_OPERATOR", "ADMIN"],
   incentives: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   plants: ["PLANT_OPERATOR", "ADMIN"],

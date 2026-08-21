@@ -17,6 +17,10 @@ export async function login(formData: FormData) {
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) redirect("/login?error=1");
 
+  // Disabled accounts fail with the exact same generic error as a wrong
+  // password, for the same reason as the lockout below.
+  if (user.status !== "ACTIVE") redirect("/login?error=1");
+
   // Locked accounts fail with the exact same generic error as a wrong
   // password — a distinct "locked" message would let an attacker use the
   // lockout itself to fingerprint which emails have real accounts.

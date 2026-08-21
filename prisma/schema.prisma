@@ -20,6 +20,12 @@ model User {
   name         String
   passwordHash String
   role         String
+  // ACTIVE, DISABLED — a disabled account fails login with the exact same
+  // generic error as a wrong password or a lockout (see the note below),
+  // so retiring the seeded demo accounts doesn't reveal which emails were
+  // ever real. Deliberately not a delete: Session/AuditEvent rows still
+  // reference the user.
+  status       String   @default("ACTIVE")
   plantId      String?
   plant        Plant?   @relation(fields: [plantId], references: [id])
   // Links a DRIVER-role account to their Employee record, so the driver app
