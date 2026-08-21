@@ -12,9 +12,10 @@ Compliance + driver mobile app)**, **Phase 4 (Pumps + integration webhooks
 full Arabic/RTL localization across every page)**, **Phase 6 (Billing —
 customer pricing, invoicing, and AR)**, **Phase 8 (AI decision layer —
 statistical anomaly detection on batch deviations, early-age strength
-prediction, best-fit truck ranking for dispatch, and estimated embodied
-carbon)**, and **Material Receiving** (built out of sequence to close a
-gap in the original module list) — a real
+prediction, best-fit truck ranking for dispatch, estimated embodied
+carbon, and a demand outlook from the reservation pipeline)**, and
+**Material Receiving** (built out of sequence to close a gap in the
+original module list) — a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -473,6 +474,28 @@ driver app (`/driver`) automatically instead of the back office.
   manual verification, not a bug in the app. Re-seeded from a clean
   `db push` to fix; worth knowing `prisma db seed` isn't idempotent here
   the way `db push` is.
+
+**Phase 8's fifth feature: demand outlook**
+- The strategic review's demand-forecasting idea, scoped honestly: the app
+  has no order history deep enough yet to fit a real statistical forecast
+  the way anomaly detection or strength prediction can (those lean on data
+  that accumulates from day one of production; a seasonal or day-of-week
+  demand pattern needs months of it). What's reliably knowable today is the
+  confirmed reservation pipeline itself — real committed volume, not a
+  guess — which is exactly what a plant manager needs to avoid a stockout
+  on a day that's already booked.
+- **Reports** gets a "Demand outlook" strip: the next 7 days, each showing
+  the volume still owed against reservations with a pour window that day
+  (`src/lib/demand.ts`, a pure day-bucketing function). Volume already
+  released as batch tickets is netted out — a split reservation partway
+  through delivery shows what's actually still coming, not its full
+  original size, reusing the same accounting the Reservations and
+  Production screens already do for split-batch dispatch. A day with
+  nothing booked shows "—", not a fabricated zero-looking blank.
+- Verified live: a 7 m³ reservation with tomorrow's pour window showed
+  correctly under its date with "1 reservation"; releasing a 3 m³ partial
+  batch ticket against it dropped the outlook figure to 4.0 immediately,
+  confirming the netting. Confirmed in English and Arabic.
 
 ## Not yet implemented (see the rollout plan)
 

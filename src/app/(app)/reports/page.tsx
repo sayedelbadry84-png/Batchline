@@ -4,8 +4,10 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
 import { estimateCo2eKg } from "@/lib/carbon";
+import { groupReservationsByDay } from "@/lib/demand";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+const OUTLOOK_DAYS = 7;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
 const SILO_MATERIAL_TYPES = new Set(["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"]);
 
@@ -45,6 +47,29 @@ export default async function ReportsPage() {
   // --- Production ---
   const todayStart = new Date(nowMs);
   todayStart.setHours(0, 0, 0, 0);
+  const outlookEnd = new Date(todayStart);
+  outlookEnd.setDate(outlookEnd.getDate() + OUTLOOK_DAYS);
+
+  // --- Demand outlook: the confirmed reservation pipeline for the next 7
+  // days — real committed demand, not a statistical guess (there isn't
+  // enough order history yet to fit one honestly). Volume already
+  // released as batch tickets is netted out, same split-batch accounting
+  // the Reservations screen itself uses. ---
+  const upcomingReservations = await prisma.reservation.findMany({
+    where: {
+      status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] },
+      pourWindowStart: { gte: todayStart, lt: outlookEnd },
+    },
+    include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } } },
+  });
+  const demandOutlook = groupReservationsByDay(
+    upcomingReservations.map((r) => ({
+      pourWindowStart: r.pourWindowStart,
+      remainingVolumeM3: r.requestedVolumeM3 - r.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0),
+    })),
+    OUTLOOK_DAYS,
+    todayStart,
+  );
   const producedToday = completedTickets
     .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= todayStart)
     .reduce((sum, t) => sum + t.volumeM3, 0);
@@ -171,6 +196,22 @@ export default async function ReportsPage() {
             <div className="font-mono text-2xl tabular">{completedTickets.length}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.batchesCompleted}</div>
           </div>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.outlookTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.outlookIntro}</p>
+        <div className="grid grid-cols-7 gap-2 overflow-x-auto">
+          {demandOutlook.map((day) => (
+            <div key={day.dateKey} className={`${ui.card} py-3 text-center`}>
+              <div className="font-mono text-[0.65rem] tracking-wide text-ink-faint uppercase">
+                {day.date.toLocaleDateString(undefined, { weekday: "short", day: "numeric" })}
+              </div>
+              <div className="mt-1 font-mono text-lg tabular">{day.volumeM3 > 0 ? day.volumeM3.toFixed(1) : "—"}</div>
+              {day.count > 0 && <div className="text-xs text-ink-muted">{m.outlookCount(day.count)}</div>}
+            </div>
+          ))}
         </div>
       </div>
 
