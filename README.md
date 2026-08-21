@@ -10,10 +10,10 @@ This codebase covers all 12 modules from the original system scope plus a
 Compliance + driver mobile app)**, **Phase 4 (Pumps + integration webhooks
 + Reports/KPIs)**, **Phase 5 (real authentication + RBAC enforcement, and
 full Arabic/RTL localization across every page)**, **Phase 6 (Billing —
-customer pricing, invoicing, and AR)**, **Phase 8 (first AI decision-layer
-feature — statistical anomaly detection on batch deviations)**, and
-**Material Receiving** (built out of sequence to close a gap in the
-original module list) — a real
+customer pricing, invoicing, and AR)**, **Phase 8 (AI decision layer —
+statistical anomaly detection on batch deviations, and early-age strength
+prediction)**, and **Material Receiving** (built out of sequence to close
+a gap in the original module list) — a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -373,6 +373,44 @@ driver app (`/driver`) automatically instead of the back office.
   an absurd 80.6%; after the fix, only cement was flagged — correctly
   reading "the last 3 batches all ran over target by more than 1.5%" — and
   the average deviation dropped to a realistic 3.00%. Confirmed in Arabic.
+
+**Phase 8 — AI decision layer, second feature: early strength prediction**
+- A cylinder break at 28 days is the real answer, but it's known weeks
+  after the pour — too late to act on a problem batch. Quality now
+  estimates the eventual late-age strength from an early-age reading (age
+  3, 7, or 14 days — the ages QC actually samples at), the same "prove it
+  with data already on file" approach as the anomaly-detection feature
+  above (`src/lib/strength-prediction.ts`, a pure function, no external
+  model or call).
+- **Two methods, chosen automatically per age**: once there are at least 3
+  historical (early-age, 28-day) pairs *for that specific age* on this
+  plant's own `LabResult` records, it fits a linear regression (least
+  squares) and labels the prediction "based on N of this plant's own
+  historical results." Below that threshold it falls back to a widely-cited
+  generic strength-gain ratio (≈40%/65%/85% of 28-day strength at 3/7/14
+  days for ordinary Portland cement), explicitly labeled as a general
+  default rather than passed off as plant-specific. The regression is
+  always preferred once there's enough data to trust it more than the
+  generic curve.
+- The reference target it checks the prediction against is whatever
+  `targetStrengthMpa` the QC engineer logged alongside that same early-age
+  result — the app has no separate "28-day design target" field to invent
+  one from, so this is the most honest reference available rather than a
+  guess. A batch only gets a prediction while it lacks a 28-day-or-later
+  result of its own; once one is recorded, the prediction disappears in
+  favor of the real number.
+- Surfaced as an "On track" / "At risk" chip plus the predicted MPa and
+  method, directly under a test batch's lab-results table on the Quality
+  page — the natural place to look right after logging an early break.
+- Verified live: logged a 7-day/20 MPa result against a 30 MPa target with
+  no plant history yet — got "On track, predicted 30.8 MPa, using a
+  general industry default" (20 ÷ 0.65 ≈ 30.8, correct). Logged a 28-day/32
+  MPa result on the same test batch — the prediction correctly disappeared
+  once the real result existed. On a second test batch, logged a 7-day/15
+  MPa result against the same 30 MPa target and got "At risk, predicted
+  23.1 MPa" (15 ÷ 0.65 ≈ 23.1) — correctly flagged as below target.
+  Regression math (ordinary least squares) verified independently against
+  known sample data outside the app. Confirmed in English and Arabic.
 
 ## Not yet implemented (see the rollout plan)
 

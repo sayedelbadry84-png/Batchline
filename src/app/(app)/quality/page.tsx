@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createTestBatch, addLabResult, createCertificate, updateCertificate } from "./actions";
+import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
 
 function daysUntil(date: Date) {
   return Math.ceil((date.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
@@ -39,6 +40,19 @@ export default async function QualityPage({
     prisma.mixDesign.findMany({ orderBy: { code: "asc" } }),
   ]);
 
+  // Train the early-vs-final strength regression from every test batch that
+  // already has both an early-age and a 28-day-or-later result on file —
+  // this plant's own history, not a generic model.
+  const historicalPairs: HistoricalPair[] = [];
+  for (const tb of testBatches) {
+    const finalResult = [...tb.labResults].filter((r) => r.ageDays >= 28).sort((a, b) => a.ageDays - b.ageDays)[0];
+    if (!finalResult) continue;
+    for (const r of tb.labResults) {
+      if (r.ageDays < 28) historicalPairs.push({ ageDays: r.ageDays, earlyMpa: r.breakStrengthMpa, finalMpa: finalResult.breakStrengthMpa });
+    }
+  }
+  const strengthFits = fitRegressionsByAge(historicalPairs);
+
   return (
     <div className="flex flex-col gap-8">
       <header>
@@ -49,7 +63,15 @@ export default async function QualityPage({
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
         <div className="flex flex-col gap-4">
-          {testBatches.map((tb) => (
+          {testBatches.map((tb) => {
+            const hasFinalResult = tb.labResults.some((r) => r.ageDays >= 28);
+            const latestEarlyResult = !hasFinalResult
+              ? [...tb.labResults].sort((a, b) => b.ageDays - a.ageDays)[0]
+              : undefined;
+            const prediction = latestEarlyResult
+              ? predictFinalStrength(latestEarlyResult.ageDays, latestEarlyResult.breakStrengthMpa, latestEarlyResult.targetStrengthMpa, strengthFits)
+              : null;
+            return (
             <div key={tb.id} className={ui.card}>
               <div className="flex items-start justify-between">
                 <div>
@@ -102,6 +124,19 @@ export default async function QualityPage({
                 </tbody>
               </table>
 
+              {prediction && (
+                <div className="mt-3 flex items-center gap-2 rounded-md border border-border bg-surface-alt px-3 py-2 text-sm">
+                  <span className={`${ui.chip} ${prediction.atRisk ? "bg-critical-soft text-critical" : "bg-good-soft text-good"}`}>
+                    {prediction.atRisk ? m.atRisk : m.onTrack}
+                  </span>
+                  <span>
+                    {m.predictedStrength(prediction.predictedFinalMpa)}
+                    {" — "}
+                    {prediction.method.kind === "REGRESSION" ? m.methodRegression(prediction.method.sampleCount) : m.methodDefault}
+                  </span>
+                </div>
+              )}
+
               <form action={addLabResult} className="mt-3 flex flex-wrap items-end gap-2">
                 <input type="hidden" name="testBatchId" value={tb.id} />
                 <div>
@@ -121,7 +156,8 @@ export default async function QualityPage({
                 </button>
               </form>
             </div>
-          ))}
+            );
+          })}
           {testBatches.length === 0 && (
             <div className={`${ui.card} text-sm text-ink-muted`}>{m.emptyBatches}</div>
           )}
