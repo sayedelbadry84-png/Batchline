@@ -61,6 +61,8 @@ export async function closeTripFull(formData: FormData) {
 export async function closeTripWithReturn(formData: FormData) {
   const tripId = String(formData.get("tripId") ?? "");
   const returnedVolumeM3 = Number(formData.get("returnedVolumeM3") ?? 0);
+  const reasonCode = String(formData.get("reasonCode") ?? "").trim() || null;
+  const fate = String(formData.get("fate") ?? "").trim() || null;
   if (!tripId || returnedVolumeM3 <= 0) return;
 
   const trip = await prisma.trip.findUnique({
@@ -91,7 +93,7 @@ export async function closeTripWithReturn(formData: FormData) {
       data: { status: "CLOSED", dischargeEnd: now, volumeDeliveredM3 },
     }),
     prisma.drumReturn.create({
-      data: { tripId, returnedVolumeM3, minutesSinceBatch, disposition },
+      data: { tripId, returnedVolumeM3, minutesSinceBatch, disposition, reasonCode, fate },
     }),
   ]);
 

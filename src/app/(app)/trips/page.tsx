@@ -110,6 +110,18 @@ export default async function TripsPage() {
                           required
                           className="w-24 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs"
                         />
+                        <select name="reasonCode" defaultValue="" className="rounded-md border border-border bg-surface px-2 py-1 text-xs">
+                          <option value="">{m.returnReasonPlaceholder}</option>
+                          {Object.entries(dict.returnReasons).map(([k, label]) => (
+                            <option key={k} value={k}>{label}</option>
+                          ))}
+                        </select>
+                        <select name="fate" defaultValue="" className="rounded-md border border-border bg-surface px-2 py-1 text-xs">
+                          <option value="">{m.returnFatePlaceholder}</option>
+                          {Object.entries(dict.returnFates).map(([k, label]) => (
+                            <option key={k} value={k}>{label}</option>
+                          ))}
+                        </select>
                         <button className="rounded-md bg-warn-soft px-3 py-1.5 text-xs font-medium text-warn hover:opacity-80">
                           {m.logReturnClose}
                         </button>
@@ -149,9 +161,23 @@ export default async function TripsPage() {
                 <td className={`${ui.td} font-mono tabular`}>{t.volumeDeliveredM3?.toFixed(1) ?? "—"} m³</td>
                 <td className={ui.td}>
                   {t.drumReturn ? (
-                    <span className={`${ui.chip} ${dispositionChip[t.drumReturn.disposition] ?? ""}`}>
-                      {dict.status[t.drumReturn.disposition as keyof typeof dict.status] ?? t.drumReturn.disposition} · {t.drumReturn.returnedVolumeM3} m³
-                    </span>
+                    <>
+                      <span className={`${ui.chip} ${dispositionChip[t.drumReturn.disposition] ?? ""}`}>
+                        {dict.status[t.drumReturn.disposition as keyof typeof dict.status] ?? t.drumReturn.disposition} · {t.drumReturn.returnedVolumeM3} m³
+                      </span>
+                      {(t.drumReturn.reasonCode || t.drumReturn.fate) && (
+                        <div className="mt-1 text-xs text-ink-muted">
+                          {[
+                            t.drumReturn.reasonCode
+                              ? dict.returnReasons[t.drumReturn.reasonCode as keyof typeof dict.returnReasons] ?? t.drumReturn.reasonCode
+                              : null,
+                            t.drumReturn.fate
+                              ? dict.returnFates[t.drumReturn.fate as keyof typeof dict.returnFates] ?? t.drumReturn.fate
+                              : null,
+                          ].filter(Boolean).join(" · ")}
+                        </div>
+                      )}
+                    </>
                   ) : (
                     <span className="text-xs text-ink-muted">{m.fullLoad}</span>
                   )}

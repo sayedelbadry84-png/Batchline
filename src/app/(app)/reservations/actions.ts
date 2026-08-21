@@ -17,6 +17,8 @@ function readPourDetails(formData: FormData) {
     siteContactPhone: String(formData.get("siteContactPhone") ?? "").trim() || null,
     deliveryMethod: String(formData.get("deliveryMethod") ?? "CHUTE"),
     structuralElement: String(formData.get("structuralElement") ?? "").trim() || null,
+    structureType: String(formData.get("structureType") ?? "").trim() || null,
+    minPumpReachM: Number(formData.get("minPumpReachM") ?? 0) || null,
     labTechnicianRequired: formData.get("labTechnicianRequired") === "on",
   };
 }

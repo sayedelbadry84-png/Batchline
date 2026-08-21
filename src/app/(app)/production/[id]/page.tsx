@@ -202,12 +202,23 @@ export default async function BatchTicketPage({
                   <label className={ui.label}>{d.pump}</label>
                   <select name="pumpId" required className={ui.select}>
                     <option value="">{dict.field.selectPump}</option>
-                    {pumps.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.code} ({dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType})
-                      </option>
-                    ))}
+                    {pumps.map((p) => {
+                      const insufficientReach =
+                        ticket.reservation.minPumpReachM != null &&
+                        p.reachM != null &&
+                        p.reachM < ticket.reservation.minPumpReachM;
+                      return (
+                        <option key={p.id} value={p.id}>
+                          {p.code} ({dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}
+                          {p.reachM != null ? ` · ${p.reachM}m` : ""})
+                          {insufficientReach ? ` — ${d.pumpReachInsufficient}` : ""}
+                        </option>
+                      );
+                    })}
                   </select>
+                  {ticket.reservation.minPumpReachM != null && (
+                    <p className="mt-1 text-xs text-ink-muted">{d.minPumpReachNote(ticket.reservation.minPumpReachM)}</p>
+                  )}
                 </div>
                 <div>
                   <label className={ui.label}>{d.pumpOperator}</label>

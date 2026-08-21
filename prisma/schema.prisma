@@ -224,7 +224,18 @@ model Reservation {
   siteContactName    String?
   siteContactPhone   String?
   deliveryMethod     String?   @default("CHUTE") // PUMP, CHUTE
+  // Free-text specific label ("Column C12", "Slab L3") — distinct from
+  // structureType below, which is the fixed category used for reporting.
   structuralElement  String?
+  // FOUNDATION, SLAB, COLUMN, COLUMN_NECK, BEAM, ROOF, RAFT, OTHER — a fixed
+  // list (from the RhinoMaster/Dynamics comparison) so "how much concrete
+  // went into columns this month" is a real query, not a free-text guess.
+  structureType      String?
+  // Required boom/line reach for a pump delivery — checked against
+  // Pump.reachM when assigning a pump on the trip-start form (see
+  // production/[id]/page.tsx), the same kind of real validation threshold
+  // temperatureC already is for concrete temperature.
+  minPumpReachM      Float?
   labTechnicianRequired Boolean @default(false)
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
@@ -391,6 +402,16 @@ model DrumReturn {
   returnedVolumeM3   Float
   minutesSinceBatch  Int
   disposition        String   // NO_CHARGE, REDISPATCHED, PARTIAL_CREDIT, FULL_WASTE
+  // Why the load came back — orthogonal to disposition, which is the
+  // time/volume-driven financial outcome. Unrecorded until now (from the
+  // RhinoMaster/Dynamics return-ticket comparison): CUSTOMER_CANCELLED,
+  // SITE_NOT_READY, OVER_ORDERED, ACCESS_BLOCKED, QUALITY_REJECTED,
+  // TRAFFIC_DELAY, OTHER.
+  reasonCode         String?
+  // What physically happened to the returned concrete — DUMPED or
+  // RECLAIMED (fed into a reclaimer / reused in another batch). Also
+  // unrecorded until now; independent of disposition and reasonCode.
+  fate               String?
   note               String?
   createdAt          DateTime @default(now())
 }

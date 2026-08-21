@@ -15,11 +15,14 @@ statistical anomaly detection on batch deviations, early-age strength
 prediction, best-fit truck ranking for dispatch, estimated embodied
 carbon, and a demand outlook from the reservation pipeline)**,
 **Material Receiving** (built out of sequence to close a gap in the
-original module list), and **Phase 9 (features adopted from a live
+original module list), **Phase 9 (features adopted from a live
 competitor teardown — a reusable pump-crew roster, tiered driver
 incentives, a real max-temperature validation on reservations, liter-based
-admixture dosing, material brand tagging, and a derived stock ledger)** —
-a real
+admixture dosing, material brand tagging, and a derived stock ledger)**,
+and **Phase 10 (a second competitor teardown, this time of the same
+product line's Dynamics 365 ERP module — a minimum pump-reach validation,
+a fixed structural-element type list, and return reason/fate tracking on
+drum returns)** — a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -598,6 +601,45 @@ driver app (`/driver`) automatically instead of the back office.
   batch tickets' consumption. Confirmed in Arabic throughout — new nav
   entries, table columns, and form labels all render RTL with no
   English-only strings.
+
+**Phase 10 — a second competitor teardown (Dynamics 365 ERP module)**
+- Same product line as the Phase 9 teardown, found running as a
+  `ReadyMix Management` module inside a real customer's Microsoft Dynamics
+  365 Finance & Operations instance — a deeper, read-only look at the same
+  underlying data model from a different deployment. Three concrete gaps
+  it surfaced were closed; a fourth (a separate operations-approval gate
+  distinct from reservation status) and a fifth (two-step cancellation)
+  were flagged as needing their own design pass rather than built blind.
+- **Minimum pump reach** — `Reservation.minPumpReachM`, an optional
+  required boom/line reach for a pump delivery. The trip-start form on a
+  completed batch ticket labels any pump whose `reachM` falls short
+  ("reach too short") right in the `<select>`, and `startTrip` re-checks
+  it server-side and refuses to start the trip if a short pump is
+  submitted anyway — the same defense-in-depth pattern already used for
+  the truck-busy check on that same form.
+- **Structural element type** — `Reservation.structureType`, a fixed list
+  (Foundation, Slab, Column, Column neck, Beam, Roof, Raft, Other) that
+  now sits alongside the existing free-text `structuralElement` field
+  rather than replacing it: the type is what makes "how much concrete
+  went into columns this month" a real query instead of a free-text
+  guess, while the free-text field keeps its job as an optional specific
+  label ("Column C12").
+- **Return reason and fate** — `DrumReturn.reasonCode` (why the load came
+  back: customer cancelled, site not ready, over-ordered, access blocked,
+  quality rejected, traffic delay, other) and `DrumReturn.fate` (dumped or
+  reclaimed), both new and both orthogonal to the existing `disposition`
+  field, which stays exactly what it was — the time/volume-driven
+  financial outcome (no charge / partial credit / full waste). Captured
+  right on the Trip Board's existing "log return & close" form.
+- Verified live: created a pump-delivery reservation with a 50 m minimum
+  reach, confirmed the trip-start form flagged the plant's 37 m pump as
+  "reach too short" while leaving the 60 m pump clean, then confirmed
+  `startTrip` actually refused the short pump when submitted directly
+  (no trip created, form redisplayed) and succeeded with the long one.
+  Confirmed the structural-element type dropdown and its chip render
+  correctly on the Reservations table. Closed a trip with a return,
+  reason "site not ready," and fate "reclaimed" — both showed correctly
+  on the Trip Board's closed-trips row. Confirmed in Arabic throughout.
 
 ## Not yet implemented (see the rollout plan)
 

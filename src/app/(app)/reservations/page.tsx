@@ -105,6 +105,15 @@ export default async function ReservationsPage({
                             />
                           </div>
                           <div>
+                            <label className={ui.label}>{m.f.structureType}</label>
+                            <select name="structureType" defaultValue={r.structureType ?? ""} className={`${ui.select} w-32`}>
+                              <option value="">{dict.field.selectOne}</option>
+                              {Object.entries(dict.structureTypes).map(([k, label]) => (
+                                <option key={k} value={k}>{label}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
                             <label className={ui.label}>{m.f.structuralElement}</label>
                             <input name="structuralElement" defaultValue={r.structuralElement ?? ""} className={`${ui.input} w-32`} />
                           </div>
@@ -114,6 +123,10 @@ export default async function ReservationsPage({
                               <option value="CHUTE">{dict.deliveryMethods.CHUTE}</option>
                               <option value="PUMP">{dict.deliveryMethods.PUMP}</option>
                             </select>
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.minPumpReachM}</label>
+                            <input name="minPumpReachM" type="number" step="0.5" defaultValue={r.minPumpReachM ?? undefined} className={`${ui.input} w-24`} />
                           </div>
                           <div>
                             <label className={ui.label}>{m.f.slump}</label>
@@ -191,7 +204,14 @@ export default async function ReservationsPage({
                         </div>
                       )}
                     </td>
-                    <td className={ui.td}>{r.structuralElement || "—"}</td>
+                    <td className={ui.td}>
+                      {r.structureType && (
+                        <span className={`${ui.chip} bg-surface-alt text-ink-muted mb-1 inline-block`}>
+                          {dict.structureTypes[r.structureType as keyof typeof dict.structureTypes] ?? r.structureType}
+                        </span>
+                      )}
+                      <div>{r.structuralElement || (r.structureType ? "" : "—")}</div>
+                    </td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} bg-surface-alt text-ink-muted`}>
                         {dict.deliveryMethods[(r.deliveryMethod ?? "CHUTE") as keyof typeof dict.deliveryMethods] ?? r.deliveryMethod}
@@ -255,6 +275,15 @@ export default async function ReservationsPage({
             <input name="pourWindowStart" type="datetime-local" required className={ui.input} />
           </div>
           <div>
+            <label className={ui.label}>{m.f.structureType}</label>
+            <select name="structureType" defaultValue="" className={ui.select}>
+              <option value="">{dict.field.selectOne}</option>
+              {Object.entries(dict.structureTypes).map(([k, label]) => (
+                <option key={k} value={k}>{label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
             <label className={ui.label}>{m.f.structuralElement}</label>
             <input name="structuralElement" className={ui.input} placeholder="Column C12 / Slab L3" />
           </div>
@@ -264,6 +293,10 @@ export default async function ReservationsPage({
               <option value="CHUTE">{dict.deliveryMethods.CHUTE}</option>
               <option value="PUMP">{dict.deliveryMethods.PUMP}</option>
             </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.minPumpReachM}</label>
+            <input name="minPumpReachM" type="number" step="0.5" className={ui.input} placeholder="42" />
           </div>
           <div>
             <label className={ui.label}>{m.f.slump}</label>

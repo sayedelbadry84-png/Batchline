@@ -189,6 +189,13 @@ export async function startTrip(formData: FormData) {
   const pumpOperatorName = isPumpDelivery ? String(formData.get("pumpOperatorName") ?? "").trim() || null : null;
   const pumpAssistantName = isPumpDelivery ? String(formData.get("pumpAssistantName") ?? "").trim() || null : null;
 
+  // Re-check server-side, same reasoning as the truck-busy check above — the
+  // picker only labels a short-reach pump, it doesn't remove it from the list.
+  if (isPumpDelivery && pumpId && ticket.reservation.minPumpReachM != null) {
+    const pump = await prisma.pump.findUnique({ where: { id: pumpId } });
+    if (pump?.reachM != null && pump.reachM < ticket.reservation.minPumpReachM) return;
+  }
+
   // The datalist only suggests roster names — the field stays free text, so
   // resolve a match here (case-insensitive, scoped to the plant) rather than
   // trusting a hidden id the picker never actually sent.
