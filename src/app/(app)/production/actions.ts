@@ -16,8 +16,15 @@ const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 // a 200 m³ pour goes out as many partial tickets (one per truck), each
 // deducting from what's left, until the reservation is fully dispatched.
 export async function releaseBatchTicket(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const reservationId = String(formData.get("reservationId") ?? "");
   const requestedVolume = Number(formData.get("volumeM3") ?? 0);
+  // Lets the mobile field view (/operator) land back on its own ticket
+  // detail page instead of the desktop one after releasing — same action,
+  // same business logic, just a different "where do I keep working" target.
+  const returnPrefix = String(formData.get("returnPrefix") ?? "/production");
   if (!reservationId || !requestedVolume || requestedVolume <= 0) return;
 
   const reservation = await prisma.reservation.findUnique({
@@ -63,11 +70,15 @@ export async function releaseBatchTicket(formData: FormData) {
   });
 
   revalidatePath("/production");
+  revalidatePath("/operator");
   revalidatePath("/reservations");
-  redirect(`/production/${ticket.id}`);
+  redirect(`${returnPrefix}/${ticket.id}`);
 }
 
 export async function recordActuals(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   if (!batchTicketId) return;
 
@@ -103,6 +114,7 @@ export async function recordActuals(formData: FormData) {
   });
 
   revalidatePath(`/production/${batchTicketId}`);
+  revalidatePath(`/operator/ticket/${batchTicketId}`);
 }
 
 export async function completeBatch(formData: FormData) {
@@ -159,14 +171,22 @@ export async function completeBatch(formData: FormData) {
   });
 
   revalidatePath(`/production/${batchTicketId}`);
+  revalidatePath(`/operator/ticket/${batchTicketId}`);
+  revalidatePath("/operator");
   revalidatePath("/silos");
   revalidatePath("/");
 }
 
 export async function startTrip(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   const truckId = String(formData.get("truckId") ?? "");
   const driverId = String(formData.get("driverId") ?? "");
+  // Field view sends "/operator" so an operator who just dispatched a
+  // truck lands back on their own ticket list, not the desktop Trip Board.
+  const returnTo = String(formData.get("returnTo") ?? "/trips");
   if (!batchTicketId || !truckId || !driverId) return;
 
   const ticket = await prisma.batchTicket.findUnique({
@@ -229,6 +249,7 @@ export async function startTrip(formData: FormData) {
   await logAudit({ module: "Fleet", recordId: trip.id, afterValue: "LOADING", reasonCode: "TRIP_STARTED" });
 
   revalidatePath(`/production/${batchTicketId}`);
+  revalidatePath("/operator");
   revalidatePath("/trips");
-  redirect("/trips");
+  redirect(returnTo);
 }

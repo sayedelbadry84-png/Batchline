@@ -191,10 +191,20 @@ export default async function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-8">
-      <header>
-        <div className={ui.eyebrow}>{d.eyebrow}</div>
-        <h1 className={ui.h1}>{plants.length === 1 ? plants[0].name : d.title}</h1>
-        <p className={ui.intro}>{d.intro}</p>
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <div className={ui.eyebrow}>{d.eyebrow}</div>
+          <h1 className={ui.h1}>{plants.length === 1 ? plants[0].name : d.title}</h1>
+          <p className={ui.intro}>{d.intro}</p>
+        </div>
+        {(user.role === "PLANT_OPERATOR" || user.role === "ADMIN") && (
+          <Link
+            href="/operator"
+            className="shrink-0 rounded-md border border-border px-3 py-2 text-sm text-ink-muted hover:bg-surface-alt"
+          >
+            {d.openFieldView}
+          </Link>
+        )}
       </header>
 
       <div>

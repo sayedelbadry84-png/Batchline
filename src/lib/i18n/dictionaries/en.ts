@@ -43,6 +43,7 @@ const en: typeof ar = {
     eyebrow: "Overview",
     title: "Plant command center",
     intro: "Everything that needs a decision today, in one place — computed live from the same records every module writes to.",
+    openFieldView: "Open field view",
     siloAlerts: "Silo alerts",
     siloAlertRest: (plant: string, pct: string, threshold: number) =>
       `at ${plant} is at ${pct}% — at or below its ${threshold}% threshold.`,
@@ -75,6 +76,13 @@ const en: typeof ar = {
     moreOnTripBoard: (n: number) => `+${n} more on the Trip Board`,
     quickLinksTitle: "Quick links",
     viewAll: "View all",
+  },
+  operator: {
+    brand: "Batchline Field",
+    signOut: "Sign out",
+    actionTitle: "Needs action now",
+    emptyAction: "Nothing needs action right now.",
+    backToList: "Back to field view",
   },
   driver: {
     brand: "Batchline Driver",

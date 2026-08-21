@@ -41,6 +41,7 @@ const ar = {
     eyebrow: "نظرة عامة",
     title: "غرفة تحكم المصنع",
     intro: "كل ما يحتاج قرارًا اليوم، في مكان واحد — محسوب مباشرة من نفس السجلات التي تكتب إليها كل وحدة.",
+    openFieldView: "فتح الواجهة الميدانية",
     siloAlerts: "تنبيهات الصوامع",
     siloAlertRest: (plant: string, pct: string, threshold: number) =>
       `في ${plant} — عند ${pct}%، وهو الحد الأدنى ${threshold}% أو أقل منه.`,
@@ -73,6 +74,13 @@ const ar = {
     moreOnTripBoard: (n: number) => `+${n} أخرى في لوحة الرحلات`,
     quickLinksTitle: "روابط سريعة",
     viewAll: "عرض الكل",
+  },
+  operator: {
+    brand: "باتشلاين الميداني",
+    signOut: "تسجيل الخروج",
+    actionTitle: "تحتاج إجراء الآن",
+    emptyAction: "لا شيء يحتاج إجراء الآن.",
+    backToList: "العودة للواجهة الميدانية",
   },
   driver: {
     brand: "سائق باتشلاين",

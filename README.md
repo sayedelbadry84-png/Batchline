@@ -22,10 +22,14 @@ admixture dosing, material brand tagging, and a derived stock ledger)**,
 **Phase 10 (a second competitor teardown, this time of the same
 product line's Dynamics 365 ERP module — a minimum pump-reach validation,
 a fixed structural-element type list, and return reason/fate tracking on
-drum returns)**, and **Phase 11 (security & integration hardening —
+drum returns)**, **Phase 11 (security & integration hardening —
 `requireRole` coverage extended to every mutating Server Action across 8
 previously-unguarded modules, login brute-force lockout, and authenticated
-SCADA/telematics webhooks)** — a real
+SCADA/telematics webhooks)**, and **Phase 12 (a mobile-first field view
+for plant operators — the same production floor workflow as the desktop
+Production module, restyled for a phone at the batching panel, and a
+second driver-app-style route tree separate from the main sidebar app)**
+— a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -681,6 +685,56 @@ driver app (`/driver`) automatically instead of the back office.
   `requireRole` audit — advance, arrive, discharge, confirm delivery — to
   confirm the `DRIVER`-inclusive guard didn't regress it. A new customer
   create still worked for `ADMIN` under its new guard.
+
+**Phase 12 — mobile field view for plant operators**
+- The first of three large investments identified in a strategic
+  five-pillar review (gaps, UX, integration, AI, security) — the user
+  picked this one first. Same idea as the existing driver app
+  (`src/app/driver`): a separate route tree (`src/app/operator`) sharing
+  only the root layout, no sidebar, single-column, large touch targets —
+  but for `PLANT_OPERATOR` (and `ADMIN`) instead of `DRIVER`. Not a forced
+  redirect like the driver app, since plant operators still need the full
+  desktop app for every other module — reachable via an "Open field view"
+  link on the Dashboard, visible only to those two roles.
+- **`/operator`** — two lists: reservations ready to release (a
+  one-tap release form, volume pre-filled to what's remaining) and batch
+  tickets needing action right now (released/batching, or complete but
+  not yet dispatched) — both scoped to the operator's own plant.
+- **`/operator/ticket/[id]`** — the exact same actions as the desktop
+  Production detail page (`recordActuals`, `completeBatch`, `startTrip`,
+  reused directly, not duplicated), but the five-column actuals table
+  becomes a stacked card per material — name, target, one or two large
+  inputs, deviation shown once entered — since a wide table doesn't work
+  on a phone screen.
+- **Redirects now context-aware, not duplicated actions**: `startTrip`
+  and `releaseBatchTicket` used to hard-code where they sent the user
+  next (`/trips`, `/production/:id`). Forking them into
+  operator-specific copies would have meant two places to keep the
+  business logic in sync forever. Instead each now reads an optional
+  hidden field (`returnTo`, `returnPrefix`) defaulting to the exact
+  desktop behavior when absent, so the field view's forms just add one
+  hidden input to land back on `/operator` instead.
+- Also closed while in this area: `releaseBatchTicket`, `recordActuals`,
+  and `startTrip` had no `requireRole` guard at all (missed by the Phase
+  11 audit, which only checked whole `actions.ts` files with *zero*
+  guarded exports — this one had one guarded export out of four and got
+  skipped). All three now require `PLANT_OPERATOR`/`ADMIN`, matching
+  `completeBatch`'s existing guard.
+- Verified live: released a reservation from `/operator`, landed back on
+  `/operator/ticket/:id` (not the desktop page); entered actuals and
+  confirmed deviations computed correctly; completed the batch; assigned
+  a truck and started the trip, landing back on `/operator` with the
+  ticket correctly gone from the action list. Confirmed the mobile
+  (375px) layout renders correctly via screenshot — card-per-material,
+  no horizontal scroll, RTL intact.
+  **Known tooling limitation, not an app bug:** the browser-automation
+  harness's touch-emulation for viewports under 768px did not reliably
+  deliver click events to Server Action submit buttons during this
+  session (consistent timeouts); every action above was therefore
+  exercised at desktop width against the identical, unmodified component
+  — the same JSX renders at both sizes, so this validates the code path,
+  not just the layout. A real touchscreen wasn't available to re-check the
+  actual tap gesture end-to-end.
 
 ## Not yet implemented (see the rollout plan)
 
