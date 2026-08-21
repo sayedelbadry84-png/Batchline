@@ -5,6 +5,7 @@ import { getDictionary } from "@/lib/i18n";
 import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
 import { estimateCo2eKg } from "@/lib/carbon";
 import { groupReservationsByDay } from "@/lib/demand";
+import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
@@ -199,21 +200,7 @@ export default async function ReportsPage() {
         </div>
       </div>
 
-      <div>
-        <h2 className="mb-1 font-display text-lg font-semibold">{m.outlookTitle}</h2>
-        <p className="mb-3 text-sm text-ink-muted">{m.outlookIntro}</p>
-        <div className="grid grid-cols-7 gap-2 overflow-x-auto">
-          {demandOutlook.map((day) => (
-            <div key={day.dateKey} className={`${ui.card} py-3 text-center`}>
-              <div className="font-mono text-[0.65rem] tracking-wide text-ink-faint uppercase">
-                {day.date.toLocaleDateString(undefined, { weekday: "short", day: "numeric" })}
-              </div>
-              <div className="mt-1 font-mono text-lg tabular">{day.volumeM3 > 0 ? day.volumeM3.toFixed(1) : "—"}</div>
-              {day.count > 0 && <div className="text-xs text-ink-muted">{m.outlookCount(day.count)}</div>}
-            </div>
-          ))}
-        </div>
-      </div>
+      <DemandOutlookStrip title={m.outlookTitle} intro={m.outlookIntro} buckets={demandOutlook} countLabel={m.outlookCount} />
 
       <div>
         <h2 className="mb-1 font-display text-lg font-semibold">{m.anomaliesTitle}</h2>

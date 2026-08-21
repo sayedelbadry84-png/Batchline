@@ -1,23 +1,56 @@
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
+import { requirePageAccess } from "@/lib/session";
+import { canAccessModule } from "@/lib/permissions";
 import { getDictionary } from "@/lib/i18n";
+import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
+import { groupReservationsByDay } from "@/lib/demand";
+import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
+import { DrumTimer } from "@/components/DrumTimer";
+
+const SEVEN_DAYS = 7;
+const OUTLOOK_DAYS = 7;
+const CERT_WARNING_DAYS = 60;
+const LIVE_OPS_LIMIT = 4;
+
+function daysUntil(date: Date, nowMs: number) {
+  return Math.ceil((date.getTime() - nowMs) / (1000 * 60 * 60 * 24));
+}
+
+type AlertRow = { key: string; severity: "critical" | "warn"; label: string; href: string };
 
 export default async function DashboardPage() {
+  const user = await requirePageAccess("dashboard");
   const { dict } = await getDictionary();
+  const d = dict.dashboard;
+  const r = dict.modules.reports;
+
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
+  const todayStart = new Date(nowMs);
+  todayStart.setHours(0, 0, 0, 0);
+  const outlookEnd = new Date(todayStart);
+  outlookEnd.setDate(outlookEnd.getDate() + OUTLOOK_DAYS);
 
   const [
-    plantCount,
+    plants,
     siloCount,
     mixCount,
     customerCount,
     projectCount,
     reservationCount,
     truckCount,
-    lowSilos,
+    silos,
     openTrips,
+    completedTickets,
+    upcomingReservations,
+    holdReservations,
+    certificates,
+    sentInvoices,
+    labResults,
   ] = await Promise.all([
-    prisma.plant.count(),
+    prisma.plant.findMany(),
     prisma.silo.count(),
     prisma.mixDesign.count(),
     prisma.customer.count(),
@@ -27,80 +60,241 @@ export default async function DashboardPage() {
     prisma.silo.findMany({ include: { plant: true } }),
     prisma.trip.findMany({
       where: { status: { not: "CLOSED" } },
-      include: { truck: true, batchTicket: { include: { plant: true } } },
+      include: { truck: true, driver: true, batchTicket: { include: { plant: true, reservation: { include: { project: true } } } } },
+      orderBy: { batchTime: "asc" },
     }),
+    prisma.batchTicket.findMany({
+      where: { status: "COMPLETE" },
+      include: { components: { include: { material: true } } },
+    }),
+    prisma.reservation.findMany({
+      where: { status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] }, pourWindowStart: { gte: todayStart, lt: outlookEnd } },
+      include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } } },
+    }),
+    prisma.reservation.findMany({ where: { status: "ON_HOLD" }, include: { project: true } }),
+    prisma.complianceCertificate.findMany({ include: { mix: true } }),
+    prisma.invoice.findMany({ where: { status: "SENT" }, include: { payments: true } }),
+    prisma.labResult.findMany(),
   ]);
 
-  const siloAlerts = lowSilos
+  // --- Silo & drum alerts (existing logic) ---
+  const siloAlerts = silos
     .map((s) => ({ ...s, pct: s.capacityTons > 0 ? (s.currentLevelTons / s.capacityTons) * 100 : 0 }))
     .filter((s) => s.pct <= s.minThresholdPct)
     .sort((a, b) => a.pct - b.pct);
 
-  // Server-rendered snapshot at request time, not a re-rendering client
-  // component — a fresh timestamp per request is the correct behavior here.
-  // eslint-disable-next-line react-hooks/purity
-  const nowMs = Date.now();
   const drumAlerts = openTrips
-    .map((t) => ({
-      ...t,
-      elapsedMin: Math.floor((nowMs - t.batchTime.getTime()) / 60000),
-    }))
+    .map((t) => ({ ...t, elapsedMin: Math.floor((nowMs - t.batchTime.getTime()) / 60000) }))
     .filter((t) => t.elapsedMin > t.batchTicket.plant.drumTimerLimitMinutes);
 
+  // --- Production sparkline + 7-day total, from the same completedTickets
+  // used for anomaly detection below — one query, two views. ---
+  const sparklineDays: { date: Date; volumeM3: number }[] = [];
+  for (let i = SEVEN_DAYS - 1; i >= 0; i--) {
+    const dayStart = new Date(todayStart);
+    dayStart.setDate(dayStart.getDate() - i);
+    const dayEnd = new Date(dayStart);
+    dayEnd.setDate(dayEnd.getDate() + 1);
+    const volumeM3 = completedTickets
+      .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= dayStart && t.batchCompletedAt < dayEnd)
+      .reduce((sum, t) => sum + t.volumeM3, 0);
+    sparklineDays.push({ date: dayStart, volumeM3 });
+  }
+  const produced7d = sparklineDays.reduce((sum, day) => sum + day.volumeM3, 0);
+  const sparklineMax = Math.max(...sparklineDays.map((day) => day.volumeM3), 1);
+
+  // --- Anomaly detection — same method as Reports (src/lib/anomaly.ts). ---
+  const byMaterial = new Map<string, { materialName: string; samples: DeviationSample[] }>();
+  for (const ticket of completedTickets) {
+    if (!ticket.batchCompletedAt) continue;
+    for (const c of ticket.components) {
+      if (c.actualMassKg == null) continue;
+      const entry = byMaterial.get(c.materialId) ?? { materialName: c.material.name, samples: [] };
+      entry.samples.push({ ticketNumber: ticket.ticketNumber, completedAt: ticket.batchCompletedAt, deviationPct: ((c.actualMassKg - c.targetMassKg) / c.targetMassKg) * 100 });
+      byMaterial.set(c.materialId, entry);
+    }
+  }
+  const anomalies = detectAnomalies(byMaterial);
+
+  // --- Demand outlook (src/lib/demand.ts), same as Reports. ---
+  const demandOutlook = groupReservationsByDay(
+    upcomingReservations.map((res) => ({
+      pourWindowStart: res.pourWindowStart,
+      remainingVolumeM3: res.requestedVolumeM3 - res.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0),
+    })),
+    OUTLOOK_DAYS,
+    todayStart,
+  );
+
+  // --- AR / quality KPIs, only computed (and shown) for roles that can
+  // actually act on those modules — a Plant Operator sees production and
+  // fleet context, not a customer's outstanding balance. ---
+  const canSeeBilling = canAccessModule(user.role, "billing");
+  const canSeeQuality = canAccessModule(user.role, "quality");
+  const canSeeReservations = canAccessModule(user.role, "reservations");
+  const canSeeProduction = canAccessModule(user.role, "production");
+
+  const arOutstanding = canSeeBilling
+    ? sentInvoices.reduce((sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)), 0)
+    : 0;
+  const overdueInvoiceCount = canSeeBilling ? sentInvoices.filter((inv) => inv.dueDate.getTime() < nowMs).length : 0;
+
+  const passRate = canSeeQuality && labResults.length > 0
+    ? (labResults.filter((res) => res.passFail === "PASS").length / labResults.length) * 100
+    : null;
+
+  // --- Unified alert feed: every warning scattered across Silos, Trips,
+  // Quality, Reservations, Billing, and Reports, in one prioritized list —
+  // the single-pane-of-glass this dashboard exists to be. ---
+  const alerts: AlertRow[] = [];
+  for (const s of siloAlerts) {
+    alerts.push({ key: `silo-${s.id}`, severity: "warn", href: "/silos", label: `${s.name} ${d.siloAlertRest(s.plant.name, s.pct.toFixed(0), s.minThresholdPct)}` });
+  }
+  for (const t of drumAlerts) {
+    alerts.push({ key: `drum-${t.id}`, severity: "critical", href: "/trips", label: `${t.truck.code} ${d.drumAlertRest(t.elapsedMin, t.batchTicket.plant.drumTimerLimitMinutes)}` });
+  }
+  if (canSeeQuality) {
+    for (const c of certificates) {
+      const remaining = daysUntil(c.expiryDate, nowMs);
+      if (remaining < 0) alerts.push({ key: `cert-${c.id}`, severity: "critical", href: "/quality", label: d.alertCertExpired(c.mix.code) });
+      else if (remaining <= CERT_WARNING_DAYS) alerts.push({ key: `cert-${c.id}`, severity: "warn", href: "/quality", label: d.alertCertExpiring(c.mix.code, remaining) });
+    }
+    for (const a of anomalies) {
+      const label = a.type === "OUTLIER" ? r.outlierFlag(a.materialName, a.ticketNumber, a.deviationPct, a.zScore) : r.driftFlag(a.materialName, a.direction === "OVER" ? r.overLabel : r.underLabel, a.windowSize, a.thresholdPct);
+      alerts.push({ key: `anomaly-${a.type}-${a.materialId}-${a.ticketNumber}`, severity: a.type === "OUTLIER" ? "critical" : "warn", href: "/reports", label });
+    }
+  }
+  if (canSeeReservations) {
+    for (const res of holdReservations) {
+      alerts.push({ key: `hold-${res.id}`, severity: "warn", href: "/reservations", label: d.alertCreditHold(res.project.name) });
+    }
+  }
+  if (canSeeBilling) {
+    for (const inv of sentInvoices) {
+      const overdueDays = Math.floor((nowMs - inv.dueDate.getTime()) / 86400000);
+      if (overdueDays > 0 && inv.total - inv.payments.reduce((s, p) => s + p.amount, 0) > 0.01) {
+        alerts.push({ key: `invoice-${inv.id}`, severity: "critical", href: `/billing/${inv.id}`, label: d.alertOverdueInvoice(inv.invoiceNumber, overdueDays) });
+      }
+    }
+  }
+  alerts.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "critical" ? -1 : 1));
+
   const stats = [
-    { label: dict.dashboard.stats.plants, value: plantCount, href: "/plants" },
-    { label: dict.dashboard.stats.silos, value: siloCount, href: "/silos" },
-    { label: dict.dashboard.stats.mixDesigns, value: mixCount, href: "/mix-designs" },
-    { label: dict.dashboard.stats.trucks, value: truckCount, href: "/fleet" },
-    { label: dict.dashboard.stats.openTrips, value: openTrips.length, href: "/trips" },
-    { label: dict.dashboard.stats.customers, value: customerCount, href: "/customers" },
-    { label: dict.dashboard.stats.projects, value: projectCount, href: "/projects" },
-    { label: dict.dashboard.stats.reservations, value: reservationCount, href: "/reservations" },
+    { label: d.stats.plants, value: plants.length, href: "/plants" },
+    { label: d.stats.silos, value: siloCount, href: "/silos" },
+    { label: d.stats.mixDesigns, value: mixCount, href: "/mix-designs" },
+    { label: d.stats.trucks, value: truckCount, href: "/fleet" },
+    { label: d.stats.customers, value: customerCount, href: "/customers" },
+    { label: d.stats.projects, value: projectCount, href: "/projects" },
+    { label: d.stats.reservations, value: reservationCount, href: "/reservations" },
   ];
 
   return (
     <div className="flex flex-col gap-8">
       <header>
-        <div className={ui.eyebrow}>{dict.dashboard.eyebrow}</div>
-        <h1 className={ui.h1}>{dict.dashboard.title}</h1>
-        <p className={ui.intro}>{dict.dashboard.intro}</p>
+        <div className={ui.eyebrow}>{d.eyebrow}</div>
+        <h1 className={ui.h1}>{plants.length === 1 ? plants[0].name : d.title}</h1>
+        <p className={ui.intro}>{d.intro}</p>
       </header>
 
-      {siloAlerts.length > 0 && (
-        <div className="flex flex-col gap-2 rounded-xl border border-transparent bg-warn-soft px-5 py-4 text-warn">
-          <div className="font-mono text-xs tracking-wide uppercase">{dict.dashboard.siloAlerts}</div>
-          {siloAlerts.map((s) => (
-            <div key={s.id} className="text-sm">
-              <Link href="/silos" className="font-medium hover:underline">
-                {s.name}
-              </Link>{" "}
-              {dict.dashboard.siloAlertRest(s.plant.name, s.pct.toFixed(0), s.minThresholdPct)}
-            </div>
+      <div>
+        <h2 className="mb-3 font-display text-lg font-semibold">{d.alertsTitle}</h2>
+        <div className="flex flex-col gap-2">
+          {alerts.map((a) => (
+            <Link
+              key={a.key}
+              href={a.href}
+              className={`flex items-center gap-3 rounded-lg border px-4 py-2.5 text-sm transition-colors ${
+                a.severity === "critical"
+                  ? "border-critical/30 bg-critical-soft text-critical hover:bg-critical-soft/70"
+                  : "border-warn/30 bg-warn-soft text-warn hover:bg-warn-soft/70"
+              }`}
+            >
+              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${a.severity === "critical" ? "bg-critical" : "bg-warn"}`} />
+              {a.label}
+            </Link>
           ))}
+          {alerts.length === 0 && <div className={`${ui.card} text-sm text-good`}>{d.emptyAlerts}</div>}
         </div>
-      )}
+      </div>
 
-      {drumAlerts.length > 0 && (
-        <div className="flex flex-col gap-2 rounded-xl border border-transparent bg-critical-soft px-5 py-4 text-critical">
-          <div className="font-mono text-xs tracking-wide uppercase">{dict.dashboard.drumAlerts}</div>
-          {drumAlerts.map((t) => (
-            <div key={t.id} className="text-sm">
-              <Link href="/trips" className="font-medium hover:underline">
-                {t.truck.code}
-              </Link>{" "}
-              {dict.dashboard.drumAlertRest(t.elapsedMin, t.batchTicket.plant.drumTimerLimitMinutes)}
+      <div>
+        <h2 className="mb-3 font-display text-lg font-semibold">{d.kpiTitle}</h2>
+        <div className="grid grid-cols-4 gap-4">
+          <Link href="/reports" className={`${ui.card} block transition-shadow hover:shadow-md`}>
+            <div className="font-mono text-2xl tabular">{produced7d.toFixed(1)} m³</div>
+            <div className="mt-1 text-sm text-ink-muted">{d.kpiProduction7d}</div>
+            <div className="mt-2 flex h-8 items-end gap-1">
+              {sparklineDays.map((day, i) => (
+                <div
+                  key={i}
+                  className="flex-1 rounded-sm bg-accent"
+                  style={{ height: `${Math.max(6, (day.volumeM3 / sparklineMax) * 100)}%` }}
+                />
+              ))}
             </div>
-          ))}
-        </div>
-      )}
-
-      <div className="grid grid-cols-3 gap-4">
-        {stats.map((s) => (
-          <Link key={s.label} href={s.href} className={`${ui.card} block transition-shadow hover:shadow-md`}>
-            <div className="font-mono text-3xl tabular">{s.value}</div>
-            <div className="mt-1 text-sm text-ink-muted">{s.label}</div>
           </Link>
-        ))}
+          {canSeeBilling && (
+            <Link href="/billing" className={`${ui.card} block transition-shadow hover:shadow-md`}>
+              <div className="font-mono text-2xl tabular" dir="ltr">{arOutstanding.toLocaleString()}</div>
+              <div className="mt-1 text-sm text-ink-muted">{d.kpiArOutstanding}</div>
+              {overdueInvoiceCount > 0 && <div className="mt-1 text-xs text-critical">{r.arOverdue}: {overdueInvoiceCount}</div>}
+            </Link>
+          )}
+          {canSeeQuality && (
+            <Link href="/quality" className={`${ui.card} block transition-shadow hover:shadow-md`}>
+              <div className="font-mono text-2xl tabular">{passRate !== null ? `${passRate.toFixed(0)}%` : "—"}</div>
+              <div className="mt-1 text-sm text-ink-muted">{d.kpiQualityPassRate}</div>
+            </Link>
+          )}
+          <Link href="/trips" className={`${ui.card} block transition-shadow hover:shadow-md`}>
+            <div className="font-mono text-2xl tabular">{openTrips.length}</div>
+            <div className="mt-1 text-sm text-ink-muted">{d.kpiOpenTrips}</div>
+          </Link>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-6">
+        <div>
+          <h2 className="mb-3 font-display text-lg font-semibold">{d.liveOpsTitle}</h2>
+          <div className="flex flex-col gap-2">
+            {openTrips.slice(0, LIVE_OPS_LIMIT).map((t) => (
+              <div key={t.id} className={`${ui.card} flex items-center justify-between py-3`}>
+                <div>
+                  <span className="font-medium" dir="ltr">{t.truck.code}</span>
+                  <span className="text-ink-muted"> · {t.driver.name}</span>
+                  <div className="text-xs text-ink-muted">{t.batchTicket.reservation.project.name}</div>
+                </div>
+                <div className="text-end">
+                  <span className={`${ui.chip} bg-surface-alt text-ink-muted mb-1 inline-block`}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</span>
+                  <DrumTimer batchTimeIso={t.batchTime.toISOString()} limitMinutes={t.batchTicket.plant.drumTimerLimitMinutes} />
+                </div>
+              </div>
+            ))}
+            {openTrips.length === 0 && <div className={`${ui.card} text-sm text-ink-muted`}>{d.emptyLiveOps}</div>}
+            {openTrips.length > LIVE_OPS_LIMIT && (
+              <Link href="/trips" className="text-sm font-medium text-accent-strong hover:underline">
+                {d.moreOnTripBoard(openTrips.length - LIVE_OPS_LIMIT)}
+              </Link>
+            )}
+          </div>
+        </div>
+
+        {canSeeProduction && (
+          <DemandOutlookStrip title={r.outlookTitle} intro={r.outlookIntro} buckets={demandOutlook} countLabel={r.outlookCount} />
+        )}
+      </div>
+
+      <div>
+        <h2 className="mb-3 font-display text-lg font-semibold">{d.quickLinksTitle}</h2>
+        <div className="grid grid-cols-4 gap-3">
+          {stats.map((s) => (
+            <Link key={s.label} href={s.href} className={`${ui.card} block px-4 py-3 transition-shadow hover:shadow-md`}>
+              <div className="font-mono text-xl tabular">{s.value}</div>
+              <div className="mt-0.5 text-xs text-ink-muted">{s.label}</div>
+            </Link>
+          ))}
+        </div>
       </div>
     </div>
   );

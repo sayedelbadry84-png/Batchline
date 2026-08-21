@@ -497,6 +497,46 @@ driver app (`/driver`) automatically instead of the back office.
   batch ticket against it dropped the outlook figure to 4.0 immediately,
   confirming the netting. Confirmed in English and Arabic.
 
+**Dashboard rebuilt as a command center**
+- The old dashboard was a count grid plus two alert boxes. Rebuilt it as
+  the single-pane-of-glass front door the design review called for —
+  everything that needs a decision today, in one place, computed live
+  from the same records every other module writes to (no new tables, no
+  client-side polling).
+- **Unified "Needs attention" feed**: every warning that used to live on a
+  different screen — silo low-level, drum-timer overrun, expiring/expired
+  compliance certificates, credit-hold reservations, overdue invoices, and
+  the anomaly-detection flags from Reports — now surfaces in one
+  severity-sorted list (critical first), each row linking straight to
+  where it needs to be acted on. An empty state reads "clean" rather than
+  showing nothing.
+- **KPI row with a real sparkline**: production over the last 7 days
+  (with a 7-bar daily trend, plain CSS height bars — no charting library),
+  AR outstanding, cylinder pass rate, and open trips right now — each
+  card links to its module.
+- **Live operations**: up to 4 currently-open trips as compact cards
+  reusing the same `DrumTimer` client component the Trip Board already
+  uses (ticks live client-side, hydration-safe placeholder on first
+  paint), with a "+N more" link when there are more.
+- **Demand outlook**: the exact same 7-day reservation-pipeline strip from
+  Reports, factored into a shared `DemandOutlookStrip` component
+  (`src/components/`) so the two views can't quietly drift apart.
+- **Role-aware, not just role-gated**: the AR tile and billing/quality
+  alerts only render for a role that can actually act on `billing` /
+  `quality` per the existing `MODULE_ROLES` map — a Plant Operator gets
+  production, fleet, and quality context; an Accountant additionally sees
+  AR. The dashboard doesn't show data a role can't otherwise reach just
+  because it's convenient to have on one screen.
+- Verified live: as Admin, the alert feed correctly combined a silo
+  warning and a certificate-expiry warning from two different modules
+  into one list; releasing and starting a real trip made it appear on
+  "Live operations" with a running `DrumTimer` and pushed the day's
+  sparkline bar up; the demand-outlook figure correctly dropped to empty
+  once its reservation was fully released. Switched to a Plant Operator
+  login and confirmed the AR tile disappeared while the quality pass-rate
+  tile remained — RBAC gating verified, not assumed. Confirmed the full
+  layout in Arabic — sidebar and every card correctly mirror to RTL.
+
 ## Not yet implemented (see the rollout plan)
 
 `requireRole` covers the highest-value mutating actions per module (see
