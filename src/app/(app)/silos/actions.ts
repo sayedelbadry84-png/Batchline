@@ -2,9 +2,13 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 export async function createSilo(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const plantId = String(formData.get("plantId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const materialType = String(formData.get("materialType") ?? "").trim();
@@ -29,6 +33,9 @@ export async function createSilo(formData: FormData) {
 }
 
 export async function updateSilo(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const plantId = String(formData.get("plantId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -54,6 +61,9 @@ export async function updateSilo(formData: FormData) {
 }
 
 export async function updateSiloLevel(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
   if (!id) return;

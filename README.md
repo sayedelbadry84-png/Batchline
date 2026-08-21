@@ -19,10 +19,13 @@ original module list), **Phase 9 (features adopted from a live
 competitor teardown — a reusable pump-crew roster, tiered driver
 incentives, a real max-temperature validation on reservations, liter-based
 admixture dosing, material brand tagging, and a derived stock ledger)**,
-and **Phase 10 (a second competitor teardown, this time of the same
+**Phase 10 (a second competitor teardown, this time of the same
 product line's Dynamics 365 ERP module — a minimum pump-reach validation,
 a fixed structural-element type list, and return reason/fate tracking on
-drum returns)** — a real
+drum returns)**, and **Phase 11 (security & integration hardening —
+`requireRole` coverage extended to every mutating Server Action across 8
+previously-unguarded modules, login brute-force lockout, and authenticated
+SCADA/telematics webhooks)** — a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -641,13 +644,54 @@ driver app (`/driver`) automatically instead of the back office.
   reason "site not ready," and fate "reclaimed" — both showed correctly
   on the Trip Board's closed-trips row. Confirmed in Arabic throughout.
 
+**Phase 11 — security & integration hardening**
+- **`requireRole` now covers every mutating Server Action**, not just the
+  highest-value ones — an audit found 8 modules (customers, fleet,
+  projects, pumps, reservations, silos, suppliers, trips — 29 functions)
+  with no server-side role check at all, relying only on
+  `requirePageAccess` at the page level. Every one now enforces the same
+  role list `MODULE_ROLES` already declares for that module, so the
+  Sidebar hiding a link and the ability to actually invoke the action
+  behind it can no longer drift apart. The one deliberate nuance: the
+  three shared trip-lifecycle actions (`advanceTrip`, `closeTripFull`,
+  `closeTripWithReturn`) accept `DRIVER` alongside `PLANT_OPERATOR` /
+  `ADMIN`, because the driver app's own wrappers
+  (`src/app/driver/actions.ts`) call straight into them after already
+  verifying the trip belongs to that driver (`requireOwnTrip`) — narrowing
+  those three to exclude `DRIVER` would have silently broken delivery
+  confirmation from the driver app.
+- **Login brute-force lockout** — `User.failedLoginAttempts` /
+  `lockedUntil`: 5 wrong passwords locks the account for 15 minutes.
+  A locked account fails with the *exact same* generic "email or password
+  incorrect" message as a wrong password, deliberately not a distinct
+  "account locked" error — that would let an attacker use the lockout
+  itself to fingerprint which emails have real accounts. Resets to zero
+  on the next successful login.
+- **Authenticated integration webhooks** — `/api/scada/silo-reading` and
+  `/api/telematics/ping` were open to any anonymous POST from the
+  internet; both now require `Authorization: Bearer <INTEGRATION_API_KEY>`
+  (`src/lib/integration-auth.ts`), checked with a constant-time compare
+  rather than `===` so a timing side-channel can't leak the key one byte
+  at a time. Fails closed: with no key configured, every request is
+  rejected rather than silently accepted.
+- Verified live: 5 wrong-password attempts locked the account, and the
+  *correct* password was then rejected with the identical generic error
+  while locked. Both webhooks returned 401 with no/wrong key and 200 with
+  the right one. Full driver flow re-verified end to end after the
+  `requireRole` audit — advance, arrive, discharge, confirm delivery — to
+  confirm the `DRIVER`-inclusive guard didn't regress it. A new customer
+  create still worked for `ADMIN` under its new guard.
+
 ## Not yet implemented (see the rollout plan)
 
-`requireRole` covers the highest-value mutating actions per module (see
-above), not literally every Server Action in the app — a role that can
-*view* a module (per `MODULE_ROLES`) can currently perform any write on it
-unless that specific action has its own guard. Extending coverage action by
-action is the natural next increment.
+Coverage gaps beyond what Phase 11 closed: rate limiting exists for login
+specifically, not for Server Actions in general (a scripted client could
+still hammer, say, `createReservation`); the integration API key is a
+single shared secret rather than one per gateway/device, so it can't be
+revoked for one sensor feed without rotating it for all of them; and
+there's no TLS termination, WAF, or dependency-vulnerability scanning
+configured at this layer — those are deployment-infrastructure decisions
+(hosting provider, reverse proxy, CI) rather than application code.
 
 The PLC/batching-scale and weighbridge integrations are still simulated
 through manual entry (Production's "record actuals" form stands in for a

@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { getRemainingVolumeM3 } from "@/lib/reservations";
 import { revalidatePath } from "next/cache";
 
@@ -24,6 +25,9 @@ function readPourDetails(formData: FormData) {
 }
 
 export async function createReservation(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"]);
+
   const projectId = String(formData.get("projectId") ?? "");
   const mixId = String(formData.get("mixId") ?? "");
   const requestedVolumeM3 = Number(formData.get("requestedVolumeM3") ?? 0);
@@ -64,6 +68,9 @@ export async function createReservation(formData: FormData) {
 // numbers, so the action re-checks this server-side rather than trusting
 // the UI to only show Edit when it's safe.
 export async function updateReservation(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const projectId = String(formData.get("projectId") ?? "");
   const mixId = String(formData.get("mixId") ?? "");

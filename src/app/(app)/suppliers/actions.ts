@@ -2,9 +2,13 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 export async function createSupplier(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+
   const name = String(formData.get("name") ?? "").trim();
   const materialCatalog = String(formData.get("materialCatalog") ?? "").trim();
   const leadTimeDays = Number(formData.get("leadTimeDays") ?? 0) || null;
@@ -19,6 +23,9 @@ export async function createSupplier(formData: FormData) {
 }
 
 export async function createMaterial(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+
   const supplierId = String(formData.get("supplierId") ?? "") || null;
   const name = String(formData.get("name") ?? "").trim();
   const type = String(formData.get("type") ?? "").trim();
@@ -36,6 +43,9 @@ export async function createMaterial(formData: FormData) {
 }
 
 export async function updateSupplier(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const materialCatalog = String(formData.get("materialCatalog") ?? "").trim();
@@ -49,6 +59,9 @@ export async function updateSupplier(formData: FormData) {
 }
 
 export async function updateMaterial(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const supplierId = String(formData.get("supplierId") ?? "") || null;
   const name = String(formData.get("name") ?? "").trim();

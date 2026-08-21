@@ -2,9 +2,13 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 export async function createProject(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"]);
+
   const name = String(formData.get("name") ?? "").trim();
   const customerId = String(formData.get("customerId") ?? "");
   const plantId = String(formData.get("plantId") ?? "");
@@ -22,6 +26,9 @@ export async function createProject(formData: FormData) {
 }
 
 export async function updateProject(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const customerId = String(formData.get("customerId") ?? "");

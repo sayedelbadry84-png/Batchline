@@ -2,9 +2,13 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 export async function createPump(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const plantId = String(formData.get("plantId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
   const pumpType = String(formData.get("pumpType") ?? "BOOM");
@@ -23,6 +27,9 @@ export async function createPump(formData: FormData) {
 }
 
 export async function updatePump(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const plantId = String(formData.get("plantId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
@@ -49,6 +56,9 @@ export async function updatePump(formData: FormData) {
 // (see startTrip) so a crew member can be typed off-roster without being
 // forced into master data first.
 export async function createPumpCrewMember(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const plantId = String(formData.get("plantId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "OPERATOR");
@@ -62,6 +72,9 @@ export async function createPumpCrewMember(formData: FormData) {
 }
 
 export async function updatePumpCrewMember(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "OPERATOR");
@@ -76,6 +89,9 @@ export async function updatePumpCrewMember(formData: FormData) {
 }
 
 export async function schedulePump(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const pumpId = String(formData.get("pumpId") ?? "");
   const reservationId = String(formData.get("reservationId") ?? "");
   const scheduledStartRaw = String(formData.get("scheduledStart") ?? "");
@@ -97,6 +113,9 @@ export async function schedulePump(formData: FormData) {
 }
 
 export async function updateAssignmentStatus(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "");
   const billedHours = Number(formData.get("billedHours") ?? 0) || null;

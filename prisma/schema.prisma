@@ -26,6 +26,14 @@ model User {
   // resolves "my trips" from the logged-in session instead of a picker.
   employeeId   String?  @unique
   employee     Employee? @relation(fields: [employeeId], references: [id])
+  // Brute-force lockout: failedLoginAttempts resets to 0 on any successful
+  // login; once it reaches the threshold in login.ts, lockedUntil is set a
+  // fixed window into the future and every login attempt is rejected with
+  // the same generic error as a wrong password, until that window passes —
+  // deliberately not a distinct error, so a locked account isn't a way to
+  // fingerprint which emails exist in the system.
+  failedLoginAttempts Int @default(0)
+  lockedUntil         DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

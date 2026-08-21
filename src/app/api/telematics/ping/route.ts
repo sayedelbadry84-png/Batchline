@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { verifyIntegrationRequest } from "@/lib/integration-auth";
 
 // GPS telematics webhook — matches the integration described in the
 // Batchline design spec: a GPS/fleet telematics provider pushes a location
@@ -8,8 +9,12 @@ import { logAudit } from "@/lib/audit";
 // internal database id) since that's the identifier the real device knows.
 //
 // Example: POST /api/telematics/ping
+// Authorization: Bearer <INTEGRATION_API_KEY>
 // { "deviceId": "GPS-114", "lat": 29.9765, "lng": 30.9188 }
 export async function POST(request: NextRequest) {
+  const authError = verifyIntegrationRequest(request);
+  if (authError) return authError;
+
   const body = await request.json().catch(() => null);
   if (!body || typeof body.deviceId !== "string" || typeof body.lat !== "number" || typeof body.lng !== "number") {
     return NextResponse.json(

@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { isReservationFullyDelivered } from "@/lib/reservations";
 import { revalidatePath } from "next/cache";
 
@@ -12,6 +13,14 @@ const NEXT_STATUS: Record<string, string> = {
 };
 
 export async function advanceTrip(formData: FormData) {
+  // DRIVER is allowed here too — the driver app's wrappers (see
+  // src/app/driver/actions.ts) call straight into these three functions,
+  // and requireOwnTrip already verified the trip belongs to that driver
+  // before we get here; a plain Trips-page call never carries a DRIVER
+  // session in the first place.
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN", "DRIVER"]);
+
   const tripId = String(formData.get("tripId") ?? "");
   const trip = await prisma.trip.findUnique({ where: { id: tripId } });
   if (!trip) return;
@@ -34,6 +43,10 @@ export async function advanceTrip(formData: FormData) {
 
 // Full load delivered, nothing returned — close the trip outright.
 export async function closeTripFull(formData: FormData) {
+  // DRIVER allowed — see the note on advanceTrip above.
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN", "DRIVER"]);
+
   const tripId = String(formData.get("tripId") ?? "");
   const trip = await prisma.trip.findUnique({ where: { id: tripId }, include: { batchTicket: true } });
   if (!trip) return;
@@ -59,6 +72,10 @@ export async function closeTripFull(formData: FormData) {
 // timer window; no charge under the absorption threshold; partial credit
 // above it (pending accountant approval) otherwise.
 export async function closeTripWithReturn(formData: FormData) {
+  // DRIVER allowed — see the note on advanceTrip above.
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN", "DRIVER"]);
+
   const tripId = String(formData.get("tripId") ?? "");
   const returnedVolumeM3 = Number(formData.get("returnedVolumeM3") ?? 0);
   const reasonCode = String(formData.get("reasonCode") ?? "").trim() || null;

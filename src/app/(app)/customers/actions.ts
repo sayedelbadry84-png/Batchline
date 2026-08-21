@@ -2,9 +2,13 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 export async function createCustomer(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+
   const legalName = String(formData.get("legalName") ?? "").trim();
   const taxId = String(formData.get("taxId") ?? "").trim();
   const creditLimit = Number(formData.get("creditLimit") ?? 0);
@@ -23,6 +27,9 @@ export async function createCustomer(formData: FormData) {
 }
 
 export async function updateCustomer(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const legalName = String(formData.get("legalName") ?? "").trim();
   const taxId = String(formData.get("taxId") ?? "").trim();

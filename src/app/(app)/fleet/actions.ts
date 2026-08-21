@@ -2,9 +2,13 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 export async function createTruck(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const plantId = String(formData.get("plantId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
   const drumCapacityM3 = Number(formData.get("drumCapacityM3") ?? 0);
@@ -22,6 +26,9 @@ export async function createTruck(formData: FormData) {
 }
 
 export async function updateTruck(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const plantId = String(formData.get("plantId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
@@ -42,6 +49,9 @@ export async function updateTruck(formData: FormData) {
 }
 
 export async function setTruckStatus(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "");
   if (!id || !status) return;
