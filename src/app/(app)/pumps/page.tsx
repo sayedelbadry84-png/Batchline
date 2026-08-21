@@ -3,7 +3,16 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createPump, schedulePump, updateAssignmentStatus, updatePump, createPumpCrewMember, updatePumpCrewMember } from "./actions";
+import { flagMaintenanceDue } from "@/lib/maintenance";
+import {
+  createPump,
+  markPumpServiced,
+  schedulePump,
+  updateAssignmentStatus,
+  updatePump,
+  createPumpCrewMember,
+  updatePumpCrewMember,
+} from "./actions";
 
 const statusChip: Record<string, string> = {
   SCHEDULED: "bg-info-soft text-ink",
@@ -22,8 +31,11 @@ export default async function PumpsPage({
   const m = dict.modules.pumps;
   const { edit: editId, editCrew: editCrewId } = await searchParams;
 
-  const [pumps, assignments, unassignedReservations, plants, pumpCrew] = await Promise.all([
-    prisma.pump.findMany({ orderBy: { createdAt: "asc" }, include: { plant: true } }),
+  const [pumpsRaw, assignments, unassignedReservations, plants, pumpCrew] = await Promise.all([
+    prisma.pump.findMany({
+      orderBy: { createdAt: "asc" },
+      include: { plant: true, trips: { select: { batchTime: true } } },
+    }),
     prisma.pumpAssignment.findMany({
       orderBy: { scheduledStart: "asc" },
       include: { pump: true, reservation: { include: { project: { include: { customer: true } } } } },
@@ -36,6 +48,14 @@ export default async function PumpsPage({
     prisma.plant.findMany({ orderBy: { name: "asc" } }),
     prisma.pumpCrewMember.findMany({ orderBy: { name: "asc" }, include: { plant: true } }),
   ]);
+
+  const pumps = pumpsRaw.map((p) => {
+    const [maintenance] = flagMaintenanceDue(
+      [{ id: p.id, lastMaintenanceAt: p.lastMaintenanceAt, tripBatchTimes: p.trips.map((trip) => trip.batchTime) }],
+      p.plant.maintenanceIntervalTrips,
+    );
+    return { ...p, maintenance };
+  });
 
   return (
     <div className="flex flex-col gap-8">
@@ -55,6 +75,7 @@ export default async function PumpsPage({
                 <th className={ui.th}>{m.col.type}</th>
                 <th className={ui.th}>{m.col.reach}</th>
                 <th className={ui.th}>{m.col.rate}</th>
+                <th className={ui.th}>{m.col.maintenance}</th>
                 <th className={ui.th}>{m.col.status}</th>
                 <th className={ui.th}>{dict.field.actions}</th>
               </tr>
@@ -63,7 +84,7 @@ export default async function PumpsPage({
               {pumps.map((p) =>
                 editId === p.id ? (
                   <tr key={p.id}>
-                    <td className={ui.td} colSpan={7}>
+                    <td className={ui.td} colSpan={8}>
                       <form action={updatePump} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={p.id} />
                         <div>
@@ -123,6 +144,19 @@ export default async function PumpsPage({
                       {p.hourlyRate}{m.perHour}{p.standbyRate ? m.standbySuffix(p.standbyRate) : ""}
                     </td>
                     <td className={ui.td}>
+                      <div className="font-mono text-xs text-ink-muted" dir="ltr">
+                        {p.lastMaintenanceAt ? new Date(p.lastMaintenanceAt).toLocaleDateString() : dict.modules.fleet.neverServiced}
+                      </div>
+                      <div className="text-xs text-ink-faint">{dict.modules.fleet.tripsSince(p.maintenance.tripsSinceLastMaintenance)}</div>
+                      {p.maintenance.dueForInspection && (
+                        <span className={`${ui.chip} bg-warn-soft text-warn mt-1 inline-block`}>{dict.modules.fleet.dueForInspection}</span>
+                      )}
+                      <form action={markPumpServiced} className="mt-1">
+                        <input type="hidden" name="id" value={p.id} />
+                        <button className="text-xs font-medium text-accent-strong hover:underline">{dict.modules.fleet.markServiced}</button>
+                      </form>
+                    </td>
+                    <td className={ui.td}>
                       <span className={`${ui.chip} bg-surface-alt text-ink-muted`}>{dict.status[p.status as keyof typeof dict.status] ?? p.status}</span>
                     </td>
                     <td className={ui.td}>
@@ -135,7 +169,7 @@ export default async function PumpsPage({
               )}
               {pumps.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={7}>
+                  <td className={ui.td} colSpan={8}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>

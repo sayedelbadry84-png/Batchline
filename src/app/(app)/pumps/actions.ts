@@ -50,6 +50,23 @@ export async function updatePump(formData: FormData) {
   revalidatePath("/pumps");
 }
 
+// Resets the trip-count clock src/lib/maintenance.ts reads — see the note
+// on markTruckServiced in fleet/actions.ts for why this is separate from
+// the status field.
+export async function markPumpServiced(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  await prisma.pump.update({ where: { id }, data: { lastMaintenanceAt: new Date() } });
+
+  await logAudit({ module: "Pumps", recordId: id, reasonCode: "PUMP_MARKED_SERVICED" });
+  revalidatePath("/pumps");
+  revalidatePath("/");
+}
+
 // A reusable roster (see RhinoMaster comparison) — picking a name from here
 // on the trip-start form prevents typos and lets an operator's history be
 // tracked across many pump jobs, while Trip still stores a plain name too

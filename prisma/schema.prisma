@@ -58,6 +58,11 @@ model Plant {
   // Batching tolerance & alert configuration (Module 12 — Plant Management).
   drumTimerLimitMinutes     Int   @default(90)
   returnAbsorptionThresholdM3 Float @default(0.2)
+  // Preventive-maintenance threshold, shared by trucks and pumps (see
+  // src/lib/maintenance.ts) — a single per-plant number is simpler to
+  // reason about than a per-vehicle one, matching the batching-tolerance
+  // fields above.
+  maintenanceIntervalTrips Int @default(150)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -315,6 +320,11 @@ model Truck {
   lastLat            Float?
   lastLng            Float?
   lastPingAt         DateTime?
+  // Reset by the "mark serviced" action — trips since this date (via
+  // Trip.batchTime) feed the due-for-inspection flag in
+  // src/lib/maintenance.ts. Null means "never recorded," which counts
+  // every trip ever as "since last maintenance."
+  lastMaintenanceAt  DateTime?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
@@ -482,6 +492,8 @@ model Pump {
   hourlyRate   Float
   standbyRate  Float?
   status       String   @default("ACTIVE") // ACTIVE, MAINTENANCE, OUT_OF_SERVICE
+  // Same due-for-inspection mechanism as Truck.lastMaintenanceAt.
+  lastMaintenanceAt DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

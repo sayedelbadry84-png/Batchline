@@ -6,6 +6,7 @@ import { canAccessModule } from "@/lib/permissions";
 import { getDictionary } from "@/lib/i18n";
 import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
 import { groupReservationsByDay } from "@/lib/demand";
+import { flagMaintenanceDue } from "@/lib/maintenance";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { DrumTimer } from "@/components/DrumTimer";
 
@@ -49,6 +50,8 @@ export default async function DashboardPage() {
     certificates,
     sentInvoices,
     labResults,
+    maintenanceTrucks,
+    maintenancePumps,
   ] = await Promise.all([
     prisma.plant.findMany(),
     prisma.silo.count(),
@@ -75,6 +78,8 @@ export default async function DashboardPage() {
     prisma.complianceCertificate.findMany({ include: { mix: true } }),
     prisma.invoice.findMany({ where: { status: "SENT" }, include: { payments: true } }),
     prisma.labResult.findMany(),
+    prisma.truck.findMany({ include: { plant: true, trips: { select: { batchTime: true } } } }),
+    prisma.pump.findMany({ include: { plant: true, trips: { select: { batchTime: true } } } }),
   ]);
 
   // --- Silo & drum alerts (existing logic) ---
@@ -86,6 +91,27 @@ export default async function DashboardPage() {
   const drumAlerts = openTrips
     .map((t) => ({ ...t, elapsedMin: Math.floor((nowMs - t.batchTime.getTime()) / 60000) }))
     .filter((t) => t.elapsedMin > t.batchTicket.plant.drumTimerLimitMinutes);
+
+  // --- Preventive maintenance (src/lib/maintenance.ts) — same derive-
+  // from-existing-trip-history approach as the drum/silo alerts above. ---
+  const truckMaintenanceAlerts = maintenanceTrucks
+    .map((t) => ({
+      code: t.code,
+      ...flagMaintenanceDue(
+        [{ id: t.id, lastMaintenanceAt: t.lastMaintenanceAt, tripBatchTimes: t.trips.map((trip) => trip.batchTime) }],
+        t.plant.maintenanceIntervalTrips,
+      )[0],
+    }))
+    .filter((t) => t.dueForInspection);
+  const pumpMaintenanceAlerts = maintenancePumps
+    .map((p) => ({
+      code: p.code,
+      ...flagMaintenanceDue(
+        [{ id: p.id, lastMaintenanceAt: p.lastMaintenanceAt, tripBatchTimes: p.trips.map((trip) => trip.batchTime) }],
+        p.plant.maintenanceIntervalTrips,
+      )[0],
+    }))
+    .filter((p) => p.dueForInspection);
 
   // --- Production sparkline + 7-day total, from the same completedTickets
   // used for anomaly detection below — one query, two views. ---
@@ -133,6 +159,7 @@ export default async function DashboardPage() {
   const canSeeQuality = canAccessModule(user.role, "quality");
   const canSeeReservations = canAccessModule(user.role, "reservations");
   const canSeeProduction = canAccessModule(user.role, "production");
+  const canSeeFleet = canAccessModule(user.role, "fleet");
 
   const arOutstanding = canSeeBilling
     ? sentInvoices.reduce((sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)), 0)
@@ -152,6 +179,14 @@ export default async function DashboardPage() {
   }
   for (const t of drumAlerts) {
     alerts.push({ key: `drum-${t.id}`, severity: "critical", href: "/trips", label: `${t.truck.code} ${d.drumAlertRest(t.elapsedMin, t.batchTicket.plant.drumTimerLimitMinutes)}` });
+  }
+  if (canSeeFleet) {
+    for (const t of truckMaintenanceAlerts) {
+      alerts.push({ key: `truck-maint-${t.id}`, severity: "warn", href: "/fleet", label: d.alertMaintenanceDue(t.code, t.tripsSinceLastMaintenance) });
+    }
+    for (const p of pumpMaintenanceAlerts) {
+      alerts.push({ key: `pump-maint-${p.id}`, severity: "warn", href: "/pumps", label: d.alertMaintenanceDue(p.code, p.tripsSinceLastMaintenance) });
+    }
   }
   if (canSeeQuality) {
     for (const c of certificates) {

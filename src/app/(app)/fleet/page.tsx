@@ -3,7 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createTruck, setTruckStatus, updateTruck } from "./actions";
+import { flagMaintenanceDue } from "@/lib/maintenance";
+import { createTruck, markTruckServiced, setTruckStatus, updateTruck } from "./actions";
 
 const statusChip: Record<string, string> = {
   ACTIVE: "bg-good-soft text-good",
@@ -21,14 +22,29 @@ export default async function FleetPage({
   const m = dict.modules.fleet;
   const { edit: editId } = await searchParams;
 
-  const [trucks, drivers, plants] = await Promise.all([
+  const [trucksRaw, drivers, plants] = await Promise.all([
     prisma.truck.findMany({
       orderBy: { createdAt: "asc" },
-      include: { plant: true, trips: { where: { status: { not: "CLOSED" } } } },
+      include: { plant: true, trips: { select: { status: true, batchTime: true } } },
     }),
     prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" }, include: { plant: true } }),
     prisma.plant.findMany({ orderBy: { name: "asc" } }),
   ]);
+
+  // Each truck's own plant sets its threshold — flagMaintenanceDue takes a
+  // single interval per call, so a truck is evaluated on its own rather
+  // than assuming every truck here shares one plant's number.
+  const trucks = trucksRaw.map((t) => {
+    const [maintenance] = flagMaintenanceDue(
+      [{ id: t.id, lastMaintenanceAt: t.lastMaintenanceAt, tripBatchTimes: t.trips.map((trip) => trip.batchTime) }],
+      t.plant.maintenanceIntervalTrips,
+    );
+    return {
+      ...t,
+      openTripsCount: t.trips.filter((trip) => trip.status !== "CLOSED").length,
+      maintenance,
+    };
+  });
 
   return (
     <div className="flex flex-col gap-8">
@@ -49,6 +65,7 @@ export default async function FleetPage({
                 <th className={ui.th}>{m.col.maxRpm}</th>
                 <th className={ui.th}>{m.col.gpsDevice}</th>
                 <th className={ui.th}>{m.col.lastPosition}</th>
+                <th className={ui.th}>{m.col.maintenance}</th>
                 <th className={ui.th}>{m.col.status}</th>
                 <th className={ui.th}>{dict.field.actions}</th>
               </tr>
@@ -57,7 +74,7 @@ export default async function FleetPage({
               {trucks.map((t) =>
                 editId === t.id ? (
                   <tr key={t.id}>
-                    <td className={ui.td} colSpan={8}>
+                    <td className={ui.td} colSpan={9}>
                       <form action={updateTruck} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={t.id} />
                         <div>
@@ -103,7 +120,7 @@ export default async function FleetPage({
                   <tr key={t.id}>
                     <td className={`${ui.td} font-medium`}>
                       <span dir="ltr">{t.code}</span>
-                      {t.trips.length > 0 && (
+                      {t.openTripsCount > 0 && (
                         <span className={`${ui.chip} bg-accent-soft text-accent-strong ms-2`}>{m.onTrip}</span>
                       )}
                     </td>
@@ -120,6 +137,19 @@ export default async function FleetPage({
                       ) : (
                         <span className="text-ink-faint">{m.noPing}</span>
                       )}
+                    </td>
+                    <td className={ui.td}>
+                      <div className="font-mono text-xs text-ink-muted" dir="ltr">
+                        {t.lastMaintenanceAt ? new Date(t.lastMaintenanceAt).toLocaleDateString() : m.neverServiced}
+                      </div>
+                      <div className="text-xs text-ink-faint">{m.tripsSince(t.maintenance.tripsSinceLastMaintenance)}</div>
+                      {t.maintenance.dueForInspection && (
+                        <span className={`${ui.chip} bg-warn-soft text-warn mt-1 inline-block`}>{m.dueForInspection}</span>
+                      )}
+                      <form action={markTruckServiced} className="mt-1">
+                        <input type="hidden" name="id" value={t.id} />
+                        <button className="text-xs font-medium text-accent-strong hover:underline">{m.markServiced}</button>
+                      </form>
                     </td>
                     <td className={ui.td}>
                       <form action={setTruckStatus} className="flex items-center gap-2">
@@ -148,7 +178,7 @@ export default async function FleetPage({
               )}
               {trucks.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={8}>
+                  <td className={ui.td} colSpan={9}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>

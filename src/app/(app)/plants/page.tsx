@@ -154,6 +154,15 @@ export default async function PlantsPage({
                   className="w-28 rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
                 />
               </div>
+              <div>
+                <label className={ui.label}>{m.maintenanceInterval}</label>
+                <input
+                  name="maintenanceIntervalTrips"
+                  type="number"
+                  defaultValue={p.maintenanceIntervalTrips}
+                  className="w-28 rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+                />
+              </div>
               <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">
                 {m.save}
               </button>

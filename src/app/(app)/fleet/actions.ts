@@ -48,6 +48,25 @@ export async function updateTruck(formData: FormData) {
   revalidatePath("/fleet");
 }
 
+// Resets the trip-count clock src/lib/maintenance.ts reads — logged
+// separately from setTruckStatus since "serviced" and "availability"
+// are different facts (a truck can be marked serviced without ever
+// having been pulled to MAINTENANCE status, if the service happened
+// during idle time).
+export async function markTruckServiced(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  await prisma.truck.update({ where: { id }, data: { lastMaintenanceAt: new Date() } });
+
+  await logAudit({ module: "Fleet", recordId: id, reasonCode: "TRUCK_MARKED_SERVICED" });
+  revalidatePath("/fleet");
+  revalidatePath("/");
+}
+
 export async function setTruckStatus(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);

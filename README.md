@@ -25,11 +25,14 @@ a fixed structural-element type list, and return reason/fate tracking on
 drum returns)**, **Phase 11 (security & integration hardening —
 `requireRole` coverage extended to every mutating Server Action across 8
 previously-unguarded modules, login brute-force lockout, and authenticated
-SCADA/telematics webhooks)**, and **Phase 12 (a mobile-first field view
+SCADA/telematics webhooks)**, **Phase 12 (a mobile-first field view
 for plant operators — the same production floor workflow as the desktop
 Production module, restyled for a phone at the batching panel, and a
-second driver-app-style route tree separate from the main sidebar app)**
-— a real
+second driver-app-style route tree separate from the main sidebar app)**,
+and **Phase 13 (preventive-maintenance flagging for trucks and pumps,
+derived from trip history — the sixth AI/decision-layer feature this
+codebase has built on the "prove it with data the app already tracks"
+approach)** — a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -735,6 +738,48 @@ driver app (`/driver`) automatically instead of the back office.
   — the same JSX renders at both sizes, so this validates the code path,
   not just the layout. A real touchscreen wasn't available to re-check the
   actual tap gesture end-to-end.
+
+**Phase 13 — preventive maintenance for trucks and pumps**
+- The second of three large investments from the five-pillar strategic
+  review (the first was Phase 12's field view). Same "derive it from data
+  the app already tracks" approach as the five earlier AI features —
+  `src/lib/maintenance.ts` computes trips since a vehicle's last service
+  from its own `Trip.batchTime` history, no new telemetry or sensor feed.
+- **`Plant.maintenanceIntervalTrips`** (default 150) — one threshold per
+  plant, editable alongside the existing drum-timer and return-absorption
+  thresholds on the Plants page, since a low-volume and a high-volume
+  plant wear equipment at genuinely different rates.
+- **`Truck.lastMaintenanceAt` / `Pump.lastMaintenanceAt`** — reset by a
+  new "Mark serviced" action, deliberately separate from the existing
+  `status` field (`ACTIVE`/`MAINTENANCE`/`OUT_OF_SERVICE`): "serviced"
+  and "currently available" are different facts, since a vehicle can be
+  serviced during idle time without ever being pulled to `MAINTENANCE`
+  status.
+- Fleet and Pumps pages both show a maintenance column: last-serviced
+  date (or "never recorded"), trip count since, and a "due for
+  inspection" badge once that count reaches the plant's threshold.
+  Trucks/pumps overdue also surface in the Dashboard's unified "needs
+  attention" feed alongside the existing silo/drum/cert/credit/invoice
+  alerts, gated to roles that can see Fleet.
+- Also closed in passing: `releaseBatchTicket`, `recordActuals`, and
+  `startTrip` in `production/actions.ts` had no `requireRole` guard —
+  missed by the Phase 11 audit for the same reason as the Phase 12
+  finding (that file had one guarded export out of four and the audit
+  only flagged files with *zero*). All three now require
+  `PLANT_OPERATOR`/`ADMIN`.
+- Verified live: released → completed → started a trip for MX-08 with
+  the plant's interval temporarily set to 1, confirmed it correctly
+  flagged "due for inspection" with the right trip count on both the
+  Fleet page and the Dashboard alert feed, while untouched trucks stayed
+  clean. Confirmed the "mark serviced" reset via a direct database check
+  (`lastMaintenanceAt` updated, count returned to 0) after the same
+  browser-automation click-delivery issue as Phase 12 prevented an
+  interactive click-through on this specific button — the read-side
+  (flag computation, badge, alert, per-plant threshold) was fully
+  verified live in the browser; only this one write action's literal
+  click had to be cross-checked outside it. Confirmed the new threshold
+  field renders on the Plants page and the maintenance column renders on
+  both Fleet and Pumps. Confirmed in Arabic throughout.
 
 ## Not yet implemented (see the rollout plan)
 
