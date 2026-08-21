@@ -12,9 +12,9 @@ Compliance + driver mobile app)**, **Phase 4 (Pumps + integration webhooks
 full Arabic/RTL localization across every page)**, **Phase 6 (Billing —
 customer pricing, invoicing, and AR)**, **Phase 8 (AI decision layer —
 statistical anomaly detection on batch deviations, early-age strength
-prediction, and best-fit truck ranking for dispatch)**, and **Material
-Receiving** (built out of sequence to close a gap in the original module
-list) — a real
+prediction, best-fit truck ranking for dispatch, and estimated embodied
+carbon)**, and **Material Receiving** (built out of sequence to close a
+gap in the original module list) — a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -440,6 +440,39 @@ driver app (`/driver`) automatically instead of the back office.
   against only an 8 m³ truck available correctly showed "8 m³ — 7.0 m³
   short of the load" rather than silently offering it as adequate.
   Confirmed in English and Arabic.
+
+**Phase 8's fourth feature: estimated embodied carbon**
+- The first feature from the strategic review's "customer & sustainability"
+  layer, and — like the anomaly detection and strength prediction above —
+  built from data the app already has, not a new integration
+  (`src/lib/carbon.ts`): a reference table of typical published
+  embodied-carbon factors per material type (kg CO₂e per kg — the kind of
+  order-of-magnitude figures cited in concrete-industry EPD/ICE-database
+  literature), explicitly **not** measured or verified for this plant's
+  actual suppliers. Every surface that shows a number derived from it says
+  so, the same honesty discipline Reports already applies to metrics it
+  can't back with real data.
+- **Mix Design** gets a fourth tile alongside computed volume/yield/total
+  mass: estimated embodied carbon per m³, computed from the mix's own
+  `MixComponent` design masses — a design-time estimate.
+- **Reports** gets a new "Sustainability" section: estimated CO₂e over the
+  last 7 days and per m³, computed from what was *actually* batched
+  (`BatchComponentActual`, actual mass where weighed, target where not) —
+  an operational number, not a design-time one, reusing the same
+  `completedTickets` data the production and anomaly sections already
+  fetch (no new query).
+- Verified live: a mix with 340 kg cement + 780 kg sand + 1040 kg coarse
+  aggregate + 170 kg water + 3.4 kg superplasticizer per m³ showed
+  296 kg CO₂e — matches `340×0.83 + 780×0.005 + 1040×0.007 + 170×0.0003 +
+  3.4×0.72 ≈ 295.9`, computed independently to confirm. Confirmed the
+  Reports tiles show "—" rather than a fabricated 0 or NaN when there's no
+  production in the last 7 days yet. Confirmed in Arabic.
+- **Incidental cleanup**: verifying this surfaced duplicate seed data in
+  the local dev database (silos showing twice) — caused by running
+  `prisma db seed` a second time against an already-seeded database during
+  manual verification, not a bug in the app. Re-seeded from a clean
+  `db push` to fix; worth knowing `prisma db seed` isn't idempotent here
+  the way `db push` is.
 
 ## Not yet implemented (see the rollout plan)
 

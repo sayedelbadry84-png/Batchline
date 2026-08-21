@@ -5,6 +5,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { addComponent, setMixStatus, updateMixDesign } from "../actions";
+import { estimateCo2eKg } from "@/lib/carbon";
 
 export default async function MixDesignDetailPage({
   params,
@@ -43,6 +44,10 @@ export default async function MixDesignDetailPage({
     designVolumeM3 += c.designMassKgPerM3 / (sg * 1000);
   }
   const totalMassKg = mix.components.reduce((sum, c) => sum + c.designMassKgPerM3, 0);
+  const embodiedCo2eKg = mix.components.reduce(
+    (sum, c) => sum + estimateCo2eKg(c.material.type, c.designMassKgPerM3),
+    0,
+  );
 
   return (
     <div className="flex flex-col gap-8">
@@ -111,7 +116,7 @@ export default async function MixDesignDetailPage({
         </form>
       </header>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-4 gap-4">
         <div className={ui.card}>
           <div className="font-mono text-xs text-ink-muted uppercase">{d.computedVolume}</div>
           <div className="mt-1 font-mono text-2xl tabular">{designVolumeM3.toFixed(3)} m³</div>
@@ -128,6 +133,11 @@ export default async function MixDesignDetailPage({
           <div className="font-mono text-xs text-ink-muted uppercase">{d.totalMass}</div>
           <div className="mt-1 font-mono text-2xl tabular">{totalMassKg.toFixed(0)} kg</div>
           <p className="mt-1 text-xs text-ink-muted">{d.totalMassNote((totalMassKg / 1000).toFixed(3))}</p>
+        </div>
+        <div className={ui.card}>
+          <div className="font-mono text-xs text-ink-muted uppercase">{d.embodiedCarbon}</div>
+          <div className="mt-1 font-mono text-2xl tabular">{embodiedCo2eKg.toFixed(0)} kg CO₂e</div>
+          <p className="mt-1 text-xs text-ink-muted">{d.embodiedCarbonNote}</p>
         </div>
       </div>
 

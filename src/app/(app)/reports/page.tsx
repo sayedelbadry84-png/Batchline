@@ -3,6 +3,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
+import { estimateCo2eKg } from "@/lib/carbon";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
@@ -55,6 +56,16 @@ export default async function ReportsPage() {
   const weighedComponents = completedTickets.flatMap((t) => t.components).filter((c) => c.actualMassKg != null);
   const deviations = weighedComponents.map((c) => Math.abs(((c.actualMassKg! - c.targetMassKg) / c.targetMassKg) * 100));
   const avgAbsDeviation = deviations.length ? deviations.reduce((a, b) => a + b, 0) / deviations.length : null;
+
+  // --- Sustainability: embodied CO2e from what was actually batched
+  // (actual mass where weighed, target where not) in the last 7 days —
+  // same generic published factors as the per-mix estimate on Mix Design,
+  // applied here to real production instead of a design recipe. ---
+  const co2e7dKg = completedTickets
+    .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= since)
+    .flatMap((t) => t.components)
+    .reduce((sum, c) => sum + estimateCo2eKg(c.material.type, c.actualMassKg ?? c.targetMassKg), 0);
+  const co2ePerM3 = produced7d > 0 ? co2e7dKg / produced7d : null;
 
   // --- Anomaly detection: statistical outliers + directional drift per
   // material, over the same weighed-component data the deviation average
@@ -185,6 +196,21 @@ export default async function ReportsPage() {
             <div className={`${ui.card} text-sm text-ink-muted`}>{m.emptyAnomalies}</div>
           )}
         </div>
+      </div>
+
+      <div>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.sustainabilityTitle}</h2>
+        <div className="grid grid-cols-4 gap-4">
+          <div className={ui.card}>
+            <div className="font-mono text-2xl tabular">{fmt(co2e7dKg, 0, " kg")}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.co2e7d}</div>
+          </div>
+          <div className={ui.card}>
+            <div className="font-mono text-2xl tabular">{fmt(co2ePerM3, 0, " kg/m³")}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.co2ePerM3}</div>
+          </div>
+        </div>
+        <p className="mt-2 text-xs text-ink-muted">{m.co2eNote}</p>
       </div>
 
       <div>
