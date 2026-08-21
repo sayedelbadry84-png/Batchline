@@ -62,6 +62,8 @@ model Plant {
   batchTickets BatchTicket[]
   pumps      Pump[]
   materialReceipts MaterialReceipt[]
+  pumpCrewMembers  PumpCrewMember[]
+  driverIncentivePolicy DriverIncentivePolicy?
 }
 
 model Silo {
@@ -121,6 +123,7 @@ model Material {
   id               String   @id @default(cuid())
   name             String
   type             String   // CEMENT, FLY_ASH, SAND, COARSE_AGGREGATE, ADMIXTURE, WATER
+  brand            String?
   specificGravity  Float?
   absorptionPct    Float?
   supplierId       String?
@@ -141,6 +144,12 @@ model MixComponent {
   material           Material  @relation(fields: [materialId], references: [id])
   designMassKgPerM3  Float
   tolerancePct       Float     @default(2)
+  // Display-only — the mass figure above stays the single source of truth
+  // for every yield/tolerance calculation. Chemical admixtures are
+  // conventionally dosed by volume on site; when set to LITER the
+  // component table shows designMassKgPerM3 / material.specificGravity
+  // instead of kg, without a second stored quantity to keep in sync.
+  dosageUnit         String    @default("KG") // KG, LITER
 
   @@unique([mixId, materialId])
 }
@@ -204,12 +213,19 @@ model Reservation {
   // own slump target, since site conditions can call for an adjustment on
   // the day (e.g. a pump mix run wetter than the design slump).
   slumpRequestedMm   Float?
+  // Maximum concrete temperature allowed at discharge — a real rejection
+  // threshold checked against TestBatch.concreteTempC when a sample is
+  // logged (see Quality), not just an informational number on the ticket.
   temperatureC       Float?
   siteLocation       String?
+  // A pasted maps share link, sent straight to the driver — simpler and
+  // more directly actionable on site than structured lat/lng would be.
+  siteLocationUrl    String?
   siteContactName    String?
   siteContactPhone   String?
   deliveryMethod     String?   @default("CHUTE") // PUMP, CHUTE
   structuralElement  String?
+  labTechnicianRequired Boolean @default(false)
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
@@ -337,8 +353,16 @@ model Trip {
   // reservation for billing hours rather than recording who ran it.
   pumpId            String?
   pump              Pump?        @relation(fields: [pumpId], references: [id])
+  // Free-text name is still the field every read path renders — picking a
+  // crew member below just fills it from PumpCrewMember.name at write time
+  // (see startTrip), so a trip can still name someone off-roster without
+  // forcing every operator into master data on day one.
   pumpOperatorName  String?
   pumpAssistantName String?
+  pumpOperatorId    String?
+  pumpOperatorCrew  PumpCrewMember? @relation("PumpOperatorCrew", fields: [pumpOperatorId], references: [id])
+  pumpAssistantId   String?
+  pumpAssistantCrew PumpCrewMember? @relation("PumpAssistantCrew", fields: [pumpAssistantId], references: [id])
   status            String       @default("LOADING") // LOADING, IN_TRANSIT, ON_SITE, DISCHARGING, CLOSED
   batchTime         DateTime     @default(now())
   departTime        DateTime?
@@ -516,6 +540,53 @@ model Payment {
   method    String?  // CASH, BANK_TRANSFER, CHEQUE
   reference String?
   createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Fleet — pump crew roster & driver incentives (from the RhinoMaster review)
+// ---------------------------------------------------------------------------
+
+// A reusable roster, distinct from the free-text pumpOperatorName/
+// pumpAssistantName already on Trip — picking a name here instead of typing
+// one prevents typos and lets an operator's history be tracked across many
+// pump jobs over time.
+model PumpCrewMember {
+  id        String   @id @default(cuid())
+  plantId   String
+  plant     Plant    @relation(fields: [plantId], references: [id])
+  name      String
+  role      String   // OPERATOR, HELPER
+  phone     String?
+  status    String   @default("ACTIVE") // ACTIVE, INACTIVE
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  operatorTrips  Trip[] @relation("PumpOperatorCrew")
+  assistantTrips Trip[] @relation("PumpAssistantCrew")
+}
+
+// A tiered per-trip bonus, one policy per plant — trips 1..freeTripsThreshold
+// earn nothing, each trip up to tier2Threshold earns tier2RateSar, each up
+// to tier3Threshold earns tier3RateSar, and every trip beyond that earns
+// beyondRateSar. Payout itself is never stored — it's computed live from
+// closed Trip counts per driver (src/lib/incentives.ts), the same
+// derive-from-what-already-exists approach as the anomaly/strength/demand
+// features above. Rates are in the plant's own currency, not a separate one.
+model DriverIncentivePolicy {
+  id                 String   @id @default(cuid())
+  plantId            String   @unique
+  plant              Plant    @relation(fields: [plantId], references: [id])
+  freeTripsThreshold Int      @default(10)
+  tier2Threshold     Int      @default(15)
+  // Field names carry "Sar" from the reviewed system's own SAR-denominated
+  // policy — the actual amount is always rendered in the owning plant's
+  // own currency (Plant.currency), never a second stored currency.
+  tier2RateSar       Float    @default(0)
+  tier3Threshold     Int      @default(20)
+  tier3RateSar       Float    @default(0)
+  beyondRateSar      Float    @default(20)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 }
 
 model AuditEvent {

@@ -12,10 +12,12 @@ function readPourDetails(formData: FormData) {
     slumpRequestedMm: Number(formData.get("slumpRequestedMm") ?? 0) || null,
     temperatureC: Number(formData.get("temperatureC") ?? 0) || null,
     siteLocation: String(formData.get("siteLocation") ?? "").trim() || null,
+    siteLocationUrl: String(formData.get("siteLocationUrl") ?? "").trim() || null,
     siteContactName: String(formData.get("siteContactName") ?? "").trim() || null,
     siteContactPhone: String(formData.get("siteContactPhone") ?? "").trim() || null,
     deliveryMethod: String(formData.get("deliveryMethod") ?? "CHUTE"),
     structuralElement: String(formData.get("structuralElement") ?? "").trim() || null,
+    labTechnicianRequired: formData.get("labTechnicianRequired") === "on",
   };
 }
 

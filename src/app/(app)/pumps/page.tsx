@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createPump, schedulePump, updateAssignmentStatus, updatePump } from "./actions";
+import { createPump, schedulePump, updateAssignmentStatus, updatePump, createPumpCrewMember, updatePumpCrewMember } from "./actions";
 
 const statusChip: Record<string, string> = {
   SCHEDULED: "bg-info-soft text-ink",
@@ -15,14 +15,14 @@ const statusChip: Record<string, string> = {
 export default async function PumpsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ edit?: string }>;
+  searchParams: Promise<{ edit?: string; editCrew?: string }>;
 }) {
   await requirePageAccess("pumps");
   const { dict } = await getDictionary();
   const m = dict.modules.pumps;
-  const { edit: editId } = await searchParams;
+  const { edit: editId, editCrew: editCrewId } = await searchParams;
 
-  const [pumps, assignments, unassignedReservations, plants] = await Promise.all([
+  const [pumps, assignments, unassignedReservations, plants, pumpCrew] = await Promise.all([
     prisma.pump.findMany({ orderBy: { createdAt: "asc" }, include: { plant: true } }),
     prisma.pumpAssignment.findMany({
       orderBy: { scheduledStart: "asc" },
@@ -34,6 +34,7 @@ export default async function PumpsPage({
       orderBy: { pourWindowStart: "asc" },
     }),
     prisma.plant.findMany({ orderBy: { name: "asc" } }),
+    prisma.pumpCrewMember.findMany({ orderBy: { name: "asc" }, include: { plant: true } }),
   ]);
 
   return (
@@ -280,6 +281,117 @@ export default async function PumpsPage({
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
             {m.book}
+          </button>
+        </form>
+      </div>
+
+      <div className="grid grid-cols-[1fr_320px] gap-6">
+        <div className={ui.card}>
+          <h2 className="mb-1 font-display text-lg font-semibold">{m.crewTitle}</h2>
+          <p className="mb-3 text-sm text-ink-muted">{m.crewIntro}</p>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th className={ui.th}>{m.colCrew.name}</th>
+                <th className={ui.th}>{m.colCrew.role}</th>
+                <th className={ui.th}>{m.colCrew.phone}</th>
+                <th className={ui.th}>{m.colCrew.status}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pumpCrew.map((c) =>
+                editCrewId === c.id ? (
+                  <tr key={c.id}>
+                    <td className={ui.td} colSpan={5}>
+                      <form action={updatePumpCrewMember} className="flex flex-wrap items-end gap-2">
+                        <input type="hidden" name="id" value={c.id} />
+                        <div>
+                          <label className={ui.label}>{m.fCrew.name}</label>
+                          <input name="name" defaultValue={c.name} required className={`${ui.input} w-36`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.fCrew.role}</label>
+                          <select name="role" defaultValue={c.role} className={`${ui.select} w-32`}>
+                            <option value="OPERATOR">{m.roleOperator}</option>
+                            <option value="HELPER">{m.roleHelper}</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.fCrew.phone}</label>
+                          <input name="phone" defaultValue={c.phone ?? ""} className={`${ui.input} w-32`} dir="ltr" />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.colCrew.status}</label>
+                          <select name="status" defaultValue={c.status} className={`${ui.select} w-28`}>
+                            <option value="ACTIVE">{dict.status.ACTIVE}</option>
+                            <option value="INACTIVE">{m.crewInactive}</option>
+                          </select>
+                        </div>
+                        <button className={ui.button}>{dict.field.save}</button>
+                        <Link href="/pumps" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                          {dict.field.cancel}
+                        </Link>
+                      </form>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={c.id}>
+                    <td className={`${ui.td} font-medium`}>{c.name}</td>
+                    <td className={ui.td}>{c.role === "OPERATOR" ? m.roleOperator : m.roleHelper}</td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{c.phone || "—"}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${c.status === "ACTIVE" ? "bg-good-soft text-good" : "bg-surface-alt text-ink-muted"}`}>
+                        {c.status === "ACTIVE" ? dict.status.ACTIVE : m.crewInactive}
+                      </span>
+                    </td>
+                    <td className={ui.td}>
+                      <Link href={`/pumps?editCrew=${c.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {dict.field.edit}
+                      </Link>
+                    </td>
+                  </tr>
+                )
+              )}
+              {pumpCrew.length === 0 && (
+                <tr>
+                  <td className={ui.td} colSpan={5}>
+                    <span className="text-ink-muted">{m.emptyCrew}</span>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <form action={createPumpCrewMember} className={`${ui.card} flex flex-col gap-3`}>
+          <h2 className="font-display text-lg font-semibold">{m.newCrewTitle}</h2>
+          <div>
+            <label className={ui.label}>{dict.field.plant}</label>
+            <select name="plantId" required className={ui.select}>
+              <option value="">{dict.field.selectPlant}</option>
+              {plants.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.fCrew.name}</label>
+            <input name="name" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.fCrew.role}</label>
+            <select name="role" defaultValue="OPERATOR" className={ui.select}>
+              <option value="OPERATOR">{m.roleOperator}</option>
+              <option value="HELPER">{m.roleHelper}</option>
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.fCrew.phone}</label>
+            <input name="phone" className={ui.input} dir="ltr" />
+          </div>
+          <button type="submit" className={`${ui.button} mt-2`}>
+            {m.addCrew}
           </button>
         </form>
       </div>

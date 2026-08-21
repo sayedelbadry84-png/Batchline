@@ -43,6 +43,38 @@ export async function updatePump(formData: FormData) {
   revalidatePath("/pumps");
 }
 
+// A reusable roster (see RhinoMaster comparison) — picking a name from here
+// on the trip-start form prevents typos and lets an operator's history be
+// tracked across many pump jobs, while Trip still stores a plain name too
+// (see startTrip) so a crew member can be typed off-roster without being
+// forced into master data first.
+export async function createPumpCrewMember(formData: FormData) {
+  const plantId = String(formData.get("plantId") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  const role = String(formData.get("role") ?? "OPERATOR");
+  const phone = String(formData.get("phone") ?? "").trim() || null;
+  if (!plantId || !name) return;
+
+  const member = await prisma.pumpCrewMember.create({ data: { plantId, name, role, phone } });
+
+  await logAudit({ module: "Pumps", recordId: member.id, afterValue: name, reasonCode: "PUMP_CREW_CREATED" });
+  revalidatePath("/pumps");
+}
+
+export async function updatePumpCrewMember(formData: FormData) {
+  const id = String(formData.get("id") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  const role = String(formData.get("role") ?? "OPERATOR");
+  const phone = String(formData.get("phone") ?? "").trim() || null;
+  const status = String(formData.get("status") ?? "ACTIVE");
+  if (!id || !name) return;
+
+  await prisma.pumpCrewMember.update({ where: { id }, data: { name, role, phone, status } });
+
+  await logAudit({ module: "Pumps", recordId: id, afterValue: name, reasonCode: "PUMP_CREW_UPDATED" });
+  revalidatePath("/pumps");
+}
+
 export async function schedulePump(formData: FormData) {
   const pumpId = String(formData.get("pumpId") ?? "");
   const reservationId = String(formData.get("reservationId") ?? "");

@@ -34,7 +34,7 @@ export default async function BatchTicketPage({
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
 
-  const [trucksRaw, drivers, pumps] = ticket.status === "COMPLETE" && !ticket.trip
+  const [trucksRaw, drivers, pumps, pumpCrew] = ticket.status === "COMPLETE" && !ticket.trip
     ? await Promise.all([
         prisma.truck.findMany({
           // A truck already on an open trip elsewhere can't be assigned
@@ -47,8 +47,11 @@ export default async function BatchTicketPage({
         isPumpDelivery
           ? prisma.pump.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" }, orderBy: { code: "asc" } })
           : Promise.resolve([]),
+        isPumpDelivery
+          ? prisma.pumpCrewMember.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" }, orderBy: { name: "asc" } })
+          : Promise.resolve([]),
       ])
-    : [[], [], []];
+    : [[], [], [], []];
 
   const trucks = rankTrucksForVolume(trucksRaw, ticket.volumeM3);
 
@@ -208,13 +211,23 @@ export default async function BatchTicketPage({
                 </div>
                 <div>
                   <label className={ui.label}>{d.pumpOperator}</label>
-                  <input name="pumpOperatorName" required className={ui.input} />
+                  <input name="pumpOperatorName" list="pumpOperators" required className={ui.input} />
                 </div>
                 <div>
                   <label className={ui.label}>{d.pumpAssistant}</label>
-                  <input name="pumpAssistantName" className={ui.input} />
+                  <input name="pumpAssistantName" list="pumpAssistants" className={ui.input} />
                 </div>
               </div>
+              <datalist id="pumpOperators">
+                {pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => (
+                  <option key={c.id} value={c.name} />
+                ))}
+              </datalist>
+              <datalist id="pumpAssistants">
+                {pumpCrew.filter((c) => c.role === "HELPER").map((c) => (
+                  <option key={c.id} value={c.name} />
+                ))}
+              </datalist>
             </div>
           )}
           <button type="submit" className={`${ui.button} self-start`}>

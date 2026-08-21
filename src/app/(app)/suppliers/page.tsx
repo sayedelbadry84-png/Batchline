@@ -119,6 +119,7 @@ export default async function SuppliersPage({
               <tr>
                 <th className={ui.th}>{m.colMaterials.material}</th>
                 <th className={ui.th}>{m.colMaterials.type}</th>
+                <th className={ui.th}>{m.colMaterials.brand}</th>
                 <th className={ui.th}>{m.colMaterials.supplier}</th>
                 <th className={ui.th}>{m.colMaterials.sg}</th>
                 <th className={ui.th}>{m.colMaterials.absorption}</th>
@@ -129,7 +130,7 @@ export default async function SuppliersPage({
               {materials.map((mt) =>
                 editMaterialId === mt.id ? (
                   <tr key={mt.id}>
-                    <td className={ui.td} colSpan={6}>
+                    <td className={ui.td} colSpan={7}>
                       <form action={updateMaterial} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={mt.id} />
                         <div>
@@ -157,6 +158,10 @@ export default async function SuppliersPage({
                           </select>
                         </div>
                         <div>
+                          <label className={ui.label}>{m.fMaterial.brand}</label>
+                          <input name="brand" defaultValue={mt.brand ?? ""} className={`${ui.input} w-28`} dir="ltr" />
+                        </div>
+                        <div>
                           <label className={ui.label}>{m.fMaterial.sg}</label>
                           <input name="specificGravity" type="number" step="0.01" defaultValue={mt.specificGravity ?? undefined} className={`${ui.input} w-24`} />
                         </div>
@@ -175,6 +180,7 @@ export default async function SuppliersPage({
                   <tr key={mt.id}>
                     <td className={`${ui.td} font-medium`}>{mt.name}</td>
                     <td className={`${ui.td} font-mono text-xs`}>{dict.materialTypes[mt.type as keyof typeof dict.materialTypes] ?? mt.type}</td>
+                    <td className={ui.td} dir="ltr">{mt.brand || "—"}</td>
                     <td className={ui.td}>{mt.supplier?.name ?? "—"}</td>
                     <td className={`${ui.td} font-mono tabular`}>{mt.specificGravity ?? "—"}</td>
                     <td className={`${ui.td} font-mono tabular`}>{mt.absorptionPct ?? "—"}</td>
@@ -188,7 +194,7 @@ export default async function SuppliersPage({
               )}
               {materials.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={6}>
+                  <td className={ui.td} colSpan={7}>
                     <span className="text-ink-muted">{m.emptyMaterials}</span>
                   </td>
                 </tr>
@@ -224,6 +230,10 @@ export default async function SuppliersPage({
               <option value="ADMIXTURE">{dict.materialTypes.ADMIXTURE}</option>
               <option value="WATER">{dict.materialTypes.WATER}</option>
             </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.fMaterial.brand}</label>
+            <input name="brand" className={ui.input} dir="ltr" placeholder="BASIF, DCP…" />
           </div>
           <div>
             <label className={ui.label}>{m.fMaterial.sg}</label>

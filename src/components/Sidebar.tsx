@@ -27,6 +27,8 @@ const MODULES: { href: string; num: string; key: ModuleKey; labelKey: keyof Dict
   { href: "/pumps", num: "11", key: "pumps", labelKey: "pumps" },
   { href: "/plants", num: "12", key: "plants", labelKey: "plants" },
   { href: "/billing", num: "13", key: "billing", labelKey: "billing" },
+  { href: "/incentives", num: "14", key: "incentives", labelKey: "incentives" },
+  { href: "/stock-ledger", num: "15", key: "stockLedger", labelKey: "stockLedger" },
 ];
 
 const VIEWS: { href: string; key: ModuleKey; labelKey: keyof Dictionary["nav"] }[] = [

@@ -189,6 +189,21 @@ export async function startTrip(formData: FormData) {
   const pumpOperatorName = isPumpDelivery ? String(formData.get("pumpOperatorName") ?? "").trim() || null : null;
   const pumpAssistantName = isPumpDelivery ? String(formData.get("pumpAssistantName") ?? "").trim() || null : null;
 
+  // The datalist only suggests roster names — the field stays free text, so
+  // resolve a match here (case-insensitive, scoped to the plant) rather than
+  // trusting a hidden id the picker never actually sent.
+  let pumpOperatorId: string | null = null;
+  let pumpAssistantId: string | null = null;
+  if (isPumpDelivery && (pumpOperatorName || pumpAssistantName)) {
+    const crew = await prisma.pumpCrewMember.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" } });
+    if (pumpOperatorName) {
+      pumpOperatorId = crew.find((c) => c.name.toLowerCase() === pumpOperatorName.toLowerCase())?.id ?? null;
+    }
+    if (pumpAssistantName) {
+      pumpAssistantId = crew.find((c) => c.name.toLowerCase() === pumpAssistantName.toLowerCase())?.id ?? null;
+    }
+  }
+
   const trip = await prisma.trip.create({
     data: {
       batchTicketId,
@@ -197,6 +212,8 @@ export async function startTrip(formData: FormData) {
       pumpId,
       pumpOperatorName,
       pumpAssistantName,
+      pumpOperatorId,
+      pumpAssistantId,
       status: "LOADING",
       batchTime: ticket.batchCompletedAt ?? new Date(),
     },

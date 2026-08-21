@@ -156,8 +156,10 @@ export default async function MixDesignDetailPage({
               </tr>
             </thead>
             <tbody>
-              {mix.components.map((c) =>
-                editComponentId === c.materialId ? (
+              {mix.components.map((c) => {
+                const showLiters = c.dosageUnit === "LITER" && !!c.material.specificGravity;
+                const displayValue = showLiters ? c.designMassKgPerM3 / c.material.specificGravity! : c.designMassKgPerM3;
+                return editComponentId === c.materialId ? (
                   <tr key={c.id}>
                     <td className={ui.td} colSpan={6}>
                       <form action={addComponent} className="flex flex-wrap items-end gap-2">
@@ -166,7 +168,14 @@ export default async function MixDesignDetailPage({
                         <div className="text-sm font-medium">{c.material.name}</div>
                         <div>
                           <label className={ui.label}>{d.designMassField}</label>
-                          <input name="designMassKgPerM3" type="number" step="0.1" defaultValue={c.designMassKgPerM3} required className={`${ui.input} w-24`} />
+                          <input name="designMassKgPerM3" type="number" step="0.1" defaultValue={displayValue} required className={`${ui.input} w-24`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{d.dosageUnitField}</label>
+                          <select name="dosageUnit" defaultValue={c.dosageUnit} className={`${ui.select} w-24`}>
+                            <option value="KG">{d.unitKg}</option>
+                            <option value="LITER">{d.unitLiter}</option>
+                          </select>
                         </div>
                         <div>
                           <label className={ui.label}>{d.toleranceField}</label>
@@ -183,7 +192,9 @@ export default async function MixDesignDetailPage({
                   <tr key={c.id}>
                     <td className={`${ui.td} font-medium`}>{c.material.name}</td>
                     <td className={`${ui.td} font-mono text-xs`}>{dict.materialTypes[c.material.type as keyof typeof dict.materialTypes] ?? c.material.type}</td>
-                    <td className={`${ui.td} font-mono tabular`}>{c.designMassKgPerM3.toFixed(1)}</td>
+                    <td className={`${ui.td} font-mono tabular`} dir="ltr">
+                      {displayValue.toFixed(showLiters ? 2 : 1)} {showLiters ? d.unitLiterShort : d.unitKgShort}
+                    </td>
                     <td className={`${ui.td} font-mono tabular`}>±{c.tolerancePct}%</td>
                     <td className={`${ui.td} font-mono tabular`}>{c.material.specificGravity ?? "—"}</td>
                     <td className={ui.td}>
@@ -192,8 +203,8 @@ export default async function MixDesignDetailPage({
                       </Link>
                     </td>
                   </tr>
-                )
-              )}
+                );
+              })}
               {mix.components.length === 0 && (
                 <tr>
                   <td className={ui.td} colSpan={6}>
@@ -222,6 +233,13 @@ export default async function MixDesignDetailPage({
           <div>
             <label className={ui.label}>{d.designMassField}</label>
             <input name="designMassKgPerM3" type="number" step="0.1" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{d.dosageUnitField}</label>
+            <select name="dosageUnit" defaultValue="KG" className={ui.select}>
+              <option value="KG">{d.unitKg}</option>
+              <option value="LITER">{d.unitLiter}</option>
+            </select>
           </div>
           <div>
             <label className={ui.label}>{d.toleranceField}</label>

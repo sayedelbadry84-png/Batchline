@@ -22,12 +22,13 @@ export async function createMaterial(formData: FormData) {
   const supplierId = String(formData.get("supplierId") ?? "") || null;
   const name = String(formData.get("name") ?? "").trim();
   const type = String(formData.get("type") ?? "").trim();
+  const brand = String(formData.get("brand") ?? "").trim() || null;
   const specificGravity = Number(formData.get("specificGravity") ?? 0) || null;
   const absorptionPct = Number(formData.get("absorptionPct") ?? 0) || null;
   if (!name || !type) return;
 
   const material = await prisma.material.create({
-    data: { supplierId, name, type, specificGravity, absorptionPct },
+    data: { supplierId, name, type, brand, specificGravity, absorptionPct },
   });
 
   await logAudit({ module: "Suppliers", recordId: material.id, afterValue: name, reasonCode: "MATERIAL_CREATED" });
@@ -52,13 +53,14 @@ export async function updateMaterial(formData: FormData) {
   const supplierId = String(formData.get("supplierId") ?? "") || null;
   const name = String(formData.get("name") ?? "").trim();
   const type = String(formData.get("type") ?? "").trim();
+  const brand = String(formData.get("brand") ?? "").trim() || null;
   const specificGravity = Number(formData.get("specificGravity") ?? 0) || null;
   const absorptionPct = Number(formData.get("absorptionPct") ?? 0) || null;
   if (!id || !name || !type) return;
 
   await prisma.material.update({
     where: { id },
-    data: { supplierId, name, type, specificGravity, absorptionPct },
+    data: { supplierId, name, type, brand, specificGravity, absorptionPct },
   });
 
   await logAudit({ module: "Suppliers", recordId: id, afterValue: name, reasonCode: "MATERIAL_UPDATED" });

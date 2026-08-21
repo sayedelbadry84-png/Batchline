@@ -128,6 +128,10 @@ export default async function ReservationsPage({
                             <input name="siteLocation" defaultValue={r.siteLocation ?? ""} className={`${ui.input} w-40`} />
                           </div>
                           <div>
+                            <label className={ui.label}>{m.f.siteLocationUrl}</label>
+                            <input name="siteLocationUrl" defaultValue={r.siteLocationUrl ?? ""} className={`${ui.input} w-48`} dir="ltr" placeholder="https://maps.google.com/…" />
+                          </div>
+                          <div>
                             <label className={ui.label}>{m.f.siteContactName}</label>
                             <input name="siteContactName" defaultValue={r.siteContactName ?? ""} className={`${ui.input} w-32`} />
                           </div>
@@ -135,6 +139,10 @@ export default async function ReservationsPage({
                             <label className={ui.label}>{m.f.siteContactPhone}</label>
                             <input name="siteContactPhone" defaultValue={r.siteContactPhone ?? ""} className={`${ui.input} w-32`} dir="ltr" />
                           </div>
+                          <label className="flex items-center gap-2 text-sm">
+                            <input type="checkbox" name="labTechnicianRequired" defaultChecked={r.labTechnicianRequired} />
+                            {m.f.labTechnicianRequired}
+                          </label>
                           <button className={ui.button}>{dict.field.save}</button>
                           <Link href="/reservations" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
                             {dict.field.cancel}
@@ -155,7 +163,18 @@ export default async function ReservationsPage({
                       {(r.siteLocation || r.siteContactName || r.siteContactPhone) && (
                         <div className="text-xs text-ink-muted">
                           {[r.siteLocation, r.siteContactName, r.siteContactPhone].filter(Boolean).join(" · ")}
+                          {r.siteLocationUrl && (
+                            <>
+                              {" · "}
+                              <a href={r.siteLocationUrl} target="_blank" rel="noopener noreferrer" className="text-accent-strong hover:underline" dir="ltr">
+                                {m.mapLink}
+                              </a>
+                            </>
+                          )}
                         </div>
+                      )}
+                      {r.labTechnicianRequired && (
+                        <span className={`${ui.chip} bg-accent-soft text-accent-strong mt-1 inline-block`}>{m.labTechnicianBadge}</span>
                       )}
                     </td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.mix.code}</td>
@@ -259,6 +278,10 @@ export default async function ReservationsPage({
             <input name="siteLocation" className={ui.input} />
           </div>
           <div>
+            <label className={ui.label}>{m.f.siteLocationUrl}</label>
+            <input name="siteLocationUrl" className={ui.input} dir="ltr" placeholder="https://maps.google.com/…" />
+          </div>
+          <div>
             <label className={ui.label}>{m.f.siteContactName}</label>
             <input name="siteContactName" className={ui.input} />
           </div>
@@ -266,6 +289,10 @@ export default async function ReservationsPage({
             <label className={ui.label}>{m.f.siteContactPhone}</label>
             <input name="siteContactPhone" className={ui.input} dir="ltr" />
           </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" name="labTechnicianRequired" />
+            {m.f.labTechnicianRequired}
+          </label>
           <button type="submit" className={`${ui.button} mt-2`}>
             {m.create}
           </button>

@@ -13,9 +13,13 @@ full Arabic/RTL localization across every page)**, **Phase 6 (Billing —
 customer pricing, invoicing, and AR)**, **Phase 8 (AI decision layer —
 statistical anomaly detection on batch deviations, early-age strength
 prediction, best-fit truck ranking for dispatch, estimated embodied
-carbon, and a demand outlook from the reservation pipeline)**, and
+carbon, and a demand outlook from the reservation pipeline)**,
 **Material Receiving** (built out of sequence to close a gap in the
-original module list) — a real
+original module list), and **Phase 9 (features adopted from a live
+competitor teardown — a reusable pump-crew roster, tiered driver
+incentives, a real max-temperature validation on reservations, liter-based
+admixture dosing, material brand tagging, and a derived stock ledger)** —
+a real
 database, real CRUD, and the batching physics (yield factor, tolerance,
 drum timer, return policy, plant KPIs) actually computing from live data,
 not placeholders.
@@ -536,6 +540,64 @@ driver app (`/driver`) automatically instead of the back office.
   login and confirmed the AR tile disappeared while the quality pass-rate
   tile remained — RBAC gating verified, not assumed. Confirmed the full
   layout in Arabic — sidebar and every card correctly mirror to RTL.
+
+**Phase 9 — features adopted from a competitor teardown**
+- Built after a live walkthrough of a competitor ready-mix system
+  (RhinoMaster), scoped to the six areas explicitly requested:
+  reservations, production, fleet management, mix design, raw materials,
+  and stock balances. Each feature below is derived from data the app
+  already records wherever possible, rather than adding parallel state
+  that could drift out of sync.
+- **Reservations** — a pasted maps-share link (`siteLocationUrl`) shown as
+  a clickable "map" link next to the project name, simpler and more
+  directly actionable for a driver than structured coordinates; a "lab
+  technician required on site" flag (`labTechnicianRequired`) shown as a
+  badge chip; and the existing `temperatureC` field repurposed from an
+  informational figure into a real validation threshold — the Quality
+  page now flags a logged `TestBatch.concreteTempC` in red when it
+  exceeds the reservation's max, instead of just recording it.
+- **Fleet management** — a reusable **Pump Crew roster**
+  (`PumpCrewMember`, managed from the Pumps page) replacing free-text
+  pump-operator/assistant entry: the trip-start form on a batch ticket
+  now offers roster names via an HTML5 `<datalist>` autocomplete, and
+  `startTrip` resolves a typed name against the roster case-insensitively
+  (scoped to the ticket's plant) to also set `pumpOperatorId` /
+  `pumpAssistantId` — while still always storing the plain-text name, so
+  a crew member can be typed off-roster without being forced into master
+  data first. Also **Driver Incentives** (`/incentives`): a tiered
+  per-trip bonus policy per plant (`DriverIncentivePolicy` — free trips,
+  then three rate tiers), with payout computed live from each driver's
+  closed-trip count for the current month (`src/lib/incentives.ts`, a
+  pure function) — nothing precomputed or stored.
+- **Mix design + raw materials** — `Material.brand` (e.g. "BASIF PS-201")
+  shown in the Suppliers materials table and both its forms; and
+  `MixComponent.dosageUnit` (KG / LITER) so a chemical admixture can be
+  dosed and displayed in liters on the mix-design detail page, converted
+  from the one stored `designMassKgPerM3` via the material's own specific
+  gravity (`liters = designMassKgPerM3 / specificGravity`) — the mass
+  figure stays the single source of truth for yield/tolerance math either
+  way, so there's no second stored quantity that could drift.
+- **Stock ledger** (`/stock-ledger`) — a per-material balance with a full
+  movement history, derived entirely from existing records: inflows are
+  receipts that actually posted to inventory (the same condition
+  Material Receiving itself uses before touching a silo/hopper level),
+  outflows are completed batch tickets' actual (or target, if never
+  weighed) mass — the same fallback `completeBatch` already uses when
+  deducting inventory. No new stock-count entry screen, so there's
+  nothing to keep in sync by hand.
+- Verified live end-to-end: created a pump crew member, then started a
+  pump-delivery trip typing the name in a different case than stored —
+  confirmed in the database that `pumpOperatorId` resolved correctly
+  while `pumpOperatorName` kept the exact text typed. Set a driver
+  incentive policy and confirmed it persisted. Set a material's dosage to
+  3.5 liters and confirmed the mix-design page displayed "3.50 لتر" (round-
+  tripped correctly through the stored kg figure). Set a material brand
+  and confirmed it rendered in the Suppliers table. Posted a pending
+  material receipt and confirmed its `+29,700 kg` appeared as the first
+  entry in that material's stock ledger, netted correctly against two
+  batch tickets' consumption. Confirmed in Arabic throughout — new nav
+  entries, table columns, and form labels all render RTL with no
+  English-only strings.
 
 ## Not yet implemented (see the rollout plan)
 

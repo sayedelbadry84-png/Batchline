@@ -50,15 +50,27 @@ export async function updateMixDesign(formData: FormData) {
 export async function addComponent(formData: FormData) {
   const mixId = String(formData.get("mixId") ?? "");
   const materialId = String(formData.get("materialId") ?? "");
-  const designMassKgPerM3 = Number(formData.get("designMassKgPerM3") ?? 0);
+  const enteredValue = Number(formData.get("designMassKgPerM3") ?? 0);
   const tolerancePct = Number(formData.get("tolerancePct") ?? 2);
+  const dosageUnit = String(formData.get("dosageUnit") ?? "KG");
 
-  if (!mixId || !materialId || !designMassKgPerM3) return;
+  if (!mixId || !materialId || !enteredValue) return;
+
+  // Chemical admixtures are conventionally dosed by volume on site — when
+  // the operator enters liters, convert to the kg the yield-factor math
+  // actually needs using the material's own specific gravity (the same
+  // absolute-volume-method conversion already used for design volume);
+  // designMassKgPerM3 stays the one stored figure either way.
+  let designMassKgPerM3 = enteredValue;
+  if (dosageUnit === "LITER") {
+    const material = await prisma.material.findUnique({ where: { id: materialId } });
+    if (material?.specificGravity) designMassKgPerM3 = enteredValue * material.specificGravity;
+  }
 
   await prisma.mixComponent.upsert({
     where: { mixId_materialId: { mixId, materialId } },
-    create: { mixId, materialId, designMassKgPerM3, tolerancePct },
-    update: { designMassKgPerM3, tolerancePct },
+    create: { mixId, materialId, designMassKgPerM3, tolerancePct, dosageUnit },
+    update: { designMassKgPerM3, tolerancePct, dosageUnit },
   });
 
   await logAudit({

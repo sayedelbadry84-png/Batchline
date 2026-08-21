@@ -71,6 +71,8 @@ export default async function QualityPage({
             const prediction = latestEarlyResult
               ? predictFinalStrength(latestEarlyResult.ageDays, latestEarlyResult.breakStrengthMpa, latestEarlyResult.targetStrengthMpa, strengthFits)
               : null;
+            const maxTempC = tb.trip.batchTicket.reservation.temperatureC;
+            const maxTempExceeded = maxTempC != null && tb.concreteTempC != null && tb.concreteTempC > maxTempC;
             return (
             <div key={tb.id} className={ui.card}>
               <div className="flex items-start justify-between">
@@ -86,9 +88,16 @@ export default async function QualityPage({
                 <div className="font-mono text-xs text-ink-muted tabular" dir="ltr">
                   {tb.slumpMeasuredMm != null && <div>{m.slump(tb.slumpMeasuredMm)}</div>}
                   {tb.airContentPct != null && <div>{m.air(tb.airContentPct)}</div>}
-                  {tb.concreteTempC != null && <div>{tb.concreteTempC}°C</div>}
+                  {tb.concreteTempC != null && (
+                    <div className={maxTempExceeded ? "font-semibold text-critical" : ""}>{tb.concreteTempC}°C</div>
+                  )}
                 </div>
               </div>
+              {maxTempExceeded && (
+                <div className="mt-2 text-xs font-medium text-critical">
+                  {m.maxTempExceeded(tb.concreteTempC!, tb.trip.batchTicket.reservation.temperatureC!)}
+                </div>
+              )}
 
               <table className={`${ui.table} mt-3`}>
                 <thead>
