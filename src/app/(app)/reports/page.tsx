@@ -19,6 +19,7 @@ import {
   getWorkerProductivityReport,
 } from "@/lib/reportQueries";
 import { calculateDriverPayout, type IncentivePolicy } from "@/lib/incentives";
+import { markDrumReturnFate } from "../trips/actions";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
@@ -600,6 +601,25 @@ export default async function ReportsPage({
 
       {tab === "returns" && returnsData && (
         <div className="flex flex-col gap-4">
+          <div className={`${ui.card} border-warn/40`}>
+            <h2 className="mb-1 font-display text-base font-semibold">{m.returnsReport.pendingTitle}</h2>
+            <p className="mb-3 text-sm text-ink-muted">{m.returnsReport.pendingIntro}</p>
+            {returnsData.pendingFate.map((r) => (
+              <form key={r.id} action={markDrumReturnFate} className="flex items-center gap-3 border-t border-border py-2 first:border-t-0 first:pt-0">
+                <input type="hidden" name="id" value={r.id} />
+                <span className="w-24 shrink-0 font-mono text-xs" dir="ltr">{r.trip.truck.code}</span>
+                <span className="flex-1 text-sm text-ink-muted">{r.trip.driver.name} · {r.returnedVolumeM3} m³</span>
+                <button name="fate" value="RECLAIMED" className="rounded-md border border-good bg-good-soft px-2 py-1 text-xs text-good hover:opacity-80">
+                  {dict.returnFates.RECLAIMED}
+                </button>
+                <button name="fate" value="DUMPED" className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt">
+                  {dict.returnFates.DUMPED}
+                </button>
+              </form>
+            ))}
+            {returnsData.pendingFate.length === 0 && <p className="text-sm text-ink-muted">{m.returnsReport.pendingEmpty}</p>}
+          </div>
+
           <ExportBar
             m={m}
             tab={tab}
@@ -608,6 +628,10 @@ export default async function ReportsPage({
             message={`${m.tabs.returns} ${rangeFrom} → ${rangeTo}\n${m.returnsReport.totalReturned(returnsData.totalReturnedM3.toFixed(1))}\n${m.returnsReport.wasted(returnsData.wastedM3.toFixed(1))}`}
           />
           <div className="flex gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular text-good">{returnsData.reclaimedM3.toFixed(1)} m³</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.returnsReport.reclaimed(returnsData.reclaimedM3.toFixed(1))}</div>
+            </div>
             <div className={ui.card}>
               <div className="font-mono text-2xl tabular">{returnsData.totalReturnedM3.toFixed(1)} m³</div>
               <div className="mt-1 text-sm text-ink-muted">{m.returnsReport.returnCount(returnsData.returnCount)}</div>

@@ -14,6 +14,7 @@ const SEVEN_DAYS = 7;
 const OUTLOOK_DAYS = 7;
 const CERT_WARNING_DAYS = 60;
 const LIVE_OPS_LIMIT = 4;
+const TRACKER_STALE_HOURS = 24;
 
 function daysUntil(date: Date, nowMs: number) {
   return Math.ceil((date.getTime() - nowMs) / (1000 * 60 * 60 * 24));
@@ -113,6 +114,19 @@ export default async function DashboardPage() {
     }))
     .filter((p) => p.dueForInspection);
 
+  // Tracker health — an ACTIVE truck (idle ones are expected to go quiet)
+  // that hasn't pinged in a day is either turned off, out of coverage, or
+  // its device has failed; either way it's silently invisible to dispatch
+  // until someone notices. Never pinged at all (lastPingAt null) is the
+  // same "not reporting" state, just from day one instead of a recent gap.
+  const staleCutoffMs = nowMs - TRACKER_STALE_HOURS * 60 * 60 * 1000;
+  const trackerAlerts = maintenanceTrucks
+    .filter((t) => t.status === "ACTIVE" && (!t.lastPingAt || t.lastPingAt.getTime() < staleCutoffMs))
+    .map((t) => ({
+      code: t.code,
+      hoursSincePing: t.lastPingAt ? Math.floor((nowMs - t.lastPingAt.getTime()) / (60 * 60 * 1000)) : null,
+    }));
+
   // --- Production sparkline + 7-day total, from the same completedTickets
   // used for anomaly detection below — one query, two views. ---
   const sparklineDays: { date: Date; volumeM3: number }[] = [];
@@ -188,6 +202,14 @@ export default async function DashboardPage() {
     }
     for (const p of pumpMaintenanceAlerts) {
       alerts.push({ key: `pump-maint-${p.id}`, severity: "warn", href: "/equipment?tab=pumps", label: d.alertMaintenanceDue(p.code, p.tripsSinceLastMaintenance) });
+    }
+    for (const t of trackerAlerts) {
+      alerts.push({
+        key: `tracker-${t.code}`,
+        severity: "warn",
+        href: "/equipment?tab=mixers",
+        label: t.hoursSincePing != null ? d.alertTrackerStale(t.code, t.hoursSincePing) : d.alertTrackerNeverReported(t.code),
+      });
     }
   }
   if (canSeeQuality) {

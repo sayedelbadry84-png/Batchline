@@ -57,7 +57,20 @@ export async function getReturnsReport({ from, to }: DateRange) {
   });
   const totalReturnedM3 = returns.reduce((sum, r) => sum + r.returnedVolumeM3, 0);
   const wastedM3 = returns.filter((r) => r.disposition === "FULL_WASTE").reduce((sum, r) => sum + r.returnedVolumeM3, 0);
-  return { rows: returns, totalReturnedM3, wastedM3, returnCount: returns.length };
+  const reclaimedM3 = returns.filter((r) => r.fate === "RECLAIMED").reduce((sum, r) => sum + r.returnedVolumeM3, 0);
+
+  // "In the drums now" (RhinoMaster's framing) — a return logged as still
+  // usable (not FULL_WASTE) but never actually resolved to DUMPED or
+  // RECLAIMED. Not date-range-scoped like the rows above: a truck sitting
+  // on unresolved concrete from last week is exactly the thing this list
+  // exists to surface, range or no range.
+  const pendingFate = await prisma.drumReturn.findMany({
+    where: { disposition: { not: "FULL_WASTE" }, fate: null },
+    include: { trip: { include: { truck: true, driver: true } } },
+    orderBy: { trip: { dischargeEnd: "desc" } },
+  });
+
+  return { rows: returns, totalReturnedM3, wastedM3, reclaimedM3, returnCount: returns.length, pendingFate };
 }
 
 export async function getTripsReport({ from, to }: DateRange) {

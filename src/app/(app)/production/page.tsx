@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { releaseBatchTicket } from "./actions";
+import { releaseBatchTicket, createManualRelease } from "./actions";
 
 // A single mixer truck load — the same hard ceiling releaseBatchTicket
 // enforces server-side, so this is display/UX only, not the real gate.
@@ -16,12 +16,17 @@ const statusChip: Record<string, string> = {
   CANCELLED: "bg-critical-soft text-critical",
 };
 
-export default async function ProductionPage() {
+export default async function ProductionPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ manualBooking?: string }>;
+}) {
   await requirePageAccess("production");
   const { dict } = await getDictionary();
   const m = dict.modules.production;
+  const { manualBooking } = await searchParams;
 
-  const [readyReservationsRaw, activeTickets, recentTickets] = await Promise.all([
+  const [readyReservationsRaw, activeTickets, recentTickets, projects, approvedMixes] = await Promise.all([
     prisma.reservation.findMany({
       // A reservation only shows up here — and can only be released against
       // — once it's cleared both sign-offs (see the Reservations module).
@@ -44,6 +49,8 @@ export default async function ProductionPage() {
       orderBy: { batchCompletedAt: "desc" },
       take: 5,
     }),
+    manualBooking ? prisma.project.findMany({ include: { customer: true }, orderBy: { name: "asc" } }) : Promise.resolve([]),
+    manualBooking ? prisma.mixDesign.findMany({ where: { status: "APPROVED" }, orderBy: { code: "asc" } }) : Promise.resolve([]),
   ]);
 
   const readyReservations = readyReservationsRaw
@@ -55,11 +62,53 @@ export default async function ProductionPage() {
 
   return (
     <div className="flex flex-col gap-8">
-      <header>
-        <div className={ui.eyebrow}>{m.eyebrow}</div>
-        <h1 className={ui.h1}>{m.title}</h1>
-        <p className={ui.intro}>{m.intro}</p>
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <div className={ui.eyebrow}>{m.eyebrow}</div>
+          <h1 className={ui.h1}>{m.title}</h1>
+          <p className={ui.intro}>{m.intro}</p>
+        </div>
+        {!manualBooking && (
+          <Link href="/production?manualBooking=1" className="shrink-0 rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+            {m.manualBooking}
+          </Link>
+        )}
       </header>
+
+      {manualBooking && (
+        <form action={createManualRelease} className={`${ui.card} flex flex-wrap items-end gap-3`}>
+          <div className="w-full">
+            <h2 className="font-display text-lg font-semibold">{m.manualBookingTitle}</h2>
+            <p className="text-sm text-ink-muted">{m.manualBookingIntro}</p>
+          </div>
+          <div>
+            <label className={ui.label}>{dict.field.selectProject}</label>
+            <select name="projectId" required className={`${ui.select} w-48`}>
+              <option value="">{dict.field.selectProject}</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>{p.name} — {p.customer.legalName}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{dict.field.selectMix}</label>
+            <select name="mixId" required className={`${ui.select} w-40`}>
+              <option value="">{dict.field.selectMix}</option>
+              {approvedMixes.map((mx) => (
+                <option key={mx.id} value={mx.id}>{mx.code} — {mx.grade}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.col.remaining}</label>
+            <input name="volumeM3" type="number" step="0.5" max={MAX_LOAD_M3} required className={`${ui.input} w-24`} placeholder="15" />
+          </div>
+          <button type="submit" className={ui.button}>{m.manualBookingSubmit}</button>
+          <Link href="/production" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+            {dict.field.cancel}
+          </Link>
+        </form>
+      )}
 
       <div className="grid grid-cols-2 gap-6">
         <div className={ui.card}>

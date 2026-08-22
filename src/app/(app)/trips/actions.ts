@@ -135,3 +135,34 @@ export async function closeTripWithReturn(formData: FormData) {
   revalidatePath("/trips");
   revalidatePath("/reservations");
 }
+
+// A return can be logged at close time without knowing yet what will
+// actually happen to the concrete sitting in the drum (fate is optional
+// on closeTripWithReturn above) — this closes that loop once someone
+// decides: fed back into another batch (RECLAIMED, the same concept
+// RhinoMaster's "redispatched" status names) or dumped (DUMPED). Never
+// full waste can be marked reclaimed — there's nothing left to reuse.
+export async function markDrumReturnFate(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const fate = String(formData.get("fate") ?? "");
+  if (!id || !fate) return;
+
+  const drumReturn = await prisma.drumReturn.findUnique({ where: { id } });
+  if (!drumReturn || drumReturn.disposition === "FULL_WASTE") return;
+
+  await prisma.drumReturn.update({ where: { id }, data: { fate } });
+
+  await logAudit({
+    module: "Fleet",
+    recordId: id,
+    field: "fate",
+    afterValue: fate,
+    reasonCode: "DRUM_RETURN_FATE_SET",
+  });
+
+  revalidatePath("/trips");
+  revalidatePath("/reports");
+}

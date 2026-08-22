@@ -17,35 +17,21 @@ const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 // max enforces client-side (production/page.tsx); this is the real gate.
 const MAX_LOAD_M3 = 15;
 
-// A reservation's requested volume is a target, not a single truck load —
-// a 200 m³ pour goes out as many partial tickets (one per truck), each
-// deducting from what's left, until the reservation is fully dispatched.
-export async function releaseBatchTicket(formData: FormData) {
-  const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
-
-  const reservationId = String(formData.get("reservationId") ?? "");
-  const requestedVolume = Number(formData.get("volumeM3") ?? 0);
-  // Lets the mobile field view (/operator) land back on its own ticket
-  // detail page instead of the desktop one after releasing — same action,
-  // same business logic, just a different "where do I keep working" target.
-  const returnPrefix = String(formData.get("returnPrefix") ?? "/production");
-  if (!reservationId || !requestedVolume || requestedVolume <= 0) return;
-  if (requestedVolume > MAX_LOAD_M3) return;
-
+// The actual ticket-creation logic shared by releaseBatchTicket (a planned,
+// pre-approved reservation) and createManualRelease (a walk-in sale that
+// self-approves on the way in) — pulled out so neither has to duplicate
+// the ticket-number/component-snapshot logic. Doesn't redirect; each
+// caller does that itself since they land somewhere different.
+async function releaseTicketForReservation(reservationId: string, requestedVolume: number) {
   const reservation = await prisma.reservation.findUnique({
     where: { id: reservationId },
     include: { project: true, mix: { include: { components: true } } },
   });
-  if (!reservation) return;
-  // Re-check server-side — the picker on /production only ever lists
-  // reservations that already cleared both sign-offs, but a stale page
-  // or a second tab shouldn't be able to release against one that hasn't.
-  if (!isReservationApproved(reservation)) return;
+  if (!reservation) return null;
 
   const remaining = await getRemainingVolumeM3(reservationId, reservation.requestedVolumeM3);
   const volumeM3 = Math.min(requestedVolume, remaining);
-  if (volumeM3 <= 0) return;
+  if (volumeM3 <= 0) return null;
 
   const plantId = reservation.project.plantId;
   const ticketCount = await prisma.batchTicket.count({ where: { plantId } });
@@ -79,10 +65,87 @@ export async function releaseBatchTicket(formData: FormData) {
     reasonCode: "BATCH_RELEASED",
   });
 
+  return ticket;
+}
+
+// A reservation's requested volume is a target, not a single truck load —
+// a 200 m³ pour goes out as many partial tickets (one per truck), each
+// deducting from what's left, until the reservation is fully dispatched.
+export async function releaseBatchTicket(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const reservationId = String(formData.get("reservationId") ?? "");
+  const requestedVolume = Number(formData.get("volumeM3") ?? 0);
+  // Lets the mobile field view (/operator) land back on its own ticket
+  // detail page instead of the desktop one after releasing — same action,
+  // same business logic, just a different "where do I keep working" target.
+  const returnPrefix = String(formData.get("returnPrefix") ?? "/production");
+  if (!reservationId || !requestedVolume || requestedVolume <= 0) return;
+  if (requestedVolume > MAX_LOAD_M3) return;
+
+  const reservation = await prisma.reservation.findUnique({ where: { id: reservationId } });
+  if (!reservation) return;
+  // Re-check server-side — the picker on /production only ever lists
+  // reservations that already cleared both sign-offs, but a stale page
+  // or a second tab shouldn't be able to release against one that hasn't.
+  if (!isReservationApproved(reservation)) return;
+
+  const ticket = await releaseTicketForReservation(reservationId, requestedVolume);
+  if (!ticket) return;
+
   revalidatePath("/production");
   revalidatePath("/operator");
   revalidatePath("/reservations");
   redirect(`${returnPrefix}/${ticket.id}`);
+}
+
+// A walk-in sale — a customer at the yard with no prior booking. Creates
+// the reservation and releases the first ticket against it in one step,
+// self-approved by the operator submitting it rather than going through
+// the two-stage sign-off gate: that gate exists for a planned pour that
+// hasn't happened yet, not a truck idling at the yard waiting to load.
+export async function createManualRelease(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const projectId = String(formData.get("projectId") ?? "");
+  const mixId = String(formData.get("mixId") ?? "");
+  const volumeM3 = Number(formData.get("volumeM3") ?? 0);
+  if (!projectId || !mixId || !volumeM3 || volumeM3 <= 0) return;
+  if (volumeM3 > MAX_LOAD_M3) return;
+
+  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  if (!project) return;
+
+  const now = new Date();
+  const reservation = await prisma.reservation.create({
+    data: {
+      projectId,
+      mixId,
+      requestedVolumeM3: volumeM3,
+      pourWindowStart: now,
+      status: "CONFIRMED",
+      initialApprovedAt: now,
+      initialApprovedById: user!.id,
+      finalApprovedAt: now,
+      finalApprovedById: user!.id,
+    },
+  });
+
+  await logAudit({
+    module: "Reservations",
+    recordId: reservation.id,
+    afterValue: `${volumeM3} m3`,
+    reasonCode: "MANUAL_BOOKING_CREATED",
+  });
+
+  const ticket = await releaseTicketForReservation(reservation.id, volumeM3);
+  if (!ticket) return;
+
+  revalidatePath("/production");
+  revalidatePath("/reservations");
+  redirect(`/production/${ticket.id}`);
 }
 
 export async function recordActuals(formData: FormData) {

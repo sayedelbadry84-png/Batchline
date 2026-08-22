@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createReceipt, updateReceipt, deleteReceipt, returnReceiptToSupplier, setQcStatus } from "./actions";
+import { createSupplier } from "../suppliers/actions";
 
 const qcChip: Record<string, string> = {
   PENDING: "bg-surface-alt text-ink-muted",
@@ -16,12 +17,12 @@ const qcChip: Record<string, string> = {
 export default async function MaterialReceivingPage({
   searchParams,
 }: {
-  searchParams: Promise<{ edit?: string }>;
+  searchParams: Promise<{ edit?: string; newSupplier?: string }>;
 }) {
   await requirePageAccess("material-receiving");
   const { dict } = await getDictionary();
   const m = dict.modules.materialReceiving;
-  const { edit: editId } = await searchParams;
+  const { edit: editId, newSupplier } = await searchParams;
 
   const [receipts, plants, suppliers, materials, silos, hoppers, deliveryDrivers] = await Promise.all([
     prisma.materialReceipt.findMany({
@@ -229,6 +230,7 @@ export default async function MaterialReceivingPage({
         </table>
       </div>
 
+      {newSupplier && <form id="inline-new-supplier" action={createSupplier} />}
       <form action={createReceipt} className={`${ui.card} grid grid-cols-3 gap-4`}>
         <h2 className="col-span-3 font-display text-lg font-semibold">{m.captureTitle}</h2>
         <div>
@@ -243,15 +245,36 @@ export default async function MaterialReceivingPage({
           </select>
         </div>
         <div>
-          <label className={ui.label}>{m.f.supplier}</label>
-          <select name="supplierId" required className={ui.select}>
-            <option value="">{dict.field.selectSupplier}</option>
-            {suppliers.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center justify-between">
+            <label className={ui.label}>{m.f.supplier}</label>
+            {!newSupplier && (
+              <Link href="/material-receiving?newSupplier=1" className="text-xs font-medium text-accent-strong hover:underline">
+                {m.addSupplierInline}
+              </Link>
+            )}
+          </div>
+          {newSupplier ? (
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <input form="inline-new-supplier" name="name" required placeholder={m.f.supplier} className={ui.input} />
+              </div>
+              <button form="inline-new-supplier" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                {m.addSupplierInlineSave}
+              </button>
+              <Link href="/material-receiving" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                {dict.field.cancel}
+              </Link>
+            </div>
+          ) : (
+            <select name="supplierId" required className={ui.select}>
+              <option value="">{dict.field.selectSupplier}</option>
+              {suppliers.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <div>
           <label className={ui.label}>{m.f.material}</label>
