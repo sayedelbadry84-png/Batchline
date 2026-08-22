@@ -32,7 +32,7 @@ export function Sidebar({
   const canSee = (key: ModuleKey) => allowedModules.includes(key);
 
   return (
-    <nav className="sticky top-0 flex h-screen w-60 shrink-0 flex-col gap-1 overflow-y-auto border-e border-border px-4 py-6">
+    <nav className="no-print sticky top-0 flex h-screen w-60 shrink-0 flex-col gap-1 overflow-y-auto border-e border-border px-4 py-6">
       <div className="mb-1 flex items-baseline gap-2">
         <span className="font-display text-xl font-semibold tracking-tight">
           Batchline

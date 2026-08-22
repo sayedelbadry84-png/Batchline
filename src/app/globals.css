@@ -53,3 +53,22 @@ body {
 .tabular {
   font-variant-numeric: tabular-nums;
 }
+
+/* Report export: "Print / Save as PDF" just uses the browser's native
+   print pipeline (File > Save as PDF) rather than a server-side PDF
+   library — zero new dependencies, and every report already renders as
+   clean HTML tables. Anything chrome-only (sidebar, nav, buttons) opts
+   out via .no-print; report content wanting a page break opts in via
+   .print-break. */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+    color: #000;
+  }
+  .print-break {
+    break-before: page;
+  }
+}

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
@@ -6,21 +7,96 @@ import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
 import { estimateCo2eKg } from "@/lib/carbon";
 import { groupReservationsByDay } from "@/lib/demand";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
+import { PrintButton } from "@/components/PrintButton";
+import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
+import {
+  getProductionReport,
+  getIncomingReport,
+  getConsumptionReport,
+  getReturnsReport,
+  getTripsReport,
+  getEquipmentProductivityReport,
+  getWorkerProductivityReport,
+} from "@/lib/reportQueries";
+import { calculateDriverPayout, type IncentivePolicy } from "@/lib/incentives";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
 const SILO_MATERIAL_TYPES = new Set(["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"]);
+const REPORT_TABS = ["overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers"] as const;
+type ReportTab = (typeof REPORT_TABS)[number];
+
+const DEFAULT_POLICY: IncentivePolicy = {
+  freeTripsThreshold: 10,
+  tier2Threshold: 15,
+  tier2RateSar: 0,
+  tier3Threshold: 20,
+  tier3RateSar: 0,
+  beyondRateSar: 20,
+};
 
 function fmt(n: number | null, digits = 1, suffix = "") {
   if (n === null || !Number.isFinite(n)) return "—";
   return `${n.toFixed(digits)}${suffix}`;
 }
 
-export default async function ReportsPage() {
+// Report export bar shared by every non-overview tab: date range + Print +
+// WhatsApp. `message` is the pre-built plain-text summary for that tab.
+function ExportBar({
+  m,
+  tab,
+  from,
+  to,
+  message,
+}: {
+  m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["reports"];
+  tab: ReportTab;
+  from: string;
+  to: string;
+  message: string;
+}) {
+  return (
+    <form action={`/reports`} className="no-print flex flex-wrap items-end gap-3">
+      <input type="hidden" name="tab" value={tab} />
+      <div>
+        <label className={ui.label}>{m.dateFrom}</label>
+        <input name="from" type="date" defaultValue={from} className={`${ui.input} w-40`} />
+      </div>
+      <div>
+        <label className={ui.label}>{m.dateTo}</label>
+        <input name="to" type="date" defaultValue={to} className={`${ui.input} w-40`} />
+      </div>
+      <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">{m.applyRange}</button>
+      <div className="ms-auto flex gap-2">
+        <PrintButton label={m.exportPdf} />
+        <WhatsAppShareButton label={m.sendWhatsApp} promptLabel={m.whatsAppPrompt} message={message} />
+      </div>
+    </form>
+  );
+}
+
+export default async function ReportsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string; from?: string; to?: string }>;
+}) {
   await requirePageAccess("reports");
   const { dict } = await getDictionary();
   const m = dict.modules.reports;
+  const { tab: tabRaw, from: fromRaw, to: toRaw } = await searchParams;
+  const tab: ReportTab = (REPORT_TABS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as ReportTab) : "overview";
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const defaultFrom = (() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  })();
+  const rangeFrom = fromRaw || defaultFrom;
+  const rangeTo = toRaw || todayIso;
+  const rangeStart = new Date(`${rangeFrom}T00:00:00`);
+  const rangeEnd = new Date(`${rangeTo}T23:59:59`);
 
   // Server-rendered snapshot at request time, not a re-rendering client
   // component — see the same pattern (and rationale) in (app)/page.tsx.
@@ -170,6 +246,43 @@ export default async function ReportsPage() {
     .filter((inv) => inv.dueDate.getTime() < nowMs)
     .reduce((sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)), 0);
 
+  // --- Data for the non-overview report tabs, only fetched for whichever
+  // tab is actually open. ---
+  const production = tab === "production" ? await getProductionReport({ from: rangeStart, to: rangeEnd }) : null;
+  const incoming = tab === "incoming" ? await getIncomingReport({ from: rangeStart, to: rangeEnd }) : null;
+  const consumption = tab === "consumption" ? await getConsumptionReport({ from: rangeStart, to: rangeEnd }) : null;
+  const returnsData = tab === "returns" ? await getReturnsReport({ from: rangeStart, to: rangeEnd }) : null;
+  const tripsData = tab === "trips" ? await getTripsReport({ from: rangeStart, to: rangeEnd }) : null;
+  const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport({ from: rangeStart, to: rangeEnd }) : null;
+  const workersData = tab === "workers" ? await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd }) : null;
+
+  const incentivesData =
+    tab === "incentives"
+      ? await (async () => {
+          const worker = await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd });
+          const policies = await prisma.driverIncentivePolicy.findMany();
+          const policyByRole = new Map(policies.map((p) => [p.role, p]));
+          const rows = worker.rows.map((r) => {
+            const policy: IncentivePolicy = policyByRole.get(r.role) ?? DEFAULT_POLICY;
+            return { ...r, payout: calculateDriverPayout(r.count, policy) };
+          });
+          rows.sort((a, b) => b.payout - a.payout);
+          return { rows, totalPayout: rows.reduce((sum, r) => sum + r.payout, 0) };
+        })()
+      : null;
+
+  const tabLabels: Record<ReportTab, string> = {
+    overview: m.tabs.overview,
+    production: m.tabs.production,
+    incoming: m.tabs.incoming,
+    consumption: m.tabs.consumption,
+    incentives: m.tabs.incentives,
+    returns: m.tabs.returns,
+    trips: m.tabs.trips,
+    equipment: m.tabs.equipment,
+    workers: m.tabs.workers,
+  };
+
   return (
     <div className="flex flex-col gap-8">
       <header>
@@ -178,6 +291,22 @@ export default async function ReportsPage() {
         <p className={ui.intro}>{m.intro}</p>
       </header>
 
+      <div className="no-print flex flex-wrap gap-1 border-b border-border">
+        {REPORT_TABS.map((t) => (
+          <Link
+            key={t}
+            href={`/reports?tab=${t}`}
+            className={`rounded-t-md px-3 py-2 text-sm ${
+              tab === t ? "border-b-2 border-accent font-medium text-ink" : "text-ink-muted hover:text-ink"
+            }`}
+          >
+            {tabLabels[t]}
+          </Link>
+        ))}
+      </div>
+
+      {tab === "overview" && (
+      <>
       <div>
         <h2 className="mb-3 font-display text-lg font-semibold">{m.productionTitle}</h2>
         <div className="grid grid-cols-4 gap-4">
@@ -330,6 +459,389 @@ export default async function ReportsPage() {
       <div className="rounded-xl border border-dashed border-border p-5 text-sm text-ink-muted">
         <b className="text-ink">{m.notShownTitle}</b> {m.notShownBody}
       </div>
+      </>
+      )}
+
+      {tab === "production" && production && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.production} ${rangeFrom} → ${rangeTo}\n${m.production.totalVolume(production.totalVolumeM3.toFixed(1))}\n${m.production.ticketCount(production.ticketCount)} (${m.production.completedCount(production.completedCount)})`}
+          />
+          <div className="flex gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{production.totalVolumeM3.toFixed(1)} m³</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.production.ticketCount(production.ticketCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{production.completedCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.production.completedCount(production.completedCount)}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.production.col.ticket}</th>
+                  <th className={ui.th}>{m.production.col.project}</th>
+                  <th className={ui.th}>{m.production.col.mix}</th>
+                  <th className={ui.th}>{m.production.col.volume}</th>
+                  <th className={ui.th}>{m.production.col.status}</th>
+                  <th className={ui.th}>{m.production.col.released}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {production.rows.map((t) => (
+                  <tr key={t.id}>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.ticketNumber}</td>
+                    <td className={ui.td}>{t.reservation.project.name}</td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.mix.code}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{t.volumeM3} m³</td>
+                    <td className={ui.td}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(t.releasedAt).toLocaleDateString()}</td>
+                  </tr>
+                ))}
+                {production.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "incoming" && incoming && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.incoming} ${rangeFrom} → ${rangeTo}\n${m.incoming.totalNetWeight(incoming.totalNetKg.toFixed(0))}\n${m.incoming.receiptCount(incoming.receiptCount)}`}
+          />
+          <div className={ui.card}>
+            <div className="font-mono text-2xl tabular">{incoming.totalNetKg.toFixed(0)} kg</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.incoming.receiptCount(incoming.receiptCount)}</div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.incoming.col.received}</th>
+                  <th className={ui.th}>{m.incoming.col.supplier}</th>
+                  <th className={ui.th}>{m.incoming.col.material}</th>
+                  <th className={ui.th}>{m.incoming.col.netWeight}</th>
+                  <th className={ui.th}>{m.incoming.col.po}</th>
+                  <th className={ui.th}>{m.incoming.col.qcStatus}</th>
+                  <th className={ui.th}>{m.incoming.col.driver}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {incoming.rows.map((r) => (
+                  <tr key={r.id}>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.receivedAt).toLocaleDateString()}</td>
+                    <td className={ui.td}>{r.supplier.name}</td>
+                    <td className={ui.td}>{r.material.name}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.netWeightKg.toFixed(0)} kg</td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.poNumber || "—"}</td>
+                    <td className={ui.td}>{dict.status[r.qcStatus as keyof typeof dict.status] ?? r.qcStatus}</td>
+                    <td className={ui.td}>{r.driver?.name ?? r.driverName ?? "—"}</td>
+                  </tr>
+                ))}
+                {incoming.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "consumption" && consumption && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.consumption} ${rangeFrom} → ${rangeTo}\n${m.consumption.ticketCount(consumption.ticketCount)}\n${consumption.rows.map((r) => `${r.materialName}: ${(r.massKg / 1000).toFixed(2)} t`).join("\n")}`}
+          />
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.consumption.col.material}</th>
+                  <th className={ui.th}>{m.consumption.col.type}</th>
+                  <th className={ui.th}>{m.consumption.col.mass}</th>
+                  <th className={ui.th}>{m.consumption.col.tickets}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {consumption.rows.map((r, i) => (
+                  <tr key={i}>
+                    <td className={`${ui.td} font-medium`}>{r.materialName}</td>
+                    <td className={`${ui.td} font-mono text-xs`}>{dict.materialTypes[r.type as keyof typeof dict.materialTypes] ?? r.type}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{(r.massKg / 1000).toFixed(2)} t</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.ticketCount}</td>
+                  </tr>
+                ))}
+                {consumption.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+            <p className="mt-2 text-xs text-ink-muted">{m.consumption.ticketCount(consumption.ticketCount)}</p>
+          </div>
+        </div>
+      )}
+
+      {tab === "returns" && returnsData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.returns} ${rangeFrom} → ${rangeTo}\n${m.returnsReport.totalReturned(returnsData.totalReturnedM3.toFixed(1))}\n${m.returnsReport.wasted(returnsData.wastedM3.toFixed(1))}`}
+          />
+          <div className="flex gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{returnsData.totalReturnedM3.toFixed(1)} m³</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.returnsReport.returnCount(returnsData.returnCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular text-critical">{returnsData.wastedM3.toFixed(1)} m³</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.returnsReport.wasted(returnsData.wastedM3.toFixed(1))}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.returnsReport.col.discharged}</th>
+                  <th className={ui.th}>{m.returnsReport.col.truck}</th>
+                  <th className={ui.th}>{m.returnsReport.col.driver}</th>
+                  <th className={ui.th}>{m.returnsReport.col.project}</th>
+                  <th className={ui.th}>{m.returnsReport.col.returned}</th>
+                  <th className={ui.th}>{m.returnsReport.col.disposition}</th>
+                  <th className={ui.th}>{m.returnsReport.col.reason}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {returnsData.rows.map((r) => (
+                  <tr key={r.id}>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{r.trip.dischargeEnd ? new Date(r.trip.dischargeEnd).toLocaleDateString() : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.trip.truck.code}</td>
+                    <td className={ui.td}>{r.trip.driver.name}</td>
+                    <td className={ui.td}>{r.trip.batchTicket.reservation.project.name}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.returnedVolumeM3} m³</td>
+                    <td className={ui.td}>{dict.status[r.disposition as keyof typeof dict.status] ?? r.disposition}</td>
+                    <td className={ui.td}>{r.reasonCode ? (dict.returnReasons[r.reasonCode as keyof typeof dict.returnReasons] ?? r.reasonCode) : "—"}</td>
+                  </tr>
+                ))}
+                {returnsData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "trips" && tripsData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.trips} ${rangeFrom} → ${rangeTo}\n${m.tripsReport.totalDelivered(tripsData.totalDeliveredM3.toFixed(1))}\n${m.tripsReport.tripCount(tripsData.tripCount)}`}
+          />
+          <div className="flex gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{tripsData.totalDeliveredM3.toFixed(1)} m³</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.tripsReport.tripCount(tripsData.tripCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{fmt(tripsData.avgCycleTimeMin, 0)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.tripsReport.avgCycleTime(fmt(tripsData.avgCycleTimeMin, 0))}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.tripsReport.col.closed}</th>
+                  <th className={ui.th}>{m.tripsReport.col.truck}</th>
+                  <th className={ui.th}>{m.tripsReport.col.driver}</th>
+                  <th className={ui.th}>{m.tripsReport.col.project}</th>
+                  <th className={ui.th}>{m.tripsReport.col.delivered}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tripsData.rows.map((t) => (
+                  <tr key={t.id}>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{t.dischargeEnd ? new Date(t.dischargeEnd).toLocaleString() : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.truck.code}</td>
+                    <td className={ui.td}>{t.driver.name}</td>
+                    <td className={ui.td}>{t.batchTicket.reservation.project.name}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{fmt(t.volumeDeliveredM3, 1, " m³")}</td>
+                  </tr>
+                ))}
+                {tripsData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={5}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "equipment" && equipmentData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.equipment} ${rangeFrom} → ${rangeTo}\n${equipmentData.trucks.map((t) => `${t.code}: ${t.tripCount} trips, ${t.volumeM3.toFixed(1)} m³`).join("\n")}`}
+          />
+          <div className="grid grid-cols-2 gap-6">
+            <div className={ui.card}>
+              <h2 className="mb-3 font-display text-base font-semibold">{m.equipmentReport.trucksTitle}</h2>
+              <table className={ui.table}>
+                <thead>
+                  <tr>
+                    <th className={ui.th}>{m.equipmentReport.col.code}</th>
+                    <th className={ui.th}>{m.equipmentReport.col.trips}</th>
+                    <th className={ui.th}>{m.equipmentReport.col.volume}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {equipmentData.trucks.map((t) => (
+                    <tr key={t.code}>
+                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.code}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{t.tripCount}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{t.volumeM3.toFixed(1)} m³</td>
+                    </tr>
+                  ))}
+                  {equipmentData.trucks.length === 0 && (
+                    <tr><td className={ui.td} colSpan={3}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className={ui.card}>
+              <h2 className="mb-3 font-display text-base font-semibold">{m.equipmentReport.pumpsTitle}</h2>
+              <table className={ui.table}>
+                <thead>
+                  <tr>
+                    <th className={ui.th}>{m.equipmentReport.col.code}</th>
+                    <th className={ui.th}>{m.equipmentReport.col.trips}</th>
+                    <th className={ui.th}>{m.equipmentReport.col.volume}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {equipmentData.pumps.map((p) => (
+                    <tr key={p.code}>
+                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{p.code}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{p.tripCount}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{p.volumeM3.toFixed(1)} m³</td>
+                    </tr>
+                  ))}
+                  {equipmentData.pumps.length === 0 && (
+                    <tr><td className={ui.td} colSpan={3}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === "workers" && workersData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.workers} ${rangeFrom} → ${rangeTo}\n${workersData.rows.map((r) => `${r.name} (${dict.roles[r.role as keyof typeof dict.roles] ?? r.role}): ${r.count}`).join("\n")}`}
+          />
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.workersReport.col.name}</th>
+                  <th className={ui.th}>{m.workersReport.col.role}</th>
+                  <th className={ui.th}>{m.workersReport.col.count}</th>
+                  <th className={ui.th}>{m.workersReport.col.volume}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {workersData.rows.map((r) => (
+                  <tr key={r.key}>
+                    <td className={`${ui.td} font-medium`}>{r.name}</td>
+                    <td className={`${ui.td} font-mono text-xs`}>{dict.roles[r.role as keyof typeof dict.roles] ?? r.role}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.count}</td>
+                    <td className={`${ui.td} font-mono tabular`}>
+                      {r.volumeM3.toFixed(1)} {r.role === "BULKER_DRIVER" || r.role === "WATER_TANKER_DRIVER" ? "t" : "m³"}
+                    </td>
+                  </tr>
+                ))}
+                {workersData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "incentives" && incentivesData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.incentives} ${rangeFrom} → ${rangeTo}\n${incentivesData.rows.map((r) => `${r.name}: ${r.payout.toFixed(0)}`).join("\n")}`}
+          />
+          <p className="text-sm text-ink-muted">{m.incentivesReport.intro}</p>
+          <div className={ui.card}>
+            <div className="font-mono text-2xl tabular" dir="ltr">{incentivesData.totalPayout.toLocaleString()}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.incentivesReport.col.payout}</div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.incentivesReport.col.name}</th>
+                  <th className={ui.th}>{m.incentivesReport.col.role}</th>
+                  <th className={ui.th}>{m.incentivesReport.col.trips}</th>
+                  <th className={ui.th}>{m.incentivesReport.col.payout}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {incentivesData.rows.map((r) => (
+                  <tr key={r.key}>
+                    <td className={`${ui.td} font-medium`}>{r.name}</td>
+                    <td className={`${ui.td} font-mono text-xs`}>{dict.roles[r.role as keyof typeof dict.roles] ?? r.role}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.count}</td>
+                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.payout.toLocaleString()}</td>
+                  </tr>
+                ))}
+                {incentivesData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
