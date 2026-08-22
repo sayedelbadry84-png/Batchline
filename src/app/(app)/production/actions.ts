@@ -182,12 +182,16 @@ export async function completeBatch(formData: FormData) {
 
   const ticket = await prisma.batchTicket.findUnique({
     where: { id: batchTicketId },
-    include: { components: { include: { material: true } }, plant: { include: { silos: true, hoppers: true } } },
+    include: {
+      components: { include: { material: true } },
+      plant: { include: { silos: true, hoppers: true, chemicalTanks: true } },
+    },
   });
   if (!ticket || ticket.status === "COMPLETE") return;
 
-  // Deduct actual (or target, if never weighed) mass from the matching silo
-  // or hopper — the same inventory the Silos screen and dashboard alerts read.
+  // Deduct actual (or target, if never weighed) mass from the matching
+  // silo, hopper, or chemical tank — the same inventory the Silos screen
+  // and dashboard alerts read.
   for (const c of ticket.components) {
     const massKg = c.actualMassKg ?? c.targetMassKg;
     const massTons = massKg / 1000;
@@ -208,6 +212,30 @@ export async function completeBatch(formData: FormData) {
         await prisma.hopper.update({
           where: { id: hopper.id },
           data: { currentLevelTons: Math.max(0, hopper.currentLevelTons - massTons) },
+        });
+      }
+    } else if (c.material.type === "WATER") {
+      // Reuses Hopper (a plain tonnage heap) rather than a new model — a
+      // plant that meters bulk water registers a Hopper with
+      // aggregateType "WATER"; one that doesn't just has no match here,
+      // same silent no-op as any other unregistered destination.
+      const waterHopper = ticket.plant.hoppers.find((h) => h.aggregateType === "WATER");
+      if (waterHopper) {
+        await prisma.hopper.update({
+          where: { id: waterHopper.id },
+          data: { currentLevelTons: Math.max(0, waterHopper.currentLevelTons - massTons) },
+        });
+      }
+    } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
+      // Batched mass is always stored in kg (see addComponent in
+      // mix-designs/actions.ts) — convert back to liters, the unit a
+      // chemical tank is actually metered in.
+      const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
+      if (tank) {
+        const liters = massKg / c.material.specificGravity;
+        await prisma.chemicalTank.update({
+          where: { id: tank.id },
+          data: { currentLevelLiters: Math.max(0, tank.currentLevelLiters - liters) },
         });
       }
     }
@@ -462,14 +490,15 @@ export async function deleteBatchTicket(formData: FormData) {
     include: {
       trip: true,
       components: { include: { material: true } },
-      plant: { include: { silos: true, hoppers: true } },
+      plant: { include: { silos: true, hoppers: true, chemicalTanks: true } },
     },
   });
   if (!ticket || ticket.trip) return;
 
   if (ticket.status === "COMPLETE") {
     for (const c of ticket.components) {
-      const massTons = (c.actualMassKg ?? c.targetMassKg) / 1000;
+      const massKg = c.actualMassKg ?? c.targetMassKg;
+      const massTons = massKg / 1000;
 
       if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
         const silo = ticket.plant.silos.find((s) => s.materialType === c.material.type);
@@ -482,6 +511,17 @@ export async function deleteBatchTicket(formData: FormData) {
         );
         if (hopper) {
           await prisma.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + massTons } });
+        }
+      } else if (c.material.type === "WATER") {
+        const waterHopper = ticket.plant.hoppers.find((h) => h.aggregateType === "WATER");
+        if (waterHopper) {
+          await prisma.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: waterHopper.currentLevelTons + massTons } });
+        }
+      } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
+        const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
+        if (tank) {
+          const liters = massKg / c.material.specificGravity;
+          await prisma.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: tank.currentLevelLiters + liters } });
         }
       }
     }

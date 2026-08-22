@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createSilo, updateSilo, updateSiloLevel } from "./actions";
+import { createSilo, updateSilo, updateSiloLevel, createHopper, updateHopperLevel, createChemicalTank, updateChemicalTankLevel } from "./actions";
 
 function levelColor(pct: number, minPct: number) {
   if (pct <= minPct) return "bg-critical";
@@ -21,9 +21,12 @@ export default async function SilosPage({
   const m = dict.modules.silos;
   const { edit: editId } = await searchParams;
 
-  const [silos, plants] = await Promise.all([
+  const [silos, plants, hoppers, chemicalTanks, admixtureMaterials] = await Promise.all([
     prisma.silo.findMany({ include: { plant: true }, orderBy: { createdAt: "asc" } }),
     prisma.plant.findMany({ orderBy: { name: "asc" } }),
+    prisma.hopper.findMany({ include: { plant: true }, orderBy: { createdAt: "asc" } }),
+    prisma.chemicalTank.findMany({ include: { plant: true, material: true }, orderBy: { createdAt: "asc" } }),
+    prisma.material.findMany({ where: { type: "ADMIXTURE" }, orderBy: { name: "asc" } }),
   ]);
 
   return (
@@ -162,6 +165,148 @@ export default async function SilosPage({
             {m.add}
           </button>
         </form>
+      </div>
+
+      <div>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.hoppersTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.hoppersIntro}</p>
+        <div className="grid grid-cols-[1fr_320px] gap-6">
+          <div className={`${ui.card} flex flex-col gap-4`}>
+            {hoppers.map((h) => {
+              const pct = h.capacityTons > 0 ? (h.currentLevelTons / h.capacityTons) * 100 : 0;
+              return (
+                <div key={h.id} className="flex items-center gap-4">
+                  <div className="w-40 shrink-0">
+                    <div className="font-medium" dir="ltr">{h.name}</div>
+                    <div className="text-xs text-ink-muted">{h.plant.name} · {h.aggregateType}</div>
+                  </div>
+                  <div className="h-2.5 flex-1 overflow-hidden rounded-full border border-border bg-surface-alt">
+                    <div className={`h-full rounded-full ${levelColor(pct, 15)}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+                  </div>
+                  <div className="w-32 shrink-0 font-mono text-xs text-ink-muted tabular" dir="ltr">
+                    {h.currentLevelTons.toFixed(1)} / {h.capacityTons.toFixed(1)} t
+                  </div>
+                  <form action={updateHopperLevel} className="flex shrink-0 items-center gap-1">
+                    <input type="hidden" name="id" value={h.id} />
+                    <input
+                      name="currentLevelTons"
+                      type="number"
+                      step="0.1"
+                      defaultValue={h.currentLevelTons}
+                      className="w-20 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs"
+                    />
+                    <button className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt">{m.update}</button>
+                  </form>
+                </div>
+              );
+            })}
+            {hoppers.length === 0 && <p className="text-sm text-ink-muted">{m.emptyHoppers}</p>}
+          </div>
+
+          <form action={createHopper} className={`${ui.card} flex flex-col gap-3`}>
+            <h2 className="font-display text-lg font-semibold">{m.newHopperTitle}</h2>
+            <div>
+              <label className={ui.label}>{dict.field.plant}</label>
+              <select name="plantId" required className={ui.select}>
+                <option value="">{dict.field.selectPlant}</option>
+                {plants.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={ui.label}>{m.fHopper.name}</label>
+              <input name="name" required className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.fHopper.aggregateType}</label>
+              <select name="aggregateType" required className={ui.select}>
+                <option value="SAND">{dict.materialTypes.SAND}</option>
+                <option value="COARSE_AGGREGATE">{dict.materialTypes.COARSE_AGGREGATE}</option>
+                <option value="WATER">{dict.materialTypes.WATER}</option>
+              </select>
+            </div>
+            <div>
+              <label className={ui.label}>{m.fHopper.capacity}</label>
+              <input name="capacityTons" type="number" step="0.1" required className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.fHopper.currentLevel}</label>
+              <input name="currentLevelTons" type="number" step="0.1" defaultValue={0} className={ui.input} />
+            </div>
+            <button type="submit" className={`${ui.button} mt-2`}>{m.addHopper}</button>
+          </form>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.tanksTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.tanksIntro}</p>
+        <div className="grid grid-cols-[1fr_320px] gap-6">
+          <div className={`${ui.card} flex flex-col gap-4`}>
+            {chemicalTanks.map((t) => {
+              const pct = t.capacityLiters && t.capacityLiters > 0 ? (t.currentLevelLiters / t.capacityLiters) * 100 : 0;
+              return (
+                <div key={t.id} className="flex items-center gap-4">
+                  <div className="w-40 shrink-0">
+                    <div className="font-medium" dir="ltr">{t.name}</div>
+                    <div className="text-xs text-ink-muted">{t.plant.name} · {t.material.name}</div>
+                  </div>
+                  <div className="h-2.5 flex-1 overflow-hidden rounded-full border border-border bg-surface-alt">
+                    <div className={`h-full rounded-full ${levelColor(pct, 15)}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+                  </div>
+                  <div className="w-36 shrink-0 font-mono text-xs text-ink-muted tabular" dir="ltr">
+                    {t.currentLevelLiters.toFixed(0)}{t.capacityLiters ? ` / ${t.capacityLiters.toFixed(0)}` : ""} L
+                  </div>
+                  <form action={updateChemicalTankLevel} className="flex shrink-0 items-center gap-1">
+                    <input type="hidden" name="id" value={t.id} />
+                    <input
+                      name="currentLevelLiters"
+                      type="number"
+                      step="0.1"
+                      defaultValue={t.currentLevelLiters}
+                      className="w-20 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs"
+                    />
+                    <button className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt">{m.update}</button>
+                  </form>
+                </div>
+              );
+            })}
+            {chemicalTanks.length === 0 && <p className="text-sm text-ink-muted">{m.emptyTanks}</p>}
+          </div>
+
+          <form action={createChemicalTank} className={`${ui.card} flex flex-col gap-3`}>
+            <h2 className="font-display text-lg font-semibold">{m.newTankTitle}</h2>
+            <div>
+              <label className={ui.label}>{dict.field.plant}</label>
+              <select name="plantId" required className={ui.select}>
+                <option value="">{dict.field.selectPlant}</option>
+                {plants.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={ui.label}>{m.fTank.material}</label>
+              <select name="materialId" required className={ui.select}>
+                <option value="">{dict.field.selectMaterial}</option>
+                {admixtureMaterials.map((mt) => <option key={mt.id} value={mt.id}>{mt.name}</option>)}
+              </select>
+            </div>
+            {admixtureMaterials.some((mt) => !mt.specificGravity) && (
+              <p className="text-xs text-warn">{m.noSpecificGravityWarning}</p>
+            )}
+            <div>
+              <label className={ui.label}>{m.fTank.name}</label>
+              <input name="name" required className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.fTank.capacity}</label>
+              <input name="capacityLiters" type="number" step="1" className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.fTank.currentLevel}</label>
+              <input name="currentLevelLiters" type="number" step="0.1" defaultValue={0} className={ui.input} />
+            </div>
+            <button type="submit" className={`${ui.button} mt-2`}>{m.addTank}</button>
+          </form>
+        </div>
       </div>
     </div>
   );

@@ -11,6 +11,8 @@ import { revalidatePath } from "next/cache";
 function readPourDetails(formData: FormData) {
   return {
     slumpRequestedMm: Number(formData.get("slumpRequestedMm") ?? 0) || null,
+    slumpToleranceMm: Number(formData.get("slumpToleranceMm") ?? 0) || null,
+    cementType: String(formData.get("cementType") ?? "").trim() || null,
     temperatureC: Number(formData.get("temperatureC") ?? 0) || null,
     siteLocation: String(formData.get("siteLocation") ?? "").trim() || null,
     siteLocationUrl: String(formData.get("siteLocationUrl") ?? "").trim() || null,

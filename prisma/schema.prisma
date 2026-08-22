@@ -97,6 +97,7 @@ model Plant {
   pumpCrewMembers  PumpCrewMember[]
   incentivePolicies DriverIncentivePolicy[]
   supportVehicles  SupportVehicle[]
+  chemicalTanks    ChemicalTank[]
 }
 
 model Silo {
@@ -130,6 +131,28 @@ model Hopper {
   updatedAt        DateTime @updatedAt
 
   receipts MaterialReceipt[]
+}
+
+// Liquid admixture inventory — separate from Silo/Hopper because it's
+// tracked in liters, not tons, and a plant typically has one tank per
+// specific admixture product rather than per material-type category.
+// Wired into completeBatch's deduction loop the same way silos/hoppers
+// are, converting a component's batched mass back to liters via the
+// material's specific gravity (the inverse of the kg conversion
+// addComponent already does when a mix recipe is entered in liters).
+model ChemicalTank {
+  id                 String   @id @default(cuid())
+  plantId            String
+  plant              Plant    @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  materialId         String
+  material           Material @relation(fields: [materialId], references: [id])
+  name               String
+  capacityLiters     Float?
+  currentLevelLiters Float    @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([plantId, materialId])
 }
 
 model MixDesign {
@@ -167,6 +190,7 @@ model Material {
   mixComponents    MixComponent[]
   batchActuals     BatchComponentActual[]
   receipts         MaterialReceipt[]
+  chemicalTanks    ChemicalTank[]
 }
 
 model MixComponent {
@@ -246,6 +270,15 @@ model Reservation {
   // own slump target, since site conditions can call for an adjustment on
   // the day (e.g. a pump mix run wetter than the design slump).
   slumpRequestedMm   Float?
+  // How far the measured slump may miss slumpRequestedMm and still pass —
+  // separate from the fixed SLUMP_TOLERANCE_MM the Reports module uses as
+  // a plant-wide default, since a specific pour can call for a tighter or
+  // looser band. Null means "use the plant-wide default."
+  slumpToleranceMm   Float?
+  // Printed on the delivery ticket when the job specifies one — OPC or
+  // SRC. Null means the job didn't ask, not "OPC by default": leaving it
+  // unset is a real, distinct state from choosing OPC.
+  cementType         String?
   // Maximum concrete temperature allowed at discharge — a real rejection
   // threshold checked against TestBatch.concreteTempC when a sample is
   // logged (see Quality), not just an informational number on the ticket.

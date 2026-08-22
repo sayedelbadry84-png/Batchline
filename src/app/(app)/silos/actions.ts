@@ -82,3 +82,97 @@ export async function updateSiloLevel(formData: FormData) {
 
   revalidatePath("/silos");
 }
+
+// --- Hoppers (aggregate heaps — SAND, COARSE_AGGREGATE, and now WATER;
+// see completeBatch in production/actions.ts for how each is consumed). ---
+
+export async function createHopper(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const plantId = String(formData.get("plantId") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  const aggregateType = String(formData.get("aggregateType") ?? "").trim();
+  const capacityTons = Number(formData.get("capacityTons") ?? 0);
+  const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
+
+  if (!plantId || !name || !aggregateType || !capacityTons) return;
+
+  const hopper = await prisma.hopper.create({
+    data: { plantId, name, aggregateType, capacityTons, currentLevelTons },
+  });
+
+  await logAudit({ module: "Silos", recordId: hopper.id, afterValue: `${name} / ${aggregateType}`, reasonCode: "HOPPER_CREATED" });
+  revalidatePath("/silos");
+}
+
+export async function updateHopperLevel(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
+  if (!id) return;
+
+  const before = await prisma.hopper.findUnique({ where: { id } });
+  await prisma.hopper.update({ where: { id }, data: { currentLevelTons } });
+
+  await logAudit({
+    module: "Silos",
+    recordId: id,
+    field: "currentLevelTons",
+    beforeValue: String(before?.currentLevelTons ?? ""),
+    afterValue: String(currentLevelTons),
+    reasonCode: "MANUAL_LEVEL_READING",
+  });
+
+  revalidatePath("/silos");
+}
+
+// --- Chemical tanks (liquid admixtures — see completeBatch in
+// production/actions.ts for the consumption side of this). ---
+
+export async function createChemicalTank(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const plantId = String(formData.get("plantId") ?? "");
+  const materialId = String(formData.get("materialId") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  const capacityLiters = Number(formData.get("capacityLiters") ?? 0) || null;
+  const currentLevelLiters = Number(formData.get("currentLevelLiters") ?? 0);
+
+  if (!plantId || !materialId || !name) return;
+
+  const tank = await prisma.chemicalTank.upsert({
+    where: { plantId_materialId: { plantId, materialId } },
+    create: { plantId, materialId, name, capacityLiters, currentLevelLiters },
+    update: { name, capacityLiters, currentLevelLiters },
+  });
+
+  await logAudit({ module: "Silos", recordId: tank.id, afterValue: name, reasonCode: "CHEMICAL_TANK_CREATED" });
+  revalidatePath("/silos");
+}
+
+export async function updateChemicalTankLevel(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const currentLevelLiters = Number(formData.get("currentLevelLiters") ?? 0);
+  if (!id) return;
+
+  const before = await prisma.chemicalTank.findUnique({ where: { id } });
+  await prisma.chemicalTank.update({ where: { id }, data: { currentLevelLiters } });
+
+  await logAudit({
+    module: "Silos",
+    recordId: id,
+    field: "currentLevelLiters",
+    beforeValue: String(before?.currentLevelLiters ?? ""),
+    afterValue: String(currentLevelLiters),
+    reasonCode: "MANUAL_TANK_READING",
+  });
+
+  revalidatePath("/silos");
+}

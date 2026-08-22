@@ -143,6 +143,18 @@ export default async function ReservationsPage({
                             <input name="slumpRequestedMm" type="number" defaultValue={r.slumpRequestedMm ?? undefined} className={`${ui.input} w-24`} />
                           </div>
                           <div>
+                            <label className={ui.label}>{m.f.slumpTolerance}</label>
+                            <input name="slumpToleranceMm" type="number" defaultValue={r.slumpToleranceMm ?? undefined} className={`${ui.input} w-20`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.cementType}</label>
+                            <select name="cementType" defaultValue={r.cementType ?? ""} className={`${ui.select} w-24`}>
+                              <option value="">{dict.field.none}</option>
+                              <option value="OPC">OPC</option>
+                              <option value="SRC">SRC</option>
+                            </select>
+                          </div>
+                          <div>
                             <label className={ui.label}>{m.f.temperature}</label>
                             <input name="temperatureC" type="number" step="0.5" defaultValue={r.temperatureC ?? undefined} className={`${ui.input} w-24`} />
                           </div>
@@ -205,11 +217,12 @@ export default async function ReservationsPage({
                       {r.released > 0 && r.released < r.requestedVolumeM3
                         ? `${r.released} / ${r.requestedVolumeM3} m³`
                         : `${r.requestedVolumeM3} m³`}
-                      {(r.slumpRequestedMm != null || r.temperatureC != null) && (
+                      {(r.slumpRequestedMm != null || r.temperatureC != null || r.cementType) && (
                         <div className="font-normal text-xs text-ink-muted">
                           {[
-                            r.slumpRequestedMm != null ? `${r.slumpRequestedMm} mm` : null,
+                            r.slumpRequestedMm != null ? `${r.slumpRequestedMm}${r.slumpToleranceMm != null ? `±${r.slumpToleranceMm}` : ""} mm` : null,
                             r.temperatureC != null ? `${r.temperatureC}°C` : null,
+                            r.cementType,
                           ].filter(Boolean).join(" · ")}
                         </div>
                       )}
@@ -337,6 +350,18 @@ export default async function ReservationsPage({
           <div>
             <label className={ui.label}>{m.f.slump}</label>
             <input name="slumpRequestedMm" type="number" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.slumpTolerance}</label>
+            <input name="slumpToleranceMm" type="number" className={ui.input} placeholder="25" />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.cementType}</label>
+            <select name="cementType" defaultValue="" className={ui.select}>
+              <option value="">{dict.field.none}</option>
+              <option value="OPC">OPC</option>
+              <option value="SRC">SRC</option>
+            </select>
           </div>
           <div>
             <label className={ui.label}>{m.f.temperature}</label>
