@@ -94,3 +94,50 @@ export async function getAccessibleModules(role: string): Promise<ModuleKey[]> {
   const checks = await Promise.all(allKeys.map(async (key) => [key, await canAccessModule(role, key)] as const));
   return checks.filter(([, ok]) => ok).map(([key]) => key);
 }
+
+// --- Per-action permissions (ActionPermission) ---------------------------
+// A finer-grained sibling of the module-level system above: gates one
+// specific action within a module rather than the whole screen — e.g. a
+// PLANT_OPERATOR can create and edit a reservation, but only an Admin can
+// give it final sign-off. Deliberately NOT applied to every action in the
+// app (that would mean retrofitting 40+ server actions for marginal
+// value) — wired into the handful of actions within Reservations and
+// Production where different people genuinely need different rights,
+// mirroring RhinoMaster's own example of splitting "create/edit a
+// booking" from "assign pumps" and "approve" within one module.
+export const ACTION_ROLES = {
+  reservations: {
+    create: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
+    edit: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
+    approveInitial: ["PLANT_OPERATOR", "ADMIN"],
+    approveFinal: ["ADMIN"],
+  },
+  production: {
+    release: ["PLANT_OPERATOR", "ADMIN"],
+    manualBooking: ["PLANT_OPERATOR", "ADMIN"],
+    complete: ["PLANT_OPERATOR", "ADMIN"],
+    deleteTicket: ["PLANT_OPERATOR", "ADMIN"],
+  },
+} as const satisfies Record<string, Record<string, readonly string[]>>;
+
+export type ActionModuleKey = keyof typeof ACTION_ROLES;
+
+// Flat list the Permissions screen renders — every (module, action) pair
+// this system knows about, with a plain string label built from the
+// module's own nav label plus the action's own short label (see
+// ACTION_LABEL_KEY below) rather than a whole second i18n tree.
+export const ACTION_LIST: { moduleKey: ActionModuleKey; actionKey: string }[] = Object.entries(ACTION_ROLES).flatMap(
+  ([moduleKey, actions]) => Object.keys(actions).map((actionKey) => ({ moduleKey: moduleKey as ActionModuleKey, actionKey })),
+);
+
+export async function getEffectiveActionRoles(moduleKey: ActionModuleKey, actionKey: string): Promise<readonly string[]> {
+  const rows = await prisma.actionPermission.findMany({ where: { moduleKey, actionKey } });
+  if (rows.length > 0) return rows.map((r) => r.role);
+  const moduleDefaults: Record<string, readonly string[]> = ACTION_ROLES[moduleKey];
+  return moduleDefaults[actionKey] ?? ASSIGNABLE_ROLES;
+}
+
+export async function canPerformAction(role: string, moduleKey: ActionModuleKey, actionKey: string): Promise<boolean> {
+  const allowed = await getEffectiveActionRoles(moduleKey, actionKey);
+  return allowed.includes(role);
+}

@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { ASSIGNABLE_ROLES, MODULE_KEYS, type ModuleKey } from "@/lib/permissions";
+import { ASSIGNABLE_ROLES, MODULE_KEYS, ACTION_LIST, type ModuleKey } from "@/lib/permissions";
 import { revalidatePath } from "next/cache";
 
 // Full-replace, not a diff — a module's checkbox row always submits its
@@ -42,4 +42,37 @@ export async function saveModulePermissions(formData: FormData) {
   // Every open page's sidebar reads getAccessibleModules on next
   // navigation — no per-user cache to bust beyond the layout itself.
   revalidatePath("/", "layout");
+}
+
+// Same full-replace shape as saveModulePermissions, one action-key row at
+// a time — see ACTION_ROLES in src/lib/permissions.ts for what this
+// actually gates.
+export async function saveActionPermissions(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ADMIN"]);
+
+  const moduleKey = String(formData.get("moduleKey") ?? "");
+  const actionKey = String(formData.get("actionKey") ?? "");
+  if (!ACTION_LIST.some((a) => a.moduleKey === moduleKey && a.actionKey === actionKey)) return;
+
+  const roles = formData
+    .getAll("roles")
+    .map(String)
+    .filter((r): r is (typeof ASSIGNABLE_ROLES)[number] => (ASSIGNABLE_ROLES as readonly string[]).includes(r));
+
+  if (roles.length === 0) return;
+
+  await prisma.$transaction([
+    prisma.actionPermission.deleteMany({ where: { moduleKey, actionKey } }),
+    prisma.actionPermission.createMany({ data: roles.map((role) => ({ moduleKey, actionKey, role })) }),
+  ]);
+
+  await logAudit({
+    module: "Permissions",
+    recordId: `${moduleKey}:${actionKey}`,
+    afterValue: roles.join(","),
+    reasonCode: "ACTION_PERMISSIONS_UPDATED",
+  });
+
+  revalidatePath("/permissions");
 }

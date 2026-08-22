@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getReleasedVolumeM3 } from "@/lib/reservations";
 import { revalidatePath } from "next/cache";
 
@@ -28,7 +28,7 @@ function readPourDetails(formData: FormData) {
 
 export async function createReservation(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "reservations", "create");
 
   const projectId = String(formData.get("projectId") ?? "");
   const mixId = String(formData.get("mixId") ?? "");
@@ -71,7 +71,7 @@ export async function createReservation(formData: FormData) {
 // that concrete is already real and can't un-happen.
 export async function updateReservation(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "reservations", "edit");
 
   const id = String(formData.get("id") ?? "");
   const projectId = String(formData.get("projectId") ?? "");
@@ -117,7 +117,7 @@ export async function updateReservation(formData: FormData) {
 // move forward. First of the two required sign-offs.
 export async function approveReservationInitial(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "reservations", "approveInitial");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -141,7 +141,7 @@ export async function approveReservationInitial(formData: FormData) {
 // isReservationApproved in src/lib/reservations.ts).
 export async function approveReservationFinal(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ADMIN"]);
+  await requireActionPermission(user, "reservations", "approveFinal");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;

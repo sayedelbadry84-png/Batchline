@@ -604,6 +604,22 @@ const en: typeof ar = {
       defaultNote: "Not yet customized — showing the built-in default.",
       customNote: "Customized",
       allUncheckedWarning: "At least one role must stay checked, or nobody (including Admin) could open this module.",
+      actionsTitle: "Action permissions",
+      actionsIntro: "Finer-grained than the module grid above — gates one specific action within a module rather than the whole screen. Not every action in the app has a row here; only the ones where different people genuinely need different rights.",
+      actionLabel: {
+        reservations: {
+          create: "Create a reservation",
+          edit: "Edit a reservation",
+          approveInitial: "Approve (initial)",
+          approveFinal: "Approve (final)",
+        },
+        production: {
+          release: "Release a batch ticket",
+          manualBooking: "Manual booking (walk-in sale)",
+          complete: "Complete a batch (deducts inventory)",
+          deleteTicket: "Delete a batch ticket",
+        },
+      },
     },
     plants: {
       eyebrow: "Module 12 — Plant Management",

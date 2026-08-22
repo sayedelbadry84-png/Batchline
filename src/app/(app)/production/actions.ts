@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -85,7 +85,7 @@ async function releaseTicketForReservation(reservationId: string, requestedVolum
 // deducting from what's left, until the reservation is fully dispatched.
 export async function releaseBatchTicket(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "production", "release");
 
   const reservationId = String(formData.get("reservationId") ?? "");
   const requestedVolume = Number(formData.get("volumeM3") ?? 0);
@@ -119,7 +119,7 @@ export async function releaseBatchTicket(formData: FormData) {
 // hasn't happened yet, not a truck idling at the yard waiting to load.
 export async function createManualRelease(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "production", "manualBooking");
 
   const projectId = String(formData.get("projectId") ?? "");
   const mixId = String(formData.get("mixId") ?? "");
@@ -250,7 +250,7 @@ export async function recordActualField(formData: FormData) {
 
 export async function completeBatch(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "production", "complete");
 
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   if (!batchTicketId) return;
@@ -556,7 +556,7 @@ export async function deleteTicketComponent(formData: FormData) {
 // before deleting, the mirror image of that same deduction loop.
 export async function deleteBatchTicket(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "production", "deleteTicket");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;

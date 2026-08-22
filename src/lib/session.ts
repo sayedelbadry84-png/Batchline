@@ -2,7 +2,7 @@ import "server-only";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
-import { canAccessModule, type ModuleKey } from "@/lib/permissions";
+import { canAccessModule, canPerformAction, type ModuleKey, type ActionModuleKey } from "@/lib/permissions";
 
 export const SESSION_COOKIE = "batchline_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -85,4 +85,18 @@ export async function requirePageAccess(moduleKey: ModuleKey) {
     redirect(`/access-denied?module=${moduleKey}`);
   }
   return user;
+}
+
+/**
+ * Finer-grained sibling of requireRole, for the specific actions gated by
+ * ActionPermission (src/lib/permissions.ts) instead of a hardcoded role
+ * array — e.g. reservation approval, where the database-editable grant
+ * (set from /permissions) is the actual source of truth, not a value
+ * baked into this call site.
+ */
+export async function requireActionPermission(user: CurrentUser | null, moduleKey: ActionModuleKey, actionKey: string) {
+  if (!user) throw new Error("Not authenticated.");
+  if (!(await canPerformAction(user.role, moduleKey, actionKey))) {
+    throw new Error(`Role ${user.role} is not permitted to perform "${actionKey}" in ${moduleKey}.`);
+  }
 }
