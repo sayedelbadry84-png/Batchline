@@ -10,28 +10,29 @@ export async function updateIncentivePolicy(formData: FormData) {
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
   const plantId = String(formData.get("plantId") ?? "");
+  const role = String(formData.get("role") ?? "").trim();
   const freeTripsThreshold = Number(formData.get("freeTripsThreshold") ?? 10);
   const tier2Threshold = Number(formData.get("tier2Threshold") ?? 15);
   const tier2RateSar = Number(formData.get("tier2RateSar") ?? 0);
   const tier3Threshold = Number(formData.get("tier3Threshold") ?? 20);
   const tier3RateSar = Number(formData.get("tier3RateSar") ?? 0);
   const beyondRateSar = Number(formData.get("beyondRateSar") ?? 0);
-  if (!plantId) return;
+  if (!plantId || !role) return;
 
-  const before = await prisma.driverIncentivePolicy.findUnique({ where: { plantId } });
+  const before = await prisma.driverIncentivePolicy.findUnique({ where: { plantId_role: { plantId, role } } });
 
   await prisma.driverIncentivePolicy.upsert({
-    where: { plantId },
-    create: { plantId, freeTripsThreshold, tier2Threshold, tier2RateSar, tier3Threshold, tier3RateSar, beyondRateSar },
+    where: { plantId_role: { plantId, role } },
+    create: { plantId, role, freeTripsThreshold, tier2Threshold, tier2RateSar, tier3Threshold, tier3RateSar, beyondRateSar },
     update: { freeTripsThreshold, tier2Threshold, tier2RateSar, tier3Threshold, tier3RateSar, beyondRateSar },
   });
 
   await logAudit({
     module: "Fleet",
-    recordId: plantId,
+    recordId: `${plantId}:${role}`,
     field: "driverIncentivePolicy",
     beforeValue: before ? JSON.stringify(before) : undefined,
-    afterValue: JSON.stringify({ freeTripsThreshold, tier2Threshold, tier2RateSar, tier3Threshold, tier3RateSar, beyondRateSar }),
+    afterValue: JSON.stringify({ role, freeTripsThreshold, tier2Threshold, tier2RateSar, tier3Threshold, tier3RateSar, beyondRateSar }),
     reasonCode: "INCENTIVE_POLICY_UPDATED",
   });
 

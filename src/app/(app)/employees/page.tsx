@@ -5,7 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createEmployee, updateEmployee } from "./actions";
 
-const ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DRIVER", "DISPATCHER", "ADMIN"] as const;
+const ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DRIVER", "DISPATCHER", "ADMIN", "BULKER_DRIVER", "WATER_TANKER_DRIVER"] as const;
 
 // Pure and outside the component body on purpose — takes "now" and the
 // translated labels as arguments instead of closing over Date.now()/dict,

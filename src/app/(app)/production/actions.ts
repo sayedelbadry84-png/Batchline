@@ -117,6 +117,52 @@ export async function recordActuals(formData: FormData) {
   revalidatePath(`/operator/ticket/${batchTicketId}`);
 }
 
+// One field, saved the instant it's entered — called from AutoSaveField's
+// onBlur handler rather than waiting for the whole "Save readings" form to
+// be submitted, so a reading typed on the batching floor isn't lost to a
+// tab switch or an interrupted operator before that button gets pressed.
+// recordActuals (above) still exists for the explicit bulk save/status-flip.
+export async function recordActualField(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const batchTicketId = String(formData.get("batchTicketId") ?? "");
+  const componentId = String(formData.get("componentId") ?? "");
+  const field = String(formData.get("field") ?? "");
+  const rawValue = formData.get("value");
+  if (!batchTicketId || !componentId || rawValue === null || rawValue === "") return;
+  if (field !== "actual" && field !== "moisture") return;
+
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) return;
+
+  const component = await prisma.batchComponentActual.findUnique({
+    where: { id: componentId },
+    include: { batchTicket: true },
+  });
+  if (!component || component.batchTicketId !== batchTicketId || component.batchTicket.status === "COMPLETE") return;
+
+  await prisma.batchComponentActual.update({
+    where: { id: componentId },
+    data: field === "actual" ? { actualMassKg: value } : { moisturePct: value },
+  });
+
+  if (component.batchTicket.status !== "BATCHING") {
+    await prisma.batchTicket.update({ where: { id: batchTicketId }, data: { status: "BATCHING" } });
+  }
+
+  await logAudit({
+    module: "Production",
+    recordId: batchTicketId,
+    field: `component:${componentId}:${field}`,
+    afterValue: String(value),
+    reasonCode: "ACTUAL_FIELD_AUTOSAVED",
+  });
+
+  revalidatePath(`/production/${batchTicketId}`);
+  revalidatePath(`/operator/ticket/${batchTicketId}`);
+}
+
 export async function completeBatch(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
@@ -206,8 +252,8 @@ export async function startTrip(formData: FormData) {
   // pump doesn't attach itself to a trip that never used one.
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
   const pumpId = isPumpDelivery ? String(formData.get("pumpId") ?? "").trim() || null : null;
-  const pumpOperatorName = isPumpDelivery ? String(formData.get("pumpOperatorName") ?? "").trim() || null : null;
-  const pumpAssistantName = isPumpDelivery ? String(formData.get("pumpAssistantName") ?? "").trim() || null : null;
+  const pumpOperatorIdInput = isPumpDelivery ? String(formData.get("pumpOperatorId") ?? "").trim() || null : null;
+  const pumpAssistantIdInput = isPumpDelivery ? String(formData.get("pumpAssistantId") ?? "").trim() || null : null;
 
   // Re-check server-side, same reasoning as the truck-busy check above — the
   // picker only labels a short-reach pump, it doesn't remove it from the list.
@@ -216,18 +262,29 @@ export async function startTrip(formData: FormData) {
     if (pump?.reachM != null && pump.reachM < ticket.reservation.minPumpReachM) return;
   }
 
-  // The datalist only suggests roster names — the field stays free text, so
-  // resolve a match here (case-insensitive, scoped to the plant) rather than
-  // trusting a hidden id the picker never actually sent.
+  // The select only ever offers this plant's active roster — re-verify the
+  // submitted id against it server-side rather than trusting the picker,
+  // same reasoning as the truck-busy check above. A stray id (stale page,
+  // crew member deactivated meanwhile) is dropped rather than trusted.
   let pumpOperatorId: string | null = null;
   let pumpAssistantId: string | null = null;
-  if (isPumpDelivery && (pumpOperatorName || pumpAssistantName)) {
+  let pumpOperatorName: string | null = null;
+  let pumpAssistantName: string | null = null;
+  if (isPumpDelivery && (pumpOperatorIdInput || pumpAssistantIdInput)) {
     const crew = await prisma.pumpCrewMember.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" } });
-    if (pumpOperatorName) {
-      pumpOperatorId = crew.find((c) => c.name.toLowerCase() === pumpOperatorName.toLowerCase())?.id ?? null;
+    if (pumpOperatorIdInput) {
+      const match = crew.find((c) => c.id === pumpOperatorIdInput && c.role === "OPERATOR");
+      if (match) {
+        pumpOperatorId = match.id;
+        pumpOperatorName = match.name;
+      }
     }
-    if (pumpAssistantName) {
-      pumpAssistantId = crew.find((c) => c.name.toLowerCase() === pumpAssistantName.toLowerCase())?.id ?? null;
+    if (pumpAssistantIdInput) {
+      const match = crew.find((c) => c.id === pumpAssistantIdInput && c.role === "HELPER");
+      if (match) {
+        pumpAssistantId = match.id;
+        pumpAssistantName = match.name;
+      }
     }
   }
 
@@ -252,4 +309,72 @@ export async function startTrip(formData: FormData) {
   revalidatePath("/operator");
   revalidatePath("/trips");
   redirect(returnTo);
+}
+
+// A truck, driver, or pump crew name picked wrong at dispatch shouldn't
+// need the trip cancelled and re-started — correctable up until it actually
+// leaves the yard (status LOADING), same "pre-dispatch only" boundary the
+// reservation editor uses for its own fields.
+export async function updateTripAssignment(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const tripId = String(formData.get("tripId") ?? "");
+  const truckId = String(formData.get("truckId") ?? "");
+  const driverId = String(formData.get("driverId") ?? "");
+  if (!tripId || !truckId || !driverId) return;
+
+  const trip = await prisma.trip.findUnique({
+    where: { id: tripId },
+    include: { batchTicket: { include: { reservation: true } } },
+  });
+  if (!trip || trip.status !== "LOADING") return;
+
+  const truckBusy = await prisma.trip.findFirst({
+    where: { truckId, status: { not: "CLOSED" }, id: { not: tripId } },
+  });
+  if (truckBusy) return;
+
+  const isPumpDelivery = trip.batchTicket.reservation.deliveryMethod === "PUMP";
+  const pumpId = isPumpDelivery ? String(formData.get("pumpId") ?? "").trim() || null : null;
+  const pumpOperatorIdInput = isPumpDelivery ? String(formData.get("pumpOperatorId") ?? "").trim() || null : null;
+  const pumpAssistantIdInput = isPumpDelivery ? String(formData.get("pumpAssistantId") ?? "").trim() || null : null;
+
+  if (isPumpDelivery && pumpId && trip.batchTicket.reservation.minPumpReachM != null) {
+    const pump = await prisma.pump.findUnique({ where: { id: pumpId } });
+    if (pump?.reachM != null && pump.reachM < trip.batchTicket.reservation.minPumpReachM) return;
+  }
+
+  let pumpOperatorId: string | null = null;
+  let pumpAssistantId: string | null = null;
+  let pumpOperatorName: string | null = null;
+  let pumpAssistantName: string | null = null;
+  if (isPumpDelivery && (pumpOperatorIdInput || pumpAssistantIdInput)) {
+    const crew = await prisma.pumpCrewMember.findMany({ where: { plantId: trip.batchTicket.plantId, status: "ACTIVE" } });
+    if (pumpOperatorIdInput) {
+      const match = crew.find((c) => c.id === pumpOperatorIdInput && c.role === "OPERATOR");
+      if (match) {
+        pumpOperatorId = match.id;
+        pumpOperatorName = match.name;
+      }
+    }
+    if (pumpAssistantIdInput) {
+      const match = crew.find((c) => c.id === pumpAssistantIdInput && c.role === "HELPER");
+      if (match) {
+        pumpAssistantId = match.id;
+        pumpAssistantName = match.name;
+      }
+    }
+  }
+
+  await prisma.trip.update({
+    where: { id: tripId },
+    data: { truckId, driverId, pumpId, pumpOperatorId, pumpOperatorName, pumpAssistantId, pumpAssistantName },
+  });
+
+  await logAudit({ module: "Fleet", recordId: tripId, afterValue: `${truckId}/${driverId}`, reasonCode: "TRIP_ASSIGNMENT_UPDATED" });
+
+  revalidatePath(`/production/${trip.batchTicketId}`);
+  revalidatePath("/operator");
+  revalidatePath("/trips");
 }

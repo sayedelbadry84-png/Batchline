@@ -104,9 +104,21 @@ export default async function InvoiceDetailPage({
             )}
           </tbody>
         </table>
-        <div className="mt-3 flex justify-end gap-8 border-t border-border pt-3 text-sm">
-          <span className="text-ink-muted">{d.subtotal}</span>
-          <span className="font-mono tabular" dir="ltr">{invoice.subtotal.toLocaleString()} {invoice.currency}</span>
+        <div className="mt-3 flex flex-col items-end gap-1 border-t border-border pt-3 text-sm">
+          <div className="flex gap-8">
+            <span className="text-ink-muted">{d.subtotal}</span>
+            <span className="font-mono tabular" dir="ltr">{invoice.subtotal.toLocaleString()} {invoice.currency}</span>
+          </div>
+          {invoice.taxAmount > 0 && (
+            <div className="flex gap-8">
+              <span className="text-ink-muted">{d.taxLine(invoice.taxLabel, invoice.taxRatePct)}</span>
+              <span className="font-mono tabular" dir="ltr">{invoice.taxAmount.toLocaleString()} {invoice.currency}</span>
+            </div>
+          )}
+          <div className="flex gap-8 font-semibold">
+            <span>{d.total}</span>
+            <span className="font-mono tabular" dir="ltr">{invoice.total.toLocaleString()} {invoice.currency}</span>
+          </div>
         </div>
       </div>
 

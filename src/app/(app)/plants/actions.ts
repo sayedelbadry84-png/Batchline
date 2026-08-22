@@ -8,13 +8,16 @@ import { revalidatePath } from "next/cache";
 export async function createPlant(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const city = String(formData.get("city") ?? "").trim();
+  const country = String(formData.get("country") ?? "").trim() || null;
   const currency = String(formData.get("currency") ?? "EGP").trim();
   const timezone = String(formData.get("timezone") ?? "Africa/Cairo").trim();
+  const taxRatePct = Number(formData.get("taxRatePct") ?? 0) || 0;
+  const taxLabel = String(formData.get("taxLabel") ?? "VAT").trim() || "VAT";
 
   if (!name || !city) return;
 
   const plant = await prisma.plant.create({
-    data: { name, city, currency, timezone },
+    data: { name, city, country, currency, timezone, taxRatePct, taxLabel },
   });
 
   await logAudit({
@@ -34,19 +37,22 @@ export async function updatePlant(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const city = String(formData.get("city") ?? "").trim();
+  const country = String(formData.get("country") ?? "").trim() || null;
   const currency = String(formData.get("currency") ?? "").trim();
   const timezone = String(formData.get("timezone") ?? "").trim();
+  const taxRatePct = Number(formData.get("taxRatePct") ?? 0) || 0;
+  const taxLabel = String(formData.get("taxLabel") ?? "VAT").trim() || "VAT";
   if (!id || !name || !city) return;
 
   const before = await prisma.plant.findUnique({ where: { id } });
-  await prisma.plant.update({ where: { id }, data: { name, city, currency, timezone } });
+  await prisma.plant.update({ where: { id }, data: { name, city, country, currency, timezone, taxRatePct, taxLabel } });
 
   await logAudit({
     module: "PlantManagement",
     recordId: id,
-    field: "name/city/currency/timezone",
-    beforeValue: `${before?.name} / ${before?.city} / ${before?.currency} / ${before?.timezone}`,
-    afterValue: `${name} / ${city} / ${currency} / ${timezone}`,
+    field: "name/city/country/currency/timezone/tax",
+    beforeValue: `${before?.name} / ${before?.city} / ${before?.country} / ${before?.currency} / ${before?.timezone} / ${before?.taxLabel} ${before?.taxRatePct}%`,
+    afterValue: `${name} / ${city} / ${country} / ${currency} / ${timezone} / ${taxLabel} ${taxRatePct}%`,
     reasonCode: "PLANT_UPDATED",
   });
 

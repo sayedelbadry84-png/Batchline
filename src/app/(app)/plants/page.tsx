@@ -35,7 +35,9 @@ export default async function PlantsPage({
               <tr>
                 <th className={ui.th}>{m.col.plant}</th>
                 <th className={ui.th}>{m.col.city}</th>
+                <th className={ui.th}>{m.col.country}</th>
                 <th className={ui.th}>{m.col.currency}</th>
+                <th className={ui.th}>{m.col.tax}</th>
                 <th className={ui.th}>{m.col.silos}</th>
                 <th className={ui.th}>{m.col.employees}</th>
                 <th className={ui.th}>{m.col.projects}</th>
@@ -46,7 +48,7 @@ export default async function PlantsPage({
               {plants.map((p) =>
                 editId === p.id ? (
                   <tr key={p.id}>
-                    <td className={ui.td} colSpan={7}>
+                    <td className={ui.td} colSpan={9}>
                       <form action={updatePlant} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={p.id} />
                         <div>
@@ -58,12 +60,24 @@ export default async function PlantsPage({
                           <input name="city" defaultValue={p.city} required className={`${ui.input} w-36`} />
                         </div>
                         <div>
+                          <label className={ui.label}>{m.f.country}</label>
+                          <input name="country" defaultValue={p.country ?? ""} className={`${ui.input} w-32`} />
+                        </div>
+                        <div>
                           <label className={ui.label}>{m.f.currency}</label>
                           <input name="currency" defaultValue={p.currency} className={`${ui.input} w-20`} dir="ltr" />
                         </div>
                         <div>
                           <label className={ui.label}>{m.f.timezone}</label>
                           <input name="timezone" defaultValue={p.timezone} className={`${ui.input} w-36`} dir="ltr" />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.taxLabel}</label>
+                          <input name="taxLabel" defaultValue={p.taxLabel} className={`${ui.input} w-24`} dir="ltr" />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.taxRatePct}</label>
+                          <input name="taxRatePct" type="number" step="0.1" defaultValue={p.taxRatePct} className={`${ui.input} w-24`} />
                         </div>
                         <button className={ui.button}>{dict.field.save}</button>
                         <Link href="/plants" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
@@ -76,7 +90,9 @@ export default async function PlantsPage({
                   <tr key={p.id}>
                     <td className={`${ui.td} font-medium`}>{p.name}</td>
                     <td className={ui.td}>{p.city}</td>
+                    <td className={ui.td}>{p.country || "—"}</td>
                     <td className={`${ui.td} font-mono`} dir="ltr">{p.currency}</td>
+                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{p.taxLabel} {p.taxRatePct}%</td>
                     <td className={`${ui.td} font-mono tabular`}>{p._count.silos}</td>
                     <td className={`${ui.td} font-mono tabular`}>{p._count.employees}</td>
                     <td className={`${ui.td} font-mono tabular`}>{p._count.projects}</td>
@@ -90,7 +106,7 @@ export default async function PlantsPage({
               )}
               {plants.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={7}>
+                  <td className={ui.td} colSpan={9}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>
@@ -110,12 +126,24 @@ export default async function PlantsPage({
             <input name="city" required className={ui.input} placeholder="6th of October City" />
           </div>
           <div>
+            <label className={ui.label}>{m.f.country}</label>
+            <input name="country" className={ui.input} placeholder="Egypt" />
+          </div>
+          <div>
             <label className={ui.label}>{m.f.currency}</label>
             <input name="currency" defaultValue="EGP" className={ui.input} dir="ltr" />
           </div>
           <div>
             <label className={ui.label}>{m.f.timezone}</label>
             <input name="timezone" defaultValue="Africa/Cairo" className={ui.input} dir="ltr" />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.taxLabel}</label>
+            <input name="taxLabel" defaultValue="VAT" className={ui.input} dir="ltr" />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f.taxRatePct}</label>
+            <input name="taxRatePct" type="number" step="0.1" defaultValue={0} className={ui.input} />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
             {m.add}

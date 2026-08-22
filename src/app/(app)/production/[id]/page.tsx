@@ -4,18 +4,22 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { recordActuals, completeBatch, startTrip } from "../actions";
+import { recordActuals, recordActualField, completeBatch, startTrip, updateTripAssignment } from "../actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
+import { AutoSaveField } from "@/components/AutoSaveField";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
 export default async function BatchTicketPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ editTrip?: string }>;
 }) {
   await requirePageAccess("production");
   const { id } = await params;
+  const { editTrip } = await searchParams;
   const { dict } = await getDictionary();
   const m = dict.modules.production;
   const d = m.detail;
@@ -33,14 +37,25 @@ export default async function BatchTicketPage({
 
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
+  // A trip's truck/driver/pump crew is only correctable up until it leaves
+  // the yard — same boundary updateTripAssignment enforces server-side.
+  const canEditTrip = ticket.trip?.status === "LOADING";
+  const showAssignForm = ticket.status === "COMPLETE" && !ticket.trip;
+  const showEditTripForm = canEditTrip && editTrip === "1";
 
-  const [trucksRaw, drivers, pumps, pumpCrew] = ticket.status === "COMPLETE" && !ticket.trip
+  const [trucksRaw, drivers, pumps, pumpCrew] = showAssignForm || showEditTripForm
     ? await Promise.all([
         prisma.truck.findMany({
           // A truck already on an open trip elsewhere can't be assigned
           // here too — matches the guarantee the Fleet page's own intro
-          // text makes ("can't be double-booked from Production").
-          where: { plantId: ticket.plantId, status: "ACTIVE", trips: { none: { status: { not: "CLOSED" } } } },
+          // text makes ("can't be double-booked from Production"). When
+          // editing an existing trip, that trip's own truck doesn't count
+          // as "busy" against itself.
+          where: {
+            plantId: ticket.plantId,
+            status: "ACTIVE",
+            trips: { none: { status: { not: "CLOSED" }, ...(ticket.trip ? { id: { not: ticket.trip.id } } : {}) } },
+          },
           orderBy: { code: "asc" },
         }),
         prisma.employee.findMany({ where: { plantId: ticket.plantId, role: "DRIVER" }, orderBy: { name: "asc" } }),
@@ -102,9 +117,11 @@ export default async function BatchTicketPage({
                   </td>
                   <td className={`${ui.td} font-mono tabular`}>{c.targetMassKg.toFixed(1)}</td>
                   <td className={ui.td}>
-                    <input
+                    <AutoSaveField
+                      action={recordActualField}
+                      hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "actual" }}
+                      valueField="value"
                       name={`actual_${c.id}`}
-                      type="number"
                       step="0.1"
                       defaultValue={c.actualMassKg ?? undefined}
                       disabled={ticket.status === "COMPLETE"}
@@ -113,9 +130,11 @@ export default async function BatchTicketPage({
                   </td>
                   <td className={ui.td}>
                     {AGGREGATE_TYPES.has(c.material.type) ? (
-                      <input
+                      <AutoSaveField
+                        action={recordActualField}
+                        hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
+                        valueField="value"
                         name={`moisture_${c.id}`}
-                        type="number"
                         step="0.1"
                         defaultValue={c.moisturePct ?? undefined}
                         disabled={ticket.status === "COMPLETE"}
@@ -222,23 +241,23 @@ export default async function BatchTicketPage({
                 </div>
                 <div>
                   <label className={ui.label}>{d.pumpOperator}</label>
-                  <input name="pumpOperatorName" list="pumpOperators" required className={ui.input} />
+                  <select name="pumpOperatorId" required className={ui.select}>
+                    <option value="">{d.selectPumpOperator}</option>
+                    {pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
                 </div>
                 <div>
                   <label className={ui.label}>{d.pumpAssistant}</label>
-                  <input name="pumpAssistantName" list="pumpAssistants" className={ui.input} />
+                  <select name="pumpAssistantId" className={ui.select}>
+                    <option value="">{dict.field.none}</option>
+                    {pumpCrew.filter((c) => c.role === "HELPER").map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
-              <datalist id="pumpOperators">
-                {pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => (
-                  <option key={c.id} value={c.name} />
-                ))}
-              </datalist>
-              <datalist id="pumpAssistants">
-                {pumpCrew.filter((c) => c.role === "HELPER").map((c) => (
-                  <option key={c.id} value={c.name} />
-                ))}
-              </datalist>
             </div>
           )}
           <button type="submit" className={`${ui.button} self-start`}>
@@ -247,7 +266,7 @@ export default async function BatchTicketPage({
         </form>
       )}
 
-      {ticket.trip && (
+      {ticket.trip && !showEditTripForm && (
         <div className={`${ui.card} flex items-center justify-between`}>
           <div>
             <h2 className="font-display text-lg font-semibold">{d.tripStatus(dict.status[ticket.trip.status as keyof typeof dict.status] ?? ticket.trip.status)}</h2>
@@ -263,10 +282,90 @@ export default async function BatchTicketPage({
               )}
             </p>
           </div>
-          <Link href="/trips" className="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt">
-            {d.goToTrips}
-          </Link>
+          <div className="flex items-center gap-3">
+            {canEditTrip && (
+              <Link href={`/production/${ticket.id}?editTrip=1`} className="text-sm font-medium text-accent-strong hover:underline">
+                {dict.field.edit}
+              </Link>
+            )}
+            <Link href="/trips" className="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt">
+              {d.goToTrips}
+            </Link>
+          </div>
         </div>
+      )}
+
+      {showEditTripForm && ticket.trip && (
+        <form action={updateTripAssignment} className={`${ui.card} flex flex-col gap-3`}>
+          <input type="hidden" name="tripId" value={ticket.trip.id} />
+          <h2 className="font-display text-lg font-semibold">{d.editAssignTitle}</h2>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={ui.label}>{d.truck}</label>
+              <select name="truckId" required defaultValue={ticket.trip.truckId} className={ui.select}>
+                <option value="">{d.selectTruck}</option>
+                {trucks.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.code} ({t.drumCapacityM3} m³)
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={ui.label}>{d.driver}</label>
+              <select name="driverId" required defaultValue={ticket.trip.driverId} className={ui.select}>
+                <option value="">{d.selectDriver}</option>
+                {drivers.map((dr) => (
+                  <option key={dr.id} value={dr.id}>
+                    {dr.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {isPumpDelivery && (
+            <div className="border-t border-border pt-3">
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className={ui.label}>{d.pump}</label>
+                  <select name="pumpId" required defaultValue={ticket.trip.pumpId ?? ""} className={ui.select}>
+                    <option value="">{dict.field.selectPump}</option>
+                    {pumps.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.code} ({dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}
+                        {p.reachM != null ? ` · ${p.reachM}m` : ""})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className={ui.label}>{d.pumpOperator}</label>
+                  <select name="pumpOperatorId" required defaultValue={ticket.trip.pumpOperatorId ?? ""} className={ui.select}>
+                    <option value="">{d.selectPumpOperator}</option>
+                    {pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className={ui.label}>{d.pumpAssistant}</label>
+                  <select name="pumpAssistantId" defaultValue={ticket.trip.pumpAssistantId ?? ""} className={ui.select}>
+                    <option value="">{dict.field.none}</option>
+                    {pumpCrew.filter((c) => c.role === "HELPER").map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="flex gap-3">
+            <button type="submit" className={ui.button}>{dict.field.save}</button>
+            <Link href={`/production/${ticket.id}`} className="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt">
+              {dict.field.cancel}
+            </Link>
+          </div>
+        </form>
       )}
     </div>
   );

@@ -16,16 +16,20 @@ export default async function MaterialReceivingPage() {
   const { dict } = await getDictionary();
   const m = dict.modules.materialReceiving;
 
-  const [receipts, plants, suppliers, materials, silos, hoppers] = await Promise.all([
+  const [receipts, plants, suppliers, materials, silos, hoppers, deliveryDrivers] = await Promise.all([
     prisma.materialReceipt.findMany({
       orderBy: { receivedAt: "desc" },
-      include: { supplier: true, material: true, destinationSilo: true, destinationHopper: true },
+      include: { supplier: true, material: true, destinationSilo: true, destinationHopper: true, driver: true },
     }),
     prisma.plant.findMany({ orderBy: { name: "asc" } }),
     prisma.supplier.findMany({ orderBy: { name: "asc" } }),
     prisma.material.findMany({ orderBy: { name: "asc" } }),
     prisma.silo.findMany({ orderBy: { name: "asc" } }),
     prisma.hopper.findMany({ orderBy: { name: "asc" } }),
+    // Only the two roles a material delivery is ever attributed to — the
+    // roster the select below offers, so choosing a name here can only ever
+    // land on someone actually relevant to this ticket.
+    prisma.employee.findMany({ where: { role: { in: ["BULKER_DRIVER", "WATER_TANKER_DRIVER"] } }, orderBy: { name: "asc" } }),
   ]);
 
   return (
@@ -59,6 +63,9 @@ export default async function MaterialReceivingPage() {
                   <td className={ui.td}>
                     {r.supplier.name}
                     <div className="text-xs text-ink-muted">{r.material.name}</div>
+                    {(r.driver?.name ?? r.driverName) && (
+                      <div className="text-xs text-ink-faint">{r.driver?.name ?? r.driverName}</div>
+                    )}
                   </td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.poNumber || "—"}</td>
                   <td className={`${ui.td} font-mono tabular`}>
@@ -199,6 +206,21 @@ export default async function MaterialReceivingPage() {
               </option>
             ))}
           </select>
+        </div>
+        <div>
+          <label className={ui.label}>{m.f.driver}</label>
+          <select name="driverId" className={ui.select}>
+            <option value="">{m.selectDriver}</option>
+            {deliveryDrivers.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.name} — {dict.roles[e.role as keyof typeof dict.roles] ?? e.role}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className={ui.label}>{m.f.driverName}</label>
+          <input name="driverName" className={ui.input} dir="ltr" />
         </div>
         <button type="submit" className={`${ui.button} col-span-3 justify-self-start`}>
           {m.capture}

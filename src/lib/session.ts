@@ -81,7 +81,7 @@ export function requireRole(user: CurrentUser | null, allowed: string[]) {
 export async function requirePageAccess(moduleKey: ModuleKey) {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
-  if (!canAccessModule(user.role, moduleKey)) {
+  if (!(await canAccessModule(user.role, moduleKey))) {
     redirect(`/access-denied?module=${moduleKey}`);
   }
   return user;

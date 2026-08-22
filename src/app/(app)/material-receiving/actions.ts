@@ -16,6 +16,8 @@ export async function createReceipt(formData: FormData) {
   const moisturePct = Number(formData.get("moisturePct") ?? 0) || null;
   const destinationSiloId = String(formData.get("destinationSiloId") ?? "") || null;
   const destinationHopperId = String(formData.get("destinationHopperId") ?? "") || null;
+  const driverId = String(formData.get("driverId") ?? "") || null;
+  const driverName = String(formData.get("driverName") ?? "").trim() || null;
 
   if (!plantId || !supplierId || !materialId || !grossWeightKg || !tareWeightKg) return;
   if (grossWeightKg <= tareWeightKg) return;
@@ -35,6 +37,8 @@ export async function createReceipt(formData: FormData) {
       moisturePct,
       destinationSiloId,
       destinationHopperId,
+      driverId,
+      driverName,
     },
   });
 

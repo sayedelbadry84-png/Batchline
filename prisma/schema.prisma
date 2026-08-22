@@ -59,8 +59,19 @@ model Plant {
   id        String   @id @default(cuid())
   name      String
   city      String
+  // Free text on purpose, like currency below — a fixed country list would
+  // need maintaining forever for a field that's really just a label on
+  // invoices and reports, not something any query filters or branches on.
+  country   String?
   currency  String   @default("EGP")
   timezone  String   @default("Africa/Cairo")
+  // Applied to every invoice generated for this plant's projects, snapshotted
+  // onto the invoice at generation time (see Invoice.taxRatePct) so a later
+  // rate change never rewrites an already-issued invoice. taxLabel is the
+  // name shown on the invoice ("VAT", "GST", "Sales Tax"...) since which
+  // term applies depends on the plant's own jurisdiction, not the app.
+  taxRatePct Float   @default(0)
+  taxLabel   String  @default("VAT")
   // Batching tolerance & alert configuration (Module 12 — Plant Management).
   drumTimerLimitMinutes     Int   @default(90)
   returnAbsorptionThresholdM3 Float @default(0.2)
@@ -82,7 +93,7 @@ model Plant {
   pumps      Pump[]
   materialReceipts MaterialReceipt[]
   pumpCrewMembers  PumpCrewMember[]
-  driverIncentivePolicy DriverIncentivePolicy?
+  incentivePolicies DriverIncentivePolicy[]
 }
 
 model Silo {
@@ -277,6 +288,7 @@ model Employee {
 
   trips Trip[]
   sampledTestBatches TestBatch[]
+  materialReceiptsDriven MaterialReceipt[]
   user User?
 }
 
@@ -304,6 +316,15 @@ model MaterialReceipt {
   destinationSilo    Silo?     @relation(fields: [destinationSiloId], references: [id])
   destinationHopperId String?
   destinationHopper  Hopper?   @relation(fields: [destinationHopperId], references: [id])
+  // Who physically drove this delivery — a cement bulker for a CEMENT
+  // receipt, a water tanker for a WATER one. Optional and free-text-
+  // capable like Trip's pump-crew fields: pick from the roster (an
+  // Employee with role BULKER_DRIVER/WATER_TANKER_DRIVER) when possible,
+  // but a delivery can still be logged with just a typed name. Feeds the
+  // per-role incentive tables on the Incentives page (src/lib/incentives.ts).
+  driverId           String?
+  driver             Employee? @relation(fields: [driverId], references: [id])
+  driverName         String?
   receivedAt         DateTime  @default(now())
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
@@ -554,6 +575,12 @@ model Invoice {
   issueDate     DateTime @default(now())
   dueDate       DateTime
   subtotal      Float
+  // Snapshotted from Plant.taxRatePct/taxLabel at generation time — the
+  // plant's rate can change later without altering an already-issued
+  // invoice's own numbers.
+  taxRatePct    Float    @default(0)
+  taxLabel      String   @default("VAT")
+  taxAmount     Float    @default(0)
   total         Float
   currency      String   @default("EGP")
   createdAt     DateTime @default(now())
@@ -619,10 +646,21 @@ model PumpCrewMember {
 // closed Trip counts per driver (src/lib/incentives.ts), the same
 // derive-from-what-already-exists approach as the anomaly/strength/demand
 // features above. Rates are in the plant's own currency, not a separate one.
+// One policy per (plant, role) — generalized from a single driver-only
+// policy per plant so pump crew and material-delivery drivers can each
+// have their own tier ladder, not just mixer drivers. Model name kept as
+// DriverIncentivePolicy (not renamed to something role-neutral) purely to
+// avoid Prisma treating a model rename as drop-and-recreate against a
+// live database with real rows — role below is what actually generalizes
+// it. role is a plain string rather than every role in the system, since
+// only roles with a real trip-count source (see src/lib/incentives.ts and
+// the Incentives page) ever get a policy: MIXER_DRIVER, PUMP_OPERATOR,
+// PUMP_ASSISTANT, BULKER_DRIVER, WATER_TANKER_DRIVER.
 model DriverIncentivePolicy {
   id                 String   @id @default(cuid())
-  plantId            String   @unique
+  plantId            String
   plant              Plant    @relation(fields: [plantId], references: [id])
+  role               String   @default("MIXER_DRIVER")
   freeTripsThreshold Int      @default(10)
   tier2Threshold     Int      @default(15)
   // Field names carry "Sar" from the reviewed system's own SAR-denominated
@@ -634,6 +672,8 @@ model DriverIncentivePolicy {
   beyondRateSar      Float    @default(20)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+
+  @@unique([plantId, role])
 }
 
 model AuditEvent {
@@ -648,4 +688,21 @@ model AuditEvent {
   afterValue  String?
   reasonCode  String?
   createdAt   DateTime @default(now())
+}
+
+// Database-editable override of the compiled-in MODULE_ROLES map
+// (src/lib/permissions.ts) — lets an Admin grant/revoke a role's access to
+// a module from the Permissions screen instead of it only ever being a
+// code change. A module with zero rows here still works: canAccessModule
+// falls back to its MODULE_ROLES default, so this table starts empty and
+// only ever holds the modules an Admin has actually touched. Deliberately
+// role-only (no plantId) — permissions are which screens a role can reach
+// at all, not a per-plant concern, same scope MODULE_ROLES already had.
+model RolePermission {
+  id        String   @id @default(cuid())
+  moduleKey String
+  role      String
+  createdAt DateTime @default(now())
+
+  @@unique([moduleKey, role])
 }

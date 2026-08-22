@@ -3,8 +3,9 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { recordActuals, completeBatch, startTrip } from "@/app/(app)/production/actions";
+import { recordActuals, recordActualField, completeBatch, startTrip } from "@/app/(app)/production/actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
+import { AutoSaveField } from "@/components/AutoSaveField";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -92,9 +93,11 @@ export default async function OperatorTicketPage({
                 <span className="font-mono text-xs text-ink-muted" dir="ltr">{c.targetMassKg.toFixed(1)} kg</span>
               </div>
               <div className="mt-2 flex items-center gap-2" dir="ltr">
-                <input
+                <AutoSaveField
+                  action={recordActualField}
+                  hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "actual" }}
+                  valueField="value"
                   name={`actual_${c.id}`}
-                  type="number"
                   step="0.1"
                   placeholder={d.col.actual}
                   defaultValue={c.actualMassKg ?? undefined}
@@ -102,9 +105,11 @@ export default async function OperatorTicketPage({
                   className="w-full rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
                 />
                 {AGGREGATE_TYPES.has(c.material.type) && (
-                  <input
+                  <AutoSaveField
+                    action={recordActualField}
+                    hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
+                    valueField="value"
                     name={`moisture_${c.id}`}
-                    type="number"
                     step="0.1"
                     placeholder={d.col.moisture}
                     defaultValue={c.moisturePct ?? undefined}
@@ -195,22 +200,22 @@ export default async function OperatorTicketPage({
               </div>
               <div>
                 <label className="mb-1 block text-xs text-ink-muted">{d.pumpOperator}</label>
-                <input name="pumpOperatorName" list="pumpOperators" required className="w-full rounded-md border border-border bg-bg px-2 py-2 text-sm" />
+                <select name="pumpOperatorId" required className="w-full rounded-md border border-border bg-bg px-2 py-2 text-sm">
+                  <option value="">{d.selectPumpOperator}</option>
+                  {pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
               </div>
               <div>
                 <label className="mb-1 block text-xs text-ink-muted">{d.pumpAssistant}</label>
-                <input name="pumpAssistantName" list="pumpAssistants" className="w-full rounded-md border border-border bg-bg px-2 py-2 text-sm" />
+                <select name="pumpAssistantId" className="w-full rounded-md border border-border bg-bg px-2 py-2 text-sm">
+                  <option value="">{dict.field.none}</option>
+                  {pumpCrew.filter((c) => c.role === "HELPER").map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
               </div>
-              <datalist id="pumpOperators">
-                {pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => (
-                  <option key={c.id} value={c.name} />
-                ))}
-              </datalist>
-              <datalist id="pumpAssistants">
-                {pumpCrew.filter((c) => c.role === "HELPER").map((c) => (
-                  <option key={c.id} value={c.name} />
-                ))}
-              </datalist>
             </div>
           )}
           <button type="submit" className="rounded-md bg-accent py-2.5 text-sm font-medium text-white">

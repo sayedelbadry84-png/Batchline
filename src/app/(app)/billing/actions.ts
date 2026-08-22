@@ -84,6 +84,13 @@ export async function generateInvoiceForProject(formData: FormData) {
   if (lines.length === 0) return;
 
   const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0);
+  // Snapshotted from the plant's current rate/label rather than referenced
+  // live — a later change to Plant.taxRatePct must never rewrite the
+  // numbers on an invoice that already went out.
+  const taxRatePct = project.plant.taxRatePct;
+  const taxLabel = project.plant.taxLabel;
+  const taxAmount = subtotal * (taxRatePct / 100);
+  const total = subtotal + taxAmount;
   const dueDate = new Date(Date.now() + parseNetDays(project.customer.paymentTerms) * 24 * 60 * 60 * 1000);
   const invoiceCount = await prisma.invoice.count();
   const invoiceNumber = `INV-${new Date().getFullYear()}-${String(invoiceCount + 1).padStart(4, "0")}`;
@@ -95,7 +102,10 @@ export async function generateInvoiceForProject(formData: FormData) {
       projectId,
       dueDate,
       subtotal,
-      total: subtotal,
+      taxRatePct,
+      taxLabel,
+      taxAmount,
+      total,
       currency: project.plant.currency,
       lines: { create: lines },
     },
@@ -104,7 +114,7 @@ export async function generateInvoiceForProject(formData: FormData) {
   await logAudit({
     module: "Billing",
     recordId: invoice.id,
-    afterValue: `${invoiceNumber} — ${subtotal} ${project.plant.currency}`,
+    afterValue: `${invoiceNumber} — ${subtotal} + ${taxLabel} ${taxAmount} = ${total} ${project.plant.currency}`,
     reasonCode: "INVOICE_GENERATED",
   });
 

@@ -155,11 +155,13 @@ export default async function DashboardPage() {
   // --- AR / quality KPIs, only computed (and shown) for roles that can
   // actually act on those modules — a Plant Operator sees production and
   // fleet context, not a customer's outstanding balance. ---
-  const canSeeBilling = canAccessModule(user.role, "billing");
-  const canSeeQuality = canAccessModule(user.role, "quality");
-  const canSeeReservations = canAccessModule(user.role, "reservations");
-  const canSeeProduction = canAccessModule(user.role, "production");
-  const canSeeFleet = canAccessModule(user.role, "fleet");
+  const [canSeeBilling, canSeeQuality, canSeeReservations, canSeeProduction, canSeeFleet] = await Promise.all([
+    canAccessModule(user.role, "billing"),
+    canAccessModule(user.role, "quality"),
+    canAccessModule(user.role, "reservations"),
+    canAccessModule(user.role, "production"),
+    canAccessModule(user.role, "fleet"),
+  ]);
 
   const arOutstanding = canSeeBilling
     ? sentInvoices.reduce((sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)), 0)
