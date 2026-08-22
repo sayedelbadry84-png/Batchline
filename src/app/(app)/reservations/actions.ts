@@ -148,6 +148,10 @@ export async function approveReservationFinal(formData: FormData) {
 
   const reservation = await prisma.reservation.findUnique({ where: { id } });
   if (!reservation || !reservation.initialApprovedAt || reservation.finalApprovedAt) return;
+  // Separation of duties: the same person can't clear both stages of one
+  // reservation, whoever they are — an ADMIN is allowed to hold either
+  // role individually, just not both on the same record.
+  if (reservation.initialApprovedById === user!.id) return;
 
   await prisma.reservation.update({
     where: { id },

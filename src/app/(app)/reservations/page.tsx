@@ -249,13 +249,15 @@ export default async function ReservationsPage({
                       ) : r.initialApprovedAt ? (
                         <>
                           <span className={`${ui.chip} bg-warn-soft text-warn`}>{m.approvedInitial}</span>
-                          {user.role === "ADMIN" && (
+                          {user.role === "ADMIN" && r.initialApprovedById !== user.id && (
                             <form action={approveReservationFinal} className="mt-1">
                               <input type="hidden" name="id" value={r.id} />
                               <button className="text-xs font-medium text-accent-strong hover:underline">{m.approveFinal}</button>
                             </form>
                           )}
-                          {user.role !== "ADMIN" && <div className="mt-1 text-xs text-ink-faint">{m.pendingFinal}</div>}
+                          {(user.role !== "ADMIN" || r.initialApprovedById === user.id) && (
+                            <div className="mt-1 text-xs text-ink-faint">{m.pendingFinal}</div>
+                          )}
                         </>
                       ) : (
                         <>

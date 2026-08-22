@@ -29,6 +29,32 @@ export default async function SilosPage({
     prisma.material.findMany({ where: { type: "ADMIXTURE" }, orderBy: { name: "asc" } }),
   ]);
 
+  // Reorder list — "soonest to run out, first": every silo and hopper at
+  // or below its low-level threshold (chemical tanks excluded, they have
+  // no threshold field yet), ranked by how close to empty they are. Same
+  // underlying comparison levelColor already makes visually, just pulled
+  // out into a ranked, dedicated list rather than left implicit in a
+  // color on the full silo/hopper tables below.
+  const reorderList = [
+    ...silos.map((s) => ({
+      id: s.id,
+      name: s.name,
+      plantName: s.plant.name,
+      pct: s.capacityTons > 0 ? (s.currentLevelTons / s.capacityTons) * 100 : 0,
+      thresholdPct: s.minThresholdPct,
+    })),
+    ...hoppers.map((h) => ({
+      id: h.id,
+      name: h.name,
+      plantName: h.plant.name,
+      pct: h.capacityTons > 0 ? (h.currentLevelTons / h.capacityTons) * 100 : 0,
+      thresholdPct: 15,
+    })),
+  ]
+    .filter((r) => r.pct <= r.thresholdPct * 2)
+    .sort((a, b) => a.pct - b.pct);
+  const criticalCount = reorderList.filter((r) => r.pct <= r.thresholdPct).length;
+
   return (
     <div className="flex flex-col gap-8">
       <header>
@@ -36,6 +62,25 @@ export default async function SilosPage({
         <h1 className={ui.h1}>{m.title}</h1>
         <p className={ui.intro}>{m.intro}</p>
       </header>
+
+      <div>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.reorderTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.reorderIntro(reorderList.length, criticalCount)}</p>
+        {reorderList.length > 0 ? (
+          <div className={`${ui.card} flex flex-col gap-2`}>
+            {reorderList.map((r) => (
+              <div key={r.id} className="flex items-center gap-3 text-sm">
+                <span className={`h-2 w-2 shrink-0 rounded-full ${levelColor(r.pct, r.thresholdPct)}`} />
+                <span className="w-40 shrink-0 font-medium" dir="ltr">{r.name}</span>
+                <span className="flex-1 text-ink-muted">{r.plantName}</span>
+                <span className="font-mono text-xs tabular" dir="ltr">{r.pct.toFixed(0)}%</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-good">{m.reorderEmpty}</p>
+        )}
+      </div>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
         <div className={`${ui.card} flex flex-col gap-4`}>
