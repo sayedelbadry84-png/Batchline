@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { flagMaintenanceDue } from "@/lib/maintenance";
+import { FleetMap } from "@/components/FleetMapLoader";
 import {
   createPump,
   updatePump,
@@ -133,8 +134,24 @@ async function MixersTab({
     return { ...t, openTripsCount: t.trips.filter((trip) => trip.status !== "CLOSED").length, maintenance };
   });
 
+  const mapTrucks = trucks
+    .filter((t) => t.lastLat != null && t.lastLng != null)
+    .map((t) => ({
+      id: t.id,
+      code: t.code,
+      lastLat: t.lastLat!,
+      lastLng: t.lastLng!,
+      lastPingAt: t.lastPingAt ? t.lastPingAt.toISOString() : null,
+      driverName: t.defaultDriver?.name ?? null,
+      status: t.status,
+    }));
+
   return (
-    <div className="grid grid-cols-[1fr_320px] gap-6">
+    <div className="flex flex-col gap-6">
+      {mapTrucks.length > 0 && (
+        <FleetMap trucks={mapTrucks} neverPingedLabel={m.mixers.noPing} lastPingLabel={(when) => `${m.mixers.lastPing} ${when}`} />
+      )}
+      <div className="grid grid-cols-[1fr_320px] gap-6">
       <div className={ui.card}>
         <table className={ui.table}>
           <thead>
@@ -300,6 +317,7 @@ async function MixersTab({
         </div>
         <button type="submit" className={`${ui.button} mt-2`}>{m.mixers.add}</button>
       </form>
+      </div>
     </div>
   );
 }

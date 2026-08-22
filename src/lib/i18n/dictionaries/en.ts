@@ -448,6 +448,7 @@ const en: typeof ar = {
         col: { truck: "Truck", drumCapacity: "Drum capacity", maxRpm: "Max RPM", gpsDevice: "GPS device", defaultDriver: "Default driver", maintenance: "Maintenance" },
         onTrip: "on trip",
         noPing: "no ping yet",
+        lastPing: "Last seen",
         empty: "No mixer trucks yet.",
         newTitle: "New mixer truck",
         f: { drumCapacity: "Drum capacity (m³)", maxRpm: "Max agitation speed (rpm)", gpsDevice: "GPS device ID", defaultDriver: "Default driver" },

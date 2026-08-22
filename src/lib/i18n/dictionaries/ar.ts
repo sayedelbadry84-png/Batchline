@@ -447,6 +447,7 @@ const ar = {
         col: { truck: "الشاحنة", drumCapacity: "سعة الأسطوانة", maxRpm: "أقصى سرعة دوران", gpsDevice: "جهاز GPS", defaultDriver: "السائق الافتراضي", maintenance: "الصيانة" },
         onTrip: "في رحلة",
         noPing: "لا إشارة بعد",
+        lastPing: "آخر ظهور",
         empty: "لا توجد شاحنات خلط بعد.",
         newTitle: "شاحنة خلط جديدة",
         f: { drumCapacity: "سعة الأسطوانة (م³)", maxRpm: "أقصى سرعة تحريك (دورة/د)", gpsDevice: "معرّف جهاز GPS", defaultDriver: "السائق الافتراضي" },
