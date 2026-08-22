@@ -6,6 +6,7 @@ import { getDictionary } from "@/lib/i18n";
 import { recordActuals, recordActualField, completeBatch, startTrip } from "@/app/(app)/production/actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
+import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -55,6 +56,25 @@ export default async function OperatorTicketPage({
     : [[], [], [], []];
 
   const trucks = rankTrucksForVolume(trucksRaw, ticket.volumeM3);
+
+  const mobileSelect = "w-full rounded-md border border-border bg-bg px-2 py-2 text-sm";
+  const truckOptions = trucks.map((t) => ({
+    value: t.id,
+    label: `${t.code} (${t.drumCapacityM3} m³)${t.recommended ? ` — ${d.bestFit}` : ""}${t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}`,
+    defaults: { driverId: t.defaultDriverId ?? "" },
+  }));
+  const driverOptions = drivers.map((dr) => ({ value: dr.id, label: dr.name }));
+  const pumpOptions = pumps.map((p) => {
+    const insufficientReach =
+      ticket.reservation.minPumpReachM != null && p.reachM != null && p.reachM < ticket.reservation.minPumpReachM;
+    return {
+      value: p.id,
+      label: `${p.code} (${dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}${p.reachM != null ? ` · ${p.reachM}m` : ""})${insufficientReach ? ` — ${d.pumpReachInsufficient}` : ""}`,
+      defaults: { pumpOperatorId: p.defaultOperatorId ?? "", pumpAssistantId: p.defaultAssistantId ?? "" },
+    };
+  });
+  const operatorOptions = pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => ({ value: c.id, label: c.name }));
+  const assistantOptions = pumpCrew.filter((c) => c.role === "HELPER").map((c) => ({ value: c.id, label: c.name }));
 
   return (
     <div className="mx-auto flex min-h-screen max-w-sm flex-col gap-5 bg-bg px-5 py-6">
@@ -150,72 +170,24 @@ export default async function OperatorTicketPage({
           <input type="hidden" name="batchTicketId" value={ticket.id} />
           <input type="hidden" name="returnTo" value="/operator" />
           <h2 className="font-display text-base font-semibold">{d.assignTitle}</h2>
-          <div>
-            <label className="mb-1 block text-xs text-ink-muted">{d.truck}</label>
-            <select name="truckId" required className="w-full rounded-md border border-border bg-bg px-2 py-2 text-sm">
-              <option value="">{d.selectTruck}</option>
-              {trucks.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.code} ({t.drumCapacityM3} m³)
-                  {t.recommended ? ` — ${d.bestFit}` : ""}
-                  {t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}
-                </option>
-              ))}
-            </select>
-            {trucks.length === 0 && <p className="mt-1 text-xs text-warn">{d.noTrucksAvailable}</p>}
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-ink-muted">{d.driver}</label>
-            <select name="driverId" required className="w-full rounded-md border border-border bg-bg px-2 py-2 text-sm">
-              <option value="">{d.selectDriver}</option>
-              {drivers.map((dr) => (
-                <option key={dr.id} value={dr.id}>{dr.name}</option>
-              ))}
-            </select>
-          </div>
+          <EquipmentAssignPicker
+            equipment={{ name: "truckId", label: d.truck, placeholder: d.selectTruck, required: true, className: mobileSelect, options: truckOptions }}
+            dependents={[{ key: "driverId", name: "driverId", label: d.driver, placeholder: d.selectDriver, required: true, className: mobileSelect, options: driverOptions }]}
+          />
+          {trucks.length === 0 && <p className="text-xs text-warn">{d.noTrucksAvailable}</p>}
           {isPumpDelivery && (
             <div className="flex flex-col gap-3 border-t border-border pt-3">
               <p className="text-xs text-ink-muted">{d.pumpDeliveryNote}</p>
-              <div>
-                <label className="mb-1 block text-xs text-ink-muted">{d.pump}</label>
-                <select name="pumpId" required className="w-full rounded-md border border-border bg-bg px-2 py-2 text-sm">
-                  <option value="">{dict.field.selectPump}</option>
-                  {pumps.map((p) => {
-                    const insufficientReach =
-                      ticket.reservation.minPumpReachM != null &&
-                      p.reachM != null &&
-                      p.reachM < ticket.reservation.minPumpReachM;
-                    return (
-                      <option key={p.id} value={p.id}>
-                        {p.code} ({dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}
-                        {p.reachM != null ? ` · ${p.reachM}m` : ""})
-                        {insufficientReach ? ` — ${d.pumpReachInsufficient}` : ""}
-                      </option>
-                    );
-                  })}
-                </select>
-                {ticket.reservation.minPumpReachM != null && (
-                  <p className="mt-1 text-xs text-ink-muted">{d.minPumpReachNote(ticket.reservation.minPumpReachM)}</p>
-                )}
-              </div>
-              <div>
-                <label className="mb-1 block text-xs text-ink-muted">{d.pumpOperator}</label>
-                <select name="pumpOperatorId" required className="w-full rounded-md border border-border bg-bg px-2 py-2 text-sm">
-                  <option value="">{d.selectPumpOperator}</option>
-                  {pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="mb-1 block text-xs text-ink-muted">{d.pumpAssistant}</label>
-                <select name="pumpAssistantId" className="w-full rounded-md border border-border bg-bg px-2 py-2 text-sm">
-                  <option value="">{dict.field.none}</option>
-                  {pumpCrew.filter((c) => c.role === "HELPER").map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
+              <EquipmentAssignPicker
+                equipment={{ name: "pumpId", label: d.pump, placeholder: dict.field.selectPump, required: true, className: mobileSelect, options: pumpOptions }}
+                dependents={[
+                  { key: "pumpOperatorId", name: "pumpOperatorId", label: d.pumpOperator, placeholder: d.selectPumpOperator, required: true, className: mobileSelect, options: operatorOptions },
+                  { key: "pumpAssistantId", name: "pumpAssistantId", label: d.pumpAssistant, placeholder: dict.field.none, className: mobileSelect, options: assistantOptions },
+                ]}
+              />
+              {ticket.reservation.minPumpReachM != null && (
+                <p className="text-xs text-ink-muted">{d.minPumpReachNote(ticket.reservation.minPumpReachM)}</p>
+              )}
             </div>
           )}
           <button type="submit" className="rounded-md bg-accent py-2.5 text-sm font-medium text-white">

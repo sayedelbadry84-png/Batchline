@@ -7,6 +7,7 @@ export type TruckOption = {
   id: string;
   code: string;
   drumCapacityM3: number;
+  defaultDriverId?: string | null;
 };
 
 export type RankedTruck = TruckOption & {

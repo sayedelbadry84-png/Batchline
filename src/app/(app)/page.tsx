@@ -155,12 +155,12 @@ export default async function DashboardPage() {
   // --- AR / quality KPIs, only computed (and shown) for roles that can
   // actually act on those modules — a Plant Operator sees production and
   // fleet context, not a customer's outstanding balance. ---
-  const [canSeeBilling, canSeeQuality, canSeeReservations, canSeeProduction, canSeeFleet] = await Promise.all([
+  const [canSeeBilling, canSeeQuality, canSeeReservations, canSeeProduction, canSeeEquipment] = await Promise.all([
     canAccessModule(user.role, "billing"),
     canAccessModule(user.role, "quality"),
     canAccessModule(user.role, "reservations"),
     canAccessModule(user.role, "production"),
-    canAccessModule(user.role, "fleet"),
+    canAccessModule(user.role, "equipment"),
   ]);
 
   const arOutstanding = canSeeBilling
@@ -182,12 +182,12 @@ export default async function DashboardPage() {
   for (const t of drumAlerts) {
     alerts.push({ key: `drum-${t.id}`, severity: "critical", href: "/trips", label: `${t.truck.code} ${d.drumAlertRest(t.elapsedMin, t.batchTicket.plant.drumTimerLimitMinutes)}` });
   }
-  if (canSeeFleet) {
+  if (canSeeEquipment) {
     for (const t of truckMaintenanceAlerts) {
-      alerts.push({ key: `truck-maint-${t.id}`, severity: "warn", href: "/fleet", label: d.alertMaintenanceDue(t.code, t.tripsSinceLastMaintenance) });
+      alerts.push({ key: `truck-maint-${t.id}`, severity: "warn", href: "/equipment?tab=mixers", label: d.alertMaintenanceDue(t.code, t.tripsSinceLastMaintenance) });
     }
     for (const p of pumpMaintenanceAlerts) {
-      alerts.push({ key: `pump-maint-${p.id}`, severity: "warn", href: "/pumps", label: d.alertMaintenanceDue(p.code, p.tripsSinceLastMaintenance) });
+      alerts.push({ key: `pump-maint-${p.id}`, severity: "warn", href: "/equipment?tab=pumps", label: d.alertMaintenanceDue(p.code, p.tripsSinceLastMaintenance) });
     }
   }
   if (canSeeQuality) {
@@ -220,7 +220,7 @@ export default async function DashboardPage() {
     { label: d.stats.plants, value: plants.length, href: "/plants" },
     { label: d.stats.silos, value: siloCount, href: "/silos" },
     { label: d.stats.mixDesigns, value: mixCount, href: "/mix-designs" },
-    { label: d.stats.trucks, value: truckCount, href: "/fleet" },
+    { label: d.stats.trucks, value: truckCount, href: "/equipment?tab=mixers" },
     { label: d.stats.customers, value: customerCount, href: "/customers" },
     { label: d.stats.projects, value: projectCount, href: "/projects" },
     { label: d.stats.reservations, value: reservationCount, href: "/reservations" },

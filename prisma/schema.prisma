@@ -94,6 +94,7 @@ model Plant {
   materialReceipts MaterialReceipt[]
   pumpCrewMembers  PumpCrewMember[]
   incentivePolicies DriverIncentivePolicy[]
+  supportVehicles  SupportVehicle[]
 }
 
 model Silo {
@@ -283,12 +284,20 @@ model Employee {
   licenseNumber  String?
   licenseExpiry  DateTime?
   shiftPattern   String?
+  // ACTIVE, FROZEN (temporarily suspended, kept on file), REMOVED (soft
+  // delete — never a real row delete, same reasoning as User.status: the
+  // employee's trip/receipt history must keep resolving to a real name).
+  // "Transfer to another plant" is just editing plantId above, not a
+  // separate status value.
+  status         String    @default("ACTIVE")
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
   trips Trip[]
   sampledTestBatches TestBatch[]
   materialReceiptsDriven MaterialReceipt[]
+  defaultForTrucks Truck[]
+  defaultForSupportVehicles SupportVehicle[]
   user User?
 }
 
@@ -342,7 +351,17 @@ model Truck {
   drumCapacityM3     Float
   maxAgitationRpm    Float?
   gpsDeviceId        String?
-  status             String   @default("ACTIVE") // ACTIVE, MAINTENANCE, OUT_OF_SERVICE
+  // Registration details — optional since older/imported records may not
+  // have them on file yet; nothing downstream depends on these being set.
+  year               Int?
+  chassisNumber      String?
+  plateNumber        String?
+  // Pre-fills the driver field when this truck is picked to start a trip
+  // (see startTrip/updateTripAssignment) — still just a default, not a
+  // lock: the operator can always pick someone else for that specific trip.
+  defaultDriverId    String?
+  defaultDriver      Employee? @relation(fields: [defaultDriverId], references: [id])
+  status             String   @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
   // Populated by the GPS telematics webhook (see /api/telematics/ping).
   lastLat            Float?
   lastLng            Float?
@@ -518,7 +537,18 @@ model Pump {
   reachM       Float?
   hourlyRate   Float
   standbyRate  Float?
-  status       String   @default("ACTIVE") // ACTIVE, MAINTENANCE, OUT_OF_SERVICE
+  // Registration details, same optional/informational role as on Truck.
+  year               Int?
+  chassisNumber      String?
+  plateNumber        String?
+  // Pre-fill the operator/assistant fields when this pump is picked to
+  // start a pump-delivery trip — still just defaults, always overridable
+  // for that specific trip (see startTrip/updateTripAssignment).
+  defaultOperatorId  String?
+  defaultOperator    PumpCrewMember? @relation("PumpDefaultOperator", fields: [defaultOperatorId], references: [id])
+  defaultAssistantId String?
+  defaultAssistant   PumpCrewMember? @relation("PumpDefaultAssistant", fields: [defaultAssistantId], references: [id])
+  status       String   @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
   // Same due-for-inspection mechanism as Truck.lastMaintenanceAt.
   lastMaintenanceAt DateTime?
   createdAt    DateTime @default(now())
@@ -631,12 +661,17 @@ model PumpCrewMember {
   name      String
   role      String   // OPERATOR, HELPER
   phone     String?
-  status    String   @default("ACTIVE") // ACTIVE, INACTIVE
+  // ACTIVE, FROZEN, REMOVED — same three-state convention as
+  // Employee.status (INACTIVE is kept as a legacy synonym of FROZEN on
+  // existing rows rather than migrated, since it's just a display label).
+  status    String   @default("ACTIVE")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   operatorTrips  Trip[] @relation("PumpOperatorCrew")
   assistantTrips Trip[] @relation("PumpAssistantCrew")
+  defaultForPumpsAsOperator  Pump[] @relation("PumpDefaultOperator")
+  defaultForPumpsAsAssistant Pump[] @relation("PumpDefaultAssistant")
 }
 
 // A tiered per-trip bonus, one policy per plant — trips 1..freeTripsThreshold
@@ -705,4 +740,25 @@ model RolePermission {
   createdAt DateTime @default(now())
 
   @@unique([moduleKey, role])
+}
+
+// Cement bulkers, water tankers, and loaders share one model (rather than
+// three near-identical ones like Truck/Pump) since none of them carry the
+// type-specific spec fields those two do (drum capacity, pump reach) — just
+// registration details and a default driver. `type` is what the Equipment
+// screen's tabs filter on.
+model SupportVehicle {
+  id             String   @id @default(cuid())
+  plantId        String
+  plant          Plant    @relation(fields: [plantId], references: [id])
+  type           String   // BULKER, WATER_TANKER, LOADER
+  code           String
+  year           Int?
+  chassisNumber  String?
+  plateNumber    String?
+  defaultDriverId String?
+  defaultDriver   Employee? @relation(fields: [defaultDriverId], references: [id])
+  status         String   @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 }

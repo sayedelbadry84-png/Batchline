@@ -7,6 +7,7 @@ import { getDictionary } from "@/lib/i18n";
 import { recordActuals, recordActualField, completeBatch, startTrip, updateTripAssignment } from "../actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
+import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -69,6 +70,26 @@ export default async function BatchTicketPage({
     : [[], [], [], []];
 
   const trucks = rankTrucksForVolume(trucksRaw, ticket.volumeM3);
+
+  // Selecting the equipment pre-fills its registered default person(s) —
+  // still freely editable afterward — via EquipmentAssignPicker.
+  const truckOptions = trucks.map((t) => ({
+    value: t.id,
+    label: `${t.code} (${t.drumCapacityM3} m³)${t.recommended ? ` — ${d.bestFit}` : ""}${t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}`,
+    defaults: { driverId: t.defaultDriverId ?? "" },
+  }));
+  const driverOptions = drivers.map((dr) => ({ value: dr.id, label: dr.name }));
+  const pumpOptions = pumps.map((p) => {
+    const insufficientReach =
+      ticket.reservation.minPumpReachM != null && p.reachM != null && p.reachM < ticket.reservation.minPumpReachM;
+    return {
+      value: p.id,
+      label: `${p.code} (${dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}${p.reachM != null ? ` · ${p.reachM}m` : ""})${insufficientReach ? ` — ${d.pumpReachInsufficient}` : ""}`,
+      defaults: { pumpOperatorId: p.defaultOperatorId ?? "", pumpAssistantId: p.defaultAssistantId ?? "" },
+    };
+  });
+  const operatorOptions = pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => ({ value: c.id, label: c.name }));
+  const assistantOptions = pumpCrew.filter((c) => c.role === "HELPER").map((c) => ({ value: c.id, label: c.name }));
 
   return (
     <div className="flex flex-col gap-8">
@@ -187,77 +208,27 @@ export default async function BatchTicketPage({
           <input type="hidden" name="batchTicketId" value={ticket.id} />
           <h2 className="font-display text-lg font-semibold">{d.assignTitle}</h2>
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={ui.label}>{d.truck}</label>
-              <select name="truckId" required className={ui.select}>
-                <option value="">{d.selectTruck}</option>
-                {trucks.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.code} ({t.drumCapacityM3} m³)
-                    {t.recommended ? ` — ${d.bestFit}` : ""}
-                    {t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}
-                  </option>
-                ))}
-              </select>
-              {trucks.length === 0 && <p className="mt-1 text-xs text-warn">{d.noTrucksAvailable}</p>}
-            </div>
-            <div>
-              <label className={ui.label}>{d.driver}</label>
-              <select name="driverId" required className={ui.select}>
-                <option value="">{d.selectDriver}</option>
-                {drivers.map((dr) => (
-                  <option key={dr.id} value={dr.id}>
-                    {dr.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <EquipmentAssignPicker
+              equipment={{ name: "truckId", label: d.truck, placeholder: d.selectTruck, required: true, className: ui.select, options: truckOptions }}
+              dependents={[{ key: "driverId", name: "driverId", label: d.driver, placeholder: d.selectDriver, required: true, className: ui.select, options: driverOptions }]}
+            />
           </div>
+          {trucks.length === 0 && <p className="text-xs text-warn">{d.noTrucksAvailable}</p>}
           {isPumpDelivery && (
             <div className="border-t border-border pt-3">
               <p className="mb-2 text-xs text-ink-muted">{d.pumpDeliveryNote}</p>
               <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className={ui.label}>{d.pump}</label>
-                  <select name="pumpId" required className={ui.select}>
-                    <option value="">{dict.field.selectPump}</option>
-                    {pumps.map((p) => {
-                      const insufficientReach =
-                        ticket.reservation.minPumpReachM != null &&
-                        p.reachM != null &&
-                        p.reachM < ticket.reservation.minPumpReachM;
-                      return (
-                        <option key={p.id} value={p.id}>
-                          {p.code} ({dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}
-                          {p.reachM != null ? ` · ${p.reachM}m` : ""})
-                          {insufficientReach ? ` — ${d.pumpReachInsufficient}` : ""}
-                        </option>
-                      );
-                    })}
-                  </select>
-                  {ticket.reservation.minPumpReachM != null && (
-                    <p className="mt-1 text-xs text-ink-muted">{d.minPumpReachNote(ticket.reservation.minPumpReachM)}</p>
-                  )}
-                </div>
-                <div>
-                  <label className={ui.label}>{d.pumpOperator}</label>
-                  <select name="pumpOperatorId" required className={ui.select}>
-                    <option value="">{d.selectPumpOperator}</option>
-                    {pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className={ui.label}>{d.pumpAssistant}</label>
-                  <select name="pumpAssistantId" className={ui.select}>
-                    <option value="">{dict.field.none}</option>
-                    {pumpCrew.filter((c) => c.role === "HELPER").map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
+                <EquipmentAssignPicker
+                  equipment={{ name: "pumpId", label: d.pump, placeholder: dict.field.selectPump, required: true, className: ui.select, options: pumpOptions }}
+                  dependents={[
+                    { key: "pumpOperatorId", name: "pumpOperatorId", label: d.pumpOperator, placeholder: d.selectPumpOperator, required: true, className: ui.select, options: operatorOptions },
+                    { key: "pumpAssistantId", name: "pumpAssistantId", label: d.pumpAssistant, placeholder: dict.field.none, className: ui.select, options: assistantOptions },
+                  ]}
+                />
               </div>
+              {ticket.reservation.minPumpReachM != null && (
+                <p className="mt-1 text-xs text-ink-muted">{d.minPumpReachNote(ticket.reservation.minPumpReachM)}</p>
+              )}
             </div>
           )}
           <button type="submit" className={`${ui.button} self-start`}>
@@ -300,62 +271,21 @@ export default async function BatchTicketPage({
           <input type="hidden" name="tripId" value={ticket.trip.id} />
           <h2 className="font-display text-lg font-semibold">{d.editAssignTitle}</h2>
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={ui.label}>{d.truck}</label>
-              <select name="truckId" required defaultValue={ticket.trip.truckId} className={ui.select}>
-                <option value="">{d.selectTruck}</option>
-                {trucks.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.code} ({t.drumCapacityM3} m³)
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className={ui.label}>{d.driver}</label>
-              <select name="driverId" required defaultValue={ticket.trip.driverId} className={ui.select}>
-                <option value="">{d.selectDriver}</option>
-                {drivers.map((dr) => (
-                  <option key={dr.id} value={dr.id}>
-                    {dr.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <EquipmentAssignPicker
+              equipment={{ name: "truckId", label: d.truck, placeholder: d.selectTruck, required: true, className: ui.select, defaultValue: ticket.trip.truckId, options: truckOptions }}
+              dependents={[{ key: "driverId", name: "driverId", label: d.driver, placeholder: d.selectDriver, required: true, className: ui.select, defaultValue: ticket.trip.driverId, options: driverOptions }]}
+            />
           </div>
           {isPumpDelivery && (
             <div className="border-t border-border pt-3">
               <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className={ui.label}>{d.pump}</label>
-                  <select name="pumpId" required defaultValue={ticket.trip.pumpId ?? ""} className={ui.select}>
-                    <option value="">{dict.field.selectPump}</option>
-                    {pumps.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.code} ({dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}
-                        {p.reachM != null ? ` · ${p.reachM}m` : ""})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className={ui.label}>{d.pumpOperator}</label>
-                  <select name="pumpOperatorId" required defaultValue={ticket.trip.pumpOperatorId ?? ""} className={ui.select}>
-                    <option value="">{d.selectPumpOperator}</option>
-                    {pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className={ui.label}>{d.pumpAssistant}</label>
-                  <select name="pumpAssistantId" defaultValue={ticket.trip.pumpAssistantId ?? ""} className={ui.select}>
-                    <option value="">{dict.field.none}</option>
-                    {pumpCrew.filter((c) => c.role === "HELPER").map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
+                <EquipmentAssignPicker
+                  equipment={{ name: "pumpId", label: d.pump, placeholder: dict.field.selectPump, required: true, className: ui.select, defaultValue: ticket.trip.pumpId ?? "", options: pumpOptions }}
+                  dependents={[
+                    { key: "pumpOperatorId", name: "pumpOperatorId", label: d.pumpOperator, placeholder: d.selectPumpOperator, required: true, className: ui.select, defaultValue: ticket.trip.pumpOperatorId ?? "", options: operatorOptions },
+                    { key: "pumpAssistantId", name: "pumpAssistantId", label: d.pumpAssistant, placeholder: dict.field.none, className: ui.select, defaultValue: ticket.trip.pumpAssistantId ?? "", options: assistantOptions },
+                  ]}
+                />
               </div>
             </div>
           )}
