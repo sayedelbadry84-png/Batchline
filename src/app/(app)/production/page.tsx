@@ -5,6 +5,10 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { releaseBatchTicket } from "./actions";
 
+// A single mixer truck load — the same hard ceiling releaseBatchTicket
+// enforces server-side, so this is display/UX only, not the real gate.
+const MAX_LOAD_M3 = 15;
+
 const statusChip: Record<string, string> = {
   RELEASED: "bg-info-soft text-ink",
   BATCHING: "bg-accent-soft text-accent-strong",
@@ -19,7 +23,9 @@ export default async function ProductionPage() {
 
   const [readyReservationsRaw, activeTickets, recentTickets] = await Promise.all([
     prisma.reservation.findMany({
-      where: { status: { in: ["CONFIRMED", "IN_PRODUCTION"] } },
+      // A reservation only shows up here — and can only be released against
+      // — once it's cleared both sign-offs (see the Reservations module).
+      where: { status: { in: ["CONFIRMED", "IN_PRODUCTION"] }, initialApprovedAt: { not: null }, finalApprovedAt: { not: null } },
       include: {
         project: { include: { customer: true } },
         mix: true,
@@ -88,8 +94,8 @@ export default async function ProductionPage() {
                         name="volumeM3"
                         type="number"
                         step="0.5"
-                        max={r.remaining}
-                        defaultValue={r.remaining}
+                        max={Math.min(r.remaining, MAX_LOAD_M3)}
+                        defaultValue={Math.min(r.remaining, MAX_LOAD_M3)}
                         className="w-20 rounded-md border border-border bg-surface px-2 py-1.5 font-mono text-xs"
                       />
                       <button className={ui.button}>{m.release}</button>
@@ -106,6 +112,7 @@ export default async function ProductionPage() {
               )}
             </tbody>
           </table>
+          <p className="mt-2 text-xs text-ink-muted">{m.maxLoadNote(MAX_LOAD_M3)}</p>
         </div>
 
         <div className={ui.card}>

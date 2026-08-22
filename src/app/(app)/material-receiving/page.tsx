@@ -1,20 +1,27 @@
+import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createReceipt, setQcStatus } from "./actions";
+import { createReceipt, updateReceipt, deleteReceipt, returnReceiptToSupplier, setQcStatus } from "./actions";
 
 const qcChip: Record<string, string> = {
   PENDING: "bg-surface-alt text-ink-muted",
   PASSED: "bg-good-soft text-good",
   HELD: "bg-warn-soft text-warn",
   REJECTED: "bg-critical-soft text-critical",
+  RETURNED: "bg-critical-soft text-critical",
 };
 
-export default async function MaterialReceivingPage() {
+export default async function MaterialReceivingPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ edit?: string }>;
+}) {
   await requirePageAccess("material-receiving");
   const { dict } = await getDictionary();
   const m = dict.modules.materialReceiving;
+  const { edit: editId } = await searchParams;
 
   const [receipts, plants, suppliers, materials, silos, hoppers, deliveryDrivers] = await Promise.all([
     prisma.materialReceipt.findMany({
@@ -57,6 +64,81 @@ export default async function MaterialReceivingPage() {
           <tbody>
             {receipts.map((r) => {
               const variancePct = r.orderedMassKg ? ((r.netWeightKg - r.orderedMassKg) / r.orderedMassKg) * 100 : null;
+              const editable = !r.postedToInventory;
+
+              if (editId === r.id && editable) {
+                return (
+                  <tr key={r.id}>
+                    <td className={ui.td} colSpan={8}>
+                      <form action={updateReceipt} className="flex flex-wrap items-end gap-2">
+                        <input type="hidden" name="id" value={r.id} />
+                        <div>
+                          <label className={ui.label}>{m.f.supplier}</label>
+                          <select name="supplierId" defaultValue={r.supplierId} required className={`${ui.select} w-40`}>
+                            {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.material}</label>
+                          <select name="materialId" defaultValue={r.materialId} required className={`${ui.select} w-40`}>
+                            {materials.map((mt) => <option key={mt.id} value={mt.id}>{mt.name}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.poNumber}</label>
+                          <input name="poNumber" defaultValue={r.poNumber ?? ""} className={`${ui.input} w-28`} dir="ltr" />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.orderedQty}</label>
+                          <input name="orderedMassKg" type="number" step="1" defaultValue={r.orderedMassKg ?? undefined} className={`${ui.input} w-28`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.moisture}</label>
+                          <input name="moisturePct" type="number" step="0.1" defaultValue={r.moisturePct ?? undefined} className={`${ui.input} w-24`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.grossWeight}</label>
+                          <input name="grossWeightKg" type="number" step="1" defaultValue={r.grossWeightKg} required className={`${ui.input} w-28`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.tareWeight}</label>
+                          <input name="tareWeightKg" type="number" step="1" defaultValue={r.tareWeightKg} required className={`${ui.input} w-28`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.destSilo}</label>
+                          <select name="destinationSiloId" defaultValue={r.destinationSiloId ?? ""} className={`${ui.select} w-36`}>
+                            <option value="">{dict.field.none}</option>
+                            {silos.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.destHopper}</label>
+                          <select name="destinationHopperId" defaultValue={r.destinationHopperId ?? ""} className={`${ui.select} w-36`}>
+                            <option value="">{dict.field.none}</option>
+                            {hoppers.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.driver}</label>
+                          <select name="driverId" defaultValue={r.driverId ?? ""} className={`${ui.select} w-40`}>
+                            <option value="">{m.selectDriver}</option>
+                            {deliveryDrivers.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.f.driverName}</label>
+                          <input name="driverName" defaultValue={r.driverName ?? ""} className={`${ui.input} w-32`} dir="ltr" />
+                        </div>
+                        <button className={ui.button}>{dict.field.save}</button>
+                        <Link href="/material-receiving" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                          {dict.field.cancel}
+                        </Link>
+                      </form>
+                    </td>
+                  </tr>
+                );
+              }
+
               return (
                 <tr key={r.id}>
                   <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.receivedAt).toLocaleString()}</td>
@@ -87,8 +169,8 @@ export default async function MaterialReceivingPage() {
                     <span className={`${ui.chip} ${qcChip[r.qcStatus] ?? ""}`}>{dict.status[r.qcStatus as keyof typeof dict.status] ?? r.qcStatus}</span>
                   </td>
                   <td className={ui.td}>
-                    {r.qcStatus !== "PASSED" && r.qcStatus !== "REJECTED" && (
-                      <div className="flex gap-1">
+                    {r.qcStatus !== "PASSED" && r.qcStatus !== "REJECTED" && r.qcStatus !== "RETURNED" && (
+                      <div className="flex flex-wrap gap-1">
                         <form action={setQcStatus}>
                           <input type="hidden" name="id" value={r.id} />
                           <input type="hidden" name="status" value="PASSED" />
@@ -115,6 +197,23 @@ export default async function MaterialReceivingPage() {
                     {r.qcStatus === "PASSED" && (
                       <span className="text-xs text-ink-faint">{m.postedToInventory}</span>
                     )}
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {editable && (
+                        <Link href={`/material-receiving?edit=${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                          {dict.field.edit}
+                        </Link>
+                      )}
+                      <form action={deleteReceipt}>
+                        <input type="hidden" name="id" value={r.id} />
+                        <button className="text-xs font-medium text-critical hover:underline">{dict.field.delete}</button>
+                      </form>
+                      {r.qcStatus !== "RETURNED" && (
+                        <form action={returnReceiptToSupplier}>
+                          <input type="hidden" name="id" value={r.id} />
+                          <button className="text-xs font-medium text-critical hover:underline">{m.returnToSupplier}</button>
+                        </form>
+                      )}
+                    </div>
                   </td>
                 </tr>
               );

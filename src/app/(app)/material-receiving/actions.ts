@@ -52,6 +52,153 @@ export async function createReceipt(formData: FormData) {
   revalidatePath("/material-receiving");
 }
 
+// Only while the shipment hasn't been posted to inventory yet — once QC
+// has passed it and its weight is already reflected in a silo/hopper
+// balance, changing the weight here would leave that balance wrong. Use
+// deleteReceipt or returnReceiptToSupplier instead for a posted receipt;
+// both reverse the posted amount before touching anything else.
+export async function updateReceipt(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const supplierId = String(formData.get("supplierId") ?? "");
+  const materialId = String(formData.get("materialId") ?? "");
+  const poNumber = String(formData.get("poNumber") ?? "").trim() || null;
+  const orderedMassKg = Number(formData.get("orderedMassKg") ?? 0) || null;
+  const grossWeightKg = Number(formData.get("grossWeightKg") ?? 0);
+  const tareWeightKg = Number(formData.get("tareWeightKg") ?? 0);
+  const moisturePct = Number(formData.get("moisturePct") ?? 0) || null;
+  const destinationSiloId = String(formData.get("destinationSiloId") ?? "") || null;
+  const destinationHopperId = String(formData.get("destinationHopperId") ?? "") || null;
+  const driverId = String(formData.get("driverId") ?? "") || null;
+  const driverName = String(formData.get("driverName") ?? "").trim() || null;
+
+  if (!id || !supplierId || !materialId || !grossWeightKg || !tareWeightKg) return;
+  if (grossWeightKg <= tareWeightKg) return;
+
+  const receipt = await prisma.materialReceipt.findUnique({ where: { id } });
+  if (!receipt || receipt.postedToInventory) return;
+
+  const netWeightKg = grossWeightKg - tareWeightKg;
+
+  await prisma.materialReceipt.update({
+    where: { id },
+    data: {
+      supplierId,
+      materialId,
+      poNumber,
+      orderedMassKg,
+      grossWeightKg,
+      tareWeightKg,
+      netWeightKg,
+      moisturePct,
+      destinationSiloId,
+      destinationHopperId,
+      driverId,
+      driverName,
+    },
+  });
+
+  await logAudit({
+    module: "MaterialReceiving",
+    recordId: id,
+    afterValue: `${netWeightKg.toFixed(0)} kg net, PO ${poNumber ?? "—"}`,
+    reasonCode: "RECEIPT_UPDATED",
+  });
+
+  revalidatePath("/material-receiving");
+}
+
+// Reverses the posted amount (if any) from wherever it landed, then
+// removes the row outright — for a receipt that was captured in error and
+// never should have existed, as opposed to a real shipment being sent
+// back (see returnReceiptToSupplier below, which keeps the record).
+export async function deleteReceipt(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const receipt = await prisma.materialReceipt.findUnique({ where: { id } });
+  if (!receipt) return;
+
+  await prisma.$transaction(async (tx) => {
+    if (receipt.postedToInventory) {
+      const netTons = receipt.netWeightKg / 1000;
+      if (receipt.destinationSiloId) {
+        const silo = await tx.silo.findUnique({ where: { id: receipt.destinationSiloId } });
+        if (silo) {
+          await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: Math.max(0, silo.currentLevelTons - netTons) } });
+        }
+      } else if (receipt.destinationHopperId) {
+        const hopper = await tx.hopper.findUnique({ where: { id: receipt.destinationHopperId } });
+        if (hopper) {
+          await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: Math.max(0, hopper.currentLevelTons - netTons) } });
+        }
+      }
+    }
+    await tx.materialReceipt.delete({ where: { id } });
+  });
+
+  await logAudit({
+    module: "MaterialReceiving",
+    recordId: id,
+    reasonCode: receipt.postedToInventory ? "RECEIPT_DELETED_INVENTORY_REVERSED" : "RECEIPT_DELETED",
+  });
+
+  revalidatePath("/material-receiving");
+  revalidatePath("/silos");
+  revalidatePath("/");
+}
+
+// A real shipment being sent back to the supplier — kept on file as a
+// RETURNED record (unlike deleteReceipt) since it's a real event that
+// happened, not a data-entry mistake. Reverses the posted amount the same
+// way deleteReceipt does, if it had already landed in inventory.
+export async function returnReceiptToSupplier(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const receipt = await prisma.materialReceipt.findUnique({ where: { id } });
+  if (!receipt || receipt.qcStatus === "RETURNED") return;
+
+  await prisma.$transaction(async (tx) => {
+    if (receipt.postedToInventory) {
+      const netTons = receipt.netWeightKg / 1000;
+      if (receipt.destinationSiloId) {
+        const silo = await tx.silo.findUnique({ where: { id: receipt.destinationSiloId } });
+        if (silo) {
+          await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: Math.max(0, silo.currentLevelTons - netTons) } });
+        }
+      } else if (receipt.destinationHopperId) {
+        const hopper = await tx.hopper.findUnique({ where: { id: receipt.destinationHopperId } });
+        if (hopper) {
+          await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: Math.max(0, hopper.currentLevelTons - netTons) } });
+        }
+      }
+    }
+    await tx.materialReceipt.update({ where: { id }, data: { qcStatus: "RETURNED", postedToInventory: false } });
+  });
+
+  await logAudit({
+    module: "MaterialReceiving",
+    recordId: id,
+    field: "qcStatus",
+    beforeValue: receipt.qcStatus,
+    afterValue: "RETURNED",
+    reasonCode: "RECEIPT_RETURNED_TO_SUPPLIER",
+  });
+
+  revalidatePath("/material-receiving");
+  revalidatePath("/silos");
+  revalidatePath("/");
+}
+
 export async function setQcStatus(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);

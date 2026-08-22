@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { getRemainingVolumeM3 } from "@/lib/reservations";
+import { getReleasedVolumeM3 } from "@/lib/reservations";
 import { revalidatePath } from "next/cache";
 
 // Shared by create and update — the pour-order details captured at intake,
@@ -62,11 +62,11 @@ export async function createReservation(formData: FormData) {
   revalidatePath("/reservations");
 }
 
-// Only editable before any volume has been dispatched — once a batch ticket
-// has been released against it, changing the mix or requested volume would
-// silently invalidate tickets/tolerances already computed off the old
-// numbers, so the action re-checks this server-side rather than trusting
-// the UI to only show Edit when it's safe.
+// Editable at any point in the delivery lifecycle short of DELIVERED or
+// CANCELLED — including after partial release, so a site's actual pour
+// can be scaled up or down mid-job. The one hard rule: requested volume
+// can never drop below what's already gone out as a batch ticket, since
+// that concrete is already real and can't un-happen.
 export async function updateReservation(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"]);
@@ -76,15 +76,16 @@ export async function updateReservation(formData: FormData) {
   const mixId = String(formData.get("mixId") ?? "");
   const requestedVolumeM3 = Number(formData.get("requestedVolumeM3") ?? 0);
   const pourWindowStartRaw = String(formData.get("pourWindowStart") ?? "");
+  const status = String(formData.get("status") ?? "");
 
-  if (!id || !projectId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw) return;
+  if (!id || !projectId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw || !status) return;
 
   const reservation = await prisma.reservation.findUnique({ where: { id } });
   if (!reservation) return;
-  if (!["REQUESTED", "CONFIRMED", "ON_HOLD"].includes(reservation.status)) return;
+  if (["DELIVERED", "CANCELLED"].includes(reservation.status)) return;
 
-  const remaining = await getRemainingVolumeM3(id, reservation.requestedVolumeM3);
-  if (remaining < reservation.requestedVolumeM3) return; // something has already been released
+  const released = await getReleasedVolumeM3(id);
+  if (requestedVolumeM3 < released) return; // can't shrink below what's already gone out
 
   await prisma.reservation.update({
     where: { id },
@@ -93,6 +94,7 @@ export async function updateReservation(formData: FormData) {
       mixId,
       requestedVolumeM3,
       pourWindowStart: new Date(pourWindowStartRaw),
+      status,
       ...readPourDetails(formData),
     },
   });
@@ -100,9 +102,57 @@ export async function updateReservation(formData: FormData) {
   await logAudit({
     module: "Reservations",
     recordId: id,
-    afterValue: `${requestedVolumeM3} m3`,
+    afterValue: `${requestedVolumeM3} m3, ${status}`,
     reasonCode: "RESERVATION_UPDATED",
   });
 
   revalidatePath("/reservations");
+  revalidatePath("/production");
+}
+
+// "مسئول الحجوزات" — the reservations officer confirming the booking
+// itself (project, mix, volume, site details) is correct and ready to
+// move forward. First of the two required sign-offs.
+export async function approveReservationInitial(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const reservation = await prisma.reservation.findUnique({ where: { id } });
+  if (!reservation || reservation.initialApprovedAt) return;
+
+  await prisma.reservation.update({
+    where: { id },
+    data: { initialApprovedAt: new Date(), initialApprovedById: user!.id },
+  });
+
+  await logAudit({ module: "Reservations", recordId: id, reasonCode: "RESERVATION_INITIAL_APPROVED" });
+  revalidatePath("/reservations");
+  revalidatePath("/production");
+}
+
+// "مدير التشغيل" — operations management's final clearance. Only
+// meaningful once the initial approval is already on file; a reservation
+// only becomes releasable in Production once both are set (see
+// isReservationApproved in src/lib/reservations.ts).
+export async function approveReservationFinal(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const reservation = await prisma.reservation.findUnique({ where: { id } });
+  if (!reservation || !reservation.initialApprovedAt || reservation.finalApprovedAt) return;
+
+  await prisma.reservation.update({
+    where: { id },
+    data: { finalApprovedAt: new Date(), finalApprovedById: user!.id },
+  });
+
+  await logAudit({ module: "Reservations", recordId: id, reasonCode: "RESERVATION_FINAL_APPROVED" });
+  revalidatePath("/reservations");
+  revalidatePath("/production");
 }

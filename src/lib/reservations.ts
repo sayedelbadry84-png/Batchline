@@ -28,6 +28,15 @@ export async function getRemainingVolumeM3(reservationId: string, requestedVolum
  * closed — closing trip 1 of 25 on a split load must not mark the whole
  * reservation DELIVERED.
  */
+// A reservation only counts as activated — releasable in Production —
+// once both sign-offs are on file. Checked both where the release form
+// decides what to show (production/page.tsx) and again inside
+// releaseBatchTicket itself, same defense-in-depth pattern as every other
+// "the picker only offered valid options" re-check in this app.
+export function isReservationApproved(reservation: { initialApprovedAt: Date | null; finalApprovedAt: Date | null }): boolean {
+  return reservation.initialApprovedAt != null && reservation.finalApprovedAt != null;
+}
+
 export async function isReservationFullyDelivered(reservationId: string): Promise<boolean> {
   const reservation = await prisma.reservation.findUnique({
     where: { id: reservationId },

@@ -4,7 +4,16 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { recordActuals, recordActualField, completeBatch, startTrip, updateTripAssignment } from "../actions";
+import {
+  recordActuals,
+  recordActualField,
+  completeBatch,
+  startTrip,
+  updateTripAssignment,
+  addTicketComponent,
+  deleteTicketComponent,
+  deleteBatchTicket,
+} from "../actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
 import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
@@ -25,16 +34,23 @@ export default async function BatchTicketPage({
   const m = dict.modules.production;
   const d = m.detail;
 
-  const ticket = await prisma.batchTicket.findUnique({
-    where: { id },
-    include: {
-      reservation: { include: { project: { include: { customer: true, plant: true } } } },
-      mix: { include: { components: true } },
-      components: { include: { material: true } },
-      trip: { include: { truck: true, driver: true, pump: true } },
-    },
-  });
+  const [ticket, materials] = await Promise.all([
+    prisma.batchTicket.findUnique({
+      where: { id },
+      include: {
+        reservation: { include: { project: { include: { customer: true, plant: true } } } },
+        mix: { include: { components: true } },
+        components: { include: { material: true } },
+        trip: { include: { truck: true, driver: true, pump: true } },
+      },
+    }),
+    prisma.material.findMany({ orderBy: { name: "asc" } }),
+  ]);
   if (!ticket) notFound();
+
+  const canEditComponents = ticket.status !== "COMPLETE";
+  const componentMaterialIds = new Set(ticket.components.map((c) => c.materialId));
+  const addableMaterials = materials.filter((mt) => !componentMaterialIds.has(mt.id));
 
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
@@ -114,6 +130,13 @@ export default async function BatchTicketPage({
       <form action={recordActuals} className={ui.card}>
         <input type="hidden" name="batchTicketId" value={ticket.id} />
         <h2 className="mb-3 font-display text-lg font-semibold">{d.targetVsActual}</h2>
+        {canEditComponents &&
+          ticket.components.map((c) => (
+            <form key={c.id} id={`delcomp-${c.id}`} action={deleteTicketComponent} className="hidden">
+              <input type="hidden" name="id" value={c.id} />
+              <input type="hidden" name="batchTicketId" value={ticket.id} />
+            </form>
+          ))}
         <table className={ui.table}>
           <thead>
             <tr>
@@ -122,6 +145,7 @@ export default async function BatchTicketPage({
               <th className={ui.th}>{d.col.actual}</th>
               <th className={ui.th}>{d.col.moisture}</th>
               <th className={ui.th}>{d.col.deviation}</th>
+              {canEditComponents && <th className={ui.th}></th>}
             </tr>
           </thead>
           <tbody>
@@ -175,6 +199,13 @@ export default async function BatchTicketPage({
                       <span className="text-ink-faint">—</span>
                     )}
                   </td>
+                  {canEditComponents && (
+                    <td className={ui.td}>
+                      <button form={`delcomp-${c.id}`} type="submit" className="text-xs font-medium text-critical hover:underline">
+                        {d.removeComponent}
+                      </button>
+                    </td>
+                  )}
                 </tr>
               );
             })}
@@ -189,6 +220,26 @@ export default async function BatchTicketPage({
         )}
         <p className="mt-3 text-xs text-ink-muted">{d.moistureHint}</p>
       </form>
+
+      {canEditComponents && addableMaterials.length > 0 && (
+        <form action={addTicketComponent} className={`${ui.card} flex flex-wrap items-end gap-3`}>
+          <input type="hidden" name="batchTicketId" value={ticket.id} />
+          <h2 className="w-full font-display text-lg font-semibold">{d.addComponentTitle}</h2>
+          <div>
+            <label className={ui.label}>{d.col.material}</label>
+            <select name="materialId" required className={`${ui.select} w-48`}>
+              {addableMaterials.map((mt) => (
+                <option key={mt.id} value={mt.id}>{mt.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{d.col.target}</label>
+            <input name="targetMassKg" type="number" step="0.1" required className={`${ui.input} w-28`} />
+          </div>
+          <button type="submit" className={ui.button}>{d.addComponentButton}</button>
+        </form>
+      )}
 
       {ticket.status !== "COMPLETE" && (
         <form action={completeBatch} className={`${ui.card} flex items-center justify-between`}>
@@ -264,6 +315,45 @@ export default async function BatchTicketPage({
             </Link>
           </div>
         </div>
+      )}
+
+      {ticket.trip && (
+        <div className={ui.card}>
+          <h2 className="mb-3 font-display text-lg font-semibold">{d.deliveryStagesTitle}</h2>
+          <ol className="flex flex-col gap-2">
+            {[
+              { label: d.stageLoading, at: ticket.trip.batchTime as Date | null },
+              { label: d.stageInTransit, at: ticket.trip.departTime },
+              { label: d.stageOnSite, at: ticket.trip.arriveTime },
+              { label: d.stageDischarging, at: ticket.trip.dischargeStart },
+              { label: d.stageClosed, at: ticket.trip.dischargeEnd },
+            ].map((stage, i) => {
+              const reached = stage.at != null;
+              return (
+                <li key={i} className="flex items-center gap-3 text-sm">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${reached ? "bg-good" : "bg-border"}`} />
+                  <span className={reached ? "font-medium" : "text-ink-muted"}>{stage.label}</span>
+                  {reached && (
+                    <span className="font-mono text-xs text-ink-muted" dir="ltr">{new Date(stage.at!).toLocaleString()}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
+
+      {!ticket.trip && (
+        <form action={deleteBatchTicket} className={`${ui.card} flex items-center justify-between`}>
+          <input type="hidden" name="id" value={ticket.id} />
+          <div>
+            <h2 className="font-display text-lg font-semibold">{d.deleteTicket}</h2>
+            <p className="text-sm text-ink-muted">{d.deleteTicketHint}</p>
+          </div>
+          <button type="submit" className="rounded-md border border-critical px-4 py-2 text-sm font-medium text-critical hover:bg-critical-soft">
+            {d.deleteTicket}
+          </button>
+        </form>
       )}
 
       {showEditTripForm && ticket.trip && (

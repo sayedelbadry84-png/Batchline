@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createReservation, updateReservation } from "./actions";
+import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal } from "./actions";
 
 const statusChip: Record<string, string> = {
   REQUESTED: "bg-surface-alt text-ink-muted",
@@ -19,7 +19,7 @@ export default async function ReservationsPage({
 }: {
   searchParams: Promise<{ edit?: string }>;
 }) {
-  await requirePageAccess("reservations");
+  const user = await requirePageAccess("reservations");
   const { dict } = await getDictionary();
   const m = dict.modules.reservations;
   const { edit: editId } = await searchParams;
@@ -62,16 +62,17 @@ export default async function ReservationsPage({
                 <th className={ui.th}>{m.col.element}</th>
                 <th className={ui.th}>{m.col.delivery}</th>
                 <th className={ui.th}>{m.col.status}</th>
+                <th className={ui.th}>{m.col.approval}</th>
                 <th className={ui.th}>{dict.field.actions}</th>
               </tr>
             </thead>
             <tbody>
               {reservations.map((r) => {
-                const editable = r.released === 0 && ["REQUESTED", "CONFIRMED", "ON_HOLD"].includes(r.status);
+                const editable = !["DELIVERED", "CANCELLED"].includes(r.status);
                 if (editId === r.id && editable) {
                   return (
                     <tr key={r.id}>
-                      <td className={ui.td} colSpan={8}>
+                      <td className={ui.td} colSpan={9}>
                         <form action={updateReservation} className="flex flex-wrap items-end gap-2">
                           <input type="hidden" name="id" value={r.id} />
                           <div>
@@ -92,7 +93,16 @@ export default async function ReservationsPage({
                           </div>
                           <div>
                             <label className={ui.label}>{m.f.volume}</label>
-                            <input name="requestedVolumeM3" type="number" step="0.5" defaultValue={r.requestedVolumeM3} required className={`${ui.input} w-24`} />
+                            <input name="requestedVolumeM3" type="number" step="0.5" min={r.released} defaultValue={r.requestedVolumeM3} required className={`${ui.input} w-24`} />
+                            {r.released > 0 && <p className="mt-1 text-xs text-ink-muted">{m.alreadyReleased(r.released)}</p>}
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.status}</label>
+                            <select name="status" defaultValue={r.status} required className={`${ui.select} w-36`}>
+                              {["REQUESTED", "CONFIRMED", "ON_HOLD", "IN_PRODUCTION", "DELIVERED", "CANCELLED"].map((s) => (
+                                <option key={s} value={s}>{dict.status[s as keyof typeof dict.status] ?? s}</option>
+                              ))}
+                            </select>
                           </div>
                           <div>
                             <label className={ui.label}>{m.f.pourStart}</label>
@@ -221,6 +231,32 @@ export default async function ReservationsPage({
                       <span className={`${ui.chip} ${statusChip[r.status] ?? ""}`}>{dict.status[r.status as keyof typeof dict.status] ?? r.status}</span>
                     </td>
                     <td className={ui.td}>
+                      {r.finalApprovedAt ? (
+                        <span className={`${ui.chip} bg-good-soft text-good`}>{m.approvedFinal}</span>
+                      ) : r.initialApprovedAt ? (
+                        <>
+                          <span className={`${ui.chip} bg-warn-soft text-warn`}>{m.approvedInitial}</span>
+                          {user.role === "ADMIN" && (
+                            <form action={approveReservationFinal} className="mt-1">
+                              <input type="hidden" name="id" value={r.id} />
+                              <button className="text-xs font-medium text-accent-strong hover:underline">{m.approveFinal}</button>
+                            </form>
+                          )}
+                          {user.role !== "ADMIN" && <div className="mt-1 text-xs text-ink-faint">{m.pendingFinal}</div>}
+                        </>
+                      ) : (
+                        <>
+                          <span className={`${ui.chip} bg-surface-alt text-ink-muted`}>{m.pendingInitial}</span>
+                          {(user.role === "PLANT_OPERATOR" || user.role === "ADMIN") && (
+                            <form action={approveReservationInitial} className="mt-1">
+                              <input type="hidden" name="id" value={r.id} />
+                              <button className="text-xs font-medium text-accent-strong hover:underline">{m.approveInitial}</button>
+                            </form>
+                          )}
+                        </>
+                      )}
+                    </td>
+                    <td className={ui.td}>
                       {editable && (
                         <Link href={`/reservations?edit=${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
                           {dict.field.edit}
@@ -232,7 +268,7 @@ export default async function ReservationsPage({
               })}
               {reservations.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={8}>
+                  <td className={ui.td} colSpan={9}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>

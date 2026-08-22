@@ -45,6 +45,8 @@ model User {
 
   auditEvents  AuditEvent[]
   sessions     Session[]
+  reservationInitialApprovals Reservation[] @relation("ReservationInitialApproval")
+  reservationFinalApprovals   Reservation[] @relation("ReservationFinalApproval")
 }
 
 model Session {
@@ -268,6 +270,19 @@ model Reservation {
   // temperatureC already is for concrete temperature.
   minPumpReachM      Float?
   labTechnicianRequired Boolean @default(false)
+  // Two-stage sign-off gate a reservation must clear before Production will
+  // release a batch ticket against it — distinct from `status` above, which
+  // tracks the delivery lifecycle rather than who signed off. Initial is
+  // the reservations officer confirming the booking itself is sound; final
+  // is operations management clearing it to actually be produced. Both
+  // null means "not yet activated," same meaning whether the reservation
+  // was just created or was edited enough to warrant re-approval.
+  initialApprovedAt   DateTime?
+  initialApprovedById String?
+  initialApprovedBy   User?     @relation("ReservationInitialApproval", fields: [initialApprovedById], references: [id])
+  finalApprovedAt     DateTime?
+  finalApprovedById   String?
+  finalApprovedBy     User?     @relation("ReservationFinalApproval", fields: [finalApprovedById], references: [id])
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 

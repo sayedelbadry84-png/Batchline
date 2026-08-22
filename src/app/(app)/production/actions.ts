@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { getRemainingVolumeM3 } from "@/lib/reservations";
+import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -11,6 +11,11 @@ import { redirect } from "next/navigation";
 // admixture and water do not (this mirrors the moisture-correction rule in
 // the Batchline design spec — only aggregates carry surface moisture).
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
+
+// A single mixer truck load, never exceeded regardless of how much of the
+// reservation remains — the same ceiling the release form's own input
+// max enforces client-side (production/page.tsx); this is the real gate.
+const MAX_LOAD_M3 = 15;
 
 // A reservation's requested volume is a target, not a single truck load —
 // a 200 m³ pour goes out as many partial tickets (one per truck), each
@@ -26,12 +31,17 @@ export async function releaseBatchTicket(formData: FormData) {
   // same business logic, just a different "where do I keep working" target.
   const returnPrefix = String(formData.get("returnPrefix") ?? "/production");
   if (!reservationId || !requestedVolume || requestedVolume <= 0) return;
+  if (requestedVolume > MAX_LOAD_M3) return;
 
   const reservation = await prisma.reservation.findUnique({
     where: { id: reservationId },
     include: { project: true, mix: { include: { components: true } } },
   });
   if (!reservation) return;
+  // Re-check server-side — the picker on /production only ever lists
+  // reservations that already cleared both sign-offs, but a stale page
+  // or a second tab shouldn't be able to release against one that hasn't.
+  if (!isReservationApproved(reservation)) return;
 
   const remaining = await getRemainingVolumeM3(reservationId, reservation.requestedVolumeM3);
   const volumeM3 = Math.min(requestedVolume, remaining);
@@ -377,4 +387,120 @@ export async function updateTripAssignment(formData: FormData) {
   revalidatePath(`/production/${trip.batchTicketId}`);
   revalidatePath("/operator");
   revalidatePath("/trips");
+}
+
+// A component missed at release time (or a last-minute site addition —
+// an extra admixture dose, say) can still be added onto an already-
+// released ticket, right up until it's marked COMPLETE and its mass is
+// actually deducted from inventory.
+export async function addTicketComponent(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const batchTicketId = String(formData.get("batchTicketId") ?? "");
+  const materialId = String(formData.get("materialId") ?? "");
+  const targetMassKg = Number(formData.get("targetMassKg") ?? 0);
+  if (!batchTicketId || !materialId || !targetMassKg || targetMassKg <= 0) return;
+
+  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId } });
+  if (!ticket || ticket.status === "COMPLETE") return;
+
+  await prisma.batchComponentActual.upsert({
+    where: { batchTicketId_materialId: { batchTicketId, materialId } },
+    create: { batchTicketId, materialId, targetMassKg },
+    update: { targetMassKg },
+  });
+
+  await logAudit({
+    module: "Production",
+    recordId: batchTicketId,
+    field: "component",
+    afterValue: `${materialId}: ${targetMassKg} kg`,
+    reasonCode: "TICKET_COMPONENT_ADDED",
+  });
+
+  revalidatePath(`/production/${batchTicketId}`);
+  revalidatePath(`/operator/ticket/${batchTicketId}`);
+}
+
+// Same COMPLETE boundary as addTicketComponent above — once a component's
+// mass has actually been deducted from a silo or hopper, removing the row
+// would leave that deduction unexplained rather than undoing it.
+export async function deleteTicketComponent(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const batchTicketId = String(formData.get("batchTicketId") ?? "");
+  if (!id || !batchTicketId) return;
+
+  const component = await prisma.batchComponentActual.findUnique({ where: { id }, include: { batchTicket: true } });
+  if (!component || component.batchTicketId !== batchTicketId || component.batchTicket.status === "COMPLETE") return;
+
+  await prisma.batchComponentActual.delete({ where: { id } });
+
+  await logAudit({ module: "Production", recordId: batchTicketId, field: "component", reasonCode: "TICKET_COMPONENT_REMOVED" });
+
+  revalidatePath(`/production/${batchTicketId}`);
+  revalidatePath(`/operator/ticket/${batchTicketId}`);
+}
+
+// Only ever safe before anything has actually been dispatched (no Trip on
+// file yet — a Trip's own FK to this ticket is what would otherwise break).
+// If the ticket had already reached COMPLETE, its components' mass was
+// deducted from inventory in completeBatch — reverse that deduction here
+// before deleting, the mirror image of that same deduction loop.
+export async function deleteBatchTicket(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const ticket = await prisma.batchTicket.findUnique({
+    where: { id },
+    include: {
+      trip: true,
+      components: { include: { material: true } },
+      plant: { include: { silos: true, hoppers: true } },
+    },
+  });
+  if (!ticket || ticket.trip) return;
+
+  if (ticket.status === "COMPLETE") {
+    for (const c of ticket.components) {
+      const massTons = (c.actualMassKg ?? c.targetMassKg) / 1000;
+
+      if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
+        const silo = ticket.plant.silos.find((s) => s.materialType === c.material.type);
+        if (silo) {
+          await prisma.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + massTons } });
+        }
+      } else if (AGGREGATE_TYPES.has(c.material.type)) {
+        const hopper = ticket.plant.hoppers.find((h) =>
+          c.material.type === "SAND" ? h.aggregateType === "SAND" : h.aggregateType.startsWith("COARSE"),
+        );
+        if (hopper) {
+          await prisma.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + massTons } });
+        }
+      }
+    }
+  }
+
+  // Components cascade-delete with the ticket (see BatchComponentActual's
+  // onDelete: Cascade in schema.prisma).
+  await prisma.batchTicket.delete({ where: { id } });
+
+  await logAudit({
+    module: "Production",
+    recordId: id,
+    afterValue: ticket.ticketNumber,
+    reasonCode: ticket.status === "COMPLETE" ? "TICKET_DELETED_INVENTORY_RESTORED" : "TICKET_DELETED",
+  });
+
+  revalidatePath("/production");
+  revalidatePath("/reservations");
+  revalidatePath("/silos");
+  revalidatePath("/");
+  redirect("/production");
 }

@@ -84,6 +84,28 @@ export async function addComponent(formData: FormData) {
   revalidatePath(`/mix-designs/${mixId}`);
 }
 
+// Freely removable at any mix status, including APPROVED — a mix design
+// edited mid-production never touches tickets already released against
+// it, since BatchTicket snapshots its own component targets at release
+// time (see releaseBatchTicket in production/actions.ts).
+export async function deleteComponent(formData: FormData) {
+  const mixId = String(formData.get("mixId") ?? "");
+  const materialId = String(formData.get("materialId") ?? "");
+  if (!mixId || !materialId) return;
+
+  await prisma.mixComponent.delete({ where: { mixId_materialId: { mixId, materialId } } });
+
+  await logAudit({
+    module: "MixDesign",
+    recordId: mixId,
+    field: "component",
+    afterValue: materialId,
+    reasonCode: "COMPONENT_REMOVED",
+  });
+
+  revalidatePath(`/mix-designs/${mixId}`);
+}
+
 // Approving a mix design is the gate before it can be batched — restricted
 // to the role that owns quality sign-off, per the RBAC matrix.
 export async function setMixStatus(formData: FormData) {

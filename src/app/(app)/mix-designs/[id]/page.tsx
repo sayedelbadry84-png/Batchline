@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { addComponent, setMixStatus, updateMixDesign } from "../actions";
+import { addComponent, deleteComponent, setMixStatus, updateMixDesign } from "../actions";
 import { estimateCo2eKg } from "@/lib/carbon";
 
 export default async function MixDesignDetailPage({
@@ -198,9 +198,16 @@ export default async function MixDesignDetailPage({
                     <td className={`${ui.td} font-mono tabular`}>±{c.tolerancePct}%</td>
                     <td className={`${ui.td} font-mono tabular`}>{c.material.specificGravity ?? "—"}</td>
                     <td className={ui.td}>
-                      <Link href={`/mix-designs/${mix.id}?editComponent=${c.materialId}`} className="text-xs font-medium text-accent-strong hover:underline">
-                        {dict.field.edit}
-                      </Link>
+                      <div className="flex items-center gap-3">
+                        <Link href={`/mix-designs/${mix.id}?editComponent=${c.materialId}`} className="text-xs font-medium text-accent-strong hover:underline">
+                          {dict.field.edit}
+                        </Link>
+                        <form action={deleteComponent}>
+                          <input type="hidden" name="mixId" value={mix.id} />
+                          <input type="hidden" name="materialId" value={c.materialId} />
+                          <button className="text-xs font-medium text-critical hover:underline">{dict.field.delete}</button>
+                        </form>
+                      </div>
                     </td>
                   </tr>
                 );
