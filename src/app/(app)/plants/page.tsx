@@ -198,6 +198,39 @@ export default async function PlantsPage({
           ))}
         </div>
       </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.yardTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.yardIntro}</p>
+        <div className="flex flex-col gap-3">
+          {plants.map((p) => (
+            <form
+              key={p.id}
+              action={updatePlantThresholds}
+              className="flex flex-wrap items-end gap-4 border-b border-border pb-3 last:border-0 last:pb-0"
+            >
+              <input type="hidden" name="id" value={p.id} />
+              <input type="hidden" name="drumTimerLimitMinutes" value={p.drumTimerLimitMinutes} />
+              <input type="hidden" name="returnAbsorptionThresholdM3" value={p.returnAbsorptionThresholdM3} />
+              <input type="hidden" name="maintenanceIntervalTrips" value={p.maintenanceIntervalTrips} />
+              <div className="min-w-32 font-medium">{p.name}</div>
+              <div>
+                <label className={ui.label}>{m.yardLat}</label>
+                <input name="yardLat" type="number" step="0.000001" defaultValue={p.yardLat ?? undefined} className="w-32 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" dir="ltr" />
+              </div>
+              <div>
+                <label className={ui.label}>{m.yardLng}</label>
+                <input name="yardLng" type="number" step="0.000001" defaultValue={p.yardLng ?? undefined} className="w-32 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" dir="ltr" />
+              </div>
+              <div>
+                <label className={ui.label}>{m.yardRadius}</label>
+                <input name="yardRadiusM" type="number" step="10" defaultValue={p.yardRadiusM ?? undefined} className="w-28 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" placeholder="250" />
+              </div>
+              <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">{m.save}</button>
+            </form>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

@@ -67,12 +67,17 @@ export async function updatePlantThresholds(formData: FormData) {
   const drumTimerLimitMinutes = Number(formData.get("drumTimerLimitMinutes") ?? 90);
   const returnAbsorptionThresholdM3 = Number(formData.get("returnAbsorptionThresholdM3") ?? 0.2);
   const maintenanceIntervalTrips = Number(formData.get("maintenanceIntervalTrips") ?? 150);
+  // Geofenced yard — all three left blank turns geofencing off for this
+  // plant (see the distance check in the telematics webhook).
+  const yardLat = Number(formData.get("yardLat") ?? 0) || null;
+  const yardLng = Number(formData.get("yardLng") ?? 0) || null;
+  const yardRadiusM = Number(formData.get("yardRadiusM") ?? 0) || null;
   if (!id) return;
 
   const before = await prisma.plant.findUnique({ where: { id } });
   await prisma.plant.update({
     where: { id },
-    data: { drumTimerLimitMinutes, returnAbsorptionThresholdM3, maintenanceIntervalTrips },
+    data: { drumTimerLimitMinutes, returnAbsorptionThresholdM3, maintenanceIntervalTrips, yardLat, yardLng, yardRadiusM },
   });
 
   await logAudit({

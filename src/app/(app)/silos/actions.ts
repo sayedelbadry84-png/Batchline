@@ -95,14 +95,39 @@ export async function createHopper(formData: FormData) {
   const aggregateType = String(formData.get("aggregateType") ?? "").trim();
   const capacityTons = Number(formData.get("capacityTons") ?? 0);
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
+  const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
 
   if (!plantId || !name || !aggregateType || !capacityTons) return;
 
   const hopper = await prisma.hopper.create({
-    data: { plantId, name, aggregateType, capacityTons, currentLevelTons },
+    data: { plantId, name, aggregateType, capacityTons, currentLevelTons, sharedAcrossPlants },
   });
 
   await logAudit({ module: "Silos", recordId: hopper.id, afterValue: `${name} / ${aggregateType}`, reasonCode: "HOPPER_CREATED" });
+  revalidatePath("/silos");
+}
+
+// Toggled independently of the level reading — sharing is a
+// configuration fact, not a measurement (see findMatchingHopper in
+// production/actions.ts for how this actually changes consumption).
+export async function setHopperSharing(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
+  if (!id) return;
+
+  await prisma.hopper.update({ where: { id }, data: { sharedAcrossPlants } });
+
+  await logAudit({
+    module: "Silos",
+    recordId: id,
+    field: "sharedAcrossPlants",
+    afterValue: String(sharedAcrossPlants),
+    reasonCode: "HOPPER_SHARING_CHANGED",
+  });
+
   revalidatePath("/silos");
 }
 

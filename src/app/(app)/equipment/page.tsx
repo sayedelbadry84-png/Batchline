@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { flagMaintenanceDue } from "@/lib/maintenance";
+import { isAtYard } from "@/lib/geo";
 import { FleetMap } from "@/components/FleetMapLoader";
 import {
   createPump,
@@ -131,7 +132,8 @@ async function MixersTab({
       [{ id: t.id, lastMaintenanceAt: t.lastMaintenanceAt, tripBatchTimes: t.trips.map((trip) => trip.batchTime) }],
       t.plant.maintenanceIntervalTrips,
     );
-    return { ...t, openTripsCount: t.trips.filter((trip) => trip.status !== "CLOSED").length, maintenance };
+    const atYard = t.lastLat != null && t.lastLng != null && isAtYard(t.plant, t.lastLat, t.lastLng);
+    return { ...t, openTripsCount: t.trips.filter((trip) => trip.status !== "CLOSED").length, maintenance, atYard };
   });
 
   const mapTrucks = trucks
@@ -232,6 +234,7 @@ async function MixersTab({
                   <td className={`${ui.td} font-medium`}>
                     <span dir="ltr">{t.code}</span>
                     {t.openTripsCount > 0 && <span className={`${ui.chip} bg-accent-soft text-accent-strong ms-2`}>{m.mixers.onTrip}</span>}
+                    {t.atYard && <span className={`${ui.chip} bg-good-soft text-good ms-2`}>{m.mixers.atYard}</span>}
                     <div className="text-xs text-ink-faint">{t.plant.name}</div>
                   </td>
                   <td className={ui.td}>{t.plant.name}</td>

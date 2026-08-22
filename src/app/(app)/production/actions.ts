@@ -12,6 +12,18 @@ import { redirect } from "next/navigation";
 // the Batchline design spec — only aggregates carry surface moisture).
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
+// A hopper's aggregate/water heap can be shared by every plant on one
+// yard (Hopper.sharedAcrossPlants) — prefer a match at the ticket's own
+// plant, but fall back to any hopper elsewhere marked shared rather than
+// silently finding nothing. Silos stay plant-only (cement tanks are
+// fixed installations per plant, not a shared open heap), so this is
+// only ever called for aggregate/water hoppers.
+async function findMatchingHopper(plantId: string, aggregateTypeWhere: { equals: string } | { startsWith: string }) {
+  const own = await prisma.hopper.findFirst({ where: { plantId, aggregateType: aggregateTypeWhere } });
+  if (own) return own;
+  return prisma.hopper.findFirst({ where: { sharedAcrossPlants: true, aggregateType: aggregateTypeWhere } });
+}
+
 // A single mixer truck load, never exceeded regardless of how much of the
 // reservation remains — the same ceiling the release form's own input
 // max enforces client-side (production/page.tsx); this is the real gate.
@@ -268,8 +280,9 @@ export async function completeBatch(formData: FormData) {
         });
       }
     } else if (AGGREGATE_TYPES.has(c.material.type)) {
-      const hopper = ticket.plant.hoppers.find((h) =>
-        c.material.type === "SAND" ? h.aggregateType === "SAND" : h.aggregateType.startsWith("COARSE"),
+      const hopper = await findMatchingHopper(
+        ticket.plantId,
+        c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
       );
       if (hopper) {
         await prisma.hopper.update({
@@ -282,7 +295,7 @@ export async function completeBatch(formData: FormData) {
       // plant that meters bulk water registers a Hopper with
       // aggregateType "WATER"; one that doesn't just has no match here,
       // same silent no-op as any other unregistered destination.
-      const waterHopper = ticket.plant.hoppers.find((h) => h.aggregateType === "WATER");
+      const waterHopper = await findMatchingHopper(ticket.plantId, { equals: "WATER" });
       if (waterHopper) {
         await prisma.hopper.update({
           where: { id: waterHopper.id },
@@ -569,14 +582,15 @@ export async function deleteBatchTicket(formData: FormData) {
           await prisma.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + massTons } });
         }
       } else if (AGGREGATE_TYPES.has(c.material.type)) {
-        const hopper = ticket.plant.hoppers.find((h) =>
-          c.material.type === "SAND" ? h.aggregateType === "SAND" : h.aggregateType.startsWith("COARSE"),
+        const hopper = await findMatchingHopper(
+          ticket.plantId,
+          c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
         );
         if (hopper) {
           await prisma.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + massTons } });
         }
       } else if (c.material.type === "WATER") {
-        const waterHopper = ticket.plant.hoppers.find((h) => h.aggregateType === "WATER");
+        const waterHopper = await findMatchingHopper(ticket.plantId, { equals: "WATER" });
         if (waterHopper) {
           await prisma.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: waterHopper.currentLevelTons + massTons } });
         }
