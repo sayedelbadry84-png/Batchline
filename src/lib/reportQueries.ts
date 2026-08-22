@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { type PumpOperatorTrips } from "@/lib/incentives";
 
 // One function per exportable report in the Reports module — each takes a
 // plain date range and returns rows plus whatever summary numbers its own
@@ -178,4 +179,31 @@ export async function getWorkerProductivityReport({ from, to }: DateRange) {
 
   rows.sort((a, b) => b.volumeM3 - a.volumeM3);
   return { rows };
+}
+
+// Per-trip volume and pump reach for every pump operator in a date range —
+// the raw material calculatePumpOperatorPayout needs, since pump operator
+// incentive is priced per trip by that trip's own pump reach, not a plain
+// count like the other four roles. Mirrors pumpOperatorTripDetails in the
+// Incentives module's own page (which is month-scoped, not range-scoped),
+// kept separate rather than shared since the two callers' time windows
+// don't line up.
+export async function getPumpOperatorTripDetailsInRange({ from, to }: DateRange): Promise<PumpOperatorTrips[]> {
+  const trips = await prisma.trip.findMany({
+    where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, pumpOperatorId: { not: null } },
+    select: {
+      pumpOperatorId: true,
+      pumpOperatorCrew: { select: { name: true } },
+      volumeDeliveredM3: true,
+      pump: { select: { reachM: true } },
+    },
+  });
+  const byOperator = new Map<string, PumpOperatorTrips>();
+  for (const t of trips) {
+    if (!t.pumpOperatorId || !t.pumpOperatorCrew) continue;
+    const entry = byOperator.get(t.pumpOperatorId) ?? { driverId: t.pumpOperatorId, driverName: t.pumpOperatorCrew.name, trips: [] };
+    entry.trips.push({ volumeM3: t.volumeDeliveredM3 ?? 0, reachM: t.pump?.reachM ?? null });
+    byOperator.set(t.pumpOperatorId, entry);
+  }
+  return Array.from(byOperator.values());
 }

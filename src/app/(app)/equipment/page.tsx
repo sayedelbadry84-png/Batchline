@@ -344,8 +344,11 @@ async function PumpsTab({
       orderBy: { scheduledStart: "asc" },
       include: { pump: true, reservation: { include: { project: { include: { customer: true } } } } },
     }),
+    // Not filtered to zero-assignment reservations — a large pour can need
+    // more than one pump (see the PumpAssignment schema note), so a
+    // reservation that already has one scheduled can still take another.
     prisma.reservation.findMany({
-      where: { pumpAssignment: null, status: { in: ["CONFIRMED", "REQUESTED"] } },
+      where: { deliveryMethod: "PUMP", status: { in: ["CONFIRMED", "REQUESTED"] } },
       include: { project: true },
       orderBy: { pourWindowStart: "asc" },
     }),

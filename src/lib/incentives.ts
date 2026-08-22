@@ -48,3 +48,58 @@ export function rankDriversByIncentive(trips: DriverTripCount[], policy: Incenti
     .map((t) => ({ ...t, payout: calculateDriverPayout(t.tripCount, policy) }))
     .sort((a, b) => b.payout - a.payout || b.tripCount - a.tripCount);
 }
+
+// Pump operator incentive is priced differently from the other four
+// roles: by m³ delivered (not trip count), only above a company-wide
+// "free" target, and at a rate that depends on the reach of the specific
+// pump each trip used — a 60m boom job and a 30m job earn differently
+// even at the same volume. rateBrackets covers each reach with its own
+// price; a trip whose pump has no matching bracket (or no reach on file)
+// earns nothing rather than guessing a rate.
+export type PumpRateBracket = { minReachM: number; maxReachM: number | null; ratePerM3Sar: number };
+export type PumpTripVolume = { volumeM3: number; reachM: number | null };
+
+export function calculatePumpOperatorPayout(
+  trips: PumpTripVolume[],
+  freeVolumeM3: number,
+  rateBrackets: PumpRateBracket[],
+): number {
+  let cumulative = 0;
+  let payout = 0;
+
+  for (const trip of trips) {
+    const before = cumulative;
+    cumulative += trip.volumeM3;
+    // The slice of THIS trip's volume that falls above the free target —
+    // trips are priced in the order given, so once cumulative volume
+    // crosses the target, everything after (in this trip or a later one)
+    // is billable.
+    const billable = Math.max(0, cumulative - Math.max(before, freeVolumeM3));
+    if (billable <= 0 || trip.reachM == null) continue;
+
+    const bracket = rateBrackets.find(
+      (b) => trip.reachM! >= b.minReachM && (b.maxReachM == null || trip.reachM! <= b.maxReachM),
+    );
+    if (bracket) payout += billable * bracket.ratePerM3Sar;
+  }
+
+  return payout;
+}
+
+export type PumpOperatorTrips = { driverId: string; driverName: string; trips: PumpTripVolume[] };
+export type PumpOperatorResult = { driverId: string; driverName: string; volumeM3: number; payout: number };
+
+export function rankPumpOperatorsByIncentive(
+  operators: PumpOperatorTrips[],
+  freeVolumeM3: number,
+  rateBrackets: PumpRateBracket[],
+): PumpOperatorResult[] {
+  return operators
+    .map((o) => ({
+      driverId: o.driverId,
+      driverName: o.driverName,
+      volumeM3: o.trips.reduce((sum, t) => sum + t.volumeM3, 0),
+      payout: calculatePumpOperatorPayout(o.trips, freeVolumeM3, rateBrackets),
+    }))
+    .sort((a, b) => b.payout - a.payout || b.volumeM3 - a.volumeM3);
+}

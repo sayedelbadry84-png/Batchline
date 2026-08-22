@@ -17,8 +17,9 @@ import {
   getTripsReport,
   getEquipmentProductivityReport,
   getWorkerProductivityReport,
+  getPumpOperatorTripDetailsInRange,
 } from "@/lib/reportQueries";
-import { calculateDriverPayout, type IncentivePolicy } from "@/lib/incentives";
+import { calculateDriverPayout, calculatePumpOperatorPayout, type IncentivePolicy } from "@/lib/incentives";
 import { markDrumReturnFate } from "../trips/actions";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -263,11 +264,33 @@ export default async function ReportsPage({
           const worker = await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd });
           const policies = await prisma.driverIncentivePolicy.findMany();
           const policyByRole = new Map(policies.map((p) => [p.role, p]));
-          const rows = worker.rows.map((r) => {
-            const policy: IncentivePolicy = policyByRole.get(r.role) ?? DEFAULT_POLICY;
-            return { ...r, payout: calculateDriverPayout(r.count, policy) };
+          // PUMP_OPERATOR is priced by volume × reach bracket, not a plain
+          // trip-count tier (see calculatePumpOperatorPayout) — computed
+          // separately below and merged in, rather than through the same
+          // count-based path the other four roles use.
+          const countBasedRows = worker.rows
+            .filter((r) => r.role !== "PUMP_OPERATOR")
+            .map((r) => {
+              const policy: IncentivePolicy = policyByRole.get(r.role) ?? DEFAULT_POLICY;
+              return { key: r.key, name: r.name, role: r.role, count: r.count, payout: calculateDriverPayout(r.count, policy) };
+            });
+
+          const pumpTrips = await getPumpOperatorTripDetailsInRange({ from: rangeStart, to: rangeEnd });
+          const pumpCrewPlants = await prisma.pumpCrewMember.findMany({
+            where: { id: { in: pumpTrips.map((t) => t.driverId) } },
+            select: { id: true, plantId: true },
           });
-          rows.sort((a, b) => b.payout - a.payout);
+          const plantIdByOperator = new Map(pumpCrewPlants.map((c) => [c.id, c.plantId]));
+          const pumpPolicies = await prisma.pumpIncentivePolicy.findMany({ include: { rateBrackets: true } });
+          const pumpPolicyByPlant = new Map(pumpPolicies.map((p) => [p.plantId, p]));
+          const pumpRows = pumpTrips.map((op) => {
+            const plantId = plantIdByOperator.get(op.driverId);
+            const policy = plantId ? pumpPolicyByPlant.get(plantId) : undefined;
+            const payout = policy ? calculatePumpOperatorPayout(op.trips, policy.freeVolumeM3, policy.rateBrackets) : 0;
+            return { key: `PUMP_OPERATOR:${op.driverId}`, name: op.driverName, role: "PUMP_OPERATOR", count: op.trips.length, payout };
+          });
+
+          const rows = [...countBasedRows, ...pumpRows].sort((a, b) => b.payout - a.payout);
           return { rows, totalPayout: rows.reduce((sum, r) => sum + r.payout, 0) };
         })()
       : null;

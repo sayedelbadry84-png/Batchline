@@ -82,6 +82,15 @@ model Plant {
   // reason about than a per-vehicle one, matching the batching-tolerance
   // fields above.
   maintenanceIntervalTrips Int @default(150)
+  // Geofenced yard — "a mixer counts as home once it is inside this
+  // circle" (from the RhinoMaster review). Purely informational: the
+  // telematics webhook computes distance on each ping and the Equipment
+  // map shows an "at yard" badge, but nothing here ever overwrites a
+  // truck's manually-set status. All three null means geofencing is off
+  // for this plant.
+  yardLat      Float?
+  yardLng      Float?
+  yardRadiusM  Float?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -97,6 +106,7 @@ model Plant {
   pumpCrewMembers  PumpCrewMember[]
   incentivePolicies DriverIncentivePolicy[]
   supportVehicles  SupportVehicle[]
+  pumpIncentivePolicy PumpIncentivePolicy?
   chemicalTanks    ChemicalTank[]
 }
 
@@ -127,6 +137,11 @@ model Hopper {
   aggregateType    String
   capacityTons     Float
   currentLevelTons Float    @default(0)
+  // A yard heap multiple plants on the same site draw from — plantId
+  // above is still the "home"/organizational plant, but completeBatch's
+  // consumption lookup (production/actions.ts) matches a shared hopper
+  // for ANY plant's ticket, not just its own, once this is true.
+  sharedAcrossPlants Boolean @default(false)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -320,7 +335,7 @@ model Reservation {
   updatedAt          DateTime  @updatedAt
 
   batchTickets BatchTicket[]
-  pumpAssignment PumpAssignment?
+  pumpAssignments PumpAssignment[]
 }
 
 model Employee {
@@ -606,11 +621,13 @@ model Pump {
   trips       Trip[]
 }
 
+// Not @unique on reservationId — a large pour can need more than one pump
+// working simultaneously, so a reservation may carry several assignments.
 model PumpAssignment {
   id              String      @id @default(cuid())
   pumpId          String
   pump            Pump        @relation(fields: [pumpId], references: [id])
-  reservationId   String      @unique
+  reservationId   String
   reservation     Reservation @relation(fields: [reservationId], references: [id])
   scheduledStart  DateTime
   billedHours     Float?
@@ -788,6 +805,53 @@ model RolePermission {
   createdAt DateTime @default(now())
 
   @@unique([moduleKey, role])
+}
+
+// Finer-grained sibling of RolePermission — gates one specific action
+// within a module (e.g. "approve a reservation" vs. just "view
+// reservations") rather than the whole screen. Same fallback shape: the
+// compiled default for each actionKey lives in ACTION_ROLES
+// (src/lib/permissions.ts); a module/action pair with zero rows here
+// falls back to that default until an Admin actually customizes it.
+model ActionPermission {
+  id         String   @id @default(cuid())
+  moduleKey  String
+  actionKey  String
+  role       String
+  createdAt  DateTime @default(now())
+
+  @@unique([moduleKey, actionKey, role])
+}
+
+// Pump operator incentive is volume-based (m³ delivered through a pump
+// they worked), not trip-count-based like the other four incentive
+// roles, and priced per m³ by the reach bracket of the specific pump —
+// a longer-reach pump job prices differently than a short one. One
+// policy per plant; its rate table is PumpReachRateBracket below.
+model PumpIncentivePolicy {
+  id           String   @id @default(cuid())
+  plantId      String   @unique
+  plant        Plant    @relation(fields: [plantId], references: [id])
+  // "تارجت الشركة" — company target: m³ delivered up to this amount in
+  // the period earns nothing; only volume beyond it is priced, and only
+  // at the rate bracket matching whichever pump actually carried it.
+  freeVolumeM3 Float    @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  rateBrackets PumpReachRateBracket[]
+}
+
+model PumpReachRateBracket {
+  id           String              @id @default(cuid())
+  policyId     String
+  policy       PumpIncentivePolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  minReachM    Float
+  // null = open-ended top bracket ("60m and up").
+  maxReachM    Float?
+  ratePerM3Sar Float
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
 }
 
 // Cement bulkers, water tankers, and loaders share one model (rather than

@@ -682,6 +682,18 @@ const en: typeof ar = {
         BULKER_DRIVER: "Cement bulker drivers",
         WATER_TANKER_DRIVER: "Water tanker drivers",
       },
+      pumpIncentiveNote: "Priced differently from the other roles: by m³ delivered above a company-wide target, at a rate that depends on the reach of the pump actually worked — not a per-trip tier.",
+      pumpFreeVolume: "Company target (m³, no bonus below this)",
+      pumpRateBracketsTitle: "Rate by pump reach",
+      pumpRateBracketsEmpty: "No rate brackets set — pump operators earn nothing until at least one is added.",
+      pumpRateCol: {
+        reach: "Reach",
+        rate: "Rate",
+        minReach: "Min reach (m)",
+        maxReach: "Max reach (m, blank = open-ended)",
+        add: "Add bracket",
+      },
+      pumpVolumeCol: "Volume this month",
     },
     stockLedger: {
       eyebrow: "Raw materials — balances",
