@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
+import { logTransferIfChanged } from "@/lib/transferAudit";
 import { revalidatePath } from "next/cache";
 
 function refresh() {
@@ -66,6 +67,7 @@ export async function updateTruck(formData: FormData) {
     where: { id },
     data: { plantId, code, drumCapacityM3, maxAgitationRpm, gpsDeviceId, year, chassisNumber, plateNumber, defaultDriverId, status },
   });
+  await logTransferIfChanged("Equipment", id, existing.plantId, plantId);
 
   await logAudit({ module: "Equipment", recordId: id, afterValue: code, reasonCode: "TRUCK_UPDATED" });
   refresh();
@@ -146,6 +148,7 @@ export async function updatePump(formData: FormData) {
     where: { id },
     data: { plantId, code, pumpType, reachM, hourlyRate, standbyRate, year, chassisNumber, plateNumber, defaultOperatorId, defaultAssistantId, status },
   });
+  await logTransferIfChanged("Equipment", id, existingPump.plantId, plantId);
 
   await logAudit({ module: "Equipment", recordId: id, afterValue: code, reasonCode: "PUMP_UPDATED" });
   refresh();
@@ -268,6 +271,7 @@ export async function updateSupportVehicle(formData: FormData) {
     where: { id },
     data: { plantId, code, year, chassisNumber, plateNumber, defaultDriverId, status },
   });
+  await logTransferIfChanged("Equipment", id, existingVehicle.plantId, plantId);
 
   await logAudit({ module: "Equipment", recordId: id, afterValue: code, reasonCode: "SUPPORT_VEHICLE_UPDATED" });
   refresh();

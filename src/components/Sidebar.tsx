@@ -121,6 +121,16 @@ export function Sidebar({
           >
             {nav.integrations}
           </Link>
+          <Link
+            href="/audit-log"
+            className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
+              pathname.startsWith("/audit-log")
+                ? "border-accent bg-surface-alt font-medium text-ink"
+                : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
+            }`}
+          >
+            {nav.auditLog}
+          </Link>
         </div>
       )}
 

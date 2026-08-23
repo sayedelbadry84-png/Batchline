@@ -3,6 +3,8 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
+import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
+import { logTransferIfChanged } from "@/lib/transferAudit";
 import { revalidatePath } from "next/cache";
 
 export async function createEmployee(formData: FormData) {
@@ -51,6 +53,8 @@ export async function updateEmployee(formData: FormData) {
   const status = String(formData.get("status") ?? "ACTIVE");
 
   if (!id || !plantId || !name || !role) return;
+  const existingEmployee = await prisma.employee.findUnique({ where: { id }, select: { plantId: true } });
+  if (!existingEmployee) return;
 
   await prisma.employee.update({
     where: { id },
@@ -64,6 +68,7 @@ export async function updateEmployee(formData: FormData) {
       status,
     },
   });
+  await logTransferIfChanged("Employees", id, existingEmployee.plantId, plantId);
 
   await logAudit({ module: "Employees", recordId: id, afterValue: name, reasonCode: "EMPLOYEE_UPDATED" });
   revalidatePath("/employees");
@@ -103,6 +108,7 @@ export async function createPumpCrewMember(formData: FormData) {
   const phone = String(formData.get("phone") ?? "").trim() || null;
   const code = String(formData.get("code") ?? "").trim() || null;
   if (!plantId || !name) return;
+  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
 
   const member = await prisma.pumpCrewMember.create({ data: { plantId, name, role, phone, code } });
 
@@ -122,8 +128,12 @@ export async function updatePumpCrewMember(formData: FormData) {
   const code = String(formData.get("code") ?? "").trim() || null;
   const status = String(formData.get("status") ?? "ACTIVE");
   if (!id || !plantId || !name) return;
+  const crewSiteId = effectiveSiteId(user);
+  const existingMember = await prisma.pumpCrewMember.findUnique({ where: { id }, select: { plantId: true } });
+  if (!existingMember || !(await isPlantInScope(existingMember.plantId, crewSiteId)) || !(await isPlantInScope(plantId, crewSiteId))) return;
 
   await prisma.pumpCrewMember.update({ where: { id }, data: { plantId, name, role, phone, code, status } });
+  await logTransferIfChanged("Employees", id, existingMember.plantId, plantId);
 
   await logAudit({ module: "Employees", recordId: id, afterValue: name, reasonCode: "PUMP_CREW_UPDATED" });
   revalidatePath("/employees");
