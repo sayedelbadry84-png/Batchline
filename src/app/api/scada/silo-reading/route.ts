@@ -13,7 +13,7 @@ import { verifyIntegrationRequest } from "@/lib/integration-auth";
 // Authorization: Bearer <INTEGRATION_API_KEY>
 // { "siloId": "cmt1...", "levelTons": 11.6 }
 export async function POST(request: NextRequest) {
-  const authError = verifyIntegrationRequest(request);
+  const authError = await verifyIntegrationRequest(request, "SCADA");
   if (authError) return authError;
 
   const body = await request.json().catch(() => null);

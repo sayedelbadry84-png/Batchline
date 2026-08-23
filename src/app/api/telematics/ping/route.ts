@@ -12,7 +12,7 @@ import { verifyIntegrationRequest } from "@/lib/integration-auth";
 // Authorization: Bearer <INTEGRATION_API_KEY>
 // { "deviceId": "GPS-114", "lat": 29.9765, "lng": 30.9188 }
 export async function POST(request: NextRequest) {
-  const authError = verifyIntegrationRequest(request);
+  const authError = await verifyIntegrationRequest(request, "TELEMATICS");
   if (authError) return authError;
 
   const body = await request.json().catch(() => null);

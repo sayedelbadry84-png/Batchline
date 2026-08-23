@@ -47,6 +47,7 @@ model User {
   sessions     Session[]
   reservationInitialApprovals Reservation[] @relation("ReservationInitialApproval")
   reservationFinalApprovals   Reservation[] @relation("ReservationFinalApproval")
+  apiKeysCreated ApiKey[]
 }
 
 model Session {
@@ -925,4 +926,29 @@ model SupportVehicle {
   status         String   @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+}
+
+// A revocable, scoped credential for a machine-to-machine caller (a GPS
+// telematics provider, a SCADA edge gateway) — replaces relying on one
+// shared INTEGRATION_API_KEY env var for every integration forever. Only
+// the SHA-256 hash is stored (src/lib/apiKeys.ts), never the raw key —
+// it's shown to the Admin exactly once at creation time and can't be
+// recovered afterward, only revoked and replaced with a new one. scope
+// limits what a compromised or over-shared key can actually do (a GPS
+// provider's key has no business posting silo readings). The legacy env
+// var still works as an ALL-scope fallback for compatibility —
+// verifyIntegrationRequest in src/lib/integration-auth.ts checks both.
+model ApiKey {
+  id          String    @id @default(cuid())
+  label       String
+  keyHash     String    @unique
+  // First few characters of the raw key, kept in the clear so the Admin
+  // can recognize which key is which in the list without the full secret.
+  keyPrefix   String
+  scope       String    @default("ALL") // ALL, TELEMATICS, SCADA
+  lastUsedAt  DateTime?
+  revokedAt   DateTime?
+  createdById String?
+  createdBy   User?     @relation(fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
 }
