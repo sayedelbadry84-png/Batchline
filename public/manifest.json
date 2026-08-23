@@ -1,0 +1,12 @@
+{
+  "name": "Batchline — Plant Operations",
+  "short_name": "Batchline",
+  "description": "Ready-mix concrete plant management",
+  "start_url": "/operator",
+  "display": "standalone",
+  "background_color": "#f2f4f5",
+  "theme_color": "#d9761e",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

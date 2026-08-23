@@ -7,6 +7,7 @@ import { recordActuals, recordActualField, completeBatch, startTrip } from "@/ap
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
 import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
+import { OfflineSyncBanner } from "@/components/OfflineSyncBanner";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -98,6 +99,8 @@ export default async function OperatorTicketPage({
         </p>
       </div>
 
+      <OfflineSyncBanner labels={{ offline: o.offlineBanner, pending: o.offlinePending, synced: o.offlineSynced }} />
+
       <form action={recordActuals} className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm">
         <input type="hidden" name="batchTicketId" value={ticket.id} />
         <h2 className="font-display text-base font-semibold">{d.targetVsActual}</h2>
@@ -115,6 +118,7 @@ export default async function OperatorTicketPage({
               <div className="mt-2 flex items-center gap-2" dir="ltr">
                 <AutoSaveField
                   action={recordActualField}
+                  offlineQueueKind="recordActualField"
                   hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "actual" }}
                   valueField="value"
                   name={`actual_${c.id}`}
@@ -127,6 +131,7 @@ export default async function OperatorTicketPage({
                 {AGGREGATE_TYPES.has(c.material.type) && (
                   <AutoSaveField
                     action={recordActualField}
+                    offlineQueueKind="recordActualField"
                     hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
                     valueField="value"
                     name={`moisture_${c.id}`}

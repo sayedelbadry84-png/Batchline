@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Oswald, IBM_Plex_Sans, IBM_Plex_Sans_Arabic, IBM_Plex_Mono } from "next/font/google";
 import { getLocale } from "@/lib/i18n";
 import { dirFor } from "@/lib/i18n/config";
+import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
 import "./globals.css";
 
 const oswald = Oswald({
@@ -31,6 +32,12 @@ const plexMono = IBM_Plex_Mono({
 export const metadata: Metadata = {
   title: "Batchline — Plant Operations",
   description: "Ready-mix concrete plant management",
+  manifest: "/manifest.json",
+  icons: { icon: "/icon.svg", apple: "/icon.svg" },
+};
+
+export const viewport = {
+  themeColor: "#d9761e",
 };
 
 // Shared by both surfaces: the back-office app (src/app/(app), sidebar layout)
@@ -45,7 +52,10 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
       dir={dirFor(locale)}
       className={`${oswald.variable} ${plexSans.variable} ${plexSansArabic.variable} ${plexMono.variable} h-full`}
     >
-      <body className="min-h-full font-sans antialiased">{children}</body>
+      <body className="min-h-full font-sans antialiased">
+        <ServiceWorkerRegister />
+        {children}
+      </body>
     </html>
   );
 }
