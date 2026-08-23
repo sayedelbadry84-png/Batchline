@@ -181,29 +181,57 @@ export async function getWorkerProductivityReport({ from, to }: DateRange) {
   return { rows };
 }
 
-// Per-trip volume and pump reach for every pump operator in a date range —
-// the raw material calculatePumpOperatorPayout needs, since pump operator
-// incentive is priced per trip by that trip's own pump reach, not a plain
-// count like the other four roles. Mirrors pumpOperatorTripDetails in the
-// Incentives module's own page (which is month-scoped, not range-scoped),
-// kept separate rather than shared since the two callers' time windows
-// don't line up.
-export async function getPumpOperatorTripDetailsInRange({ from, to }: DateRange): Promise<PumpOperatorTrips[]> {
-  const trips = await prisma.trip.findMany({
-    where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, pumpOperatorId: { not: null } },
-    select: {
-      pumpOperatorId: true,
-      pumpOperatorCrew: { select: { name: true } },
-      volumeDeliveredM3: true,
-      pump: { select: { reachM: true } },
-    },
-  });
-  const byOperator = new Map<string, PumpOperatorTrips>();
-  for (const t of trips) {
-    if (!t.pumpOperatorId || !t.pumpOperatorCrew) continue;
-    const entry = byOperator.get(t.pumpOperatorId) ?? { driverId: t.pumpOperatorId, driverName: t.pumpOperatorCrew.name, trips: [] };
-    entry.trips.push({ volumeM3: t.volumeDeliveredM3 ?? 0, reachM: t.pump?.reachM ?? null });
-    byOperator.set(t.pumpOperatorId, entry);
+// Per-trip/delivery volume (and, for pump crew, reach) for a given
+// incentive role in a date range — the raw material
+// calculateVolumeIncentivePayout needs when that role's method is
+// VOLUME_M3 (see IncentiveMethod/DEFAULT_INCENTIVE_METHOD). Mirrors
+// volumeTripsForRole in the Incentives module's own page (which is
+// month-scoped, not range-scoped), kept separate rather than shared since
+// the two callers' time windows don't line up. Covers all five incentive
+// roles, not just PUMP_OPERATOR, since any of them can now use this method.
+export async function getVolumeTripDetailsForRole(role: string, { from, to }: DateRange): Promise<PumpOperatorTrips[]> {
+  const byId = new Map<string, PumpOperatorTrips>();
+  const push = (id: string | null | undefined, name: string | null | undefined, volumeM3: number, reachM: number | null) => {
+    if (!id || !name) return;
+    const entry = byId.get(id) ?? { driverId: id, driverName: name, trips: [] };
+    entry.trips.push({ volumeM3, reachM });
+    byId.set(id, entry);
+  };
+
+  if (role === "MIXER_DRIVER") {
+    const trips = await prisma.trip.findMany({
+      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to } },
+      select: { driverId: true, driver: { select: { name: true } }, volumeDeliveredM3: true },
+    });
+    for (const t of trips) push(t.driverId, t.driver.name, t.volumeDeliveredM3 ?? 0, null);
+  } else if (role === "PUMP_OPERATOR" || role === "PUMP_ASSISTANT") {
+    const crewField = role === "PUMP_OPERATOR" ? "pumpOperatorId" : "pumpAssistantId";
+    const trips = await prisma.trip.findMany({
+      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, [crewField]: { not: null } },
+      select: {
+        pumpOperatorId: true,
+        pumpAssistantId: true,
+        pumpOperatorCrew: { select: { name: true } },
+        pumpAssistantCrew: { select: { name: true } },
+        volumeDeliveredM3: true,
+        pump: { select: { reachM: true } },
+      },
+    });
+    for (const t of trips) {
+      const id = role === "PUMP_OPERATOR" ? t.pumpOperatorId : t.pumpAssistantId;
+      const name = role === "PUMP_OPERATOR" ? t.pumpOperatorCrew?.name : t.pumpAssistantCrew?.name;
+      push(id, name, t.volumeDeliveredM3 ?? 0, t.pump?.reachM ?? null);
+    }
+  } else if (role === "BULKER_DRIVER" || role === "WATER_TANKER_DRIVER") {
+    const materialType = role === "BULKER_DRIVER" ? "CEMENT" : "WATER";
+    const receipts = await prisma.materialReceipt.findMany({
+      where: { receivedAt: { gte: from, lte: to }, material: { type: materialType } },
+      select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true },
+    });
+    for (const r of receipts) {
+      const name = r.driver?.name ?? r.driverName;
+      push(r.driverId ?? (name ? `name:${name}` : null), name, r.netWeightKg / 1000, null);
+    }
   }
-  return Array.from(byOperator.values());
+  return Array.from(byId.values());
 }

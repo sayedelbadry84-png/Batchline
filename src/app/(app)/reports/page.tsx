@@ -17,9 +17,16 @@ import {
   getTripsReport,
   getEquipmentProductivityReport,
   getWorkerProductivityReport,
-  getPumpOperatorTripDetailsInRange,
+  getVolumeTripDetailsForRole,
 } from "@/lib/reportQueries";
-import { calculateDriverPayout, calculatePumpOperatorPayout, type IncentivePolicy } from "@/lib/incentives";
+import {
+  calculateDriverPayout,
+  calculateVolumeIncentivePayout,
+  DEFAULT_INCENTIVE_METHOD,
+  INCENTIVE_ROLE_KEYS,
+  type IncentivePolicy,
+  type IncentiveMethodKind,
+} from "@/lib/incentives";
 import { markDrumReturnFate } from "../trips/actions";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -264,33 +271,47 @@ export default async function ReportsPage({
           const worker = await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd });
           const policies = await prisma.driverIncentivePolicy.findMany();
           const policyByRole = new Map(policies.map((p) => [p.role, p]));
-          // PUMP_OPERATOR is priced by volume × reach bracket, not a plain
-          // trip-count tier (see calculatePumpOperatorPayout) — computed
-          // separately below and merged in, rather than through the same
-          // count-based path the other four roles use.
+          const methodOverrides = await prisma.incentiveMethod.findMany();
+          const methodByRole = new Map(methodOverrides.map((r) => [r.role, r.method as IncentiveMethodKind]));
+          const pumpPolicies = await prisma.pumpIncentivePolicy.findMany({ include: { rateBrackets: true } });
+
+          // Which of the five roles are priced by volume (VOLUME_M3) vs
+          // trip/delivery count (TRIP_COUNT) — see IncentiveMethod and
+          // DEFAULT_INCENTIVE_METHOD. Trip-count roles keep this report's
+          // pre-existing simplification of collapsing across plants (this
+          // range-wide report isn't grouped per plant the way the
+          // Incentives module page itself is); volume roles resolve each
+          // person's own plant so the right target/rate bracket applies.
+          const methodForRole = (role: string): IncentiveMethodKind => methodByRole.get(role) ?? DEFAULT_INCENTIVE_METHOD[role];
+
           const countBasedRows = worker.rows
-            .filter((r) => r.role !== "PUMP_OPERATOR")
+            .filter((r) => methodForRole(r.role) !== "VOLUME_M3")
             .map((r) => {
               const policy: IncentivePolicy = policyByRole.get(r.role) ?? DEFAULT_POLICY;
               return { key: r.key, name: r.name, role: r.role, count: r.count, payout: calculateDriverPayout(r.count, policy) };
             });
 
-          const pumpTrips = await getPumpOperatorTripDetailsInRange({ from: rangeStart, to: rangeEnd });
-          const pumpCrewPlants = await prisma.pumpCrewMember.findMany({
-            where: { id: { in: pumpTrips.map((t) => t.driverId) } },
-            select: { id: true, plantId: true },
-          });
-          const plantIdByOperator = new Map(pumpCrewPlants.map((c) => [c.id, c.plantId]));
-          const pumpPolicies = await prisma.pumpIncentivePolicy.findMany({ include: { rateBrackets: true } });
-          const pumpPolicyByPlant = new Map(pumpPolicies.map((p) => [p.plantId, p]));
-          const pumpRows = pumpTrips.map((op) => {
-            const plantId = plantIdByOperator.get(op.driverId);
-            const policy = plantId ? pumpPolicyByPlant.get(plantId) : undefined;
-            const payout = policy ? calculatePumpOperatorPayout(op.trips, policy.freeVolumeM3, policy.rateBrackets) : 0;
-            return { key: `PUMP_OPERATOR:${op.driverId}`, name: op.driverName, role: "PUMP_OPERATOR", count: op.trips.length, payout };
-          });
+          const volumeRoles = INCENTIVE_ROLE_KEYS.filter((role) => methodForRole(role) === "VOLUME_M3");
+          const volumeRoleRows = (
+            await Promise.all(
+              volumeRoles.map(async (role) => {
+                const trips = await getVolumeTripDetailsForRole(role, { from: rangeStart, to: rangeEnd });
+                const isPumpRole = role === "PUMP_OPERATOR" || role === "PUMP_ASSISTANT";
+                const plantRows = isPumpRole
+                  ? await prisma.pumpCrewMember.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, plantId: true } })
+                  : await prisma.employee.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, plantId: true } });
+                const plantIdByDriver = new Map(plantRows.map((c) => [c.id, c.plantId]));
+                return trips.map((op) => {
+                  const plantId = plantIdByDriver.get(op.driverId);
+                  const policy = plantId ? pumpPolicies.find((p) => p.plantId === plantId && p.role === role) : undefined;
+                  const payout = policy ? calculateVolumeIncentivePayout(op.trips, policy.freeVolumeM3, policy.rateBrackets) : 0;
+                  return { key: `${role}:${op.driverId}`, name: op.driverName, role, count: op.trips.length, payout };
+                });
+              }),
+            )
+          ).flat();
 
-          const rows = [...countBasedRows, ...pumpRows].sort((a, b) => b.payout - a.payout);
+          const rows = [...countBasedRows, ...volumeRoleRows].sort((a, b) => b.payout - a.payout);
           return { rows, totalPayout: rows.reduce((sum, r) => sum + r.payout, 0) };
         })()
       : null;

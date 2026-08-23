@@ -12,6 +12,7 @@ export async function createEmployee(formData: FormData) {
   const plantId = String(formData.get("plantId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "").trim();
+  const code = String(formData.get("code") ?? "").trim() || null;
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
 
@@ -22,6 +23,7 @@ export async function createEmployee(formData: FormData) {
       plantId,
       name,
       role,
+      code,
       shiftPattern,
       licenseExpiry: licenseExpiryRaw ? new Date(licenseExpiryRaw) : null,
     },
@@ -43,6 +45,7 @@ export async function updateEmployee(formData: FormData) {
   const plantId = String(formData.get("plantId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "").trim();
+  const code = String(formData.get("code") ?? "").trim() || null;
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
   const status = String(formData.get("status") ?? "ACTIVE");
@@ -55,6 +58,7 @@ export async function updateEmployee(formData: FormData) {
       plantId,
       name,
       role,
+      code,
       shiftPattern,
       licenseExpiry: licenseExpiryRaw ? new Date(licenseExpiryRaw) : null,
       status,
@@ -62,6 +66,27 @@ export async function updateEmployee(formData: FormData) {
   });
 
   await logAudit({ module: "Employees", recordId: id, afterValue: name, reasonCode: "EMPLOYEE_UPDATED" });
+  revalidatePath("/employees");
+}
+
+// Lets an Admin grow the "admin" tab's role picker from the screen itself
+// instead of a code change — see JobTitle in schema.prisma. Silently
+// no-ops on an empty or duplicate name rather than surfacing a unique-
+// constraint error, since the outcome ("this title is now selectable") is
+// the same either way.
+export async function createJobTitle(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ADMIN"]);
+
+  const name = String(formData.get("name") ?? "").trim();
+  if (!name) return;
+
+  const existing = await prisma.jobTitle.findUnique({ where: { name } });
+  if (existing) return;
+
+  const jobTitle = await prisma.jobTitle.create({ data: { name } });
+
+  await logAudit({ module: "Employees", recordId: jobTitle.id, afterValue: name, reasonCode: "JOB_TITLE_CREATED" });
   revalidatePath("/employees");
 }
 

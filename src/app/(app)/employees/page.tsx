@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createEmployee, updateEmployee, createPumpCrewMember, updatePumpCrewMember } from "./actions";
+import { createEmployee, updateEmployee, createPumpCrewMember, updatePumpCrewMember, createJobTitle } from "./actions";
 
 const ADMIN_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DISPATCHER", "ADMIN"] as const;
 const EMPLOYEE_STATUSES = ["ACTIVE", "FROZEN", "REMOVED"] as const;
@@ -61,6 +61,10 @@ export default async function EmployeesPage({
   const fixedRole = EMPLOYEE_TAB_ROLE[tab];
 
   const plants = await prisma.plant.findMany({ orderBy: { name: "asc" } });
+  const jobTitles = await prisma.jobTitle.findMany({ orderBy: { name: "asc" } });
+  // Built-in roles plus whatever an Admin has added from this screen —
+  // deduped since a custom title could in principle repeat a built-in name.
+  const roleOptions = Array.from(new Set([...ADMIN_ROLES, ...jobTitles.map((j) => j.name)]));
 
   const employees = !isCrewTab
     ? await prisma.employee.findMany({
@@ -225,6 +229,7 @@ export default async function EmployeesPage({
               <thead>
                 <tr>
                   <th className={ui.th}>{m.col.name}</th>
+                  <th className={ui.th}>{m.col.code}</th>
                   {tab === "admin" && <th className={ui.th}>{m.col.role}</th>}
                   <th className={ui.th}>{m.col.plant}</th>
                   <th className={ui.th}>{m.col.shift}</th>
@@ -236,7 +241,7 @@ export default async function EmployeesPage({
               <tbody>
                 {employees.map((e) => {
                   const flag = expiryFlag(e.licenseExpiry, nowMs, m);
-                  const colCount = tab === "admin" ? 7 : 6;
+                  const colCount = tab === "admin" ? 8 : 7;
                   if (editId === e.id) {
                     return (
                       <tr key={e.id}>
@@ -256,12 +261,16 @@ export default async function EmployeesPage({
                               <label className={ui.label}>{m.f.name}</label>
                               <input name="name" defaultValue={e.name} required className={`${ui.input} w-40`} />
                             </div>
+                            <div>
+                              <label className={ui.label}>{m.f.code}</label>
+                              <input name="code" defaultValue={e.code ?? ""} className={`${ui.input} w-28`} dir="ltr" />
+                            </div>
                             {tab === "admin" && (
                               <div>
                                 <label className={ui.label}>{m.f.role}</label>
                                 <select name="role" defaultValue={e.role} required className={`${ui.select} w-40`}>
-                                  {ADMIN_ROLES.map((r) => (
-                                    <option key={r} value={r}>{dict.roles[r]}</option>
+                                  {roleOptions.map((r) => (
+                                    <option key={r} value={r}>{dict.roles[r as keyof typeof dict.roles] ?? r}</option>
                                   ))}
                                 </select>
                               </div>
@@ -299,6 +308,7 @@ export default async function EmployeesPage({
                   return (
                     <tr key={e.id}>
                       <td className={`${ui.td} font-medium`}>{e.name}</td>
+                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{e.code || "—"}</td>
                       {tab === "admin" && (
                         <td className={`${ui.td} font-mono text-xs`}>{dict.roles[e.role as keyof typeof dict.roles] ?? e.role}</td>
                       )}
@@ -323,7 +333,7 @@ export default async function EmployeesPage({
                 })}
                 {employees.length === 0 && (
                   <tr>
-                    <td className={ui.td} colSpan={tab === "admin" ? 7 : 6}>
+                    <td className={ui.td} colSpan={tab === "admin" ? 8 : 7}>
                       <span className="text-ink-muted">{m.empty}</span>
                     </td>
                   </tr>
@@ -332,6 +342,7 @@ export default async function EmployeesPage({
             </table>
           </div>
 
+          <div className="flex flex-col gap-6">
           <form action={createEmployee} className={`${ui.card} flex flex-col gap-3`}>
             <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
             {fixedRole && <input type="hidden" name="role" value={fixedRole} />}
@@ -350,13 +361,17 @@ export default async function EmployeesPage({
               <label className={ui.label}>{m.f.name}</label>
               <input name="name" required className={ui.input} />
             </div>
+            <div>
+              <label className={ui.label}>{m.f.code}</label>
+              <input name="code" className={ui.input} dir="ltr" />
+            </div>
             {tab === "admin" && (
               <div>
                 <label className={ui.label}>{m.f.role}</label>
                 <select name="role" required className={ui.select}>
-                  {ADMIN_ROLES.map((r) => (
+                  {roleOptions.map((r) => (
                     <option key={r} value={r}>
-                      {dict.roles[r]}
+                      {dict.roles[r as keyof typeof dict.roles] ?? r}
                     </option>
                   ))}
                 </select>
@@ -374,6 +389,20 @@ export default async function EmployeesPage({
               {m.add}
             </button>
           </form>
+
+          {tab === "admin" && (
+            <form action={createJobTitle} className={`${ui.card} flex flex-col gap-3`}>
+              <h2 className="font-display text-lg font-semibold">{m.newJobTitle}</h2>
+              <div>
+                <label className={ui.label}>{m.f.jobTitleName}</label>
+                <input name="name" required className={ui.input} />
+              </div>
+              <button type="submit" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                {m.addJobTitle}
+              </button>
+            </form>
+          )}
+          </div>
         </div>
       )}
     </div>

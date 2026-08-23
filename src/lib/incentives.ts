@@ -49,17 +49,19 @@ export function rankDriversByIncentive(trips: DriverTripCount[], policy: Incenti
     .sort((a, b) => b.payout - a.payout || b.tripCount - a.tripCount);
 }
 
-// Pump operator incentive is priced differently from the other four
-// roles: by m³ delivered (not trip count), only above a company-wide
-// "free" target, and at a rate that depends on the reach of the specific
-// pump each trip used — a 60m boom job and a 30m job earn differently
-// even at the same volume. rateBrackets covers each reach with its own
-// price; a trip whose pump has no matching bracket (or no reach on file)
-// earns nothing rather than guessing a rate.
+// Volume-based incentive — priced by quantity delivered (not trip count),
+// only above a company-wide "free" target, at a rate that can vary by pump
+// reach. Originally pump-operator-only (names kept as PumpRateBracket/
+// PumpTripVolume to avoid an unrelated rename); now the calculation any
+// role's VOLUME_M3 incentive method uses (see DEFAULT_INCENTIVE_METHOD
+// below) — PUMP_OPERATOR/PUMP_ASSISTANT price by the trip's real pump
+// reach, every other volume-based role prices off a single flat bracket
+// (minReachM 0, maxReachM null) that matches regardless of reach, reachM
+// included when the role has no concept of it at all.
 export type PumpRateBracket = { minReachM: number; maxReachM: number | null; ratePerM3Sar: number };
 export type PumpTripVolume = { volumeM3: number; reachM: number | null };
 
-export function calculatePumpOperatorPayout(
+export function calculateVolumeIncentivePayout(
   trips: PumpTripVolume[],
   freeVolumeM3: number,
   rateBrackets: PumpRateBracket[],
@@ -75,21 +77,27 @@ export function calculatePumpOperatorPayout(
     // crosses the target, everything after (in this trip or a later one)
     // is billable.
     const billable = Math.max(0, cumulative - Math.max(before, freeVolumeM3));
-    if (billable <= 0 || trip.reachM == null) continue;
+    if (billable <= 0) continue;
 
-    const bracket = rateBrackets.find(
-      (b) => trip.reachM! >= b.minReachM && (b.maxReachM == null || trip.reachM! <= b.maxReachM),
-    );
+    const bracket =
+      trip.reachM == null
+        ? rateBrackets.find((b) => b.minReachM <= 0 && b.maxReachM == null)
+        : rateBrackets.find((b) => trip.reachM! >= b.minReachM && (b.maxReachM == null || trip.reachM! <= b.maxReachM));
     if (bracket) payout += billable * bracket.ratePerM3Sar;
   }
 
   return payout;
 }
 
+// Back-compat alias — every existing call site was written against the
+// pump-operator-specific name; kept so this generalization doesn't force a
+// simultaneous rename across every caller.
+export const calculatePumpOperatorPayout = calculateVolumeIncentivePayout;
+
 export type PumpOperatorTrips = { driverId: string; driverName: string; trips: PumpTripVolume[] };
 export type PumpOperatorResult = { driverId: string; driverName: string; volumeM3: number; payout: number };
 
-export function rankPumpOperatorsByIncentive(
+export function rankByVolumeIncentive(
   operators: PumpOperatorTrips[],
   freeVolumeM3: number,
   rateBrackets: PumpRateBracket[],
@@ -99,7 +107,35 @@ export function rankPumpOperatorsByIncentive(
       driverId: o.driverId,
       driverName: o.driverName,
       volumeM3: o.trips.reduce((sum, t) => sum + t.volumeM3, 0),
-      payout: calculatePumpOperatorPayout(o.trips, freeVolumeM3, rateBrackets),
+      payout: calculateVolumeIncentivePayout(o.trips, freeVolumeM3, rateBrackets),
     }))
     .sort((a, b) => b.payout - a.payout || b.volumeM3 - a.volumeM3);
+}
+
+export const rankPumpOperatorsByIncentive = rankByVolumeIncentive;
+
+// The two incentive calculations a role can use — see IncentiveMethod in
+// schema.prisma. Compiled default per role, overridable per plant from the
+// Incentives module's "plan" tab; a role with no entry here (e.g. a brand
+// new job title with no wired trip/delivery data source) has no default
+// and shows as unset until an Admin explicitly assigns one.
+export type IncentiveMethodKind = "TRIP_COUNT" | "VOLUME_M3";
+
+export const DEFAULT_INCENTIVE_METHOD: Record<string, IncentiveMethodKind> = {
+  MIXER_DRIVER: "TRIP_COUNT",
+  PUMP_OPERATOR: "VOLUME_M3",
+  PUMP_ASSISTANT: "VOLUME_M3",
+  BULKER_DRIVER: "TRIP_COUNT",
+  WATER_TANKER_DRIVER: "TRIP_COUNT",
+};
+
+export const INCENTIVE_ROLE_KEYS = ["MIXER_DRIVER", "PUMP_OPERATOR", "PUMP_ASSISTANT", "BULKER_DRIVER", "WATER_TANKER_DRIVER"] as const;
+export type IncentiveRoleKey = (typeof INCENTIVE_ROLE_KEYS)[number];
+
+// Reach brackets are only meaningful for the two pump roles (the trip
+// data actually carries a pump reach); every other role's volume policy
+// is a single flat rate, so its "add bracket" form only ever needs to
+// write one row with minReachM 0 / maxReachM null.
+export function isReachBasedRole(role: string): boolean {
+  return role === "PUMP_OPERATOR" || role === "PUMP_ASSISTANT";
 }

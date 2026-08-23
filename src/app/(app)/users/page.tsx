@@ -1,7 +1,8 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
-import { requirePageAccess } from "@/lib/session";
+import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createUser, updateUser, resetUserPassword } from "./actions";
 
@@ -15,7 +16,12 @@ export default async function UsersPage({
 }: {
   searchParams: Promise<{ edit?: string; resetPassword?: string }>;
 }) {
-  await requirePageAccess("users");
+  // Deliberately not requirePageAccess/MODULE_ROLES — same reasoning as
+  // /permissions: an account roster is a system-admin concern, never a
+  // database-editable grant another role could end up with by accident.
+  const user = await getCurrentUser();
+  if (!user) redirect("/login");
+  if (user.role !== "ADMIN") redirect("/access-denied?module=users");
   const { dict } = await getDictionary();
   const m = dict.modules.users;
   const { edit: editId, resetPassword: resetId } = await searchParams;

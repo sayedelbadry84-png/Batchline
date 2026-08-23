@@ -19,7 +19,6 @@ export const MODULE_ROLES = {
   suppliers: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
   projects: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   employees: ["ADMIN"],
-  users: ["ADMIN"],
   incentives: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   plants: ["PLANT_OPERATOR", "ADMIN"],
   billing: ["ACCOUNTANT", "ADMIN"],
@@ -56,7 +55,10 @@ export const MODULE_NAV: { key: ModuleKey; href: string; num: string; labelKey: 
   { key: "billing", href: "/billing", num: "12", labelKey: "billing" },
   { key: "incentives", href: "/incentives", num: "13", labelKey: "incentives" },
   { key: "stockLedger", href: "/stock-ledger", num: "14", labelKey: "stockLedger" },
-  { key: "users", href: "/users", num: "15", labelKey: "users" },
+  // "users" is deliberately absent — like Permissions, it's hard-locked to
+  // ADMIN in Sidebar.tsx and /users/page.tsx directly, never routed through
+  // this database-editable system, so it can never be granted to another
+  // role from the Permissions screen.
 ];
 
 export const VIEW_NAV: { key: ModuleKey; href: string; labelKey: keyof Dictionary["nav"] }[] = [

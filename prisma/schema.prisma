@@ -106,7 +106,10 @@ model Plant {
   pumpCrewMembers  PumpCrewMember[]
   incentivePolicies DriverIncentivePolicy[]
   supportVehicles  SupportVehicle[]
-  pumpIncentivePolicy PumpIncentivePolicy?
+  // One row per role using the VOLUME_M3 incentive method — see the
+  // model comment on PumpIncentivePolicy for why it's an array now.
+  pumpIncentivePolicies PumpIncentivePolicy[]
+  incentiveMethods IncentiveMethod[]
   chemicalTanks    ChemicalTank[]
 }
 
@@ -344,6 +347,11 @@ model Employee {
   plant          Plant     @relation(fields: [plantId], references: [id])
   name           String
   role           String
+  // Per-employee identifier (badge/payroll number) — distinct from `role`,
+  // which is the job title. Optional and unique when set; Postgres allows
+  // any number of NULLs under a unique constraint, so employees without a
+  // code on file never collide.
+  code           String?   @unique
   licenseNumber  String?
   licenseExpiry  DateTime?
   shiftPattern   String?
@@ -362,6 +370,19 @@ model Employee {
   defaultForTrucks Truck[]
   defaultForSupportVehicles SupportVehicle[]
   user User?
+}
+
+// Admin-managed job-title catalog — supplements the hardcoded role list on
+// the Employees "admin" tab (office/support roles) so a new position can be
+// added from the screen itself instead of a code change. Org-wide, not
+// per-plant: a job title like "Batching Technician" isn't specific to one
+// site. Employee.role stays a plain string either way (see the comment on
+// that field) — this table just feeds the picker with more options over
+// time.
+model JobTitle {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
 }
 
 // ---------------------------------------------------------------------------
@@ -823,23 +844,35 @@ model ActionPermission {
   @@unique([moduleKey, actionKey, role])
 }
 
-// Pump operator incentive is volume-based (m³ delivered through a pump
-// they worked), not trip-count-based like the other four incentive
-// roles, and priced per m³ by the reach bracket of the specific pump —
-// a longer-reach pump job prices differently than a short one. One
-// policy per plant; its rate table is PumpReachRateBracket below.
+// Volume-based incentive policy — despite the name (kept from when this
+// only covered pump operators, and left as-is to avoid Prisma treating a
+// rename as drop-and-recreate against a live database), this now backs
+// ANY role whose incentive method is VOLUME_M3 (see IncentiveMethod
+// below), not just PUMP_OPERATOR. Priced per m³ by a rate bracket:
+// PUMP_OPERATOR/PUMP_ASSISTANT get real reach-tiered brackets (a
+// longer-reach pump job prices differently than a short one, from the
+// same Trip/Pump); every other volume-based role just gets a single
+// "flat" bracket (minReachM 0, maxReachM null) since reach doesn't apply
+// to them — calculateVolumeIncentivePayout in src/lib/incentives.ts
+// matches that catch-all bracket even when a trip has no reachM at all.
+// One policy per (plant, role); its rate table is PumpReachRateBracket.
 model PumpIncentivePolicy {
   id           String   @id @default(cuid())
-  plantId      String   @unique
+  plantId      String
   plant        Plant    @relation(fields: [plantId], references: [id])
-  // "تارجت الشركة" — company target: m³ delivered up to this amount in
-  // the period earns nothing; only volume beyond it is priced, and only
-  // at the rate bracket matching whichever pump actually carried it.
+  role         String   @default("PUMP_OPERATOR")
+  // "تارجت الشركة" — company target: m³ (or, for BULKER/WATER_TANKER
+  // roles, tons) delivered up to this amount in the period earns
+  // nothing; only the amount beyond it is priced, and only at the rate
+  // bracket matching whichever pump actually carried it (pump roles) or
+  // the plant's single flat rate (every other role).
   freeVolumeM3 Float    @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   rateBrackets PumpReachRateBracket[]
+
+  @@unique([plantId, role])
 }
 
 model PumpReachRateBracket {
@@ -852,6 +885,25 @@ model PumpReachRateBracket {
   ratePerM3Sar Float
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
+}
+
+// Which of the two incentive calculations applies to a (plant, role) pair
+// — TRIP_COUNT (tiered per-trip bonus, DriverIncentivePolicy) or VOLUME_M3
+// (per-m³ commission above a target, PumpIncentivePolicy). Same
+// fallback-to-compiled-default shape as RolePermission/ActionPermission in
+// src/lib/permissions.ts: a role with zero rows here uses the compiled
+// DEFAULT_INCENTIVE_METHOD map (src/lib/incentives.ts) until an Admin
+// picks explicitly from the Incentives module's "plan" tab.
+model IncentiveMethod {
+  id        String   @id @default(cuid())
+  plantId   String
+  plant     Plant    @relation(fields: [plantId], references: [id])
+  role      String
+  method    String   // TRIP_COUNT, VOLUME_M3
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([plantId, role])
 }
 
 // Cement bulkers, water tankers, and loaders share one model (rather than
