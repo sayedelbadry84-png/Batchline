@@ -15,11 +15,12 @@ export async function createSilo(formData: FormData) {
   const capacityTons = Number(formData.get("capacityTons") ?? 0);
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
   const minThresholdPct = Number(formData.get("minThresholdPct") ?? 15);
+  const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
 
   if (!plantId || !name || !materialType || !capacityTons) return;
 
   const silo = await prisma.silo.create({
-    data: { plantId, name, materialType, capacityTons, currentLevelTons, minThresholdPct },
+    data: { plantId, name, materialType, capacityTons, currentLevelTons, minThresholdPct, sharedAcrossPlants },
   });
 
   await logAudit({
@@ -55,6 +56,30 @@ export async function updateSilo(formData: FormData) {
     recordId: id,
     afterValue: `${name} / ${materialType} / ${capacityTons}t`,
     reasonCode: "SILO_UPDATED",
+  });
+
+  revalidatePath("/silos");
+}
+
+// Toggled independently of the level reading — sharing is a
+// configuration fact, not a measurement (see findMatchingSilo in
+// production/actions.ts for how this actually changes consumption).
+export async function setSiloSharing(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
+  if (!id) return;
+
+  await prisma.silo.update({ where: { id }, data: { sharedAcrossPlants } });
+
+  await logAudit({
+    module: "Silos",
+    recordId: id,
+    field: "sharedAcrossPlants",
+    afterValue: String(sharedAcrossPlants),
+    reasonCode: "SILO_SHARING_CHANGED",
   });
 
   revalidatePath("/silos");

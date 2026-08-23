@@ -5,19 +5,63 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
-export async function createPlant(formData: FormData) {
+export async function createSite(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
   const name = String(formData.get("name") ?? "").trim();
   const city = String(formData.get("city") ?? "").trim();
   const country = String(formData.get("country") ?? "").trim() || null;
+  if (!name || !city) return;
+
+  const site = await prisma.site.create({ data: { name, city, country } });
+
+  await logAudit({ module: "PlantManagement", recordId: site.id, afterValue: name, reasonCode: "SITE_CREATED" });
+  revalidatePath("/plants");
+}
+
+export async function updateSite(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  const city = String(formData.get("city") ?? "").trim();
+  const country = String(formData.get("country") ?? "").trim() || null;
+  if (!id || !name || !city) return;
+
+  const before = await prisma.site.findUnique({ where: { id } });
+  await prisma.site.update({ where: { id }, data: { name, city, country } });
+
+  await logAudit({
+    module: "PlantManagement",
+    recordId: id,
+    field: "name/city/country",
+    beforeValue: `${before?.name} / ${before?.city} / ${before?.country}`,
+    afterValue: `${name} / ${city} / ${country}`,
+    reasonCode: "SITE_UPDATED",
+  });
+
+  revalidatePath("/plants");
+}
+
+// "Plant" here means a production line within a Site — see the model
+// comment in schema.prisma for why the two are now separate.
+export async function createPlant(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+
+  const siteId = String(formData.get("siteId") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
   const currency = String(formData.get("currency") ?? "EGP").trim();
   const timezone = String(formData.get("timezone") ?? "Africa/Cairo").trim();
   const taxRatePct = Number(formData.get("taxRatePct") ?? 0) || 0;
   const taxLabel = String(formData.get("taxLabel") ?? "VAT").trim() || "VAT";
 
-  if (!name || !city) return;
+  if (!siteId || !name) return;
 
   const plant = await prisma.plant.create({
-    data: { name, city, country, currency, timezone, taxRatePct, taxLabel },
+    data: { siteId, name, currency, timezone, taxRatePct, taxLabel },
   });
 
   await logAudit({
@@ -35,24 +79,23 @@ export async function updatePlant(formData: FormData) {
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
   const id = String(formData.get("id") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
-  const city = String(formData.get("city") ?? "").trim();
-  const country = String(formData.get("country") ?? "").trim() || null;
   const currency = String(formData.get("currency") ?? "").trim();
   const timezone = String(formData.get("timezone") ?? "").trim();
   const taxRatePct = Number(formData.get("taxRatePct") ?? 0) || 0;
   const taxLabel = String(formData.get("taxLabel") ?? "VAT").trim() || "VAT";
-  if (!id || !name || !city) return;
+  if (!id || !siteId || !name) return;
 
   const before = await prisma.plant.findUnique({ where: { id } });
-  await prisma.plant.update({ where: { id }, data: { name, city, country, currency, timezone, taxRatePct, taxLabel } });
+  await prisma.plant.update({ where: { id }, data: { siteId, name, currency, timezone, taxRatePct, taxLabel } });
 
   await logAudit({
     module: "PlantManagement",
     recordId: id,
-    field: "name/city/country/currency/timezone/tax",
-    beforeValue: `${before?.name} / ${before?.city} / ${before?.country} / ${before?.currency} / ${before?.timezone} / ${before?.taxLabel} ${before?.taxRatePct}%`,
-    afterValue: `${name} / ${city} / ${country} / ${currency} / ${timezone} / ${taxLabel} ${taxRatePct}%`,
+    field: "site/name/currency/timezone/tax",
+    beforeValue: `${before?.siteId} / ${before?.name} / ${before?.currency} / ${before?.timezone} / ${before?.taxLabel} ${before?.taxRatePct}%`,
+    afterValue: `${siteId} / ${name} / ${currency} / ${timezone} / ${taxLabel} ${taxRatePct}%`,
     reasonCode: "PLANT_UPDATED",
   });
 

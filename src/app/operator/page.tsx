@@ -17,7 +17,15 @@ export default async function OperatorHomePage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
   if (user.role !== "PLANT_OPERATOR" && user.role !== "ADMIN") redirect("/");
-  if (!user.plantId) redirect("/");
+  if (!user.plantId || !user.plant) redirect("/");
+
+  // A site can run more than one production line (Plant) sharing the same
+  // yard/stock — an operator's account is still linked to one line
+  // (User.plantId), but the field view shows every line at that SAME
+  // SITE, not just the one the account happens to point at, since one
+  // person commonly runs both. Each item below is labeled with its own
+  // line so it's clear which physical station to actually go work.
+  const siteId = user.plant.siteId;
 
   const { locale, dict } = await getDictionary();
   const o = dict.operator;
@@ -27,10 +35,10 @@ export default async function OperatorHomePage() {
     prisma.reservation.findMany({
       where: {
         status: { in: ["CONFIRMED", "IN_PRODUCTION"] },
-        project: { plantId: user.plantId },
+        project: { plant: { siteId } },
       },
       include: {
-        project: { include: { customer: true } },
+        project: { include: { customer: true, plant: true } },
         mix: true,
         batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
       },
@@ -38,10 +46,10 @@ export default async function OperatorHomePage() {
     }),
     prisma.batchTicket.findMany({
       where: {
-        plantId: user.plantId,
+        plant: { siteId },
         OR: [{ status: { in: ["RELEASED", "BATCHING"] } }, { status: "COMPLETE", trip: null }],
       },
-      include: { mix: true, reservation: { include: { project: true } } },
+      include: { mix: true, plant: true, reservation: { include: { project: true } } },
       orderBy: { releasedAt: "asc" },
     }),
   ]);
@@ -88,7 +96,7 @@ export default async function OperatorHomePage() {
               </span>
             </div>
             <div className="text-xs text-ink-muted" dir="ltr">
-              {t.ticketNumber} · {t.mix.code} · {t.volumeM3} m³
+              {t.ticketNumber} · {t.mix.code} · {t.volumeM3} m³ · {t.plant.name}
             </div>
           </Link>
         ))}
@@ -111,7 +119,7 @@ export default async function OperatorHomePage() {
             <input type="hidden" name="returnPrefix" value="/operator/ticket" />
             <div>
               <span className="font-medium">{r.project.name}</span>
-              <div className="text-xs text-ink-muted">{r.project.customer.legalName}</div>
+              <div className="text-xs text-ink-muted">{r.project.customer.legalName} · {r.project.plant.name}</div>
             </div>
             <div className="flex items-center justify-between gap-2" dir="ltr">
               <span className="font-mono text-xs text-ink-muted">{r.mix.code}</span>

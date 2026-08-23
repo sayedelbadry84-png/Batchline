@@ -96,13 +96,22 @@ function ExportBar({
 export default async function ReportsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; from?: string; to?: string }>;
+  searchParams: Promise<{ tab?: string; from?: string; to?: string; site?: string; plant?: string }>;
 }) {
   await requirePageAccess("reports");
   const { dict } = await getDictionary();
   const m = dict.modules.reports;
-  const { tab: tabRaw, from: fromRaw, to: toRaw } = await searchParams;
+  const { tab: tabRaw, from: fromRaw, to: toRaw, site: siteIdRaw, plant: plantIdRaw } = await searchParams;
   const tab: ReportTab = (REPORT_TABS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as ReportTab) : "overview";
+
+  // Site rolls up every line at that site combined; a specific line
+  // narrows further to just its own numbers. Every detail tab respects
+  // this; Overview deliberately stays whole-company regardless (see the
+  // scope note on ReportFilter in reportQueries.ts).
+  const sites = await prisma.site.findMany({ orderBy: { name: "asc" }, include: { plants: { orderBy: { name: "asc" } } } });
+  const siteId = sites.some((s) => s.id === siteIdRaw) ? siteIdRaw : undefined;
+  const plantId = siteId && sites.find((s) => s.id === siteId)?.plants.some((p) => p.id === plantIdRaw) ? plantIdRaw : undefined;
+  const scope = { siteId, plantId };
 
   const todayIso = new Date().toISOString().slice(0, 10);
   const defaultFrom = (() => {
@@ -271,18 +280,18 @@ export default async function ReportsPage({
 
   // --- Data for the non-overview report tabs, only fetched for whichever
   // tab is actually open. ---
-  const production = tab === "production" ? await getProductionReport({ from: rangeStart, to: rangeEnd }) : null;
-  const incoming = tab === "incoming" ? await getIncomingReport({ from: rangeStart, to: rangeEnd }) : null;
-  const consumption = tab === "consumption" ? await getConsumptionReport({ from: rangeStart, to: rangeEnd }) : null;
-  const returnsData = tab === "returns" ? await getReturnsReport({ from: rangeStart, to: rangeEnd }) : null;
-  const tripsData = tab === "trips" ? await getTripsReport({ from: rangeStart, to: rangeEnd }) : null;
-  const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport({ from: rangeStart, to: rangeEnd }) : null;
-  const workersData = tab === "workers" ? await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd }) : null;
+  const production = tab === "production" ? await getProductionReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const incoming = tab === "incoming" ? await getIncomingReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const consumption = tab === "consumption" ? await getConsumptionReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const returnsData = tab === "returns" ? await getReturnsReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const tripsData = tab === "trips" ? await getTripsReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const workersData = tab === "workers" ? await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
 
   const incentivesData =
     tab === "incentives"
       ? await (async () => {
-          const worker = await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd });
+          const worker = await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd, ...scope });
           const policies = await prisma.driverIncentivePolicy.findMany();
           const policyByRole = new Map(policies.map((p) => [p.role, p]));
           const methodOverrides = await prisma.incentiveMethod.findMany();
@@ -309,7 +318,7 @@ export default async function ReportsPage({
           const volumeRoleRows = (
             await Promise.all(
               volumeRoles.map(async (role) => {
-                const trips = await getVolumeTripDetailsForRole(role, { from: rangeStart, to: rangeEnd });
+                const trips = await getVolumeTripDetailsForRole(role, { from: rangeStart, to: rangeEnd, ...scope });
                 const isPumpRole = role === "PUMP_OPERATOR" || role === "PUMP_ASSISTANT";
                 const plantRows = isPumpRole
                   ? await prisma.pumpCrewMember.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, plantId: true } })
@@ -350,11 +359,40 @@ export default async function ReportsPage({
         <p className={ui.intro}>{m.intro}</p>
       </header>
 
+      <form action="/reports" className="no-print flex flex-wrap items-end gap-3">
+        <input type="hidden" name="tab" value={tab} />
+        <input type="hidden" name="from" value={rangeFrom} />
+        <input type="hidden" name="to" value={rangeTo} />
+        <div>
+          <label className={ui.label}>{m.siteFilter}</label>
+          <select name="site" defaultValue={siteId ?? ""} className={`${ui.select} w-48`}>
+            <option value="">{m.allSites}</option>
+            {sites.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+        </div>
+        {siteId && (
+          <div>
+            <label className={ui.label}>{m.lineFilter}</label>
+            <select name="plant" defaultValue={plantId ?? ""} className={`${ui.select} w-40`}>
+              <option value="">{m.wholeSite}</option>
+              {sites.find((s) => s.id === siteId)?.plants.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">{m.applyScope}</button>
+        {tab !== "overview" && (siteId || plantId) && <p className="text-xs text-ink-muted">{m.scopeNote}</p>}
+      </form>
+      {tab === "overview" && <p className="no-print text-xs text-ink-muted">{m.overviewScopeNote}</p>}
+
       <div className="no-print flex flex-wrap gap-1 border-b border-border">
         {REPORT_TABS.map((t) => (
           <Link
             key={t}
-            href={`/reports?tab=${t}`}
+            href={`/reports?tab=${t}${siteId ? `&site=${siteId}` : ""}${plantId ? `&plant=${plantId}` : ""}${fromRaw ? `&from=${fromRaw}` : ""}${toRaw ? `&to=${toRaw}` : ""}`}
             className={`rounded-t-md px-3 py-2 text-sm ${
               tab === t ? "border-b-2 border-accent font-medium text-ink" : "text-ink-muted hover:text-ink"
             }`}

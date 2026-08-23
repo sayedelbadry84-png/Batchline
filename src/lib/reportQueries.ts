@@ -2,16 +2,36 @@ import { prisma } from "@/lib/prisma";
 import { type PumpOperatorTrips } from "@/lib/incentives";
 
 // One function per exportable report in the Reports module — each takes a
-// plain date range and returns rows plus whatever summary numbers its own
-// page needs. Kept here rather than inline in page.tsx so the same query
-// can be reused by both the on-screen table and (eventually) any other
-// consumer without re-deriving the aggregation logic.
+// plain date range plus an optional scope: siteId rolls up every
+// production line at that site combined (a site can run more than one
+// line sharing the same yard), plantId narrows to exactly one line's own
+// numbers. plantId wins if both are somehow set. Neither set means every
+// site combined — the Overview tab's "whole company" default. Kept here
+// rather than inline in page.tsx so the same query can be reused by both
+// the on-screen table and (eventually) any other consumer without
+// re-deriving the aggregation logic.
 
-export type DateRange = { from: Date; to: Date };
+export type ReportFilter = { from: Date; to: Date; siteId?: string; plantId?: string };
 
-export async function getProductionReport({ from, to }: DateRange) {
+// For models with their own plantId scalar (BatchTicket, MaterialReceipt,
+// Silo, ...).
+function plantScopeWhere(siteId?: string, plantId?: string) {
+  if (plantId) return { plantId };
+  if (siteId) return { plant: { siteId } };
+  return {};
+}
+
+// For Trip, which has no plantId of its own — its "site" is whichever
+// plant released the batch ticket it's fulfilling.
+function tripPlantScopeWhere(siteId?: string, plantId?: string) {
+  if (plantId) return { batchTicket: { plantId } };
+  if (siteId) return { batchTicket: { plant: { siteId } } };
+  return {};
+}
+
+export async function getProductionReport({ from, to, siteId, plantId }: ReportFilter) {
   const tickets = await prisma.batchTicket.findMany({
-    where: { releasedAt: { gte: from, lte: to } },
+    where: { releasedAt: { gte: from, lte: to }, ...plantScopeWhere(siteId, plantId) },
     include: { mix: true, reservation: { include: { project: { include: { customer: true } } } }, plant: true },
     orderBy: { releasedAt: "asc" },
   });
@@ -20,9 +40,9 @@ export async function getProductionReport({ from, to }: DateRange) {
   return { rows: tickets, totalVolumeM3, ticketCount: tickets.length, completedCount };
 }
 
-export async function getIncomingReport({ from, to }: DateRange) {
+export async function getIncomingReport({ from, to, siteId, plantId }: ReportFilter) {
   const receipts = await prisma.materialReceipt.findMany({
-    where: { receivedAt: { gte: from, lte: to } },
+    where: { receivedAt: { gte: from, lte: to }, ...plantScopeWhere(siteId, plantId) },
     include: { supplier: true, material: true, plant: true, driver: true },
     orderBy: { receivedAt: "asc" },
   });
@@ -30,9 +50,9 @@ export async function getIncomingReport({ from, to }: DateRange) {
   return { rows: receipts, totalNetKg, receiptCount: receipts.length };
 }
 
-export async function getConsumptionReport({ from, to }: DateRange) {
+export async function getConsumptionReport({ from, to, siteId, plantId }: ReportFilter) {
   const tickets = await prisma.batchTicket.findMany({
-    where: { status: "COMPLETE", batchCompletedAt: { gte: from, lte: to } },
+    where: { status: "COMPLETE", batchCompletedAt: { gte: from, lte: to }, ...plantScopeWhere(siteId, plantId) },
     include: { components: { include: { material: true } } },
   });
 
@@ -50,9 +70,10 @@ export async function getConsumptionReport({ from, to }: DateRange) {
   return { rows, ticketCount: tickets.length };
 }
 
-export async function getReturnsReport({ from, to }: DateRange) {
+export async function getReturnsReport({ from, to, siteId, plantId }: ReportFilter) {
+  const scope = tripPlantScopeWhere(siteId, plantId);
   const returns = await prisma.drumReturn.findMany({
-    where: { trip: { dischargeEnd: { gte: from, lte: to } } },
+    where: { trip: { dischargeEnd: { gte: from, lte: to }, ...scope } },
     include: { trip: { include: { truck: true, driver: true, batchTicket: { include: { reservation: { include: { project: true } } } } } } },
     orderBy: { trip: { dischargeEnd: "asc" } },
   });
@@ -66,7 +87,7 @@ export async function getReturnsReport({ from, to }: DateRange) {
   // on unresolved concrete from last week is exactly the thing this list
   // exists to surface, range or no range.
   const pendingFate = await prisma.drumReturn.findMany({
-    where: { disposition: { not: "FULL_WASTE" }, fate: null },
+    where: { disposition: { not: "FULL_WASTE" }, fate: null, ...(siteId || plantId ? { trip: scope } : {}) },
     include: { trip: { include: { truck: true, driver: true } } },
     orderBy: { trip: { dischargeEnd: "desc" } },
   });
@@ -74,9 +95,9 @@ export async function getReturnsReport({ from, to }: DateRange) {
   return { rows: returns, totalReturnedM3, wastedM3, reclaimedM3, returnCount: returns.length, pendingFate };
 }
 
-export async function getTripsReport({ from, to }: DateRange) {
+export async function getTripsReport({ from, to, siteId, plantId }: ReportFilter) {
   const trips = await prisma.trip.findMany({
-    where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to } },
+    where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripPlantScopeWhere(siteId, plantId) },
     include: { truck: true, driver: true, pump: true, batchTicket: { include: { reservation: { include: { project: true } } } } },
     orderBy: { dischargeEnd: "asc" },
   });
@@ -86,9 +107,9 @@ export async function getTripsReport({ from, to }: DateRange) {
   return { rows: trips, totalDeliveredM3, tripCount: trips.length, avgCycleTimeMin };
 }
 
-export async function getEquipmentProductivityReport({ from, to }: DateRange) {
+export async function getEquipmentProductivityReport({ from, to, siteId, plantId }: ReportFilter) {
   const trips = await prisma.trip.findMany({
-    where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to } },
+    where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripPlantScopeWhere(siteId, plantId) },
     include: { truck: true, pump: true },
   });
 
@@ -118,26 +139,29 @@ export async function getEquipmentProductivityReport({ from, to }: DateRange) {
 // Every role that physically moves material, in one activity report — not
 // payout-focused (see the Incentives module for that), just "who did how
 // much" across all five roles' own source of trips/deliveries.
-export async function getWorkerProductivityReport({ from, to }: DateRange) {
+export async function getWorkerProductivityReport({ from, to, siteId, plantId }: ReportFilter) {
+  const tripScope = tripPlantScopeWhere(siteId, plantId);
+  const receiptScope = plantScopeWhere(siteId, plantId);
+
   const [driverTrips, operatorTrips, assistantTrips, bulkerReceipts, waterReceipts] = await Promise.all([
     prisma.trip.findMany({
-      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to } },
+      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripScope },
       select: { driverId: true, driver: { select: { name: true } }, volumeDeliveredM3: true },
     }),
     prisma.trip.findMany({
-      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, pumpOperatorId: { not: null } },
+      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, pumpOperatorId: { not: null }, ...tripScope },
       select: { pumpOperatorId: true, pumpOperatorCrew: { select: { name: true } }, volumeDeliveredM3: true },
     }),
     prisma.trip.findMany({
-      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, pumpAssistantId: { not: null } },
+      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, pumpAssistantId: { not: null }, ...tripScope },
       select: { pumpAssistantId: true, pumpAssistantCrew: { select: { name: true } }, volumeDeliveredM3: true },
     }),
     prisma.materialReceipt.findMany({
-      where: { receivedAt: { gte: from, lte: to }, material: { type: "CEMENT" } },
+      where: { receivedAt: { gte: from, lte: to }, material: { type: "CEMENT" }, ...receiptScope },
       select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true },
     }),
     prisma.materialReceipt.findMany({
-      where: { receivedAt: { gte: from, lte: to }, material: { type: "WATER" } },
+      where: { receivedAt: { gte: from, lte: to }, material: { type: "WATER" }, ...receiptScope },
       select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true },
     }),
   ]);
@@ -189,7 +213,7 @@ export async function getWorkerProductivityReport({ from, to }: DateRange) {
 // month-scoped, not range-scoped), kept separate rather than shared since
 // the two callers' time windows don't line up. Covers all five incentive
 // roles, not just PUMP_OPERATOR, since any of them can now use this method.
-export async function getVolumeTripDetailsForRole(role: string, { from, to }: DateRange): Promise<PumpOperatorTrips[]> {
+export async function getVolumeTripDetailsForRole(role: string, { from, to, siteId, plantId }: ReportFilter): Promise<PumpOperatorTrips[]> {
   const byId = new Map<string, PumpOperatorTrips>();
   const push = (id: string | null | undefined, name: string | null | undefined, volumeM3: number, reachM: number | null) => {
     if (!id || !name) return;
@@ -197,17 +221,19 @@ export async function getVolumeTripDetailsForRole(role: string, { from, to }: Da
     entry.trips.push({ volumeM3, reachM });
     byId.set(id, entry);
   };
+  const tripScope = tripPlantScopeWhere(siteId, plantId);
+  const receiptScope = plantScopeWhere(siteId, plantId);
 
   if (role === "MIXER_DRIVER") {
     const trips = await prisma.trip.findMany({
-      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to } },
+      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripScope },
       select: { driverId: true, driver: { select: { name: true } }, volumeDeliveredM3: true },
     });
     for (const t of trips) push(t.driverId, t.driver.name, t.volumeDeliveredM3 ?? 0, null);
   } else if (role === "PUMP_OPERATOR" || role === "PUMP_ASSISTANT") {
     const crewField = role === "PUMP_OPERATOR" ? "pumpOperatorId" : "pumpAssistantId";
     const trips = await prisma.trip.findMany({
-      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, [crewField]: { not: null } },
+      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, [crewField]: { not: null }, ...tripScope },
       select: {
         pumpOperatorId: true,
         pumpAssistantId: true,
@@ -225,7 +251,7 @@ export async function getVolumeTripDetailsForRole(role: string, { from, to }: Da
   } else if (role === "BULKER_DRIVER" || role === "WATER_TANKER_DRIVER") {
     const materialType = role === "BULKER_DRIVER" ? "CEMENT" : "WATER";
     const receipts = await prisma.materialReceipt.findMany({
-      where: { receivedAt: { gte: from, lte: to }, material: { type: materialType } },
+      where: { receivedAt: { gte: from, lte: to }, material: { type: materialType }, ...receiptScope },
       select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true },
     });
     for (const r of receipts) {

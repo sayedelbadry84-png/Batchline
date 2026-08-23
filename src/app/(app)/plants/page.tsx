@@ -3,21 +3,26 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createPlant, updatePlant, updatePlantThresholds } from "./actions";
+import { createSite, updateSite, createPlant, updatePlant, updatePlantThresholds } from "./actions";
 
 export default async function PlantsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ edit?: string }>;
+  searchParams: Promise<{ editSite?: string; editPlant?: string }>;
 }) {
   await requirePageAccess("plants");
   const { dict } = await getDictionary();
   const m = dict.modules.plants;
-  const { edit: editId } = await searchParams;
+  const { editSite: editSiteId, editPlant: editPlantId } = await searchParams;
 
-  const plants = await prisma.plant.findMany({
+  const sites = await prisma.site.findMany({
     orderBy: { createdAt: "asc" },
-    include: { _count: { select: { silos: true, employees: true, projects: true } } },
+    include: {
+      plants: {
+        orderBy: { createdAt: "asc" },
+        include: { _count: { select: { silos: true, employees: true, projects: true } } },
+      },
+    },
   });
 
   return (
@@ -28,134 +33,212 @@ export default async function PlantsPage({
         <p className={ui.intro}>{m.intro}</p>
       </header>
 
-      <div className="grid grid-cols-[1fr_320px] gap-6">
-        <div className={ui.card}>
-          <table className={ui.table}>
-            <thead>
-              <tr>
-                <th className={ui.th}>{m.col.plant}</th>
-                <th className={ui.th}>{m.col.city}</th>
-                <th className={ui.th}>{m.col.country}</th>
-                <th className={ui.th}>{m.col.currency}</th>
-                <th className={ui.th}>{m.col.tax}</th>
-                <th className={ui.th}>{m.col.silos}</th>
-                <th className={ui.th}>{m.col.employees}</th>
-                <th className={ui.th}>{m.col.projects}</th>
-                <th className={ui.th}>{dict.field.actions}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {plants.map((p) =>
-                editId === p.id ? (
-                  <tr key={p.id}>
-                    <td className={ui.td} colSpan={9}>
-                      <form action={updatePlant} className="flex flex-wrap items-end gap-2">
-                        <input type="hidden" name="id" value={p.id} />
-                        <div>
-                          <label className={ui.label}>{m.f.name}</label>
-                          <input name="name" defaultValue={p.name} required className={`${ui.input} w-40`} />
-                        </div>
-                        <div>
-                          <label className={ui.label}>{m.f.city}</label>
-                          <input name="city" defaultValue={p.city} required className={`${ui.input} w-36`} />
-                        </div>
-                        <div>
-                          <label className={ui.label}>{m.f.country}</label>
-                          <input name="country" defaultValue={p.country ?? ""} className={`${ui.input} w-32`} />
-                        </div>
-                        <div>
-                          <label className={ui.label}>{m.f.currency}</label>
-                          <input name="currency" defaultValue={p.currency} className={`${ui.input} w-20`} dir="ltr" />
-                        </div>
-                        <div>
-                          <label className={ui.label}>{m.f.timezone}</label>
-                          <input name="timezone" defaultValue={p.timezone} className={`${ui.input} w-36`} dir="ltr" />
-                        </div>
-                        <div>
-                          <label className={ui.label}>{m.f.taxLabel}</label>
-                          <input name="taxLabel" defaultValue={p.taxLabel} className={`${ui.input} w-24`} dir="ltr" />
-                        </div>
-                        <div>
-                          <label className={ui.label}>{m.f.taxRatePct}</label>
-                          <input name="taxRatePct" type="number" step="0.1" defaultValue={p.taxRatePct} className={`${ui.input} w-24`} />
-                        </div>
-                        <button className={ui.button}>{dict.field.save}</button>
-                        <Link href="/plants" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
-                          {dict.field.cancel}
-                        </Link>
-                      </form>
-                    </td>
-                  </tr>
-                ) : (
-                  <tr key={p.id}>
-                    <td className={`${ui.td} font-medium`}>{p.name}</td>
-                    <td className={ui.td}>{p.city}</td>
-                    <td className={ui.td}>{p.country || "—"}</td>
-                    <td className={`${ui.td} font-mono`} dir="ltr">{p.currency}</td>
-                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{p.taxLabel} {p.taxRatePct}%</td>
-                    <td className={`${ui.td} font-mono tabular`}>{p._count.silos}</td>
-                    <td className={`${ui.td} font-mono tabular`}>{p._count.employees}</td>
-                    <td className={`${ui.td} font-mono tabular`}>{p._count.projects}</td>
-                    <td className={ui.td}>
-                      <Link href={`/plants?edit=${p.id}`} className="text-xs font-medium text-accent-strong hover:underline">
-                        {dict.field.edit}
-                      </Link>
-                    </td>
-                  </tr>
-                )
-              )}
-              {plants.length === 0 && (
+      <div>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.sitesTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.sitesIntro}</p>
+        <div className="grid grid-cols-[1fr_320px] gap-6">
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
                 <tr>
-                  <td className={ui.td} colSpan={9}>
-                    <span className="text-ink-muted">{m.empty}</span>
-                  </td>
+                  <th className={ui.th}>{m.col.site}</th>
+                  <th className={ui.th}>{m.col.city}</th>
+                  <th className={ui.th}>{m.col.country}</th>
+                  <th className={ui.th}>{m.col.lines}</th>
+                  <th className={ui.th}>{dict.field.actions}</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {sites.map((s) =>
+                  editSiteId === s.id ? (
+                    <tr key={s.id}>
+                      <td className={ui.td} colSpan={5}>
+                        <form action={updateSite} className="flex flex-wrap items-end gap-2">
+                          <input type="hidden" name="id" value={s.id} />
+                          <div>
+                            <label className={ui.label}>{m.f.siteName}</label>
+                            <input name="name" defaultValue={s.name} required className={`${ui.input} w-44`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.city}</label>
+                            <input name="city" defaultValue={s.city} required className={`${ui.input} w-36`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.f.country}</label>
+                            <input name="country" defaultValue={s.country ?? ""} className={`${ui.input} w-32`} />
+                          </div>
+                          <button className={ui.button}>{dict.field.save}</button>
+                          <Link href="/plants" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                            {dict.field.cancel}
+                          </Link>
+                        </form>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr key={s.id}>
+                      <td className={`${ui.td} font-medium`}>{s.name}</td>
+                      <td className={ui.td}>{s.city}</td>
+                      <td className={ui.td}>{s.country || "—"}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{s.plants.length}</td>
+                      <td className={ui.td}>
+                        <Link href={`/plants?editSite=${s.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                          {dict.field.edit}
+                        </Link>
+                      </td>
+                    </tr>
+                  ),
+                )}
+                {sites.length === 0 && (
+                  <tr>
+                    <td className={ui.td} colSpan={5}><span className="text-ink-muted">{m.sitesEmpty}</span></td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
-        <form action={createPlant} className={`${ui.card} flex flex-col gap-3`}>
-          <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
-          <div>
-            <label className={ui.label}>{m.f.name}</label>
-            <input name="name" required className={ui.input} placeholder="Plant 02 — 6th of October" />
+          <form action={createSite} className={`${ui.card} flex flex-col gap-3`}>
+            <h3 className="font-display text-base font-semibold">{m.newSiteTitle}</h3>
+            <div>
+              <label className={ui.label}>{m.f.siteName}</label>
+              <input name="name" required className={ui.input} placeholder="6th of October Site" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.city}</label>
+              <input name="city" required className={ui.input} placeholder="6th of October City" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.country}</label>
+              <input name="country" className={ui.input} placeholder="Egypt" />
+            </div>
+            <button type="submit" className={`${ui.button} mt-2`}>{m.addSite}</button>
+          </form>
+        </div>
+      </div>
+
+      <div>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.linesTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.linesIntro}</p>
+        <div className="grid grid-cols-[1fr_320px] gap-6">
+          <div className="flex flex-col gap-4">
+            {sites.map((s) => (
+              <div key={s.id} className={ui.card}>
+                <h3 className="mb-2 font-display text-sm font-semibold text-ink-muted">{s.name}</h3>
+                <table className={ui.table}>
+                  <thead>
+                    <tr>
+                      <th className={ui.th}>{m.col.plant}</th>
+                      <th className={ui.th}>{m.col.currency}</th>
+                      <th className={ui.th}>{m.col.tax}</th>
+                      <th className={ui.th}>{m.col.silos}</th>
+                      <th className={ui.th}>{m.col.employees}</th>
+                      <th className={ui.th}>{m.col.projects}</th>
+                      <th className={ui.th}>{dict.field.actions}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {s.plants.map((p) =>
+                      editPlantId === p.id ? (
+                        <tr key={p.id}>
+                          <td className={ui.td} colSpan={7}>
+                            <form action={updatePlant} className="flex flex-wrap items-end gap-2">
+                              <input type="hidden" name="id" value={p.id} />
+                              <input type="hidden" name="siteId" value={s.id} />
+                              <div>
+                                <label className={ui.label}>{m.f.name}</label>
+                                <input name="name" defaultValue={p.name} required className={`${ui.input} w-32`} />
+                              </div>
+                              <div>
+                                <label className={ui.label}>{m.f.currency}</label>
+                                <input name="currency" defaultValue={p.currency} className={`${ui.input} w-20`} dir="ltr" />
+                              </div>
+                              <div>
+                                <label className={ui.label}>{m.f.timezone}</label>
+                                <input name="timezone" defaultValue={p.timezone} className={`${ui.input} w-36`} dir="ltr" />
+                              </div>
+                              <div>
+                                <label className={ui.label}>{m.f.taxLabel}</label>
+                                <input name="taxLabel" defaultValue={p.taxLabel} className={`${ui.input} w-24`} dir="ltr" />
+                              </div>
+                              <div>
+                                <label className={ui.label}>{m.f.taxRatePct}</label>
+                                <input name="taxRatePct" type="number" step="0.1" defaultValue={p.taxRatePct} className={`${ui.input} w-24`} />
+                              </div>
+                              <button className={ui.button}>{dict.field.save}</button>
+                              <Link href="/plants" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                                {dict.field.cancel}
+                              </Link>
+                            </form>
+                          </td>
+                        </tr>
+                      ) : (
+                        <tr key={p.id}>
+                          <td className={`${ui.td} font-medium`}>{p.name}</td>
+                          <td className={`${ui.td} font-mono`} dir="ltr">{p.currency}</td>
+                          <td className={`${ui.td} font-mono tabular`} dir="ltr">{p.taxLabel} {p.taxRatePct}%</td>
+                          <td className={`${ui.td} font-mono tabular`}>{p._count.silos}</td>
+                          <td className={`${ui.td} font-mono tabular`}>{p._count.employees}</td>
+                          <td className={`${ui.td} font-mono tabular`}>{p._count.projects}</td>
+                          <td className={ui.td}>
+                            <Link href={`/plants?editPlant=${p.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                              {dict.field.edit}
+                            </Link>
+                          </td>
+                        </tr>
+                      ),
+                    )}
+                    {s.plants.length === 0 && (
+                      <tr>
+                        <td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.empty}</span></td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            ))}
           </div>
-          <div>
-            <label className={ui.label}>{m.f.city}</label>
-            <input name="city" required className={ui.input} placeholder="6th of October City" />
-          </div>
-          <div>
-            <label className={ui.label}>{m.f.country}</label>
-            <input name="country" className={ui.input} placeholder="Egypt" />
-          </div>
-          <div>
-            <label className={ui.label}>{m.f.currency}</label>
-            <input name="currency" defaultValue="EGP" className={ui.input} dir="ltr" />
-          </div>
-          <div>
-            <label className={ui.label}>{m.f.timezone}</label>
-            <input name="timezone" defaultValue="Africa/Cairo" className={ui.input} dir="ltr" />
-          </div>
-          <div>
-            <label className={ui.label}>{m.f.taxLabel}</label>
-            <input name="taxLabel" defaultValue="VAT" className={ui.input} dir="ltr" />
-          </div>
-          <div>
-            <label className={ui.label}>{m.f.taxRatePct}</label>
-            <input name="taxRatePct" type="number" step="0.1" defaultValue={0} className={ui.input} />
-          </div>
-          <button type="submit" className={`${ui.button} mt-2`}>
-            {m.add}
-          </button>
-        </form>
+
+          <form action={createPlant} className={`${ui.card} flex flex-col gap-3`}>
+            <h3 className="font-display text-base font-semibold">{m.newTitle}</h3>
+            <div>
+              <label className={ui.label}>{m.f.site}</label>
+              <select name="siteId" required className={ui.select}>
+                <option value="">{m.selectSite}</option>
+                {sites.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.name}</label>
+              <input name="name" required className={ui.input} placeholder="Line 1" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.currency}</label>
+              <input name="currency" defaultValue="EGP" className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.timezone}</label>
+              <input name="timezone" defaultValue="Africa/Cairo" className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.taxLabel}</label>
+              <input name="taxLabel" defaultValue="VAT" className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.taxRatePct}</label>
+              <input name="taxRatePct" type="number" step="0.1" defaultValue={0} className={ui.input} />
+            </div>
+            <button type="submit" className={`${ui.button} mt-2`}>{m.add}</button>
+          </form>
+        </div>
       </div>
 
       <div className={ui.card}>
         <h2 className="mb-1 font-display text-lg font-semibold">{m.thresholdsTitle}</h2>
         <p className="mb-3 text-sm text-ink-muted">{m.thresholdsIntro}</p>
         <div className="flex flex-col gap-3">
-          {plants.map((p) => (
+          {sites.flatMap((s) => s.plants).map((p) => (
             <form
               key={p.id}
               action={updatePlantThresholds}
@@ -203,7 +286,7 @@ export default async function PlantsPage({
         <h2 className="mb-1 font-display text-lg font-semibold">{m.yardTitle}</h2>
         <p className="mb-3 text-sm text-ink-muted">{m.yardIntro}</p>
         <div className="flex flex-col gap-3">
-          {plants.map((p) => (
+          {sites.flatMap((s) => s.plants).map((p) => (
             <form
               key={p.id}
               action={updatePlantThresholds}

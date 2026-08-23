@@ -4,8 +4,11 @@ import bcrypt from "bcryptjs";
 const prisma = new PrismaClient();
 
 async function main() {
+  const site = await prisma.site.create({
+    data: { name: "6th of October Site", city: "6th of October City" },
+  });
   const plant = await prisma.plant.create({
-    data: { name: "Plant 02 — 6th of October", city: "6th of October City", currency: "EGP" },
+    data: { siteId: site.id, name: "Line 1", currency: "EGP" },
   });
 
   await prisma.silo.createMany({

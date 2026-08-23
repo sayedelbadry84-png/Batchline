@@ -60,6 +60,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({ error: "from/to must be valid dates (YYYY-MM-DD)." }, { status: 400 });
   }
 
-  const data = await REPORTS[report]({ from, to });
-  return NextResponse.json({ report, from: from.toISOString(), to: to.toISOString(), ...data });
+  // Optional scope — a site rolls up every production line at that site
+  // combined, a plant (line) id narrows to just one line's own numbers.
+  // Unset means every site, same as the on-screen "All sites" default.
+  const siteId = url.searchParams.get("site") ?? undefined;
+  const plantId = url.searchParams.get("plant") ?? undefined;
+
+  const data = await REPORTS[report]({ from, to, siteId, plantId });
+  return NextResponse.json({ report, from: from.toISOString(), to: to.toISOString(), siteId: siteId ?? null, plantId: plantId ?? null, ...data });
 }

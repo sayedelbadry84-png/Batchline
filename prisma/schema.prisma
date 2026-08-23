@@ -82,14 +82,34 @@ model LoginAttempt {
   @@index([ipAddress, createdAt])
 }
 
-model Plant {
+// A physical factory location — a company runs several of these, and each
+// one can house more than one production line (Plant). Deliberately
+// lightweight: address/name/grouping only. Each Plant keeps its own
+// currency/tax/geofence/tolerance settings rather than inheriting them
+// from here, since those were already in daily use before multi-line
+// sites existed and two lines at one site do sometimes run different
+// batching tolerances in practice — a future request, not this one.
+// What genuinely IS shared at the site level (raw-material silos/hoppers,
+// via sharedAcrossPlants below) is scoped by siteId, not globally, so two
+// unrelated sites' stock pools can never cross-contaminate each other.
+model Site {
   id        String   @id @default(cuid())
   name      String
   city      String
-  // Free text on purpose, like currency below — a fixed country list would
-  // need maintaining forever for a field that's really just a label on
-  // invoices and reports, not something any query filters or branches on.
   country   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  plants Plant[]
+}
+
+model Plant {
+  id        String   @id @default(cuid())
+  siteId    String
+  site      Site     @relation(fields: [siteId], references: [id])
+  // The production line's own label within its site ("Line 1", "خط 2") —
+  // address/city/country live on Site above now, not duplicated here.
+  name      String
   currency  String   @default("EGP")
   timezone  String   @default("Africa/Cairo")
   // Applied to every invoice generated for this plant's projects, snapshotted
@@ -151,6 +171,12 @@ model Silo {
   // Populated by the SCADA sensor-reading webhook (see /api/scada/silo-reading)
   // to distinguish a sensor-fed level from a manual dashboard override.
   lastSensorReadingAt DateTime?
+  // A cement/fly-ash tank feeding more than one production line at the
+  // same site — plantId above is still the "home" line, but
+  // completeBatch's consumption lookup (production/actions.ts) matches a
+  // shared silo for ANY line's ticket at the SAME site, not just its own,
+  // once this is true. Mirrors Hopper.sharedAcrossPlants below.
+  sharedAcrossPlants Boolean @default(false)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -165,10 +191,11 @@ model Hopper {
   aggregateType    String
   capacityTons     Float
   currentLevelTons Float    @default(0)
-  // A yard heap multiple plants on the same site draw from — plantId
-  // above is still the "home"/organizational plant, but completeBatch's
-  // consumption lookup (production/actions.ts) matches a shared hopper
-  // for ANY plant's ticket, not just its own, once this is true.
+  // A yard heap multiple production lines at the same site draw from —
+  // plantId above is still the "home"/organizational line, but
+  // completeBatch's consumption lookup (production/actions.ts) matches a
+  // shared hopper for any OTHER line's ticket at the SAME site (never a
+  // different site), not just its own, once this is true.
   sharedAcrossPlants Boolean @default(false)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt

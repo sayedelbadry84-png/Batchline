@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createSilo, updateSilo, updateSiloLevel, createHopper, updateHopperLevel, setHopperSharing, createChemicalTank, updateChemicalTankLevel } from "./actions";
+import { createSilo, updateSilo, updateSiloLevel, setSiloSharing, createHopper, updateHopperLevel, setHopperSharing, createChemicalTank, updateChemicalTankLevel } from "./actions";
 
 function levelColor(pct: number, minPct: number) {
   if (pct <= minPct) return "bg-critical";
@@ -132,6 +132,7 @@ export default async function SilosPage({
                   <div className="font-medium">{s.name}</div>
                   <div className="text-xs text-ink-muted">
                     {s.plant.name} · {dict.materialTypes[s.materialType as keyof typeof dict.materialTypes] ?? s.materialType}
+                    {s.sharedAcrossPlants && <span className={`${ui.chip} bg-accent-soft text-accent-strong ms-1`}>{m.sharedBadge}</span>}
                   </div>
                 </div>
                 <div className="h-2.5 flex-1 overflow-hidden rounded-full border border-border bg-surface-alt">
@@ -157,6 +158,13 @@ export default async function SilosPage({
                   />
                   <button className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt">
                     {m.update}
+                  </button>
+                </form>
+                <form action={setSiloSharing} className="shrink-0">
+                  <input type="hidden" name="id" value={s.id} />
+                  <input type="hidden" name="sharedAcrossPlants" value={s.sharedAcrossPlants ? "" : "on"} />
+                  <button className="text-xs font-medium text-accent-strong hover:underline">
+                    {s.sharedAcrossPlants ? m.unshareHopper : m.shareHopper}
                   </button>
                 </form>
                 <Link href={`/silos?edit=${s.id}`} className="shrink-0 text-xs font-medium text-accent-strong hover:underline">
@@ -206,6 +214,10 @@ export default async function SilosPage({
             <label className={ui.label}>{m.f.threshold}</label>
             <input name="minThresholdPct" type="number" step="1" defaultValue={15} className={ui.input} />
           </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" name="sharedAcrossPlants" />
+            {m.sharedAcrossPlantsLabel}
+          </label>
           <button type="submit" className={`${ui.button} mt-2`}>
             {m.add}
           </button>
