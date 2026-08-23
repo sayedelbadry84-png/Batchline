@@ -238,6 +238,8 @@ const en: typeof ar = {
   },
   field: {
     plant: "Plant",
+    siteCode: "Site code",
+    selectSite: "Select site…",
     name: "Name",
     code: "Code",
     status: "Status",
@@ -566,7 +568,7 @@ const en: typeof ar = {
     employees: {
       eyebrow: "Module 10 — Employees",
       title: "Employees",
-      intro: "The full plant roster in one place, grouped by job. Status controls who's currently available to be picked for a trip; transferring someone is just changing their plant on the edit form.",
+      intro: "The full plant roster in one place, grouped by job. Status controls who's currently available to be picked for a trip; registering and transferring someone is done by the site's code, not by a production-line name.",
       tabs: {
         mixerDriver: "Mixer drivers",
         pumpOperator: "Pump operators",
@@ -576,12 +578,12 @@ const en: typeof ar = {
         loaderDriver: "Loader drivers",
         admin: "Administrative",
       },
-      col: { name: "Name", code: "Code", role: "Role", plant: "Plant", shift: "Shift", license: "License", status: "Status" },
+      col: { name: "Name", code: "Code", role: "Role", plant: "Site code", shift: "Shift", license: "License", status: "Status" },
       expired: "expired",
       daysLeft: (n: number) => `${n}d left`,
       empty: "Nobody in this tab yet.",
       newTitle: "Add to this tab",
-      f: { plant: "Plant", name: "Name", code: "Employee code", role: "Role", shiftPattern: "Shift pattern", licenseExpiry: "License / cert expiry", status: "Status", jobTitleName: "Job title" },
+      f: { plant: "Site code", name: "Name", code: "Employee code", role: "Role", shiftPattern: "Shift pattern", licenseExpiry: "License / cert expiry", status: "Status", jobTitleName: "Job title" },
       add: "Add",
       newJobTitle: "New job title",
       addJobTitle: "Add job title",

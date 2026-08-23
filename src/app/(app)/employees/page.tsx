@@ -62,21 +62,17 @@ export default async function EmployeesPage({
   const isCrewTab = tab === "pumpOperator" || tab === "pumpAssistant";
   const fixedRole = EMPLOYEE_TAB_ROLE[tab];
 
-  const plants = await prisma.plant.findMany({
-    where: { ...(siteId ? { siteId } : {}) },
-    include: { site: true },
-    orderBy: [{ site: { code: "asc" } }, { name: "asc" }],
+  // Registration picks a Site by its code, not a specific production line —
+  // a person can work either line at a site interchangeably (both share
+  // the same yard/stock). The form submits siteId; the action resolves it
+  // down to a concrete Plant row (see resolvePlantIdForSite in siteScope.ts).
+  // A site with no production line registered yet has nothing to resolve
+  // to, so it's excluded here rather than offered and silently failing on
+  // submit — it becomes selectable the moment its first line is added.
+  const sitesForPicker = await prisma.site.findMany({
+    where: { ...(siteId ? { id: siteId } : {}), plants: { some: {} } },
+    orderBy: { code: "asc" },
   });
-  // Grouped by site so the plant picker below reads "site code — site name"
-  // as a heading over that site's lines — an operator registering someone
-  // looks the plant up by the site's code, not by a bare line name that
-  // looks the same across every site.
-  const plantsBySite = plants.reduce<{ siteId: string; siteLabel: string; plants: typeof plants }[]>((groups, p) => {
-    const last = groups[groups.length - 1];
-    if (last && last.siteId === p.siteId) last.plants.push(p);
-    else groups.push({ siteId: p.siteId, siteLabel: `${p.site.code} — ${p.site.name}`, plants: [p] });
-    return groups;
-  }, []);
   const jobTitles = await prisma.jobTitle.findMany({ orderBy: { name: "asc" } });
   // Built-in roles plus whatever an Admin has added from this screen —
   // deduped since a custom title could in principle repeat a built-in name.
@@ -86,7 +82,7 @@ export default async function EmployeesPage({
     ? await prisma.employee.findMany({
         where: { role: fixedRole ?? { in: [...ADMIN_ROLES] }, ...plantScopeWhere(siteId) },
         orderBy: { createdAt: "asc" },
-        include: { plant: true },
+        include: { plant: { include: { site: true } } },
       })
     : [];
 
@@ -94,7 +90,7 @@ export default async function EmployeesPage({
     ? await prisma.pumpCrewMember.findMany({
         where: { role: CREW_TAB_ROLE[tab], ...plantScopeWhere(siteId) },
         orderBy: { name: "asc" },
-        include: { plant: true },
+        include: { plant: { include: { site: true } } },
       })
     : [];
 
@@ -140,7 +136,7 @@ export default async function EmployeesPage({
                 <tr>
                   <th className={ui.th}>{m.crewCol.name}</th>
                   <th className={ui.th}>{m.crewCol.code}</th>
-                  <th className={ui.th}>{dict.field.plant}</th>
+                  <th className={ui.th}>{dict.field.siteCode}</th>
                   <th className={ui.th}>{m.crewCol.phone}</th>
                   <th className={ui.th}>{m.crewCol.status}</th>
                   <th className={ui.th}>{dict.field.actions}</th>
@@ -155,14 +151,10 @@ export default async function EmployeesPage({
                           <input type="hidden" name="id" value={c.id} />
                           <input type="hidden" name="role" value={CREW_TAB_ROLE[tab]} />
                           <div>
-                            <label className={ui.label}>{dict.field.plant}</label>
-                            <select name="plantId" defaultValue={c.plantId} required className={`${ui.select} w-36`}>
-                              {plantsBySite.map((g) => (
-                                <optgroup key={g.siteId} label={g.siteLabel}>
-                                  {g.plants.map((p) => (
-                                    <option key={p.id} value={p.id}>{p.name}</option>
-                                  ))}
-                                </optgroup>
+                            <label className={ui.label}>{dict.field.siteCode}</label>
+                            <select name="siteId" defaultValue={c.plant.siteId} required className={`${ui.select} w-36`}>
+                              {sitesForPicker.map((s) => (
+                                <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
                               ))}
                             </select>
                           </div>
@@ -197,7 +189,7 @@ export default async function EmployeesPage({
                     <tr key={c.id}>
                       <td className={`${ui.td} font-medium`}>{c.name}</td>
                       <td className={`${ui.td} font-mono text-xs`} dir="ltr">{c.code || "—"}</td>
-                      <td className={ui.td}>{c.plant.name}</td>
+                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{c.plant.site.code}</td>
                       <td className={`${ui.td} font-mono text-xs`} dir="ltr">{c.phone || "—"}</td>
                       <td className={ui.td}>
                         <span className={`${ui.chip} ${statusChip[c.status] ?? statusChip.ACTIVE}`}>
@@ -227,15 +219,11 @@ export default async function EmployeesPage({
             <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
             <input type="hidden" name="role" value={CREW_TAB_ROLE[tab]} />
             <div>
-              <label className={ui.label}>{dict.field.plant}</label>
-              <select name="plantId" required className={ui.select}>
-                <option value="">{dict.field.selectPlant}</option>
-                {plantsBySite.map((g) => (
-                  <optgroup key={g.siteId} label={g.siteLabel}>
-                    {g.plants.map((p) => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </optgroup>
+              <label className={ui.label}>{dict.field.siteCode}</label>
+              <select name="siteId" required className={ui.select}>
+                <option value="">{dict.field.selectSite}</option>
+                {sitesForPicker.map((s) => (
+                  <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
                 ))}
               </select>
             </div>
@@ -284,14 +272,10 @@ export default async function EmployeesPage({
                             <input type="hidden" name="id" value={e.id} />
                             {fixedRole && <input type="hidden" name="role" value={fixedRole} />}
                             <div>
-                              <label className={ui.label}>{dict.field.plant}</label>
-                              <select name="plantId" defaultValue={e.plantId} required className={`${ui.select} w-36`}>
-                                {plantsBySite.map((g) => (
-                                  <optgroup key={g.siteId} label={g.siteLabel}>
-                                    {g.plants.map((p) => (
-                                      <option key={p.id} value={p.id}>{p.name}</option>
-                                    ))}
-                                  </optgroup>
+                              <label className={ui.label}>{dict.field.siteCode}</label>
+                              <select name="siteId" defaultValue={e.plant.siteId} required className={`${ui.select} w-36`}>
+                                {sitesForPicker.map((s) => (
+                                  <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
                                 ))}
                               </select>
                             </div>
@@ -350,7 +334,7 @@ export default async function EmployeesPage({
                       {tab === "admin" && (
                         <td className={`${ui.td} font-mono text-xs`}>{dict.roles[e.role as keyof typeof dict.roles] ?? e.role}</td>
                       )}
-                      <td className={ui.td}>{e.plant.name}</td>
+                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{e.plant.site.code}</td>
                       <td className={ui.td}>{e.shiftPattern || "—"}</td>
                       <td className={ui.td}>
                         {e.licenseExpiry ? new Date(e.licenseExpiry).toLocaleDateString() : "—"}
@@ -385,17 +369,13 @@ export default async function EmployeesPage({
             <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
             {fixedRole && <input type="hidden" name="role" value={fixedRole} />}
             <div>
-              <label className={ui.label}>{dict.field.plant}</label>
-              <select name="plantId" required className={ui.select}>
-                <option value="">{dict.field.selectPlant}</option>
-                {plantsBySite.map((g) => (
-                  <optgroup key={g.siteId} label={g.siteLabel}>
-                    {g.plants.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </optgroup>
+              <label className={ui.label}>{dict.field.siteCode}</label>
+              <select name="siteId" required className={ui.select}>
+                <option value="">{dict.field.selectSite}</option>
+                {sitesForPicker.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.code} — {s.name}
+                  </option>
                 ))}
               </select>
             </div>

@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
+import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { logTransferIfChanged } from "@/lib/transferAudit";
 import { revalidatePath } from "next/cache";
 
@@ -11,14 +11,17 @@ export async function createEmployee(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["ADMIN"]);
 
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "").trim();
   const code = String(formData.get("code") ?? "").trim() || null;
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
 
-  if (!plantId || !name || !role) return;
+  if (!siteId || !name || !role) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
+  const plantId = await resolvePlantIdForSite(siteId);
+  if (!plantId) return;
 
   const employee = await prisma.employee.create({
     data: {
@@ -36,7 +39,7 @@ export async function createEmployee(formData: FormData) {
 }
 
 // Status (ACTIVE/FROZEN/REMOVED — "removed" never a real row delete, same
-// non-destructive convention as User.status) and plant transfer both go
+// non-destructive convention as User.status) and site transfer both go
 // through this one edit form, same as every other equipment/roster screen
 // in this app — no separate freeze/remove/transfer actions needed.
 export async function updateEmployee(formData: FormData) {
@@ -44,7 +47,7 @@ export async function updateEmployee(formData: FormData) {
   requireRole(user, ["ADMIN"]);
 
   const id = String(formData.get("id") ?? "");
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "").trim();
   const code = String(formData.get("code") ?? "").trim() || null;
@@ -52,9 +55,12 @@ export async function updateEmployee(formData: FormData) {
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
   const status = String(formData.get("status") ?? "ACTIVE");
 
-  if (!id || !plantId || !name || !role) return;
+  if (!id || !siteId || !name || !role) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
   const existingEmployee = await prisma.employee.findUnique({ where: { id }, select: { plantId: true } });
   if (!existingEmployee) return;
+  const plantId = await resolvePlantIdForSite(siteId, existingEmployee.plantId);
+  if (!plantId) return;
 
   await prisma.employee.update({
     where: { id },
@@ -102,13 +108,15 @@ export async function createPumpCrewMember(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "OPERATOR");
   const phone = String(formData.get("phone") ?? "").trim() || null;
   const code = String(formData.get("code") ?? "").trim() || null;
-  if (!plantId || !name) return;
-  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
+  if (!siteId || !name) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
+  const plantId = await resolvePlantIdForSite(siteId);
+  if (!plantId) return;
 
   const member = await prisma.pumpCrewMember.create({ data: { plantId, name, role, phone, code } });
 
@@ -121,16 +129,18 @@ export async function updatePumpCrewMember(formData: FormData) {
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
   const id = String(formData.get("id") ?? "");
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "OPERATOR");
   const phone = String(formData.get("phone") ?? "").trim() || null;
   const code = String(formData.get("code") ?? "").trim() || null;
   const status = String(formData.get("status") ?? "ACTIVE");
-  if (!id || !plantId || !name) return;
-  const crewSiteId = effectiveSiteId(user);
+  if (!id || !siteId || !name) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
   const existingMember = await prisma.pumpCrewMember.findUnique({ where: { id }, select: { plantId: true } });
-  if (!existingMember || !(await isPlantInScope(existingMember.plantId, crewSiteId)) || !(await isPlantInScope(plantId, crewSiteId))) return;
+  if (!existingMember) return;
+  const plantId = await resolvePlantIdForSite(siteId, existingMember.plantId);
+  if (!plantId) return;
 
   await prisma.pumpCrewMember.update({ where: { id }, data: { plantId, name, role, phone, code, status } });
   await logTransferIfChanged("Employees", id, existingMember.plantId, plantId);
