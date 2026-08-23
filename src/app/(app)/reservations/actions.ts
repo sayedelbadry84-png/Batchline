@@ -4,7 +4,17 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getReleasedVolumeM3 } from "@/lib/reservations";
+import { effectiveSiteId } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
+
+// Defense in depth against a crafted request naming a project outside the
+// caller's own site — the page's own project picker already only ever
+// lists the caller's site, but a write action can't rely on that alone.
+async function projectInScope(projectId: string, siteId: string | null): Promise<boolean> {
+  if (siteId === null) return true; // ADMIN — unrestricted
+  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { plant: { select: { siteId: true } } } });
+  return project?.plant.siteId === siteId;
+}
 
 // Shared by create and update — the pour-order details captured at intake,
 // separate from the core project/mix/volume/window fields.
@@ -36,6 +46,7 @@ export async function createReservation(formData: FormData) {
   const pourWindowStartRaw = String(formData.get("pourWindowStart") ?? "");
 
   if (!projectId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw) return;
+  if (!(await projectInScope(projectId, effectiveSiteId(user!)))) return;
 
   // Credit check: requested project's customer credit limit must cover
   // the standing balance implied by this reservation (simplified for Phase 1
@@ -81,6 +92,7 @@ export async function updateReservation(formData: FormData) {
   const status = String(formData.get("status") ?? "");
 
   if (!id || !projectId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw || !status) return;
+  if (!(await projectInScope(projectId, effectiveSiteId(user!)))) return;
 
   const reservation = await prisma.reservation.findUnique({ where: { id } });
   if (!reservation) return;

@@ -3,7 +3,22 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
+import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
+
+async function tripInScope(tripId: string, siteId: string | null): Promise<boolean> {
+  if (siteId === null) return true;
+  const trip = await prisma.trip.findUnique({ where: { id: tripId }, select: { batchTicket: { select: { plantId: true } } } });
+  if (!trip) return false;
+  return isPlantInScope(trip.batchTicket.plantId, siteId);
+}
+
+async function testBatchInScope(testBatchId: string, siteId: string | null): Promise<boolean> {
+  if (siteId === null) return true;
+  const tb = await prisma.testBatch.findUnique({ where: { id: testBatchId }, select: { trip: { select: { batchTicket: { select: { plantId: true } } } } } });
+  if (!tb) return false;
+  return isPlantInScope(tb.trip.batchTicket.plantId, siteId);
+}
 
 export async function createTestBatch(formData: FormData) {
   const user = await getCurrentUser();
@@ -17,6 +32,7 @@ export async function createTestBatch(formData: FormData) {
   const sampledById = String(formData.get("sampledById") ?? "") || null;
 
   if (!tripId) return;
+  if (!(await tripInScope(tripId, effectiveSiteId(user)))) return;
 
   const testBatch = await prisma.testBatch.create({
     data: { tripId, sampleType, slumpMeasuredMm, airContentPct, concreteTempC, sampledById },
@@ -42,6 +58,7 @@ export async function addLabResult(formData: FormData) {
   const targetStrengthMpa = Number(formData.get("targetStrengthMpa") ?? 0);
 
   if (!testBatchId || !breakStrengthMpa || !targetStrengthMpa) return;
+  if (!(await testBatchInScope(testBatchId, effectiveSiteId(user)))) return;
 
   const passFail = breakStrengthMpa >= targetStrengthMpa ? "PASS" : "FAIL";
 

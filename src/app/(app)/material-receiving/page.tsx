@@ -5,6 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createReceipt, updateReceipt, deleteReceipt, returnReceiptToSupplier, setQcStatus } from "./actions";
 import { createSupplier } from "../suppliers/actions";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 
 const qcChip: Record<string, string> = {
   PENDING: "bg-surface-alt text-ink-muted",
@@ -19,25 +20,31 @@ export default async function MaterialReceivingPage({
 }: {
   searchParams: Promise<{ edit?: string; newSupplier?: string }>;
 }) {
-  await requirePageAccess("material-receiving");
+  const user = await requirePageAccess("material-receiving");
   const { dict } = await getDictionary();
   const m = dict.modules.materialReceiving;
   const { edit: editId, newSupplier } = await searchParams;
+  const siteId = effectiveSiteId(user);
 
   const [receipts, plants, suppliers, materials, silos, hoppers, deliveryDrivers] = await Promise.all([
     prisma.materialReceipt.findMany({
+      where: { ...plantScopeWhere(siteId) },
       orderBy: { receivedAt: "desc" },
       include: { supplier: true, material: true, destinationSilo: true, destinationHopper: true, driver: true },
     }),
-    prisma.plant.findMany({ orderBy: { name: "asc" } }),
+    prisma.plant.findMany({ where: { ...(siteId ? { siteId } : {}) }, orderBy: { name: "asc" } }),
     prisma.supplier.findMany({ orderBy: { name: "asc" } }),
     prisma.material.findMany({ orderBy: { name: "asc" } }),
-    prisma.silo.findMany({ orderBy: { name: "asc" } }),
-    prisma.hopper.findMany({ orderBy: { name: "asc" } }),
+    // Includes every silo/hopper at every line within the user's site, not
+    // just their own line's — a shared destination (Silo/Hopper.
+    // sharedAcrossPlants) only ever lives on some OTHER line at the same
+    // site in the first place.
+    prisma.silo.findMany({ where: { ...plantScopeWhere(siteId) }, orderBy: { name: "asc" } }),
+    prisma.hopper.findMany({ where: { ...plantScopeWhere(siteId) }, orderBy: { name: "asc" } }),
     // Only the two roles a material delivery is ever attributed to — the
     // roster the select below offers, so choosing a name here can only ever
     // land on someone actually relevant to this ticket.
-    prisma.employee.findMany({ where: { role: { in: ["BULKER_DRIVER", "WATER_TANKER_DRIVER"] } }, orderBy: { name: "asc" } }),
+    prisma.employee.findMany({ where: { role: { in: ["BULKER_DRIVER", "WATER_TANKER_DRIVER"] }, ...plantScopeWhere(siteId) }, orderBy: { name: "asc" } }),
   ]);
 
   return (

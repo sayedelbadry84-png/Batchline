@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
+import { effectiveSiteId } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -103,12 +104,14 @@ export async function releaseBatchTicket(formData: FormData) {
   if (!reservationId || !requestedVolume || requestedVolume <= 0) return;
   if (requestedVolume > MAX_LOAD_M3) return;
 
-  const reservation = await prisma.reservation.findUnique({ where: { id: reservationId } });
+  const reservation = await prisma.reservation.findUnique({ where: { id: reservationId }, include: { project: { select: { plant: { select: { siteId: true } } } } } });
   if (!reservation) return;
   // Re-check server-side — the picker on /production only ever lists
   // reservations that already cleared both sign-offs, but a stale page
   // or a second tab shouldn't be able to release against one that hasn't.
   if (!isReservationApproved(reservation)) return;
+  const siteId = effectiveSiteId(user!);
+  if (siteId !== null && reservation.project.plant.siteId !== siteId) return;
 
   const ticket = await releaseTicketForReservation(reservationId, requestedVolume);
   if (!ticket) return;
@@ -134,8 +137,10 @@ export async function createManualRelease(formData: FormData) {
   if (!projectId || !mixId || !volumeM3 || volumeM3 <= 0) return;
   if (volumeM3 > MAX_LOAD_M3) return;
 
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  const project = await prisma.project.findUnique({ where: { id: projectId }, include: { plant: { select: { siteId: true } } } });
   if (!project) return;
+  const siteId = effectiveSiteId(user!);
+  if (siteId !== null && project.plant.siteId !== siteId) return;
 
   const now = new Date();
   const reservation = await prisma.reservation.create({

@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createSilo, updateSilo, updateSiloLevel, setSiloSharing, createHopper, updateHopperLevel, setHopperSharing, createChemicalTank, updateChemicalTankLevel } from "./actions";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 
 function levelColor(pct: number, minPct: number) {
   if (pct <= minPct) return "bg-critical";
@@ -16,16 +17,17 @@ export default async function SilosPage({
 }: {
   searchParams: Promise<{ edit?: string }>;
 }) {
-  await requirePageAccess("silos");
+  const user = await requirePageAccess("silos");
   const { dict } = await getDictionary();
   const m = dict.modules.silos;
   const { edit: editId } = await searchParams;
+  const siteId = effectiveSiteId(user);
 
   const [silos, plants, hoppers, chemicalTanks, admixtureMaterials] = await Promise.all([
-    prisma.silo.findMany({ include: { plant: true }, orderBy: { createdAt: "asc" } }),
-    prisma.plant.findMany({ orderBy: { name: "asc" } }),
-    prisma.hopper.findMany({ include: { plant: true }, orderBy: { createdAt: "asc" } }),
-    prisma.chemicalTank.findMany({ include: { plant: true, material: true }, orderBy: { createdAt: "asc" } }),
+    prisma.silo.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true }, orderBy: { createdAt: "asc" } }),
+    prisma.plant.findMany({ where: { ...(siteId ? { siteId } : {}) }, orderBy: { name: "asc" } }),
+    prisma.hopper.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true }, orderBy: { createdAt: "asc" } }),
+    prisma.chemicalTank.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true, material: true }, orderBy: { createdAt: "asc" } }),
     prisma.material.findMany({ where: { type: "ADMIXTURE" }, orderBy: { name: "asc" } }),
   ]);
 

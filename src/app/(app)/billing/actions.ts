@@ -4,8 +4,20 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { parseNetDays } from "@/lib/billing";
+import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+
+// Invoice.projectId is optional, so "in scope" for an invoice means: it
+// has a project, and that project's plant is in scope. An unassignable
+// (no-project) invoice is only ever visible/actionable to ADMIN, same as
+// the billing list's own filter.
+async function invoiceInScope(invoiceId: string, siteId: string | null): Promise<boolean> {
+  if (siteId === null) return true;
+  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, select: { project: { select: { plantId: true } } } });
+  if (!invoice?.project) return false;
+  return isPlantInScope(invoice.project.plantId, siteId);
+}
 
 // Create is an upsert (same customer+mix re-submitted just updates the
 // price, matching how MixDesign's addComponent behaves) — edit passes an
@@ -55,6 +67,7 @@ export async function generateInvoiceForProject(formData: FormData) {
     include: { customer: true, plant: true },
   });
   if (!project) return;
+  if (!(await isPlantInScope(project.plantId, effectiveSiteId(user)))) return;
 
   const uninvoicedTrips = await prisma.trip.findMany({
     where: { status: "CLOSED", invoiceLine: null, batchTicket: { reservation: { projectId } } },
@@ -131,6 +144,7 @@ export async function markInvoiceSent(formData: FormData) {
 
   const invoice = await prisma.invoice.findUnique({ where: { id } });
   if (!invoice || invoice.status !== "DRAFT") return;
+  if (!(await invoiceInScope(id, effectiveSiteId(user)))) return;
 
   await prisma.invoice.update({ where: { id }, data: { status: "SENT" } });
   await logAudit({ module: "Billing", recordId: id, field: "status", afterValue: "SENT", reasonCode: "INVOICE_SENT" });
@@ -156,6 +170,7 @@ export async function cancelInvoice(formData: FormData) {
 
   const invoice = await prisma.invoice.findUnique({ where: { id }, include: { payments: true } });
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID" || invoice.payments.length > 0) return;
+  if (!(await invoiceInScope(id, effectiveSiteId(user)))) return;
 
   await prisma.$transaction([
     prisma.invoiceLine.deleteMany({ where: { invoiceId: id } }),
@@ -187,6 +202,7 @@ export async function recordPayment(formData: FormData) {
 
   const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { payments: true } });
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return;
+  if (!(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
 
   await prisma.payment.create({ data: { invoiceId, amount, method, reference } });
 

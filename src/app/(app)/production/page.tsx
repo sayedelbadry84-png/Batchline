@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { releaseBatchTicket, createManualRelease } from "./actions";
+import { effectiveSiteId, plantScopeWhere, projectPlantScopeWhere } from "@/lib/siteScope";
 
 // A single mixer truck load — the same hard ceiling releaseBatchTicket
 // enforces server-side, so this is display/UX only, not the real gate.
@@ -21,16 +22,17 @@ export default async function ProductionPage({
 }: {
   searchParams: Promise<{ manualBooking?: string }>;
 }) {
-  await requirePageAccess("production");
+  const user = await requirePageAccess("production");
   const { dict } = await getDictionary();
   const m = dict.modules.production;
   const { manualBooking } = await searchParams;
+  const siteId = effectiveSiteId(user);
 
   const [readyReservationsRaw, activeTickets, recentTickets, projects, approvedMixes] = await Promise.all([
     prisma.reservation.findMany({
       // A reservation only shows up here — and can only be released against
       // — once it's cleared both sign-offs (see the Reservations module).
-      where: { status: { in: ["CONFIRMED", "IN_PRODUCTION"] }, initialApprovedAt: { not: null }, finalApprovedAt: { not: null } },
+      where: { status: { in: ["CONFIRMED", "IN_PRODUCTION"] }, initialApprovedAt: { not: null }, finalApprovedAt: { not: null }, ...projectPlantScopeWhere(siteId) },
       include: {
         project: { include: { customer: true } },
         mix: true,
@@ -39,17 +41,17 @@ export default async function ProductionPage({
       orderBy: { pourWindowStart: "asc" },
     }),
     prisma.batchTicket.findMany({
-      where: { status: { in: ["RELEASED", "BATCHING"] } },
+      where: { status: { in: ["RELEASED", "BATCHING"] }, ...plantScopeWhere(siteId) },
       include: { mix: true, reservation: { include: { project: true } } },
       orderBy: { releasedAt: "asc" },
     }),
     prisma.batchTicket.findMany({
-      where: { status: "COMPLETE" },
+      where: { status: "COMPLETE", ...plantScopeWhere(siteId) },
       include: { mix: true, reservation: { include: { project: true } }, trip: true },
       orderBy: { batchCompletedAt: "desc" },
       take: 5,
     }),
-    manualBooking ? prisma.project.findMany({ include: { customer: true }, orderBy: { name: "asc" } }) : Promise.resolve([]),
+    manualBooking ? prisma.project.findMany({ where: { ...plantScopeWhere(siteId) }, include: { customer: true }, orderBy: { name: "asc" } }) : Promise.resolve([]),
     manualBooking ? prisma.mixDesign.findMany({ where: { status: "APPROVED" }, orderBy: { code: "asc" } }) : Promise.resolve([]),
   ]);
 

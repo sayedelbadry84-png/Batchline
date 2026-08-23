@@ -5,6 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createTestBatch, addLabResult, createCertificate, updateCertificate } from "./actions";
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
+import { effectiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
 function daysUntil(date: Date) {
   return Math.ceil((date.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
@@ -15,13 +16,15 @@ export default async function QualityPage({
 }: {
   searchParams: Promise<{ editCert?: string }>;
 }) {
-  await requirePageAccess("quality");
+  const user = await requirePageAccess("quality");
   const { dict } = await getDictionary();
   const m = dict.modules.quality;
   const { editCert: editCertId } = await searchParams;
+  const siteId = effectiveSiteId(user);
 
   const [testBatches, sampleableTrips, employees, certificates, mixes] = await Promise.all([
     prisma.testBatch.findMany({
+      where: { ...(siteId ? { trip: tripPlantScopeWhere(siteId) } : {}) },
       orderBy: { sampleTime: "desc" },
       include: {
         trip: { include: { batchTicket: { include: { mix: true, reservation: { include: { project: true } } } } } },
@@ -30,12 +33,15 @@ export default async function QualityPage({
       },
     }),
     prisma.trip.findMany({
-      where: { status: { in: ["DISCHARGING", "CLOSED"] } },
+      where: { status: { in: ["DISCHARGING", "CLOSED"] }, ...tripPlantScopeWhere(siteId) },
       include: { batchTicket: { include: { reservation: { include: { project: true } } } } },
       orderBy: { batchTime: "desc" },
       take: 20,
     }),
-    prisma.employee.findMany({ where: { role: "QUALITY_SUPERVISOR" }, orderBy: { name: "asc" } }),
+    prisma.employee.findMany({ where: { role: "QUALITY_SUPERVISOR", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" } }),
+    // Certificates and mix designs are attached to a MixDesign, which is a
+    // company-wide recipe library, not a site's own record — global, same
+    // as everywhere else this appears (reservations, billing, etc).
     prisma.complianceCertificate.findMany({ include: { mix: true }, orderBy: { expiryDate: "asc" } }),
     prisma.mixDesign.findMany({ orderBy: { code: "asc" } }),
   ]);

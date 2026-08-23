@@ -4,6 +4,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { DrumTimer } from "@/components/DrumTimer";
 import { advanceTrip, closeTripFull, closeTripWithReturn } from "./actions";
+import { effectiveSiteId, tripPlantScopeWhere } from "@/lib/siteScope";
 
 const statusChip: Record<string, string> = {
   LOADING: "bg-surface-alt text-ink-muted",
@@ -21,13 +22,14 @@ const dispositionChip: Record<string, string> = {
 };
 
 export default async function TripsPage() {
-  await requirePageAccess("trips");
+  const user = await requirePageAccess("trips");
   const { dict } = await getDictionary();
   const m = dict.modules.trips;
+  const siteId = effectiveSiteId(user);
 
   const [openTrips, closedTrips] = await Promise.all([
     prisma.trip.findMany({
-      where: { status: { not: "CLOSED" } },
+      where: { status: { not: "CLOSED" }, ...tripPlantScopeWhere(siteId) },
       include: {
         truck: true,
         driver: true,
@@ -36,7 +38,7 @@ export default async function TripsPage() {
       orderBy: { batchTime: "asc" },
     }),
     prisma.trip.findMany({
-      where: { status: "CLOSED" },
+      where: { status: "CLOSED", ...tripPlantScopeWhere(siteId) },
       include: {
         truck: true,
         driver: true,

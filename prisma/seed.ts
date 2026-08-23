@@ -5,7 +5,7 @@ const prisma = new PrismaClient();
 
 async function main() {
   const site = await prisma.site.create({
-    data: { name: "6th of October Site", city: "6th of October City" },
+    data: { code: "S1", name: "6th of October Site", city: "6th of October City" },
   });
   const plant = await prisma.plant.create({
     data: { siteId: site.id, name: "Line 1", currency: "EGP" },

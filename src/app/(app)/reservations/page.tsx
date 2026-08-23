@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal } from "./actions";
+import { effectiveSiteId, plantScopeWhere, projectPlantScopeWhere } from "@/lib/siteScope";
 
 const statusChip: Record<string, string> = {
   REQUESTED: "bg-surface-alt text-ink-muted",
@@ -23,9 +24,11 @@ export default async function ReservationsPage({
   const { dict } = await getDictionary();
   const m = dict.modules.reservations;
   const { edit: editId } = await searchParams;
+  const siteId = effectiveSiteId(user);
 
   const [reservationsRaw, projects, mixes] = await Promise.all([
     prisma.reservation.findMany({
+      where: { ...projectPlantScopeWhere(siteId) },
       orderBy: { pourWindowStart: "asc" },
       include: {
         project: { include: { customer: true } },
@@ -33,7 +36,9 @@ export default async function ReservationsPage({
         batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
       },
     }),
-    prisma.project.findMany({ orderBy: { name: "asc" }, include: { customer: true } }),
+    prisma.project.findMany({ where: { ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { customer: true } }),
+    // Mix designs are a shared company-wide recipe library, not tied to a
+    // site — every site should be able to pour an approved mix.
     prisma.mixDesign.findMany({ where: { status: "APPROVED" }, orderBy: { code: "asc" } }),
   ]);
 

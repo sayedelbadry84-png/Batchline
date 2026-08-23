@@ -3,9 +3,13 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
+import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 export async function createReceipt(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"]);
+
   const plantId = String(formData.get("plantId") ?? "");
   const supplierId = String(formData.get("supplierId") ?? "");
   const materialId = String(formData.get("materialId") ?? "");
@@ -21,6 +25,7 @@ export async function createReceipt(formData: FormData) {
 
   if (!plantId || !supplierId || !materialId || !grossWeightKg || !tareWeightKg) return;
   if (grossWeightKg <= tareWeightKg) return;
+  if (!(await isPlantInScope(plantId, effectiveSiteId(user!)))) return;
 
   const netWeightKg = grossWeightKg - tareWeightKg;
 
@@ -79,6 +84,7 @@ export async function updateReceipt(formData: FormData) {
 
   const receipt = await prisma.materialReceipt.findUnique({ where: { id } });
   if (!receipt || receipt.postedToInventory) return;
+  if (!(await isPlantInScope(receipt.plantId, effectiveSiteId(user)))) return;
 
   const netWeightKg = grossWeightKg - tareWeightKg;
 
@@ -123,6 +129,7 @@ export async function deleteReceipt(formData: FormData) {
 
   const receipt = await prisma.materialReceipt.findUnique({ where: { id } });
   if (!receipt) return;
+  if (!(await isPlantInScope(receipt.plantId, effectiveSiteId(user)))) return;
 
   await prisma.$transaction(async (tx) => {
     if (receipt.postedToInventory) {
@@ -166,6 +173,7 @@ export async function returnReceiptToSupplier(formData: FormData) {
 
   const receipt = await prisma.materialReceipt.findUnique({ where: { id } });
   if (!receipt || receipt.qcStatus === "RETURNED") return;
+  if (!(await isPlantInScope(receipt.plantId, effectiveSiteId(user)))) return;
 
   await prisma.$transaction(async (tx) => {
     if (receipt.postedToInventory) {
@@ -209,6 +217,7 @@ export async function setQcStatus(formData: FormData) {
 
   const receipt = await prisma.materialReceipt.findUnique({ where: { id } });
   if (!receipt) return;
+  if (!(await isPlantInScope(receipt.plantId, effectiveSiteId(user)))) return;
 
   const shouldPost = status === "PASSED" && !receipt.postedToInventory;
 

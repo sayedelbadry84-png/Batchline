@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
+import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 export async function createSilo(formData: FormData) {
@@ -18,6 +19,7 @@ export async function createSilo(formData: FormData) {
   const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
 
   if (!plantId || !name || !materialType || !capacityTons) return;
+  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
 
   const silo = await prisma.silo.create({
     data: { plantId, name, materialType, capacityTons, currentLevelTons, minThresholdPct, sharedAcrossPlants },
@@ -45,6 +47,9 @@ export async function updateSilo(formData: FormData) {
   const minThresholdPct = Number(formData.get("minThresholdPct") ?? 15);
 
   if (!id || !plantId || !name || !materialType || !capacityTons) return;
+  const siteId = effectiveSiteId(user);
+  const existing = await prisma.silo.findUnique({ where: { id }, select: { plantId: true } });
+  if (!existing || !(await isPlantInScope(existing.plantId, siteId)) || !(await isPlantInScope(plantId, siteId))) return;
 
   await prisma.silo.update({
     where: { id },
@@ -71,6 +76,8 @@ export async function setSiloSharing(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
   if (!id) return;
+  const silo = await prisma.silo.findUnique({ where: { id }, select: { plantId: true } });
+  if (!silo || !(await isPlantInScope(silo.plantId, effectiveSiteId(user)))) return;
 
   await prisma.silo.update({ where: { id }, data: { sharedAcrossPlants } });
 
@@ -94,6 +101,7 @@ export async function updateSiloLevel(formData: FormData) {
   if (!id) return;
 
   const before = await prisma.silo.findUnique({ where: { id } });
+  if (!before || !(await isPlantInScope(before.plantId, effectiveSiteId(user)))) return;
   await prisma.silo.update({ where: { id }, data: { currentLevelTons } });
 
   await logAudit({
@@ -123,6 +131,7 @@ export async function createHopper(formData: FormData) {
   const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
 
   if (!plantId || !name || !aggregateType || !capacityTons) return;
+  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
 
   const hopper = await prisma.hopper.create({
     data: { plantId, name, aggregateType, capacityTons, currentLevelTons, sharedAcrossPlants },
@@ -142,6 +151,8 @@ export async function setHopperSharing(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
   if (!id) return;
+  const hopper = await prisma.hopper.findUnique({ where: { id }, select: { plantId: true } });
+  if (!hopper || !(await isPlantInScope(hopper.plantId, effectiveSiteId(user)))) return;
 
   await prisma.hopper.update({ where: { id }, data: { sharedAcrossPlants } });
 
@@ -165,6 +176,7 @@ export async function updateHopperLevel(formData: FormData) {
   if (!id) return;
 
   const before = await prisma.hopper.findUnique({ where: { id } });
+  if (!before || !(await isPlantInScope(before.plantId, effectiveSiteId(user)))) return;
   await prisma.hopper.update({ where: { id }, data: { currentLevelTons } });
 
   await logAudit({
@@ -193,6 +205,7 @@ export async function createChemicalTank(formData: FormData) {
   const currentLevelLiters = Number(formData.get("currentLevelLiters") ?? 0);
 
   if (!plantId || !materialId || !name) return;
+  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
 
   const tank = await prisma.chemicalTank.upsert({
     where: { plantId_materialId: { plantId, materialId } },
@@ -213,6 +226,7 @@ export async function updateChemicalTankLevel(formData: FormData) {
   if (!id) return;
 
   const before = await prisma.chemicalTank.findUnique({ where: { id } });
+  if (!before || !(await isPlantInScope(before.plantId, effectiveSiteId(user)))) return;
   await prisma.chemicalTank.update({ where: { id }, data: { currentLevelLiters } });
 
   await logAudit({

@@ -4,24 +4,27 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createProject, updateProject } from "./actions";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 
 export default async function ProjectsPage({
   searchParams,
 }: {
   searchParams: Promise<{ edit?: string }>;
 }) {
-  await requirePageAccess("projects");
+  const user = await requirePageAccess("projects");
   const { dict } = await getDictionary();
   const m = dict.modules.projects;
   const { edit: editId } = await searchParams;
+  const siteId = effectiveSiteId(user);
 
   const [projects, customers, plants] = await Promise.all([
     prisma.project.findMany({
+      where: { ...plantScopeWhere(siteId) },
       orderBy: { createdAt: "asc" },
       include: { customer: true, plant: true, _count: { select: { reservations: true } } },
     }),
     prisma.customer.findMany({ orderBy: { legalName: "asc" } }),
-    prisma.plant.findMany({ orderBy: { name: "asc" } }),
+    prisma.plant.findMany({ where: { ...(siteId ? { siteId } : {}) }, orderBy: { name: "asc" } }),
   ]);
 
   return (

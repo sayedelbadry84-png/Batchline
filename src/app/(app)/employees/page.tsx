@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createEmployee, updateEmployee, createPumpCrewMember, updatePumpCrewMember, createJobTitle } from "./actions";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 
 const ADMIN_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DISPATCHER", "ADMIN"] as const;
 const EMPLOYEE_STATUSES = ["ACTIVE", "FROZEN", "REMOVED"] as const;
@@ -49,18 +50,19 @@ export default async function EmployeesPage({
 }: {
   searchParams: Promise<{ tab?: string; edit?: string }>;
 }) {
-  await requirePageAccess("employees");
+  const user = await requirePageAccess("employees");
   const { dict } = await getDictionary();
   const m = dict.modules.employees;
   const { tab: tabRaw, edit: editId } = await searchParams;
   const tab: TabKey = (TAB_KEYS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as TabKey) : "mixerDriver";
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
+  const siteId = effectiveSiteId(user);
 
   const isCrewTab = tab === "pumpOperator" || tab === "pumpAssistant";
   const fixedRole = EMPLOYEE_TAB_ROLE[tab];
 
-  const plants = await prisma.plant.findMany({ orderBy: { name: "asc" } });
+  const plants = await prisma.plant.findMany({ where: { ...(siteId ? { siteId } : {}) }, orderBy: { name: "asc" } });
   const jobTitles = await prisma.jobTitle.findMany({ orderBy: { name: "asc" } });
   // Built-in roles plus whatever an Admin has added from this screen —
   // deduped since a custom title could in principle repeat a built-in name.
@@ -68,7 +70,7 @@ export default async function EmployeesPage({
 
   const employees = !isCrewTab
     ? await prisma.employee.findMany({
-        where: { role: fixedRole ?? { in: [...ADMIN_ROLES] } },
+        where: { role: fixedRole ?? { in: [...ADMIN_ROLES] }, ...plantScopeWhere(siteId) },
         orderBy: { createdAt: "asc" },
         include: { plant: true },
       })
@@ -76,7 +78,7 @@ export default async function EmployeesPage({
 
   const crew = isCrewTab
     ? await prisma.pumpCrewMember.findMany({
-        where: { role: CREW_TAB_ROLE[tab] },
+        where: { role: CREW_TAB_ROLE[tab], ...plantScopeWhere(siteId) },
         orderBy: { name: "asc" },
         include: { plant: true },
       })
@@ -123,6 +125,7 @@ export default async function EmployeesPage({
               <thead>
                 <tr>
                   <th className={ui.th}>{m.crewCol.name}</th>
+                  <th className={ui.th}>{m.crewCol.code}</th>
                   <th className={ui.th}>{dict.field.plant}</th>
                   <th className={ui.th}>{m.crewCol.phone}</th>
                   <th className={ui.th}>{m.crewCol.status}</th>
@@ -133,7 +136,7 @@ export default async function EmployeesPage({
                 {crew.map((c) =>
                   editId === c.id ? (
                     <tr key={c.id}>
-                      <td className={ui.td} colSpan={5}>
+                      <td className={ui.td} colSpan={6}>
                         <form action={updatePumpCrewMember} className="flex flex-wrap items-end gap-2">
                           <input type="hidden" name="id" value={c.id} />
                           <input type="hidden" name="role" value={CREW_TAB_ROLE[tab]} />
@@ -148,6 +151,10 @@ export default async function EmployeesPage({
                           <div>
                             <label className={ui.label}>{m.crewF.name}</label>
                             <input name="name" defaultValue={c.name} required className={`${ui.input} w-36`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.crewF.code}</label>
+                            <input name="code" defaultValue={c.code ?? ""} className={`${ui.input} w-24`} dir="ltr" />
                           </div>
                           <div>
                             <label className={ui.label}>{m.crewF.phone}</label>
@@ -171,6 +178,7 @@ export default async function EmployeesPage({
                   ) : (
                     <tr key={c.id}>
                       <td className={`${ui.td} font-medium`}>{c.name}</td>
+                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{c.code || "—"}</td>
                       <td className={ui.td}>{c.plant.name}</td>
                       <td className={`${ui.td} font-mono text-xs`} dir="ltr">{c.phone || "—"}</td>
                       <td className={ui.td}>
@@ -188,7 +196,7 @@ export default async function EmployeesPage({
                 )}
                 {crew.length === 0 && (
                   <tr>
-                    <td className={ui.td} colSpan={5}>
+                    <td className={ui.td} colSpan={6}>
                       <span className="text-ink-muted">{m.crewEmpty}</span>
                     </td>
                   </tr>
@@ -212,6 +220,10 @@ export default async function EmployeesPage({
             <div>
               <label className={ui.label}>{m.crewF.name}</label>
               <input name="name" required className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.crewF.code}</label>
+              <input name="code" className={ui.input} dir="ltr" />
             </div>
             <div>
               <label className={ui.label}>{m.crewF.phone}</label>

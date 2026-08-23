@@ -3,20 +3,24 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 
 export default async function StockLedgerPage() {
-  await requirePageAccess("stockLedger");
+  const user = await requirePageAccess("stockLedger");
   const { dict } = await getDictionary();
   const m = dict.modules.stockLedger;
+  const siteId = effectiveSiteId(user);
 
   const [materials, receipts, actuals] = await Promise.all([
+    // Material is a global catalog (like MixDesign) — only the stock
+    // movements (receipts/consumption) are site-specific.
     prisma.material.findMany({ orderBy: [{ type: "asc" }, { name: "asc" }] }),
     prisma.materialReceipt.findMany({
-      where: { postedToInventory: true },
+      where: { postedToInventory: true, ...plantScopeWhere(siteId) },
       select: { materialId: true, netWeightKg: true },
     }),
     prisma.batchComponentActual.findMany({
-      where: { batchTicket: { status: "COMPLETE" } },
+      where: { batchTicket: { status: "COMPLETE", ...plantScopeWhere(siteId) } },
       select: { materialId: true, actualMassKg: true, targetMassKg: true },
     }),
   ]);

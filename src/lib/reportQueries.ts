@@ -113,20 +113,27 @@ export async function getEquipmentProductivityReport({ from, to, siteId, plantId
     include: { truck: true, pump: true },
   });
 
+  // Grouped by equipment CODE, not the underlying row id — a truck/pump
+  // that's re-registered under a different line's Truck/Pump row (rather
+  // than having its existing row's plantId edited) still rolls up as one
+  // asset company-wide, exactly like the on-yard fleet numbering already
+  // treats it as one thing. No unique constraint on Truck/Pump.code today,
+  // so this is a deliberate merge-by-business-identity, not a DB-enforced
+  // one.
   const byTruck = new Map<string, { code: string; tripCount: number; volumeM3: number }>();
   const byPump = new Map<string, { code: string; tripCount: number; volumeM3: number }>();
   for (const t of trips) {
     const vol = t.volumeDeliveredM3 ?? 0;
-    const truckEntry = byTruck.get(t.truckId) ?? { code: t.truck.code, tripCount: 0, volumeM3: 0 };
+    const truckEntry = byTruck.get(t.truck.code) ?? { code: t.truck.code, tripCount: 0, volumeM3: 0 };
     truckEntry.tripCount += 1;
     truckEntry.volumeM3 += vol;
-    byTruck.set(t.truckId, truckEntry);
+    byTruck.set(t.truck.code, truckEntry);
 
     if (t.pumpId && t.pump) {
-      const pumpEntry = byPump.get(t.pumpId) ?? { code: t.pump.code, tripCount: 0, volumeM3: 0 };
+      const pumpEntry = byPump.get(t.pump.code) ?? { code: t.pump.code, tripCount: 0, volumeM3: 0 };
       pumpEntry.tripCount += 1;
       pumpEntry.volumeM3 += vol;
-      byPump.set(t.pumpId, pumpEntry);
+      byPump.set(t.pump.code, pumpEntry);
     }
   }
 
@@ -146,51 +153,57 @@ export async function getWorkerProductivityReport({ from, to, siteId, plantId }:
   const [driverTrips, operatorTrips, assistantTrips, bulkerReceipts, waterReceipts] = await Promise.all([
     prisma.trip.findMany({
       where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripScope },
-      select: { driverId: true, driver: { select: { name: true } }, volumeDeliveredM3: true },
+      select: { driverId: true, driver: { select: { name: true, code: true } }, volumeDeliveredM3: true },
     }),
     prisma.trip.findMany({
       where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, pumpOperatorId: { not: null }, ...tripScope },
-      select: { pumpOperatorId: true, pumpOperatorCrew: { select: { name: true } }, volumeDeliveredM3: true },
+      select: { pumpOperatorId: true, pumpOperatorCrew: { select: { name: true, code: true } }, volumeDeliveredM3: true },
     }),
     prisma.trip.findMany({
       where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, pumpAssistantId: { not: null }, ...tripScope },
-      select: { pumpAssistantId: true, pumpAssistantCrew: { select: { name: true } }, volumeDeliveredM3: true },
+      select: { pumpAssistantId: true, pumpAssistantCrew: { select: { name: true, code: true } }, volumeDeliveredM3: true },
     }),
     prisma.materialReceipt.findMany({
       where: { receivedAt: { gte: from, lte: to }, material: { type: "CEMENT" }, ...receiptScope },
-      select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true },
+      select: { driverId: true, driverName: true, driver: { select: { name: true, code: true } }, netWeightKg: true },
     }),
     prisma.materialReceipt.findMany({
       where: { receivedAt: { gte: from, lte: to }, material: { type: "WATER" }, ...receiptScope },
-      select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true },
+      select: { driverId: true, driverName: true, driver: { select: { name: true, code: true } }, netWeightKg: true },
     }),
   ]);
 
   type Row = { key: string; name: string; role: string; count: number; volumeM3: number };
   const rows: Row[] = [];
 
-  function addTripGroup(items: { id: string | null; name: string | undefined }[], volumes: number[], role: string) {
-    const byId = new Map<string, Row>();
+  // Grouped by the person's CODE when they have one on file — like
+  // equipment above, this merges the same real person across more than
+  // one site-specific Employee/PumpCrewMember registration. Falls back to
+  // the row id when code is blank (an uncoded worker just doesn't merge
+  // across sites, which is honest: there's no stable identity to merge on).
+  function addTripGroup(items: { id: string | null; name: string | undefined; code: string | null | undefined }[], volumes: number[], role: string) {
+    const byKey = new Map<string, Row>();
     items.forEach((item, i) => {
       if (!item.id || !item.name) return;
-      const entry = byId.get(item.id) ?? { key: `${role}:${item.id}`, name: item.name, role, count: 0, volumeM3: 0 };
+      const groupKey = item.code || item.id;
+      const entry = byKey.get(groupKey) ?? { key: `${role}:${groupKey}`, name: item.name, role, count: 0, volumeM3: 0 };
       entry.count += 1;
       entry.volumeM3 += volumes[i] ?? 0;
-      byId.set(item.id, entry);
+      byKey.set(groupKey, entry);
     });
-    rows.push(...byId.values());
+    rows.push(...byKey.values());
   }
 
-  addTripGroup(driverTrips.map((t) => ({ id: t.driverId, name: t.driver.name })), driverTrips.map((t) => t.volumeDeliveredM3 ?? 0), "MIXER_DRIVER");
-  addTripGroup(operatorTrips.map((t) => ({ id: t.pumpOperatorId, name: t.pumpOperatorCrew?.name })), operatorTrips.map((t) => t.volumeDeliveredM3 ?? 0), "PUMP_OPERATOR");
-  addTripGroup(assistantTrips.map((t) => ({ id: t.pumpAssistantId, name: t.pumpAssistantCrew?.name })), assistantTrips.map((t) => t.volumeDeliveredM3 ?? 0), "PUMP_ASSISTANT");
+  addTripGroup(driverTrips.map((t) => ({ id: t.driverId, name: t.driver.name, code: t.driver.code })), driverTrips.map((t) => t.volumeDeliveredM3 ?? 0), "MIXER_DRIVER");
+  addTripGroup(operatorTrips.map((t) => ({ id: t.pumpOperatorId, name: t.pumpOperatorCrew?.name, code: t.pumpOperatorCrew?.code })), operatorTrips.map((t) => t.volumeDeliveredM3 ?? 0), "PUMP_OPERATOR");
+  addTripGroup(assistantTrips.map((t) => ({ id: t.pumpAssistantId, name: t.pumpAssistantCrew?.name, code: t.pumpAssistantCrew?.code })), assistantTrips.map((t) => t.volumeDeliveredM3 ?? 0), "PUMP_ASSISTANT");
 
-  function addReceiptGroup(items: { driverId: string | null; driverName: string | null; driver: { name: string } | null; netWeightKg: number }[], role: string) {
+  function addReceiptGroup(items: { driverId: string | null; driverName: string | null; driver: { name: string; code: string | null } | null; netWeightKg: number }[], role: string) {
     const byKey = new Map<string, Row>();
     for (const r of items) {
       const name = r.driver?.name ?? r.driverName;
       if (!name) continue;
-      const key = r.driverId ?? `name:${name}`;
+      const key = r.driver?.code || r.driverId || `name:${name}`;
       const entry = byKey.get(key) ?? { key: `${role}:${key}`, name, role, count: 0, volumeM3: 0 };
       entry.count += 1;
       entry.volumeM3 += r.netWeightKg / 1000; // tons, displayed alongside m³ rows with its own unit in the UI

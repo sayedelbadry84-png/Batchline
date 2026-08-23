@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { isReservationFullyDelivered } from "@/lib/reservations";
+import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 const NEXT_STATUS: Record<string, string> = {
@@ -22,8 +23,9 @@ export async function advanceTrip(formData: FormData) {
   requireRole(user, ["PLANT_OPERATOR", "ADMIN", "DRIVER"]);
 
   const tripId = String(formData.get("tripId") ?? "");
-  const trip = await prisma.trip.findUnique({ where: { id: tripId } });
+  const trip = await prisma.trip.findUnique({ where: { id: tripId }, include: { batchTicket: { select: { plantId: true } } } });
   if (!trip) return;
+  if (!(await isPlantInScope(trip.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   const next = NEXT_STATUS[trip.status];
   if (!next) return;
@@ -50,6 +52,7 @@ export async function closeTripFull(formData: FormData) {
   const tripId = String(formData.get("tripId") ?? "");
   const trip = await prisma.trip.findUnique({ where: { id: tripId }, include: { batchTicket: true } });
   if (!trip) return;
+  if (!(await isPlantInScope(trip.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   await prisma.trip.update({
     where: { id: tripId },
@@ -87,6 +90,7 @@ export async function closeTripWithReturn(formData: FormData) {
     include: { batchTicket: { include: { plant: true } } },
   });
   if (!trip) return;
+  if (!(await isPlantInScope(trip.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   const now = new Date();
   const minutesSinceBatch = Math.round((now.getTime() - trip.batchTime.getTime()) / 60000);
@@ -150,8 +154,9 @@ export async function markDrumReturnFate(formData: FormData) {
   const fate = String(formData.get("fate") ?? "");
   if (!id || !fate) return;
 
-  const drumReturn = await prisma.drumReturn.findUnique({ where: { id } });
+  const drumReturn = await prisma.drumReturn.findUnique({ where: { id }, include: { trip: { include: { batchTicket: { select: { plantId: true } } } } } });
   if (!drumReturn || drumReturn.disposition === "FULL_WASTE") return;
+  if (!(await isPlantInScope(drumReturn.trip.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   await prisma.drumReturn.update({ where: { id }, data: { fate } });
 

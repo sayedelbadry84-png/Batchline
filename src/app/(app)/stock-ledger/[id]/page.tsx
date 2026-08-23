@@ -5,28 +5,30 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { buildStockLedger } from "@/lib/stock-ledger";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 
 export default async function StockLedgerDetailPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requirePageAccess("stockLedger");
+  const user = await requirePageAccess("stockLedger");
   const { id } = await params;
   const { dict } = await getDictionary();
   const m = dict.modules.stockLedger;
+  const siteId = effectiveSiteId(user);
 
   const material = await prisma.material.findUnique({ where: { id } });
   if (!material) notFound();
 
   const [receipts, actuals] = await Promise.all([
     prisma.materialReceipt.findMany({
-      where: { materialId: id, postedToInventory: true },
+      where: { materialId: id, postedToInventory: true, ...plantScopeWhere(siteId) },
       include: { supplier: true },
       orderBy: { receivedAt: "asc" },
     }),
     prisma.batchComponentActual.findMany({
-      where: { materialId: id, batchTicket: { status: "COMPLETE" } },
+      where: { materialId: id, batchTicket: { status: "COMPLETE", ...plantScopeWhere(siteId) } },
       include: { batchTicket: true },
     }),
   ]);

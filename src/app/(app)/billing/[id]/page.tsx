@@ -5,6 +5,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { markInvoiceSent, recordPayment, cancelInvoice } from "../actions";
+import { effectiveSiteId } from "@/lib/siteScope";
 
 const statusChip: Record<string, string> = {
   DRAFT: "bg-surface-alt text-ink-muted",
@@ -18,7 +19,7 @@ export default async function InvoiceDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requirePageAccess("billing");
+  const user = await requirePageAccess("billing");
   const { id } = await params;
   const { dict } = await getDictionary();
   const m = dict.modules.billing;
@@ -28,12 +29,14 @@ export default async function InvoiceDetailPage({
     where: { id },
     include: {
       customer: true,
-      project: true,
+      project: { include: { plant: true } },
       lines: { include: { trip: { include: { truck: true } } } },
       payments: { orderBy: { paidAt: "desc" } },
     },
   });
   if (!invoice) notFound();
+  const siteId = effectiveSiteId(user);
+  if (siteId !== null && invoice.project?.plant.siteId !== siteId) notFound();
 
   const paid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
   const amountDue = Math.max(0, invoice.total - paid);

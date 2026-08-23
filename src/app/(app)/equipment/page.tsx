@@ -18,6 +18,7 @@ import {
   createSupportVehicle,
   updateSupportVehicle,
 } from "./actions";
+import { effectiveSiteId, plantScopeWhere, projectPlantScopeWhere } from "@/lib/siteScope";
 
 const TAB_KEYS = ["pumps", "mixers", "bulkers", "water", "loaders"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
@@ -53,13 +54,14 @@ export default async function EquipmentPage({
 }: {
   searchParams: Promise<{ tab?: string; edit?: string }>;
 }) {
-  await requirePageAccess("equipment");
+  const user = await requirePageAccess("equipment");
   const { dict } = await getDictionary();
   const m = dict.modules.equipment;
   const { tab: tabRaw, edit: editId } = await searchParams;
   const tab: TabKey = (TAB_KEYS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as TabKey) : "pumps";
+  const siteId = effectiveSiteId(user);
 
-  const plants = await prisma.plant.findMany({ orderBy: { name: "asc" } });
+  const plants = await prisma.plant.findMany({ where: { ...(siteId ? { siteId } : {}) }, orderBy: { name: "asc" } });
 
   const tabs: { key: TabKey; label: string }[] = [
     { key: "pumps", label: m.tabs.pumps },
@@ -94,13 +96,13 @@ export default async function EquipmentPage({
       </div>
 
       {tab === "mixers" && (
-        <MixersTab m={m} dict={dict} plants={plants} editId={editId} statusOptions={statusOptions} />
+        <MixersTab m={m} dict={dict} plants={plants} editId={editId} statusOptions={statusOptions} siteId={siteId} />
       )}
       {tab === "pumps" && (
-        <PumpsTab m={m} dict={dict} plants={plants} editId={editId} statusOptions={statusOptions} />
+        <PumpsTab m={m} dict={dict} plants={plants} editId={editId} statusOptions={statusOptions} siteId={siteId} />
       )}
       {(tab === "bulkers" || tab === "water" || tab === "loaders") && (
-        <SupportVehicleTab m={m} dict={dict} plants={plants} editId={editId} statusOptions={statusOptions} tab={tab} />
+        <SupportVehicleTab m={m} dict={dict} plants={plants} editId={editId} statusOptions={statusOptions} tab={tab} siteId={siteId} />
       )}
     </div>
   );
@@ -112,19 +114,22 @@ async function MixersTab({
   plants,
   editId,
   statusOptions,
+  siteId,
 }: {
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["equipment"];
   dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
   plants: { id: string; name: string }[];
   editId?: string;
   statusOptions: readonly string[];
+  siteId: string | null;
 }) {
   const [trucksRaw, drivers] = await Promise.all([
     prisma.truck.findMany({
+      where: { ...plantScopeWhere(siteId) },
       orderBy: { createdAt: "asc" },
       include: { plant: true, defaultDriver: true, trips: { select: { status: true, batchTime: true } } },
     }),
-    prisma.employee.findMany({ where: { role: "DRIVER", status: "ACTIVE" }, orderBy: { name: "asc" }, include: { plant: true } }),
+    prisma.employee.findMany({ where: { role: "DRIVER", status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: true } }),
   ]);
 
   const trucks = trucksRaw.map((t) => {
@@ -331,19 +336,23 @@ async function PumpsTab({
   plants,
   editId,
   statusOptions,
+  siteId,
 }: {
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["equipment"];
   dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
   plants: { id: string; name: string }[];
   editId?: string;
   statusOptions: readonly string[];
+  siteId: string | null;
 }) {
   const [pumpsRaw, assignments, unassignedReservations, pumpCrew] = await Promise.all([
     prisma.pump.findMany({
+      where: { ...plantScopeWhere(siteId) },
       orderBy: { createdAt: "asc" },
       include: { plant: true, defaultOperator: true, defaultAssistant: true, trips: { select: { batchTime: true } } },
     }),
     prisma.pumpAssignment.findMany({
+      where: { ...(siteId ? { pump: { plant: { siteId } } } : {}) },
       orderBy: { scheduledStart: "asc" },
       include: { pump: true, reservation: { include: { project: { include: { customer: true } } } } },
     }),
@@ -351,11 +360,11 @@ async function PumpsTab({
     // more than one pump (see the PumpAssignment schema note), so a
     // reservation that already has one scheduled can still take another.
     prisma.reservation.findMany({
-      where: { deliveryMethod: "PUMP", status: { in: ["CONFIRMED", "REQUESTED"] } },
+      where: { deliveryMethod: "PUMP", status: { in: ["CONFIRMED", "REQUESTED"] }, ...projectPlantScopeWhere(siteId) },
       include: { project: true },
       orderBy: { pourWindowStart: "asc" },
     }),
-    prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" }, include: { plant: true } }),
+    prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: true } }),
   ]);
 
   const pumps = pumpsRaw.map((p) => {
@@ -665,6 +674,7 @@ async function SupportVehicleTab({
   editId,
   statusOptions,
   tab,
+  siteId,
 }: {
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["equipment"];
   dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
@@ -672,17 +682,18 @@ async function SupportVehicleTab({
   editId?: string;
   statusOptions: readonly string[];
   tab: TabKey;
+  siteId: string | null;
 }) {
   const type = SUPPORT_TYPE[tab]!;
   const driverRole = SUPPORT_DRIVER_ROLE[tab]!;
 
   const [vehicles, drivers] = await Promise.all([
     prisma.supportVehicle.findMany({
-      where: { type },
+      where: { type, ...plantScopeWhere(siteId) },
       orderBy: { createdAt: "asc" },
       include: { plant: true, defaultDriver: true },
     }),
-    prisma.employee.findMany({ where: { role: driverRole, status: "ACTIVE" }, orderBy: { name: "asc" }, include: { plant: true } }),
+    prisma.employee.findMany({ where: { role: driverRole, status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: true } }),
   ]);
 
   return (

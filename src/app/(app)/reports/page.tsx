@@ -30,6 +30,7 @@ import {
   type IncentiveMethodKind,
 } from "@/lib/incentives";
 import { markDrumReturnFate } from "../trips/actions";
+import { effectiveSiteId, plantScopeWhere, tripPlantScopeWhere, projectPlantScopeWhere } from "@/lib/siteScope";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
@@ -98,18 +99,25 @@ export default async function ReportsPage({
 }: {
   searchParams: Promise<{ tab?: string; from?: string; to?: string; site?: string; plant?: string }>;
 }) {
-  await requirePageAccess("reports");
+  const user = await requirePageAccess("reports");
   const { dict } = await getDictionary();
   const m = dict.modules.reports;
   const { tab: tabRaw, from: fromRaw, to: toRaw, site: siteIdRaw, plant: plantIdRaw } = await searchParams;
   const tab: ReportTab = (REPORT_TABS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as ReportTab) : "overview";
 
-  // Site rolls up every line at that site combined; a specific line
-  // narrows further to just its own numbers. Every detail tab respects
-  // this; Overview deliberately stays whole-company regardless (see the
-  // scope note on ReportFilter in reportQueries.ts).
-  const sites = await prisma.site.findMany({ orderBy: { name: "asc" }, include: { plants: { orderBy: { name: "asc" } } } });
-  const siteId = sites.some((s) => s.id === siteIdRaw) ? siteIdRaw : undefined;
+  // Full restriction: every role sees only its own site, except ADMIN
+  // (restrictedSiteId === null means unrestricted). Non-admins can't
+  // override this via the ?site= query param — the site dropdown is
+  // locked to their own site below; only the line (plant) sub-filter
+  // within it stays a free choice. Site rolls up every line at that site
+  // combined; a specific line narrows further to just its own numbers.
+  const restrictedSiteId = effectiveSiteId(user);
+  const sites = await prisma.site.findMany({
+    where: restrictedSiteId ? { id: restrictedSiteId } : {},
+    orderBy: { name: "asc" },
+    include: { plants: { orderBy: { name: "asc" } } },
+  });
+  const siteId = restrictedSiteId ?? (sites.some((s) => s.id === siteIdRaw) ? siteIdRaw : undefined);
   const plantId = siteId && sites.find((s) => s.id === siteId)?.plants.some((p) => p.id === plantIdRaw) ? plantIdRaw : undefined;
   const scope = { siteId, plantId };
 
@@ -130,21 +138,29 @@ export default async function ReportsPage({
   const nowMs = Date.now();
   const since = new Date(nowMs - SEVEN_DAYS_MS);
 
+  // Overview always reflects the caller's mandatory site restriction (null
+  // only for ADMIN) — never the optional site/line drilldown above, so a
+  // non-admin's Overview always reads as "my whole site," same as before
+  // restriction existed except now actually capped for everyone else.
   const [completedTickets, closedTrips, labResults, testBatches, silos, invoices] = await Promise.all([
     prisma.batchTicket.findMany({
-      where: { status: "COMPLETE" },
+      where: { status: "COMPLETE", ...plantScopeWhere(restrictedSiteId) },
       include: { components: { include: { material: true } } },
     }),
     prisma.trip.findMany({
-      where: { status: "CLOSED" },
+      where: { status: "CLOSED", ...tripPlantScopeWhere(restrictedSiteId) },
       include: { drumReturn: true, batchTicket: true },
     }),
-    prisma.labResult.findMany(),
+    prisma.labResult.findMany({ where: { ...(restrictedSiteId ? { testBatch: { trip: tripPlantScopeWhere(restrictedSiteId) } } : {}) } }),
     prisma.testBatch.findMany({
+      where: { ...(restrictedSiteId ? { trip: tripPlantScopeWhere(restrictedSiteId) } : {}) },
       include: { trip: { include: { batchTicket: { include: { mix: true } } } } },
     }),
-    prisma.silo.findMany(),
-    prisma.invoice.findMany({ where: { status: { not: "CANCELLED" } }, include: { payments: true } }),
+    prisma.silo.findMany({ where: { ...plantScopeWhere(restrictedSiteId) } }),
+    prisma.invoice.findMany({
+      where: { status: { not: "CANCELLED" }, ...(restrictedSiteId ? { project: { plant: { siteId: restrictedSiteId } } } : {}) },
+      include: { payments: true },
+    }),
   ]);
 
   // --- Production ---
@@ -162,6 +178,7 @@ export default async function ReportsPage({
     where: {
       status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] },
       pourWindowStart: { gte: todayStart, lt: outlookEnd },
+      ...projectPlantScopeWhere(restrictedSiteId),
     },
     include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } } },
   });
@@ -321,20 +338,36 @@ export default async function ReportsPage({
                 const trips = await getVolumeTripDetailsForRole(role, { from: rangeStart, to: rangeEnd, ...scope });
                 const isPumpRole = role === "PUMP_OPERATOR" || role === "PUMP_ASSISTANT";
                 const plantRows = isPumpRole
-                  ? await prisma.pumpCrewMember.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, plantId: true } })
-                  : await prisma.employee.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, plantId: true } });
-                const plantIdByDriver = new Map(plantRows.map((c) => [c.id, c.plantId]));
+                  ? await prisma.pumpCrewMember.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, plantId: true, code: true } })
+                  : await prisma.employee.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, plantId: true, code: true } });
+                const infoByDriver = new Map(plantRows.map((c) => [c.id, c]));
+                // Priced per driver row against ITS OWN plant's policy —
+                // never blindly merged before pricing, since two lines at
+                // different sites can (and do) run different rates. Only
+                // the already-correct payouts get merged next, by CODE
+                // when the person has one on file, so the same real
+                // worker registered under more than one site still shows
+                // as one company-wide total.
                 return trips.map((op) => {
-                  const plantId = plantIdByDriver.get(op.driverId);
-                  const policy = plantId ? pumpPolicies.find((p) => p.plantId === plantId && p.role === role) : undefined;
+                  const info = infoByDriver.get(op.driverId);
+                  const policy = info?.plantId ? pumpPolicies.find((p) => p.plantId === info.plantId && p.role === role) : undefined;
                   const payout = policy ? calculateVolumeIncentivePayout(op.trips, policy.freeVolumeM3, policy.rateBrackets) : 0;
-                  return { key: `${role}:${op.driverId}`, name: op.driverName, role, count: op.trips.length, payout };
+                  return { groupKey: info?.code || op.driverId, name: op.driverName, role, count: op.trips.length, payout };
                 });
               }),
             )
           ).flat();
 
-          const rows = [...countBasedRows, ...volumeRoleRows].sort((a, b) => b.payout - a.payout);
+          const mergedVolumeRows = new Map<string, { key: string; name: string; role: string; count: number; payout: number }>();
+          for (const r of volumeRoleRows) {
+            const mergeKey = `${r.role}:${r.groupKey}`;
+            const entry = mergedVolumeRows.get(mergeKey) ?? { key: mergeKey, name: r.name, role: r.role, count: 0, payout: 0 };
+            entry.count += r.count;
+            entry.payout += r.payout;
+            mergedVolumeRows.set(mergeKey, entry);
+          }
+
+          const rows = [...countBasedRows, ...mergedVolumeRows.values()].sort((a, b) => b.payout - a.payout);
           return { rows, totalPayout: rows.reduce((sum, r) => sum + r.payout, 0) };
         })()
       : null;
@@ -363,15 +396,30 @@ export default async function ReportsPage({
         <input type="hidden" name="tab" value={tab} />
         <input type="hidden" name="from" value={rangeFrom} />
         <input type="hidden" name="to" value={rangeTo} />
-        <div>
-          <label className={ui.label}>{m.siteFilter}</label>
-          <select name="site" defaultValue={siteId ?? ""} className={`${ui.select} w-48`}>
-            <option value="">{m.allSites}</option>
-            {sites.map((s) => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
-          </select>
-        </div>
+        {restrictedSiteId === null ? (
+          <div>
+            <label className={ui.label}>{m.siteFilter}</label>
+            <select name="site" defaultValue={siteId ?? ""} className={`${ui.select} w-48`}>
+              <option value="">{m.allSites}</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          // Locked to the caller's own site — no cross-site browsing for
+          // non-admin roles. Kept as a hidden field so the line sub-filter
+          // below still round-trips through the same form submit.
+          <input type="hidden" name="site" value={siteId ?? ""} />
+        )}
+        {restrictedSiteId !== null && (
+          <div>
+            <label className={ui.label}>{m.siteFilter}</label>
+            <div className={`${ui.input} w-48 flex items-center text-ink-muted`}>
+              {sites.find((s) => s.id === siteId)?.name ?? "—"}
+            </div>
+          </div>
+        )}
         {siteId && (
           <div>
             <label className={ui.label}>{m.lineFilter}</label>

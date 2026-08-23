@@ -94,6 +94,11 @@ model LoginAttempt {
 // unrelated sites' stock pools can never cross-contaminate each other.
 model Site {
   id        String   @id @default(cuid())
+  // Short, human-assigned business code ("S1", "CAI") — distinct from the
+  // internal id, which nobody reads or types. What every other model's
+  // "which site" filters and every report's site-scoping key off of
+  // conceptually, even though the actual DB relation is still by id.
+  code      String   @unique
   name      String
   city      String
   country   String?
@@ -799,6 +804,11 @@ model PumpCrewMember {
   name      String
   role      String   // OPERATOR, HELPER
   phone     String?
+  // Same per-person identifier as Employee.code — lets a company-wide
+  // report (see getWorkerProductivityReport) recognize the same crew
+  // member across more than one site-specific registration, since a
+  // PumpCrewMember row (like Employee) belongs to exactly one plant.
+  code      String?  @unique
   // ACTIVE, FROZEN, REMOVED — same three-state convention as
   // Employee.status (INACTIVE is kept as a legacy synonym of FROZEN on
   // existing rows rather than migrated, since it's just a display label).

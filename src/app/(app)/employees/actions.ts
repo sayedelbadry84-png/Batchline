@@ -101,9 +101,10 @@ export async function createPumpCrewMember(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "OPERATOR");
   const phone = String(formData.get("phone") ?? "").trim() || null;
+  const code = String(formData.get("code") ?? "").trim() || null;
   if (!plantId || !name) return;
 
-  const member = await prisma.pumpCrewMember.create({ data: { plantId, name, role, phone } });
+  const member = await prisma.pumpCrewMember.create({ data: { plantId, name, role, phone, code } });
 
   await logAudit({ module: "Employees", recordId: member.id, afterValue: name, reasonCode: "PUMP_CREW_CREATED" });
   revalidatePath("/employees");
@@ -118,10 +119,11 @@ export async function updatePumpCrewMember(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "OPERATOR");
   const phone = String(formData.get("phone") ?? "").trim() || null;
+  const code = String(formData.get("code") ?? "").trim() || null;
   const status = String(formData.get("status") ?? "ACTIVE");
   if (!id || !plantId || !name) return;
 
-  await prisma.pumpCrewMember.update({ where: { id }, data: { plantId, name, role, phone, status } });
+  await prisma.pumpCrewMember.update({ where: { id }, data: { plantId, name, role, phone, code, status } });
 
   await logAudit({ module: "Employees", recordId: id, afterValue: name, reasonCode: "PUMP_CREW_UPDATED" });
   revalidatePath("/employees");

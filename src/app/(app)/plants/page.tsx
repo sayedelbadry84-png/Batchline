@@ -41,6 +41,7 @@ export default async function PlantsPage({
             <table className={ui.table}>
               <thead>
                 <tr>
+                  <th className={ui.th}>{m.col.siteCode}</th>
                   <th className={ui.th}>{m.col.site}</th>
                   <th className={ui.th}>{m.col.city}</th>
                   <th className={ui.th}>{m.col.country}</th>
@@ -52,9 +53,13 @@ export default async function PlantsPage({
                 {sites.map((s) =>
                   editSiteId === s.id ? (
                     <tr key={s.id}>
-                      <td className={ui.td} colSpan={5}>
+                      <td className={ui.td} colSpan={6}>
                         <form action={updateSite} className="flex flex-wrap items-end gap-2">
                           <input type="hidden" name="id" value={s.id} />
+                          <div>
+                            <label className={ui.label}>{m.f.siteCode}</label>
+                            <input name="code" defaultValue={s.code} required className={`${ui.input} w-24`} dir="ltr" />
+                          </div>
                           <div>
                             <label className={ui.label}>{m.f.siteName}</label>
                             <input name="name" defaultValue={s.name} required className={`${ui.input} w-44`} />
@@ -76,6 +81,7 @@ export default async function PlantsPage({
                     </tr>
                   ) : (
                     <tr key={s.id}>
+                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{s.code}</td>
                       <td className={`${ui.td} font-medium`}>{s.name}</td>
                       <td className={ui.td}>{s.city}</td>
                       <td className={ui.td}>{s.country || "—"}</td>
@@ -90,7 +96,7 @@ export default async function PlantsPage({
                 )}
                 {sites.length === 0 && (
                   <tr>
-                    <td className={ui.td} colSpan={5}><span className="text-ink-muted">{m.sitesEmpty}</span></td>
+                    <td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.sitesEmpty}</span></td>
                   </tr>
                 )}
               </tbody>
@@ -99,6 +105,10 @@ export default async function PlantsPage({
 
           <form action={createSite} className={`${ui.card} flex flex-col gap-3`}>
             <h3 className="font-display text-base font-semibold">{m.newSiteTitle}</h3>
+            <div>
+              <label className={ui.label}>{m.f.siteCode}</label>
+              <input name="code" required className={ui.input} placeholder="S1" dir="ltr" />
+            </div>
             <div>
               <label className={ui.label}>{m.f.siteName}</label>
               <input name="name" required className={ui.input} placeholder="6th of October Site" />
@@ -123,7 +133,9 @@ export default async function PlantsPage({
           <div className="flex flex-col gap-4">
             {sites.map((s) => (
               <div key={s.id} className={ui.card}>
-                <h3 className="mb-2 font-display text-sm font-semibold text-ink-muted">{s.name}</h3>
+                <h3 className="mb-2 font-display text-sm font-semibold text-ink-muted">
+                  {s.name} <span className="font-mono text-xs text-ink-faint" dir="ltr">({s.code})</span>
+                </h3>
                 <table className={ui.table}>
                   <thead>
                     <tr>

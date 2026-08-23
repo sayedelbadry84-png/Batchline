@@ -588,8 +588,8 @@ const en: typeof ar = {
       // (a separate roster from Employee — see PumpCrewMember), not the
       // employee directory, so their table/form share this smaller shape
       // instead of col/f above.
-      crewCol: { name: "Name", phone: "Phone", status: "Status" },
-      crewF: { name: "Name", phone: "Phone" },
+      crewCol: { name: "Name", code: "Code", phone: "Phone", status: "Status" },
+      crewF: { name: "Name", code: "Code", phone: "Phone" },
       crewEmpty: "Nobody in this tab yet.",
     },
     users: {
@@ -680,11 +680,11 @@ const en: typeof ar = {
       addSite: "Add site",
       linesTitle: "Production lines",
       linesIntro: "Configure its silos, employees, or equipment here once a line is registered under its site.",
-      col: { plant: "Line", site: "Site", city: "City", country: "Country", lines: "Lines", currency: "Currency", tax: "Tax", silos: "Silos", employees: "Employees", projects: "Projects" },
+      col: { plant: "Line", siteCode: "Code", site: "Site", city: "City", country: "Country", lines: "Lines", currency: "Currency", tax: "Tax", silos: "Silos", employees: "Employees", projects: "Projects" },
       empty: "No lines yet at this site.",
       newTitle: "New line",
       selectSite: "Select a site",
-      f: { name: "Line name", site: "Site", siteName: "Site name", city: "City", country: "Country", currency: "Currency", timezone: "Timezone", taxLabel: "Tax name", taxRatePct: "Tax rate (%)" },
+      f: { name: "Line name", site: "Site", siteCode: "Site code", siteName: "Site name", city: "City", country: "Country", currency: "Currency", timezone: "Timezone", taxLabel: "Tax name", taxRatePct: "Tax rate (%)" },
       add: "Add line",
       thresholdsTitle: "Batching tolerance & alert thresholds",
       thresholdsIntro: "Drives the drum-timer alert on the Trip Board and the return/discount policy when a trip closes with unused concrete.",

@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { generateInvoiceForProject, savePriceListEntry } from "./actions";
+import { effectiveSiteId, tripPlantScopeWhere } from "@/lib/siteScope";
 
 const statusChip: Record<string, string> = {
   DRAFT: "bg-surface-alt text-ink-muted",
@@ -17,16 +18,17 @@ export default async function BillingPage({
 }: {
   searchParams: Promise<{ editPrice?: string }>;
 }) {
-  await requirePageAccess("billing");
+  const user = await requirePageAccess("billing");
   const { dict } = await getDictionary();
   const m = dict.modules.billing;
   const { editPrice: editPriceId } = await searchParams;
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
+  const siteId = effectiveSiteId(user);
 
   const [uninvoicedTrips, invoicesRaw, customers, mixes, priceEntries] = await Promise.all([
     prisma.trip.findMany({
-      where: { status: "CLOSED", invoiceLine: null },
+      where: { status: "CLOSED", invoiceLine: null, ...tripPlantScopeWhere(siteId) },
       include: {
         batchTicket: {
           include: {
@@ -36,6 +38,10 @@ export default async function BillingPage({
       },
     }),
     prisma.invoice.findMany({
+      // An invoice with no project (rare — see Invoice.projectId) can't be
+      // attributed to any site, so it only ever shows to ADMIN once
+      // restricted, same as any other unassignable record.
+      where: { ...(siteId ? { project: { plant: { siteId } } } : {}) },
       orderBy: { issueDate: "desc" },
       include: { customer: true, project: true, payments: true },
       take: 30,

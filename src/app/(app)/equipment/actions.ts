@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
+import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 function refresh() {
@@ -27,6 +28,7 @@ export async function createTruck(formData: FormData) {
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
 
   if (!plantId || !code || !drumCapacityM3) return;
+  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
 
   const truck = await prisma.truck.create({
     data: { plantId, code, drumCapacityM3, maxAgitationRpm, gpsDeviceId, year, chassisNumber, plateNumber, defaultDriverId },
@@ -56,6 +58,9 @@ export async function updateTruck(formData: FormData) {
   const status = String(formData.get("status") ?? "ACTIVE");
 
   if (!id || !plantId || !code || !drumCapacityM3) return;
+  const siteId = effectiveSiteId(user);
+  const existing = await prisma.truck.findUnique({ where: { id }, select: { plantId: true } });
+  if (!existing || !(await isPlantInScope(existing.plantId, siteId)) || !(await isPlantInScope(plantId, siteId))) return;
 
   await prisma.truck.update({
     where: { id },
@@ -76,6 +81,8 @@ export async function markTruckServiced(formData: FormData) {
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
+  const truck = await prisma.truck.findUnique({ where: { id }, select: { plantId: true } });
+  if (!truck || !(await isPlantInScope(truck.plantId, effectiveSiteId(user)))) return;
 
   await prisma.truck.update({ where: { id }, data: { lastMaintenanceAt: new Date() } });
 
@@ -102,6 +109,7 @@ export async function createPump(formData: FormData) {
   const defaultAssistantId = String(formData.get("defaultAssistantId") ?? "") || null;
 
   if (!plantId || !code || !hourlyRate) return;
+  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
 
   const pump = await prisma.pump.create({
     data: { plantId, code, pumpType, reachM, hourlyRate, standbyRate, year, chassisNumber, plateNumber, defaultOperatorId, defaultAssistantId },
@@ -130,6 +138,9 @@ export async function updatePump(formData: FormData) {
   const status = String(formData.get("status") ?? "ACTIVE");
 
   if (!id || !plantId || !code || !hourlyRate) return;
+  const pumpSiteId = effectiveSiteId(user);
+  const existingPump = await prisma.pump.findUnique({ where: { id }, select: { plantId: true } });
+  if (!existingPump || !(await isPlantInScope(existingPump.plantId, pumpSiteId)) || !(await isPlantInScope(plantId, pumpSiteId))) return;
 
   await prisma.pump.update({
     where: { id },
@@ -146,6 +157,8 @@ export async function markPumpServiced(formData: FormData) {
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
+  const pump = await prisma.pump.findUnique({ where: { id }, select: { plantId: true } });
+  if (!pump || !(await isPlantInScope(pump.plantId, effectiveSiteId(user)))) return;
 
   await prisma.pump.update({ where: { id }, data: { lastMaintenanceAt: new Date() } });
 
@@ -162,6 +175,9 @@ export async function schedulePump(formData: FormData) {
   const scheduledStartRaw = String(formData.get("scheduledStart") ?? "");
 
   if (!pumpId || !reservationId || !scheduledStartRaw) return;
+  const scheduleSiteId = effectiveSiteId(user);
+  const pumpForSchedule = await prisma.pump.findUnique({ where: { id: pumpId }, select: { plantId: true } });
+  if (!pumpForSchedule || !(await isPlantInScope(pumpForSchedule.plantId, scheduleSiteId))) return;
 
   const assignment = await prisma.pumpAssignment.create({
     data: { pumpId, reservationId, scheduledStart: new Date(scheduledStartRaw) },
@@ -186,7 +202,8 @@ export async function updateAssignmentStatus(formData: FormData) {
   const billedHours = Number(formData.get("billedHours") ?? 0) || null;
   if (!id || !status) return;
 
-  const before = await prisma.pumpAssignment.findUnique({ where: { id } });
+  const before = await prisma.pumpAssignment.findUnique({ where: { id }, include: { pump: { select: { plantId: true } } } });
+  if (!before || !(await isPlantInScope(before.pump.plantId, effectiveSiteId(user)))) return;
   await prisma.pumpAssignment.update({ where: { id }, data: { status, billedHours } });
 
   await logAudit({
@@ -219,6 +236,7 @@ export async function createSupportVehicle(formData: FormData) {
 
   if (!plantId || !type || !code) return;
   if (!["BULKER", "WATER_TANKER", "LOADER"].includes(type)) return;
+  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
 
   const vehicle = await prisma.supportVehicle.create({
     data: { plantId, type, code, year, chassisNumber, plateNumber, defaultDriverId },
@@ -242,6 +260,9 @@ export async function updateSupportVehicle(formData: FormData) {
   const status = String(formData.get("status") ?? "ACTIVE");
 
   if (!id || !plantId || !code) return;
+  const vehicleSiteId = effectiveSiteId(user);
+  const existingVehicle = await prisma.supportVehicle.findUnique({ where: { id }, select: { plantId: true } });
+  if (!existingVehicle || !(await isPlantInScope(existingVehicle.plantId, vehicleSiteId)) || !(await isPlantInScope(plantId, vehicleSiteId))) return;
 
   await prisma.supportVehicle.update({
     where: { id },

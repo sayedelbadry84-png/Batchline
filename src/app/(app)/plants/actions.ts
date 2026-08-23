@@ -9,12 +9,13 @@ export async function createSite(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
+  const code = String(formData.get("code") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
   const city = String(formData.get("city") ?? "").trim();
   const country = String(formData.get("country") ?? "").trim() || null;
-  if (!name || !city) return;
+  if (!code || !name || !city) return;
 
-  const site = await prisma.site.create({ data: { name, city, country } });
+  const site = await prisma.site.create({ data: { code, name, city, country } });
 
   await logAudit({ module: "PlantManagement", recordId: site.id, afterValue: name, reasonCode: "SITE_CREATED" });
   revalidatePath("/plants");
@@ -25,20 +26,21 @@ export async function updateSite(formData: FormData) {
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
   const id = String(formData.get("id") ?? "");
+  const code = String(formData.get("code") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
   const city = String(formData.get("city") ?? "").trim();
   const country = String(formData.get("country") ?? "").trim() || null;
-  if (!id || !name || !city) return;
+  if (!id || !code || !name || !city) return;
 
   const before = await prisma.site.findUnique({ where: { id } });
-  await prisma.site.update({ where: { id }, data: { name, city, country } });
+  await prisma.site.update({ where: { id }, data: { code, name, city, country } });
 
   await logAudit({
     module: "PlantManagement",
     recordId: id,
-    field: "name/city/country",
-    beforeValue: `${before?.name} / ${before?.city} / ${before?.country}`,
-    afterValue: `${name} / ${city} / ${country}`,
+    field: "code/name/city/country",
+    beforeValue: `${before?.code} / ${before?.name} / ${before?.city} / ${before?.country}`,
+    afterValue: `${code} / ${name} / ${city} / ${country}`,
     reasonCode: "SITE_UPDATED",
   });
 
