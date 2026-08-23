@@ -51,8 +51,9 @@ export async function createReservation(formData: FormData) {
   // Credit check: requested project's customer credit limit must cover
   // the standing balance implied by this reservation (simplified for Phase 1
   // — a real implementation would sum outstanding invoices, not just flag).
-  const project = await prisma.project.findUnique({ where: { id: projectId }, include: { customer: true } });
-  const overCreditLimit = project ? project.customer.creditLimit <= 0 : false;
+  const project = await prisma.project.findUnique({ where: { id: projectId }, include: { customer: true, plant: true } });
+  if (!project || project.plant.status !== "ACTIVE") return; // frozen/decommissioned line: no new reservations
+  const overCreditLimit = project.customer.creditLimit <= 0;
 
   const reservation = await prisma.reservation.create({
     data: {

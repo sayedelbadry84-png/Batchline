@@ -115,6 +115,14 @@ model Plant {
   // The production line's own label within its site ("Line 1", "خط 2") —
   // address/city/country live on Site above now, not duplicated here.
   name      String
+  // ACTIVE (normal), FROZEN (temporarily paused — new reservations/projects/
+  // equipment/silos/material receipts against it are refused, but whatever
+  // is already in flight or on file keeps working and stays visible), or
+  // DECOMMISSIONED (the "delete a line" this app offers — same refusal as
+  // FROZEN, just meant as permanent). Never a real row delete: too much
+  // hangs off a Plant (silos, employees, trucks, batch tickets, invoices,
+  // ...) for that to ever be safe — same convention as Employee/Truck/Pump.
+  status    String   @default("ACTIVE")
   currency  String   @default("EGP")
   timezone  String   @default("Africa/Cairo")
   // Applied to every invoice generated for this plant's projects, snapshotted

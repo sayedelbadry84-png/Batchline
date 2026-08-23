@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
+import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 export async function createReceipt(formData: FormData) {
@@ -26,6 +26,7 @@ export async function createReceipt(formData: FormData) {
   if (!plantId || !supplierId || !materialId || !grossWeightKg || !tareWeightKg) return;
   if (grossWeightKg <= tareWeightKg) return;
   if (!(await isPlantInScope(plantId, effectiveSiteId(user!)))) return;
+  if (!(await isPlantActive(plantId))) return;
 
   const netWeightKg = grossWeightKg - tareWeightKg;
 

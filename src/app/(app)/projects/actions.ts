@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
+import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 export async function createProject(formData: FormData) {
@@ -18,6 +18,7 @@ export async function createProject(formData: FormData) {
 
   if (!name || !customerId || !plantId || !siteAddress) return;
   if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
+  if (!(await isPlantActive(plantId))) return;
 
   const project = await prisma.project.create({
     data: { name, customerId, plantId, siteAddress, contractedVolumeM3, status: "ACTIVE" },

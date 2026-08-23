@@ -71,6 +71,21 @@ export async function resolvePlantIdForSite(siteId: string, keepPlantId?: string
     const current = await prisma.plant.findUnique({ where: { id: keepPlantId }, select: { siteId: true } });
     if (current?.siteId === siteId) return keepPlantId;
   }
-  const primary = await prisma.plant.findFirst({ where: { siteId }, orderBy: { name: "asc" } });
+  // Prefer an ACTIVE line as the auto-picked default; fall back to any line
+  // at the site (even frozen) only if that's genuinely all it has, rather
+  // than returning null and refusing the whole registration.
+  const primary =
+    (await prisma.plant.findFirst({ where: { siteId, status: "ACTIVE" }, orderBy: { name: "asc" } })) ??
+    (await prisma.plant.findFirst({ where: { siteId }, orderBy: { name: "asc" } }));
   return primary?.id ?? null;
+}
+
+// Refuses new production/registration work aimed at a FROZEN or
+// DECOMMISSIONED line — see the Plant.status comment in schema.prisma.
+// Never applied to an already-existing record's own edit form (a truck
+// already on file for a line that got frozen later must stay editable),
+// only to picking a plant for something brand new.
+export async function isPlantActive(plantId: string): Promise<boolean> {
+  const plant = await prisma.plant.findUnique({ where: { id: plantId }, select: { status: true } });
+  return plant?.status === "ACTIVE";
 }

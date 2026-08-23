@@ -5,12 +5,20 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createSite, updateSite, createPlant, updatePlant, updatePlantThresholds } from "./actions";
 
+const PLANT_STATUSES = ["ACTIVE", "FROZEN", "DECOMMISSIONED"] as const;
+const PLANT_STATUS_CHIP: Record<string, string> = {
+  ACTIVE: "bg-good-soft text-good",
+  FROZEN: "bg-warn-soft text-warn",
+  DECOMMISSIONED: "bg-critical-soft text-critical",
+};
+
 export default async function PlantsPage({
   searchParams,
 }: {
   searchParams: Promise<{ editSite?: string; editPlant?: string }>;
 }) {
-  await requirePageAccess("plants");
+  const user = await requirePageAccess("plants");
+  const isAdmin = user?.role === "ADMIN";
   const { dict } = await getDictionary();
   const m = dict.modules.plants;
   const { editSite: editSiteId, editPlant: editPlantId } = await searchParams;
@@ -145,6 +153,7 @@ export default async function PlantsPage({
                       <th className={ui.th}>{m.col.silos}</th>
                       <th className={ui.th}>{m.col.employees}</th>
                       <th className={ui.th}>{m.col.projects}</th>
+                      <th className={ui.th}>{m.col.status}</th>
                       <th className={ui.th}>{dict.field.actions}</th>
                     </tr>
                   </thead>
@@ -152,10 +161,21 @@ export default async function PlantsPage({
                     {s.plants.map((p) =>
                       editPlantId === p.id ? (
                         <tr key={p.id}>
-                          <td className={ui.td} colSpan={7}>
+                          <td className={ui.td} colSpan={8}>
                             <form action={updatePlant} className="flex flex-wrap items-end gap-2">
                               <input type="hidden" name="id" value={p.id} />
-                              <input type="hidden" name="siteId" value={s.id} />
+                              {isAdmin ? (
+                                <div>
+                                  <label className={ui.label}>{m.f.site}</label>
+                                  <select name="siteId" defaultValue={s.id} className={`${ui.select} w-40`}>
+                                    {sites.map((opt) => (
+                                      <option key={opt.id} value={opt.id}>{opt.code} — {opt.name}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              ) : (
+                                <input type="hidden" name="siteId" value={s.id} />
+                              )}
                               <div>
                                 <label className={ui.label}>{m.f.name}</label>
                                 <input name="name" defaultValue={p.name} required className={`${ui.input} w-32`} />
@@ -176,10 +196,19 @@ export default async function PlantsPage({
                                 <label className={ui.label}>{m.f.taxRatePct}</label>
                                 <input name="taxRatePct" type="number" step="0.1" defaultValue={p.taxRatePct} className={`${ui.input} w-24`} />
                               </div>
+                              <div>
+                                <label className={ui.label}>{m.f.status}</label>
+                                <select name="status" defaultValue={p.status} className={`${ui.select} w-36`}>
+                                  {PLANT_STATUSES.map((st) => (
+                                    <option key={st} value={st}>{dict.status[st]}</option>
+                                  ))}
+                                </select>
+                              </div>
                               <button className={ui.button}>{dict.field.save}</button>
                               <Link href="/plants" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
                                 {dict.field.cancel}
                               </Link>
+                              <p className="w-full text-xs text-ink-muted">{m.statusHint}</p>
                             </form>
                           </td>
                         </tr>
@@ -191,6 +220,11 @@ export default async function PlantsPage({
                           <td className={`${ui.td} font-mono tabular`}>{p._count.silos}</td>
                           <td className={`${ui.td} font-mono tabular`}>{p._count.employees}</td>
                           <td className={`${ui.td} font-mono tabular`}>{p._count.projects}</td>
+                          <td className={ui.td}>
+                            <span className={`${ui.chip} ${PLANT_STATUS_CHIP[p.status] ?? PLANT_STATUS_CHIP.ACTIVE}`}>
+                              {dict.status[p.status as keyof typeof dict.status] ?? p.status}
+                            </span>
+                          </td>
                           <td className={ui.td}>
                             <Link href={`/plants?editPlant=${p.id}`} className="text-xs font-medium text-accent-strong hover:underline">
                               {dict.field.edit}

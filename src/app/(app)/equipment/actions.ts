@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
+import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
 import { logTransferIfChanged } from "@/lib/transferAudit";
 import { revalidatePath } from "next/cache";
 
@@ -30,6 +30,7 @@ export async function createTruck(formData: FormData) {
 
   if (!plantId || !code || !drumCapacityM3) return;
   if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
+  if (!(await isPlantActive(plantId))) return;
 
   const truck = await prisma.truck.create({
     data: { plantId, code, drumCapacityM3, maxAgitationRpm, gpsDeviceId, year, chassisNumber, plateNumber, defaultDriverId },
@@ -112,6 +113,7 @@ export async function createPump(formData: FormData) {
 
   if (!plantId || !code || !hourlyRate) return;
   if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
+  if (!(await isPlantActive(plantId))) return;
 
   const pump = await prisma.pump.create({
     data: { plantId, code, pumpType, reachM, hourlyRate, standbyRate, year, chassisNumber, plateNumber, defaultOperatorId, defaultAssistantId },
@@ -240,6 +242,7 @@ export async function createSupportVehicle(formData: FormData) {
   if (!plantId || !type || !code) return;
   if (!["BULKER", "WATER_TANKER", "LOADER"].includes(type)) return;
   if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
+  if (!(await isPlantActive(plantId))) return;
 
   const vehicle = await prisma.supportVehicle.create({
     data: { plantId, type, code, year, chassisNumber, plateNumber, defaultDriverId },

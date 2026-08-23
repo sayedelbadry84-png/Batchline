@@ -137,10 +137,11 @@ export async function createManualRelease(formData: FormData) {
   if (!projectId || !mixId || !volumeM3 || volumeM3 <= 0) return;
   if (volumeM3 > MAX_LOAD_M3) return;
 
-  const project = await prisma.project.findUnique({ where: { id: projectId }, include: { plant: { select: { siteId: true } } } });
+  const project = await prisma.project.findUnique({ where: { id: projectId }, include: { plant: { select: { siteId: true, status: true } } } });
   if (!project) return;
   const siteId = effectiveSiteId(user!);
   if (siteId !== null && project.plant.siteId !== siteId) return;
+  if (project.plant.status !== "ACTIVE") return; // frozen/decommissioned line: no new bookings
 
   const now = new Date();
   const reservation = await prisma.reservation.create({

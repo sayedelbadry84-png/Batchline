@@ -4,7 +4,10 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { extractYardLatLng } from "@/lib/mapLink";
+import { effectiveSiteId, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
+
+const PLANT_STATUSES = ["ACTIVE", "FROZEN", "DECOMMISSIONED"] as const;
 
 export async function createSite(formData: FormData) {
   const user = await getCurrentUser();
@@ -62,6 +65,7 @@ export async function createPlant(formData: FormData) {
   const taxLabel = String(formData.get("taxLabel") ?? "VAT").trim() || "VAT";
 
   if (!siteId || !name) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
   const plant = await prisma.plant.create({
     data: { siteId, name, currency, timezone, taxRatePct, taxLabel },
@@ -77,29 +81,46 @@ export async function createPlant(formData: FormData) {
   revalidatePath("/plants");
 }
 
+// Status (ACTIVE/FROZEN/DECOMMISSIONED — see the Plant.status comment in
+// schema.prisma) and moving to a different site both go through this one
+// edit form, same convention as every other roster/equipment screen. Only
+// ADMIN can move a line between sites — that's a structural reorg, not a
+// day-to-day edit a site's own PLANT_OPERATOR should be able to trigger —
+// so a non-ADMIN's submitted siteId is silently ignored if it names a
+// different site than the line is already on (their own site's status
+// changes still go through).
 export async function updatePlant(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
   const id = String(formData.get("id") ?? "");
-  const siteId = String(formData.get("siteId") ?? "");
+  const requestedSiteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const currency = String(formData.get("currency") ?? "").trim();
   const timezone = String(formData.get("timezone") ?? "").trim();
   const taxRatePct = Number(formData.get("taxRatePct") ?? 0) || 0;
   const taxLabel = String(formData.get("taxLabel") ?? "VAT").trim() || "VAT";
-  if (!id || !siteId || !name) return;
+  const statusRaw = String(formData.get("status") ?? "ACTIVE");
+  const status = (PLANT_STATUSES as readonly string[]).includes(statusRaw) ? statusRaw : "ACTIVE";
+  if (!id || !requestedSiteId || !name) return;
 
   const before = await prisma.plant.findUnique({ where: { id } });
-  await prisma.plant.update({ where: { id }, data: { siteId, name, currency, timezone, taxRatePct, taxLabel } });
+  if (!before) return;
+  if (!(await isPlantInScope(id, effectiveSiteId(user)))) return;
+
+  const isAdmin = user?.role === "ADMIN";
+  const siteId = isAdmin ? requestedSiteId : before.siteId;
+  if (isAdmin && !isSiteInScope(siteId, effectiveSiteId(user))) return;
+
+  await prisma.plant.update({ where: { id }, data: { siteId, name, currency, timezone, taxRatePct, taxLabel, status } });
 
   await logAudit({
     module: "PlantManagement",
     recordId: id,
-    field: "site/name/currency/timezone/tax",
-    beforeValue: `${before?.siteId} / ${before?.name} / ${before?.currency} / ${before?.timezone} / ${before?.taxLabel} ${before?.taxRatePct}%`,
-    afterValue: `${siteId} / ${name} / ${currency} / ${timezone} / ${taxLabel} ${taxRatePct}%`,
-    reasonCode: "PLANT_UPDATED",
+    field: "site/name/currency/timezone/tax/status",
+    beforeValue: `${before.siteId} / ${before.name} / ${before.currency} / ${before.timezone} / ${before.taxLabel} ${before.taxRatePct}% / ${before.status}`,
+    afterValue: `${siteId} / ${name} / ${currency} / ${timezone} / ${taxLabel} ${taxRatePct}% / ${status}`,
+    reasonCode: siteId !== before.siteId ? "PLANT_TRANSFERRED" : "PLANT_UPDATED",
   });
 
   revalidatePath("/plants");
@@ -130,6 +151,7 @@ export async function updatePlantThresholds(formData: FormData) {
     }
   }
   if (!id) return;
+  if (!(await isPlantInScope(id, effectiveSiteId(user)))) return;
 
   const before = await prisma.plant.findUnique({ where: { id } });
   await prisma.plant.update({
