@@ -62,7 +62,21 @@ export default async function EmployeesPage({
   const isCrewTab = tab === "pumpOperator" || tab === "pumpAssistant";
   const fixedRole = EMPLOYEE_TAB_ROLE[tab];
 
-  const plants = await prisma.plant.findMany({ where: { ...(siteId ? { siteId } : {}) }, orderBy: { name: "asc" } });
+  const plants = await prisma.plant.findMany({
+    where: { ...(siteId ? { siteId } : {}) },
+    include: { site: true },
+    orderBy: [{ site: { code: "asc" } }, { name: "asc" }],
+  });
+  // Grouped by site so the plant picker below reads "site code — site name"
+  // as a heading over that site's lines — an operator registering someone
+  // looks the plant up by the site's code, not by a bare line name that
+  // looks the same across every site.
+  const plantsBySite = plants.reduce<{ siteId: string; siteLabel: string; plants: typeof plants }[]>((groups, p) => {
+    const last = groups[groups.length - 1];
+    if (last && last.siteId === p.siteId) last.plants.push(p);
+    else groups.push({ siteId: p.siteId, siteLabel: `${p.site.code} — ${p.site.name}`, plants: [p] });
+    return groups;
+  }, []);
   const jobTitles = await prisma.jobTitle.findMany({ orderBy: { name: "asc" } });
   // Built-in roles plus whatever an Admin has added from this screen —
   // deduped since a custom title could in principle repeat a built-in name.
@@ -143,8 +157,12 @@ export default async function EmployeesPage({
                           <div>
                             <label className={ui.label}>{dict.field.plant}</label>
                             <select name="plantId" defaultValue={c.plantId} required className={`${ui.select} w-36`}>
-                              {plants.map((p) => (
-                                <option key={p.id} value={p.id}>{p.name}</option>
+                              {plantsBySite.map((g) => (
+                                <optgroup key={g.siteId} label={g.siteLabel}>
+                                  {g.plants.map((p) => (
+                                    <option key={p.id} value={p.id}>{p.name}</option>
+                                  ))}
+                                </optgroup>
                               ))}
                             </select>
                           </div>
@@ -212,8 +230,12 @@ export default async function EmployeesPage({
               <label className={ui.label}>{dict.field.plant}</label>
               <select name="plantId" required className={ui.select}>
                 <option value="">{dict.field.selectPlant}</option>
-                {plants.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
+                {plantsBySite.map((g) => (
+                  <optgroup key={g.siteId} label={g.siteLabel}>
+                    {g.plants.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </div>
@@ -264,8 +286,12 @@ export default async function EmployeesPage({
                             <div>
                               <label className={ui.label}>{dict.field.plant}</label>
                               <select name="plantId" defaultValue={e.plantId} required className={`${ui.select} w-36`}>
-                                {plants.map((p) => (
-                                  <option key={p.id} value={p.id}>{p.name}</option>
+                                {plantsBySite.map((g) => (
+                                  <optgroup key={g.siteId} label={g.siteLabel}>
+                                    {g.plants.map((p) => (
+                                      <option key={p.id} value={p.id}>{p.name}</option>
+                                    ))}
+                                  </optgroup>
                                 ))}
                               </select>
                             </div>
@@ -362,10 +388,14 @@ export default async function EmployeesPage({
               <label className={ui.label}>{dict.field.plant}</label>
               <select name="plantId" required className={ui.select}>
                 <option value="">{dict.field.selectPlant}</option>
-                {plants.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
+                {plantsBySite.map((g) => (
+                  <optgroup key={g.siteId} label={g.siteLabel}>
+                    {g.plants.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </div>
