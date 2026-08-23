@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
+import { extractYardLatLng } from "@/lib/mapLink";
 import { revalidatePath } from "next/cache";
 
 export async function createSite(formData: FormData) {
@@ -113,10 +114,21 @@ export async function updatePlantThresholds(formData: FormData) {
   const returnAbsorptionThresholdM3 = Number(formData.get("returnAbsorptionThresholdM3") ?? 0.2);
   const maintenanceIntervalTrips = Number(formData.get("maintenanceIntervalTrips") ?? 150);
   // Geofenced yard — all three left blank turns geofencing off for this
-  // plant (see the distance check in the telematics webhook).
-  const yardLat = Number(formData.get("yardLat") ?? 0) || null;
-  const yardLng = Number(formData.get("yardLng") ?? 0) || null;
+  // plant (see the distance check in the telematics webhook). A pasted
+  // Google Maps link is just a convenience input path for the same two
+  // fields — if it parses, it wins over whatever the manual lat/lng boxes
+  // say; if it doesn't parse (or is blank), the manual boxes stand as-is.
+  let yardLat = Number(formData.get("yardLat") ?? 0) || null;
+  let yardLng = Number(formData.get("yardLng") ?? 0) || null;
   const yardRadiusM = Number(formData.get("yardRadiusM") ?? 0) || null;
+  const yardLocationLink = String(formData.get("yardLocationLink") ?? "").trim();
+  if (yardLocationLink) {
+    const extracted = await extractYardLatLng(yardLocationLink);
+    if (extracted) {
+      yardLat = extracted.lat;
+      yardLng = extracted.lng;
+    }
+  }
   if (!id) return;
 
   const before = await prisma.plant.findUnique({ where: { id } });

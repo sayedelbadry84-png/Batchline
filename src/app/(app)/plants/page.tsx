@@ -257,6 +257,9 @@ export default async function PlantsPage({
               className="flex flex-wrap items-end gap-4 border-b border-border pb-3 last:border-0 last:pb-0"
             >
               <input type="hidden" name="id" value={p.id} />
+              <input type="hidden" name="yardLat" value={p.yardLat ?? ""} />
+              <input type="hidden" name="yardLng" value={p.yardLng ?? ""} />
+              <input type="hidden" name="yardRadiusM" value={p.yardRadiusM ?? ""} />
               <div className="min-w-32 font-medium">{p.name}</div>
               <div>
                 <label className={ui.label}>{m.drumLimit}</label>
@@ -309,6 +312,16 @@ export default async function PlantsPage({
               <input type="hidden" name="returnAbsorptionThresholdM3" value={p.returnAbsorptionThresholdM3} />
               <input type="hidden" name="maintenanceIntervalTrips" value={p.maintenanceIntervalTrips} />
               <div className="min-w-32 font-medium">{p.name}</div>
+              <div>
+                <label className={ui.label}>{m.yardLocationLink}</label>
+                <input
+                  name="yardLocationLink"
+                  placeholder={m.yardLocationLinkPlaceholder}
+                  className="w-56 rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+                  dir="ltr"
+                />
+                <p className="mt-1 max-w-56 text-xs text-ink-muted">{m.yardLocationLinkHint}</p>
+              </div>
               <div>
                 <label className={ui.label}>{m.yardLat}</label>
                 <input name="yardLat" type="number" step="0.000001" defaultValue={p.yardLat ?? undefined} className="w-32 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" dir="ltr" />
