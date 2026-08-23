@@ -141,7 +141,7 @@ export default async function QualityPage({
                   <span>
                     {m.predictedStrength(prediction.predictedFinalMpa)}
                     {" — "}
-                    {prediction.method.kind === "REGRESSION" ? m.methodRegression(prediction.method.sampleCount) : m.methodDefault}
+                    {prediction.method.kind === "REGRESSION" ? m.methodRegression(prediction.method.sampleCount, prediction.method.rSquared) : m.methodDefault}
                   </span>
                 </div>
               )}

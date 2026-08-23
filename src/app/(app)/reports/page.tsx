@@ -5,7 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
 import { estimateCo2eKg } from "@/lib/carbon";
-import { groupReservationsByDay } from "@/lib/demand";
+import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
@@ -31,6 +31,7 @@ import { markDrumReturnFate } from "../trips/actions";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
+const WEEKS_BACK_FOR_WEEKDAY_AVG = 8;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
 const SILO_MATERIAL_TYPES = new Set(["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"]);
 const REPORT_TABS = ["overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers"] as const;
@@ -148,6 +149,11 @@ export default async function ReportsPage({
     },
     include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } } },
   });
+  const weekdayAverages = computeWeekdayAverages(
+    completedTickets.filter((t) => t.batchCompletedAt).map((t) => ({ date: t.batchCompletedAt!, volumeM3: t.volumeM3 })),
+    WEEKS_BACK_FOR_WEEKDAY_AVG,
+    todayStart,
+  );
   const demandOutlook = groupReservationsByDay(
     upcomingReservations.map((r) => ({
       pourWindowStart: r.pourWindowStart,
@@ -155,6 +161,7 @@ export default async function ReportsPage({
     })),
     OUTLOOK_DAYS,
     todayStart,
+    weekdayAverages,
   );
   const producedToday = completedTickets
     .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= todayStart)
@@ -374,7 +381,7 @@ export default async function ReportsPage({
         </div>
       </div>
 
-      <DemandOutlookStrip title={m.outlookTitle} intro={m.outlookIntro} buckets={demandOutlook} countLabel={m.outlookCount} />
+      <DemandOutlookStrip title={m.outlookTitle} intro={m.outlookIntro} buckets={demandOutlook} countLabel={m.outlookCount} typicalLabel={m.outlookTypical} />
 
       <div>
         <h2 className="mb-1 font-display text-lg font-semibold">{m.anomaliesTitle}</h2>
@@ -389,7 +396,7 @@ export default async function ReportsPage({
                 <span className="text-sm">
                   {a.type === "OUTLIER"
                     ? m.outlierFlag(a.materialName, a.ticketNumber, a.deviationPct, a.zScore)
-                    : m.driftFlag(a.materialName, a.direction === "OVER" ? m.overLabel : m.underLabel, a.windowSize, a.thresholdPct)}
+                    : m.driftFlag(a.materialName, a.direction === "OVER" ? m.overLabel : m.underLabel, a.cusumPct)}
                 </span>
               </div>
             </div>

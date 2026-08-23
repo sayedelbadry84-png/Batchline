@@ -6,10 +6,12 @@
 //
 // 1. OUTLIER — a single reading far outside this material's own normal
 //    spread (z-score against its historical mean/stddev).
-// 2. DRIFT — several of the most recent readings all leaning the same
-//    direction past a minimum size, even when none of them individually
-//    looks dramatic. This is closer to what a slowly-drifting scale
-//    actually produces than a one-off outlier is.
+// 2. DRIFT — a sustained small shift in the mean, caught with a CUSUM
+//    (cumulative sum) control chart — the standard SPC technique for this
+//    exact problem, and a better fit than "N in a row on the same side"
+//    for what a slowly-drifting scale actually produces: individually
+//    unremarkable readings that keep leaning the same way just enough to
+//    accumulate into a real problem.
 export type DeviationSample = {
   ticketNumber: string;
   completedAt: Date;
@@ -32,15 +34,52 @@ export type AnomalyFlag =
       ticketNumber: string;
       deviationPct: number;
       direction: "OVER" | "UNDER";
-      windowSize: number;
-      thresholdPct: number;
+      cusumPct: number;
     };
 
 const OUTLIER_Z_THRESHOLD = 2.5;
 const MIN_SAMPLES_FOR_OUTLIER = 5;
 const RECENT_WINDOW_FOR_OUTLIER_CHECK = 5;
-const DRIFT_WINDOW = 3;
-const DRIFT_MIN_ABS_PCT = 1.5;
+
+// Classic Montgomery/SPC-textbook CUSUM defaults, in units of the
+// material's own historical standard deviation: k (the "allowance" or
+// slack) absorbs ordinary noise so it doesn't accumulate into a false
+// signal, h (the decision interval) is calibrated to reliably catch a
+// sustained ~1σ shift in the mean without a high false-alarm rate.
+const CUSUM_K_SIGMA = 0.5;
+const CUSUM_H_SIGMA = 4;
+const MIN_SAMPLES_FOR_DRIFT = 5;
+// A drift signal only fires today if it crossed the threshold within this
+// many of the most recent batches — an old, since-corrected drift from
+// months ago isn't actionable now.
+const DRIFT_RECENCY_WINDOW = 8;
+
+type CusumSignal = { index: number; direction: "OVER" | "UNDER"; magnitude: number };
+
+// Standard two-sided CUSUM: walks the samples oldest-first, accumulating
+// how far each reading sits from the mean beyond the allowance k, and
+// reports the LAST time either side crossed the decision interval h
+// (resetting after each signal, per standard practice) — a pure function
+// rather than a closured loop so the "found or not" result type stays
+// straightforward to narrow.
+function findLastCusumSignal(samplesOldFirst: DeviationSample[], mean: number, k: number, h: number): CusumSignal | null {
+  let sPlus = 0;
+  let sMinus = 0;
+  let last: CusumSignal | null = null;
+  for (let i = 0; i < samplesOldFirst.length; i++) {
+    const x = samplesOldFirst[i].deviationPct - mean;
+    sPlus = Math.max(0, sPlus + x - k);
+    sMinus = Math.min(0, sMinus + x + k);
+    if (sPlus > h) {
+      last = { index: i, direction: "OVER", magnitude: sPlus };
+      sPlus = 0;
+    } else if (Math.abs(sMinus) > h) {
+      last = { index: i, direction: "UNDER", magnitude: Math.abs(sMinus) };
+      sMinus = 0;
+    }
+  }
+  return last;
+}
 
 export function detectAnomalies(
   byMaterial: Map<string, { materialName: string; samples: DeviationSample[] }>,
@@ -50,45 +89,39 @@ export function detectAnomalies(
   for (const [materialId, { materialName, samples }] of byMaterial) {
     if (samples.length === 0) continue;
     const sortedRecentFirst = [...samples].sort((a, b) => b.completedAt.getTime() - a.completedAt.getTime());
+    const sortedOldFirst = [...sortedRecentFirst].reverse();
 
-    if (samples.length >= MIN_SAMPLES_FOR_OUTLIER) {
-      const mean = samples.reduce((sum, s) => sum + s.deviationPct, 0) / samples.length;
-      const variance = samples.reduce((sum, s) => sum + (s.deviationPct - mean) ** 2, 0) / samples.length;
-      const stddev = Math.sqrt(variance);
+    if (samples.length < MIN_SAMPLES_FOR_OUTLIER) continue;
 
-      if (stddev > 0.01) {
-        // Only surface anomalies among recent batches — a one-off outlier
-        // from months ago isn't actionable today.
-        for (const s of sortedRecentFirst.slice(0, RECENT_WINDOW_FOR_OUTLIER_CHECK)) {
-          const zScore = (s.deviationPct - mean) / stddev;
-          if (Math.abs(zScore) > OUTLIER_Z_THRESHOLD) {
-            flags.push({
-              type: "OUTLIER",
-              materialId,
-              materialName,
-              ticketNumber: s.ticketNumber,
-              deviationPct: s.deviationPct,
-              zScore,
-            });
-          }
-        }
+    const mean = samples.reduce((sum, s) => sum + s.deviationPct, 0) / samples.length;
+    const variance = samples.reduce((sum, s) => sum + (s.deviationPct - mean) ** 2, 0) / samples.length;
+    const stddev = Math.sqrt(variance);
+    if (stddev <= 0.01) continue;
+
+    // Only surface outliers among recent batches — a one-off outlier from
+    // months ago isn't actionable today.
+    for (const s of sortedRecentFirst.slice(0, RECENT_WINDOW_FOR_OUTLIER_CHECK)) {
+      const zScore = (s.deviationPct - mean) / stddev;
+      if (Math.abs(zScore) > OUTLIER_Z_THRESHOLD) {
+        flags.push({ type: "OUTLIER", materialId, materialName, ticketNumber: s.ticketNumber, deviationPct: s.deviationPct, zScore });
       }
     }
 
-    if (sortedRecentFirst.length >= DRIFT_WINDOW) {
-      const recent = sortedRecentFirst.slice(0, DRIFT_WINDOW);
-      const allOver = recent.every((s) => s.deviationPct > DRIFT_MIN_ABS_PCT);
-      const allUnder = recent.every((s) => s.deviationPct < -DRIFT_MIN_ABS_PCT);
-      if (allOver || allUnder) {
+    if (sortedOldFirst.length >= MIN_SAMPLES_FOR_DRIFT) {
+      const k = CUSUM_K_SIGMA * stddev;
+      const h = CUSUM_H_SIGMA * stddev;
+      const lastSignal = findLastCusumSignal(sortedOldFirst, mean, k, h);
+
+      if (lastSignal && lastSignal.index >= sortedOldFirst.length - DRIFT_RECENCY_WINDOW) {
+        const signalSample = sortedOldFirst[lastSignal.index];
         flags.push({
           type: "DRIFT",
           materialId,
           materialName,
-          ticketNumber: recent[0].ticketNumber,
-          deviationPct: recent[0].deviationPct,
-          direction: allOver ? "OVER" : "UNDER",
-          windowSize: DRIFT_WINDOW,
-          thresholdPct: DRIFT_MIN_ABS_PCT,
+          ticketNumber: signalSample.ticketNumber,
+          deviationPct: signalSample.deviationPct,
+          direction: lastSignal.direction,
+          cusumPct: lastSignal.magnitude,
         });
       }
     }

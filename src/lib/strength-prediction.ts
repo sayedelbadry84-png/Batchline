@@ -9,7 +9,7 @@
 export type HistoricalPair = { ageDays: number; earlyMpa: number; finalMpa: number };
 
 export type PredictionMethod =
-  | { kind: "REGRESSION"; sampleCount: number }
+  | { kind: "REGRESSION"; sampleCount: number; rSquared: number }
   | { kind: "DEFAULT_RATIO"; ratio: number };
 
 export type StrengthPrediction = {
@@ -18,7 +18,12 @@ export type StrengthPrediction = {
   atRisk: boolean;
 };
 
-type RegressionFit = { slope: number; intercept: number; count: number };
+// rSquared is the standard coefficient-of-determination: how much of the
+// variation in final strength this plant's own early-age readings actually
+// explain, on a 0-1 scale. A prediction built on 3 samples is technically
+// a regression, but rSquared is what tells a quality supervisor whether to
+// trust it or wait for more data — the sample count alone doesn't say that.
+type RegressionFit = { slope: number; intercept: number; count: number; rSquared: number };
 
 // Only ages QC actually samples at in practice — an odd age (e.g. day 5)
 // isn't worth guessing at with so little grounding.
@@ -49,12 +54,17 @@ export function fitRegressionsByAge(pairs: HistoricalPair[]): Map<number, Regres
     const sumY = samples.reduce((s, p) => s + p.finalMpa, 0);
     const sumXY = samples.reduce((s, p) => s + p.earlyMpa * p.finalMpa, 0);
     const sumXX = samples.reduce((s, p) => s + p.earlyMpa * p.earlyMpa, 0);
+    const sumYY = samples.reduce((s, p) => s + p.finalMpa * p.finalMpa, 0);
     const denom = n * sumXX - sumX * sumX;
     if (Math.abs(denom) < 1e-6) continue; // degenerate (identical x values) — fall back to the default ratio
 
     const slope = (n * sumXY - sumX * sumY) / denom;
     const intercept = (sumY - slope * sumX) / n;
-    fits.set(age, { slope, intercept, count: n });
+
+    const denomY = n * sumYY - sumY * sumY;
+    const rSquared = denomY > 1e-6 ? ((n * sumXY - sumX * sumY) ** 2) / (denom * denomY) : 0;
+
+    fits.set(age, { slope, intercept, count: n, rSquared });
   }
   return fits;
 }
@@ -76,7 +86,7 @@ export function predictFinalStrength(
   let method: PredictionMethod;
   if (fit) {
     predictedFinalMpa = fit.slope * earlyMpa + fit.intercept;
-    method = { kind: "REGRESSION", sampleCount: fit.count };
+    method = { kind: "REGRESSION", sampleCount: fit.count, rSquared: fit.rSquared };
   } else {
     const ratio = DEFAULT_RATIO_BY_AGE[ageDays];
     predictedFinalMpa = earlyMpa / ratio;

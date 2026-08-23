@@ -5,7 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { canAccessModule } from "@/lib/permissions";
 import { getDictionary } from "@/lib/i18n";
 import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
-import { groupReservationsByDay } from "@/lib/demand";
+import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
 import { flagMaintenanceDue } from "@/lib/maintenance";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { DrumTimer } from "@/components/DrumTimer";
@@ -15,6 +15,7 @@ const OUTLOOK_DAYS = 7;
 const CERT_WARNING_DAYS = 60;
 const LIVE_OPS_LIMIT = 4;
 const TRACKER_STALE_HOURS = 24;
+const WEEKS_BACK_FOR_WEEKDAY_AVG = 8;
 
 function daysUntil(date: Date, nowMs: number) {
   return Math.ceil((date.getTime() - nowMs) / (1000 * 60 * 60 * 24));
@@ -156,7 +157,14 @@ export default async function DashboardPage() {
   }
   const anomalies = detectAnomalies(byMaterial);
 
-  // --- Demand outlook (src/lib/demand.ts), same as Reports. ---
+  // --- Demand outlook (src/lib/demand.ts), same as Reports. Weekday
+  // averages reuse completedTickets (already fetched above for the
+  // sparkline/anomaly checks) rather than a separate query. ---
+  const weekdayAverages = computeWeekdayAverages(
+    completedTickets.filter((t) => t.batchCompletedAt).map((t) => ({ date: t.batchCompletedAt!, volumeM3: t.volumeM3 })),
+    WEEKS_BACK_FOR_WEEKDAY_AVG,
+    todayStart,
+  );
   const demandOutlook = groupReservationsByDay(
     upcomingReservations.map((res) => ({
       pourWindowStart: res.pourWindowStart,
@@ -164,6 +172,7 @@ export default async function DashboardPage() {
     })),
     OUTLOOK_DAYS,
     todayStart,
+    weekdayAverages,
   );
 
   // --- AR / quality KPIs, only computed (and shown) for roles that can
@@ -219,7 +228,7 @@ export default async function DashboardPage() {
       else if (remaining <= CERT_WARNING_DAYS) alerts.push({ key: `cert-${c.id}`, severity: "warn", href: "/quality", label: d.alertCertExpiring(c.mix.code, remaining) });
     }
     for (const a of anomalies) {
-      const label = a.type === "OUTLIER" ? r.outlierFlag(a.materialName, a.ticketNumber, a.deviationPct, a.zScore) : r.driftFlag(a.materialName, a.direction === "OVER" ? r.overLabel : r.underLabel, a.windowSize, a.thresholdPct);
+      const label = a.type === "OUTLIER" ? r.outlierFlag(a.materialName, a.ticketNumber, a.deviationPct, a.zScore) : r.driftFlag(a.materialName, a.direction === "OVER" ? r.overLabel : r.underLabel, a.cusumPct);
       alerts.push({ key: `anomaly-${a.type}-${a.materialId}-${a.ticketNumber}`, severity: a.type === "OUTLIER" ? "critical" : "warn", href: "/reports", label });
     }
   }
@@ -350,7 +359,7 @@ export default async function DashboardPage() {
         </div>
 
         {canSeeProduction && (
-          <DemandOutlookStrip title={r.outlookTitle} intro={r.outlookIntro} buckets={demandOutlook} countLabel={r.outlookCount} />
+          <DemandOutlookStrip title={r.outlookTitle} intro={r.outlookIntro} buckets={demandOutlook} countLabel={r.outlookCount} typicalLabel={r.outlookTypical} />
         )}
       </div>
 
