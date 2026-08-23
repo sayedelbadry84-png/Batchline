@@ -125,6 +125,16 @@ export function Sidebar({
       )}
 
       <div className="mt-auto flex flex-col gap-2 border-t border-border pt-4">
+        <Link
+          href="/account"
+          className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
+            pathname.startsWith("/account")
+              ? "border-accent bg-surface-alt font-medium text-ink"
+              : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
+          }`}
+        >
+          {nav.account}
+        </Link>
         <div className="px-3">
           <div className="text-sm font-medium">{user.name}</div>
           <div className="font-mono text-[0.68rem] text-ink-faint">{user.role.replaceAll("_", " ")}</div>

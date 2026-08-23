@@ -35,6 +35,36 @@ export async function destroySession() {
   store.delete(SESSION_COOKIE);
 }
 
+// A password has verified but the account also needs a TOTP code — this
+// cookie carries just the user id across the redirect to /login/verify.
+// Deliberately a SEPARATE cookie from SESSION_COOKIE, and never written to
+// the Session table, so nothing else in the app could ever mistake a
+// pending-2FA state for an actual logged-in session. Short-lived on
+// purpose: the user either finishes 2FA within 5 minutes or starts over.
+const PENDING_2FA_COOKIE = "batchline_pending_2fa";
+const PENDING_2FA_TTL_MS = 5 * 60 * 1000;
+
+export async function setPending2faUser(userId: string) {
+  const store = await cookies();
+  store.set(PENDING_2FA_COOKIE, userId, {
+    path: "/",
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    maxAge: PENDING_2FA_TTL_MS / 1000,
+  });
+}
+
+export async function getPending2faUserId(): Promise<string | null> {
+  const store = await cookies();
+  return store.get(PENDING_2FA_COOKIE)?.value ?? null;
+}
+
+export async function clearPending2fa() {
+  const store = await cookies();
+  store.delete(PENDING_2FA_COOKIE);
+}
+
 // Safe to call from Server Components (read-only cookie access) as well as
 // Server Actions. Expired sessions are lazily cleaned up on lookup.
 export async function getCurrentUser() {

@@ -40,6 +40,16 @@ model User {
   // fingerprint which emails exist in the system.
   failedLoginAttempts Int @default(0)
   lockedUntil         DateTime?
+  // TOTP two-factor (RFC 6238), hand-rolled on Node's built-in crypto — no
+  // external auth service, no SMS provider. totpSecret is the CONFIRMED
+  // secret an authenticator app is actually using; totpTempSecret holds a
+  // freshly-generated one during setup, only promoted to totpSecret once
+  // the user proves they scanned/typed it correctly by submitting one
+  // valid code — so 2FA can never end up "enabled" against a secret the
+  // user never actually saved into their app.
+  totpSecret     String?
+  totpTempSecret String?
+  totpEnabled    Boolean  @default(false)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -56,6 +66,20 @@ model Session {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   createdAt DateTime @default(now())
+}
+
+// IP-level login throttle — a sibling to User.failedLoginAttempts, which
+// only ever throttles ONE account at a time. Without this, an attacker
+// spraying one guessed password across many different emails from the
+// same source never trips any single account's lockout. No Redis: at this
+// app's scale a plain indexed table query per attempt is trivial, and
+// rows are pruned on the fly in login.ts rather than needing a cron job.
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  ipAddress String
+  createdAt DateTime @default(now())
+
+  @@index([ipAddress, createdAt])
 }
 
 model Plant {
