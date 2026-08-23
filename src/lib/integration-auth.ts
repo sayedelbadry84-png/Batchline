@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hashApiKey } from "@/lib/apiKeys";
 
-export type IntegrationScope = "TELEMATICS" | "SCADA";
+export type IntegrationScope = "TELEMATICS" | "SCADA" | "REPORTS";
 
 // Constant-time string compare — a plain === leaks how many leading bytes
 // matched through response timing, letting an attacker recover the key one

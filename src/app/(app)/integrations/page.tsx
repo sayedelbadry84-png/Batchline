@@ -7,7 +7,7 @@ import { getDictionary } from "@/lib/i18n";
 import { createApiKey, revokeApiKey, dismissNewApiKeyReveal } from "./actions";
 import { NEW_KEY_REVEAL_COOKIE } from "./constants";
 
-const SCOPES = ["ALL", "TELEMATICS", "SCADA"] as const;
+const SCOPES = ["ALL", "TELEMATICS", "SCADA", "REPORTS"] as const;
 
 export default async function IntegrationsPage() {
   // Deliberately not requirePageAccess/MODULE_ROLES — same reasoning as

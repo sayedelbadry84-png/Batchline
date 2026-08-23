@@ -9,6 +9,8 @@ import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
+import { CsvExportButton } from "@/components/CsvExportButton";
+import { rowsToCsv } from "@/lib/csv";
 import {
   getProductionReport,
   getIncomingReport,
@@ -59,12 +61,16 @@ function ExportBar({
   from,
   to,
   message,
+  csv,
+  csvFilename,
 }: {
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["reports"];
   tab: ReportTab;
   from: string;
   to: string;
   message: string;
+  csv?: string;
+  csvFilename?: string;
 }) {
   return (
     <form action={`/reports`} className="no-print flex flex-wrap items-end gap-3">
@@ -79,6 +85,7 @@ function ExportBar({
       </div>
       <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">{m.applyRange}</button>
       <div className="ms-auto flex gap-2">
+        {csv && csvFilename && <CsvExportButton label={m.exportCsv} filename={csvFilename} csv={csv} />}
         <PrintButton label={m.exportPdf} />
         <WhatsAppShareButton label={m.sendWhatsApp} promptLabel={m.whatsAppPrompt} message={message} />
       </div>
@@ -522,6 +529,11 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.production} ${rangeFrom} → ${rangeTo}\n${m.production.totalVolume(production.totalVolumeM3.toFixed(1))}\n${m.production.ticketCount(production.ticketCount)} (${m.production.completedCount(production.completedCount)})`}
+            csvFilename={`production-${rangeFrom}-${rangeTo}.csv`}
+            csv={rowsToCsv(
+              ["Ticket", "Project", "Mix", "Volume m3", "Status", "Released"],
+              production.rows.map((t) => [t.ticketNumber, t.reservation.project.name, t.mix.code, t.volumeM3, t.status, new Date(t.releasedAt).toISOString()]),
+            )}
           />
           <div className="flex gap-4">
             <div className={ui.card}>
@@ -573,6 +585,11 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.incoming} ${rangeFrom} → ${rangeTo}\n${m.incoming.totalNetWeight(incoming.totalNetKg.toFixed(0))}\n${m.incoming.receiptCount(incoming.receiptCount)}`}
+            csvFilename={`incoming-${rangeFrom}-${rangeTo}.csv`}
+            csv={rowsToCsv(
+              ["Received", "Supplier", "Material", "Net weight kg", "PO", "QC status", "Driver"],
+              incoming.rows.map((r) => [new Date(r.receivedAt).toISOString(), r.supplier.name, r.material.name, r.netWeightKg, r.poNumber ?? "", r.qcStatus, r.driver?.name ?? r.driverName ?? ""]),
+            )}
           />
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{incoming.totalNetKg.toFixed(0)} kg</div>
@@ -620,6 +637,11 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.consumption} ${rangeFrom} → ${rangeTo}\n${m.consumption.ticketCount(consumption.ticketCount)}\n${consumption.rows.map((r) => `${r.materialName}: ${(r.massKg / 1000).toFixed(2)} t`).join("\n")}`}
+            csvFilename={`consumption-${rangeFrom}-${rangeTo}.csv`}
+            csv={rowsToCsv(
+              ["Material", "Type", "Mass kg", "Tickets"],
+              consumption.rows.map((r) => [r.materialName, r.type, r.massKg, r.ticketCount]),
+            )}
           />
           <div className={ui.card}>
             <table className={ui.table}>
@@ -677,6 +699,19 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.returns} ${rangeFrom} → ${rangeTo}\n${m.returnsReport.totalReturned(returnsData.totalReturnedM3.toFixed(1))}\n${m.returnsReport.wasted(returnsData.wastedM3.toFixed(1))}`}
+            csvFilename={`returns-${rangeFrom}-${rangeTo}.csv`}
+            csv={rowsToCsv(
+              ["Discharged", "Truck", "Driver", "Project", "Returned m3", "Disposition", "Reason"],
+              returnsData.rows.map((r) => [
+                r.trip.dischargeEnd ? new Date(r.trip.dischargeEnd).toISOString() : "",
+                r.trip.truck.code,
+                r.trip.driver.name,
+                r.trip.batchTicket.reservation.project.name,
+                r.returnedVolumeM3,
+                r.disposition,
+                r.reasonCode ?? "",
+              ]),
+            )}
           />
           <div className="flex gap-4">
             <div className={ui.card}>
@@ -734,6 +769,17 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.trips} ${rangeFrom} → ${rangeTo}\n${m.tripsReport.totalDelivered(tripsData.totalDeliveredM3.toFixed(1))}\n${m.tripsReport.tripCount(tripsData.tripCount)}`}
+            csvFilename={`trips-${rangeFrom}-${rangeTo}.csv`}
+            csv={rowsToCsv(
+              ["Discharged", "Truck", "Driver", "Project", "Delivered m3"],
+              tripsData.rows.map((t) => [
+                t.dischargeEnd ? new Date(t.dischargeEnd).toISOString() : "",
+                t.truck.code,
+                t.driver.name,
+                t.batchTicket.reservation.project.name,
+                t.volumeDeliveredM3 ?? 0,
+              ]),
+            )}
           />
           <div className="flex gap-4">
             <div className={ui.card}>
@@ -783,6 +829,14 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.equipment} ${rangeFrom} → ${rangeTo}\n${equipmentData.trucks.map((t) => `${t.code}: ${t.tripCount} trips, ${t.volumeM3.toFixed(1)} m³`).join("\n")}`}
+            csvFilename={`equipment-${rangeFrom}-${rangeTo}.csv`}
+            csv={rowsToCsv(
+              ["Type", "Code", "Trips", "Volume m3"],
+              [
+                ...equipmentData.trucks.map((t) => ["Truck", t.code, t.tripCount, t.volumeM3]),
+                ...equipmentData.pumps.map((p) => ["Pump", p.code, p.tripCount, p.volumeM3]),
+              ],
+            )}
           />
           <div className="grid grid-cols-2 gap-6">
             <div className={ui.card}>
@@ -845,6 +899,11 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.workers} ${rangeFrom} → ${rangeTo}\n${workersData.rows.map((r) => `${r.name} (${dict.roles[r.role as keyof typeof dict.roles] ?? r.role}): ${r.count}`).join("\n")}`}
+            csvFilename={`workers-${rangeFrom}-${rangeTo}.csv`}
+            csv={rowsToCsv(
+              ["Name", "Role", "Count", "Volume"],
+              workersData.rows.map((r) => [r.name, dict.roles[r.role as keyof typeof dict.roles] ?? r.role, r.count, r.volumeM3]),
+            )}
           />
           <div className={ui.card}>
             <table className={ui.table}>
@@ -884,6 +943,11 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.incentives} ${rangeFrom} → ${rangeTo}\n${incentivesData.rows.map((r) => `${r.name}: ${r.payout.toFixed(0)}`).join("\n")}`}
+            csvFilename={`incentives-${rangeFrom}-${rangeTo}.csv`}
+            csv={rowsToCsv(
+              ["Name", "Role", "Count", "Payout"],
+              incentivesData.rows.map((r) => [r.name, dict.roles[r.role as keyof typeof dict.roles] ?? r.role, r.count, r.payout]),
+            )}
           />
           <p className="text-sm text-ink-muted">{m.incentivesReport.intro}</p>
           <div className={ui.card}>

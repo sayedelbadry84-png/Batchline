@@ -630,7 +630,7 @@ const en: typeof ar = {
     integrations: {
       eyebrow: "Administration — Integrations",
       title: "Integration API keys",
-      intro: "Credentials for machine-to-machine callers — a GPS telematics provider posting truck locations, a SCADA gateway posting silo readings. Each key is scoped to only what that caller needs and can be revoked the moment it's no longer trusted.",
+      intro: "Credentials for machine-to-machine callers — a GPS telematics provider posting truck locations, a SCADA gateway posting silo readings, or a BI/ERP system pulling report data (see /api/reports). Each key is scoped to only what that caller needs and can be revoked the moment it's no longer trusted.",
       revealWarning: "Copy this key now — it won't be shown again. Losing it means creating a new one and updating the device/provider.",
       dismissReveal: "I've copied it",
       col: { label: "Label", prefix: "Key prefix", scope: "Scope", lastUsed: "Last used", status: "Status" },
@@ -641,7 +641,7 @@ const en: typeof ar = {
       empty: "No integration keys yet.",
       newTitle: "New key",
       f: { label: "Label", labelPlaceholder: "e.g. Fleet GPS provider", scope: "Scope" },
-      scopeLabel: { ALL: "All endpoints", TELEMATICS: "GPS telematics only", SCADA: "SCADA silo readings only" },
+      scopeLabel: { ALL: "All endpoints", TELEMATICS: "GPS telematics only", SCADA: "SCADA silo readings only", REPORTS: "Reports export (read-only) only" },
       add: "Generate key",
     },
     plants: {
@@ -878,6 +878,7 @@ const en: typeof ar = {
         equipment: "Equipment productivity",
         workers: "Worker productivity",
       },
+      exportCsv: "Export CSV",
       exportPdf: "Export PDF",
       sendWhatsApp: "Send via WhatsApp",
       whatsAppPrompt: "WhatsApp number, with country code",

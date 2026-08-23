@@ -20,7 +20,7 @@ export async function createApiKey(formData: FormData) {
 
   const label = String(formData.get("label") ?? "").trim();
   const scope = String(formData.get("scope") ?? "ALL");
-  if (!label || !["ALL", "TELEMATICS", "SCADA"].includes(scope)) return;
+  if (!label || !["ALL", "TELEMATICS", "SCADA", "REPORTS"].includes(scope)) return;
 
   const { raw, hash, prefix } = generateApiKey();
   await prisma.apiKey.create({
