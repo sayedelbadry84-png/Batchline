@@ -15,9 +15,12 @@ export const MODULE_ROLES = {
   equipment: ["PLANT_OPERATOR", "ADMIN"],
   silos: ["PLANT_OPERATOR", "ADMIN"],
   stockLedger: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
+  // Projects live on this same screen now — a project has no plant/site
+  // of its own (see the Project model comment), it's just a customer's
+  // job site, so it never needed a separate module permission from
+  // "customers" once the two screens merged.
   customers: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
   suppliers: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
-  projects: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   employees: ["ADMIN"],
   incentives: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   plants: ["PLANT_OPERATOR", "ADMIN"],
@@ -49,12 +52,11 @@ export const MODULE_NAV: { key: ModuleKey; href: string; num: string; labelKey: 
   { key: "silos", href: "/silos", num: "06", labelKey: "silos" },
   { key: "customers", href: "/customers", num: "07", labelKey: "customers" },
   { key: "suppliers", href: "/suppliers", num: "08", labelKey: "suppliers" },
-  { key: "projects", href: "/projects", num: "09", labelKey: "projects" },
-  { key: "employees", href: "/employees", num: "10", labelKey: "employees" },
-  { key: "plants", href: "/plants", num: "11", labelKey: "plants" },
-  { key: "billing", href: "/billing", num: "12", labelKey: "billing" },
-  { key: "incentives", href: "/incentives", num: "13", labelKey: "incentives" },
-  { key: "stockLedger", href: "/stock-ledger", num: "14", labelKey: "stockLedger" },
+  { key: "employees", href: "/employees", num: "09", labelKey: "employees" },
+  { key: "plants", href: "/plants", num: "10", labelKey: "plants" },
+  { key: "billing", href: "/billing", num: "11", labelKey: "billing" },
+  { key: "incentives", href: "/incentives", num: "12", labelKey: "incentives" },
+  { key: "stockLedger", href: "/stock-ledger", num: "13", labelKey: "stockLedger" },
   // "users" is deliberately absent — like Permissions, it's hard-locked to
   // ADMIN in Sidebar.tsx and /users/page.tsx directly, never routed through
   // this database-editable system, so it can never be granted to another

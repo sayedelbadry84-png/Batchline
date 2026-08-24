@@ -532,9 +532,11 @@ const en: typeof ar = {
       noSpecificGravityWarning: "This material has no specific gravity on file — its consumption can't be converted to liters, so it won't be deducted from this tank.",
     },
     customers: {
-      eyebrow: "Module 07 — Customers",
-      title: "Customer accounts",
-      intro: "Builders and contractors — credit terms, contacts, and the projects billed against each account.",
+      eyebrow: "Module 07 — Customers & Projects",
+      title: "Customers & Projects",
+      intro: "A customer's account and every job site (project) under it, in one screen — a customer belongs to the whole company, not one plant, and any project under it can be served by any line.",
+      customersTitle: "Customers",
+      customersIntro: "Builders and contractors — credit terms, contacts, and the project count billed against each account.",
       col: { code: "Code", customer: "Customer", creditLimit: "Credit limit", terms: "Terms", contact: "Contact", projects: "Projects" },
       empty: "No customers yet.",
       newTitle: "New customer",
@@ -569,7 +571,7 @@ const en: typeof ar = {
       add: "Add project",
     },
     employees: {
-      eyebrow: "Module 10 — Employees",
+      eyebrow: "Module 09 — Employees",
       title: "Employees",
       intro: "The full plant roster in one place, grouped by job. Status controls who's currently available to be picked for a trip; registering and transferring someone is done by the site's code, not by a production-line name.",
       tabs: {
@@ -688,7 +690,7 @@ const en: typeof ar = {
       confirm: "Confirm & enable",
     },
     plants: {
-      eyebrow: "Module 12 — Plant Management",
+      eyebrow: "Module 10 — Plant Management",
       title: "Plants",
       intro: "A site is a physical location; each site can run more than one production line. Every silo, employee, and project is scoped to a line.",
       sitesTitle: "Sites",
@@ -721,7 +723,7 @@ const en: typeof ar = {
       yardRadius: "Yard radius (m)",
     },
     billing: {
-      eyebrow: "Module 13 — Billing",
+      eyebrow: "Module 11 — Billing",
       title: "Invoicing & pricing",
       intro: "Turn closed deliveries into invoices against a customer price list, then track them through to payment.",
       readyTitle: "Ready to invoice",

@@ -25,7 +25,7 @@ export async function createProject(formData: FormData) {
   });
 
   await logAudit({ module: "Projects", recordId: project.id, afterValue: name, reasonCode: "PROJECT_CREATED" });
-  revalidatePath("/projects");
+  revalidatePath("/customers"); // projects live on the customers screen now
 }
 
 export async function updateProject(formData: FormData) {
@@ -47,5 +47,5 @@ export async function updateProject(formData: FormData) {
   });
 
   await logAudit({ module: "Projects", recordId: id, afterValue: name, reasonCode: "PROJECT_UPDATED" });
-  revalidatePath("/projects");
+  revalidatePath("/customers"); // projects live on the customers screen now
 }

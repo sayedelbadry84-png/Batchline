@@ -258,7 +258,7 @@ export default async function DashboardPage() {
     { label: d.stats.mixDesigns, value: mixCount, href: "/mix-designs" },
     { label: d.stats.trucks, value: truckCount, href: "/equipment?tab=mixers" },
     { label: d.stats.customers, value: customerCount, href: "/customers" },
-    { label: d.stats.projects, value: projectCount, href: "/projects" },
+    { label: d.stats.projects, value: projectCount, href: "/customers" },
     { label: d.stats.reservations, value: reservationCount, href: "/reservations" },
   ];
 
