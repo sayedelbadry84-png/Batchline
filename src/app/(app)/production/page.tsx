@@ -4,7 +4,8 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { releaseBatchTicket, createManualRelease } from "./actions";
-import { effectiveSiteId, plantScopeWhere, projectPlantScopeWhere } from "@/lib/siteScope";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { SitePlantSelect } from "@/components/SitePlantSelect";
 
 // A single mixer truck load — the same hard ceiling releaseBatchTicket
 // enforces server-side, so this is display/UX only, not the real gate.
@@ -28,11 +29,11 @@ export default async function ProductionPage({
   const { manualBooking } = await searchParams;
   const siteId = effectiveSiteId(user);
 
-  const [readyReservationsRaw, activeTickets, recentTickets, projects, approvedMixes] = await Promise.all([
+  const [readyReservationsRaw, activeTickets, recentTickets, projects, approvedMixes, sitesForPicker] = await Promise.all([
     prisma.reservation.findMany({
       // A reservation only shows up here — and can only be released against
       // — once it's cleared both sign-offs (see the Reservations module).
-      where: { status: { in: ["CONFIRMED", "IN_PRODUCTION"] }, initialApprovedAt: { not: null }, finalApprovedAt: { not: null }, ...projectPlantScopeWhere(siteId) },
+      where: { status: { in: ["CONFIRMED", "IN_PRODUCTION"] }, initialApprovedAt: { not: null }, finalApprovedAt: { not: null }, ...plantScopeWhere(siteId) },
       include: {
         project: { include: { customer: true } },
         mix: true,
@@ -51,8 +52,18 @@ export default async function ProductionPage({
       orderBy: { batchCompletedAt: "desc" },
       take: 5,
     }),
-    manualBooking ? prisma.project.findMany({ where: { ...plantScopeWhere(siteId) }, include: { customer: true }, orderBy: { name: "asc" } }) : Promise.resolve([]),
+    // Projects are company-wide now (see the Project model comment) — the
+    // manual-booking form's own site/plant picker below is what scopes the
+    // reservation this creates, not the project list.
+    manualBooking ? prisma.project.findMany({ include: { customer: true }, orderBy: { name: "asc" } }) : Promise.resolve([]),
     manualBooking ? prisma.mixDesign.findMany({ where: { status: "APPROVED" }, orderBy: { code: "asc" } }) : Promise.resolve([]),
+    manualBooking
+      ? prisma.site.findMany({
+          where: { ...(siteId ? { id: siteId } : {}), plants: { some: {} } },
+          orderBy: { code: "asc" },
+          include: { plants: { orderBy: { name: "asc" }, select: { id: true, name: true } } },
+        })
+      : Promise.resolve([]),
   ]);
 
   const readyReservations = readyReservationsRaw
@@ -92,6 +103,15 @@ export default async function ProductionPage({
               ))}
             </select>
           </div>
+          <SitePlantSelect
+            sites={sitesForPicker}
+            required
+            className={`${ui.select} w-40`}
+            siteLabel={dict.field.siteCode}
+            plantLabel={dict.field.plant}
+            sitePlaceholder={dict.field.selectSite}
+            plantPlaceholder={dict.field.selectPlant}
+          />
           <div>
             <label className={ui.label}>{dict.field.selectMix}</label>
             <select name="mixId" required className={`${ui.select} w-40`}>

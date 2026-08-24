@@ -35,10 +35,11 @@ export default async function OperatorHomePage() {
     prisma.reservation.findMany({
       where: {
         status: { in: ["CONFIRMED", "IN_PRODUCTION"] },
-        project: { plant: { siteId } },
+        plant: { siteId },
       },
       include: {
-        project: { include: { customer: true, plant: true } },
+        project: { include: { customer: true } },
+        plant: true,
         mix: true,
         batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
       },
@@ -119,7 +120,7 @@ export default async function OperatorHomePage() {
             <input type="hidden" name="returnPrefix" value="/operator/ticket" />
             <div>
               <span className="font-medium">{r.project.name}</span>
-              <div className="text-xs text-ink-muted">{r.project.customer.legalName} · {r.project.plant.name}</div>
+              <div className="text-xs text-ink-muted">{r.project.customer.legalName} · {r.plant.name}</div>
             </div>
             <div className="flex items-center justify-between gap-2" dir="ltr">
               <span className="font-mono text-xs text-ink-muted">{r.mix.code}</span>

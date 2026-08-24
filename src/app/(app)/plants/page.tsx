@@ -28,7 +28,7 @@ export default async function PlantsPage({
     include: {
       plants: {
         orderBy: { createdAt: "asc" },
-        include: { _count: { select: { silos: true, employees: true, projects: true } } },
+        include: { _count: { select: { silos: true, employees: true, reservations: true } } },
       },
     },
   });
@@ -152,7 +152,7 @@ export default async function PlantsPage({
                       <th className={ui.th}>{m.col.tax}</th>
                       <th className={ui.th}>{m.col.silos}</th>
                       <th className={ui.th}>{m.col.employees}</th>
-                      <th className={ui.th}>{m.col.projects}</th>
+                      <th className={ui.th}>{m.col.reservations}</th>
                       <th className={ui.th}>{m.col.status}</th>
                       <th className={ui.th}>{dict.field.actions}</th>
                     </tr>
@@ -219,7 +219,7 @@ export default async function PlantsPage({
                           <td className={`${ui.td} font-mono tabular`} dir="ltr">{p.taxLabel} {p.taxRatePct}%</td>
                           <td className={`${ui.td} font-mono tabular`}>{p._count.silos}</td>
                           <td className={`${ui.td} font-mono tabular`}>{p._count.employees}</td>
-                          <td className={`${ui.td} font-mono tabular`}>{p._count.projects}</td>
+                          <td className={`${ui.td} font-mono tabular`}>{p._count.reservations}</td>
                           <td className={ui.td}>
                             <span className={`${ui.chip} ${PLANT_STATUS_CHIP[p.status] ?? PLANT_STATUS_CHIP.ACTIVE}`}>
                               {dict.status[p.status as keyof typeof dict.status] ?? p.status}

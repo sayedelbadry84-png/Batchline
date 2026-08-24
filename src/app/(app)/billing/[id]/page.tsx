@@ -29,14 +29,15 @@ export default async function InvoiceDetailPage({
     where: { id },
     include: {
       customer: true,
-      project: { include: { plant: true } },
+      project: true,
+      plant: true,
       lines: { include: { trip: { include: { truck: true } } } },
       payments: { orderBy: { paidAt: "desc" } },
     },
   });
   if (!invoice) notFound();
   const siteId = effectiveSiteId(user);
-  if (siteId !== null && invoice.project?.plant.siteId !== siteId) notFound();
+  if (siteId !== null && invoice.plant?.siteId !== siteId) notFound();
 
   const paid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
   const amountDue = Math.max(0, invoice.total - paid);
@@ -52,6 +53,7 @@ export default async function InvoiceDetailPage({
           <p className={ui.intro}>
             {d.billTo}: {invoice.customer.legalName}
             {invoice.project && ` · ${d.project}: ${invoice.project.name}`}
+            {invoice.plant && ` · ${invoice.plant.name}`}
           </p>
         </div>
         <span className={`${ui.chip} ${statusChip[invoice.status] ?? ""}`}>

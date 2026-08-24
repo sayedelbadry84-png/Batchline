@@ -86,7 +86,6 @@ async function main() {
     data: {
       name: "Nile Towers — Phase 2",
       customerId: customer.id,
-      plantId: plant.id,
       siteAddress: "Gate 4, Nile Towers Site, 6th of October",
       contractedVolumeM3: 12000,
       status: "ACTIVE",
@@ -96,6 +95,7 @@ async function main() {
   await prisma.reservation.create({
     data: {
       projectId: project.id,
+      plantId: plant.id,
       mixId: mix.id,
       requestedVolumeM3: 7,
       pourWindowStart: new Date(Date.now() + 1000 * 60 * 60 * 24),

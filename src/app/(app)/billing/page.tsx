@@ -4,7 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { generateInvoiceForProject, savePriceListEntry } from "./actions";
-import { effectiveSiteId, tripPlantScopeWhere } from "@/lib/siteScope";
+import { effectiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
 const statusChip: Record<string, string> = {
   DRAFT: "bg-surface-alt text-ink-muted",
@@ -38,10 +38,12 @@ export default async function BillingPage({
       },
     }),
     prisma.invoice.findMany({
-      // An invoice with no project (rare — see Invoice.projectId) can't be
-      // attributed to any site, so it only ever shows to ADMIN once
-      // restricted, same as any other unassignable record.
-      where: { ...(siteId ? { project: { plant: { siteId } } } : {}) },
+      // Invoice.plantId is set at generation time from whichever line
+      // produced its trips (see generateInvoiceForProject) — an invoice
+      // with no plant (predates this, or had no in-scope trips) only ever
+      // shows to ADMIN once restricted, same as any other unassignable
+      // record.
+      where: { ...plantScopeWhere(siteId) },
       orderBy: { issueDate: "desc" },
       include: { customer: true, project: true, payments: true },
       take: 30,

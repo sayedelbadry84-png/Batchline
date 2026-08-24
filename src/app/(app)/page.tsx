@@ -9,6 +9,7 @@ import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
 import { flagMaintenanceDue } from "@/lib/maintenance";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { DrumTimer } from "@/components/DrumTimer";
+import { effectiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
 const SEVEN_DAYS = 7;
 const OUTLOOK_DAYS = 7;
@@ -28,6 +29,7 @@ export default async function DashboardPage() {
   const { dict } = await getDictionary();
   const d = dict.dashboard;
   const r = dict.modules.reports;
+  const siteId = effectiveSiteId(user);
 
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
@@ -55,33 +57,36 @@ export default async function DashboardPage() {
     maintenanceTrucks,
     maintenancePumps,
   ] = await Promise.all([
-    prisma.plant.findMany(),
-    prisma.silo.count(),
-    prisma.mixDesign.count(),
-    prisma.customer.count(),
-    prisma.project.count(),
-    prisma.reservation.count(),
-    prisma.truck.count(),
-    prisma.silo.findMany({ include: { plant: true } }),
+    prisma.plant.findMany({ where: { ...(siteId ? { siteId } : {}) } }),
+    prisma.silo.count({ where: { ...plantScopeWhere(siteId) } }),
+    prisma.mixDesign.count(), // company-wide recipe library — never site-scoped, same as everywhere else
+    prisma.customer.count(), // company-wide customer list — never site-scoped, same as everywhere else
+    prisma.project.count(), // company-wide — a project isn't tied to any one plant, see the Project model comment
+    prisma.reservation.count({ where: { ...plantScopeWhere(siteId) } }),
+    prisma.truck.count({ where: { ...plantScopeWhere(siteId) } }),
+    prisma.silo.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true } }),
     prisma.trip.findMany({
-      where: { status: { not: "CLOSED" } },
+      where: { status: { not: "CLOSED" }, ...tripPlantScopeWhere(siteId) },
       include: { truck: true, driver: true, batchTicket: { include: { plant: true, reservation: { include: { project: true } } } } },
       orderBy: { batchTime: "asc" },
     }),
     prisma.batchTicket.findMany({
-      where: { status: "COMPLETE" },
+      where: { status: "COMPLETE", ...plantScopeWhere(siteId) },
       include: { components: { include: { material: true } } },
     }),
     prisma.reservation.findMany({
-      where: { status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] }, pourWindowStart: { gte: todayStart, lt: outlookEnd } },
+      where: { status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] }, pourWindowStart: { gte: todayStart, lt: outlookEnd }, ...plantScopeWhere(siteId) },
       include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } } },
     }),
-    prisma.reservation.findMany({ where: { status: "ON_HOLD" }, include: { project: true } }),
-    prisma.complianceCertificate.findMany({ include: { mix: true } }),
-    prisma.invoice.findMany({ where: { status: "SENT" }, include: { payments: true } }),
-    prisma.labResult.findMany(),
-    prisma.truck.findMany({ include: { plant: true, trips: { select: { batchTime: true } } } }),
-    prisma.pump.findMany({ include: { plant: true, trips: { select: { batchTime: true } } } }),
+    prisma.reservation.findMany({ where: { status: "ON_HOLD", ...plantScopeWhere(siteId) }, include: { project: true } }),
+    prisma.complianceCertificate.findMany({ include: { mix: true } }), // attached to MixDesign, not a site — same as Quality module
+    prisma.invoice.findMany({
+      where: { status: "SENT", ...plantScopeWhere(siteId) },
+      include: { payments: true },
+    }),
+    prisma.labResult.findMany({ where: { ...(siteId ? { testBatch: { trip: tripPlantScopeWhere(siteId) } } : {}) } }),
+    prisma.truck.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true, trips: { select: { batchTime: true } } } }),
+    prisma.pump.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true, trips: { select: { batchTime: true } } } }),
   ]);
 
   // --- Silo & drum alerts (existing logic) ---

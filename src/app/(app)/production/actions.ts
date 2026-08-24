@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
-import { effectiveSiteId } from "@/lib/siteScope";
+import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -45,7 +45,7 @@ const MAX_LOAD_M3 = 15;
 async function releaseTicketForReservation(reservationId: string, requestedVolume: number) {
   const reservation = await prisma.reservation.findUnique({
     where: { id: reservationId },
-    include: { project: true, mix: { include: { components: true } } },
+    include: { mix: { include: { components: true } } },
   });
   if (!reservation) return null;
 
@@ -53,7 +53,7 @@ async function releaseTicketForReservation(reservationId: string, requestedVolum
   const volumeM3 = Math.min(requestedVolume, remaining);
   if (volumeM3 <= 0) return null;
 
-  const plantId = reservation.project.plantId;
+  const plantId = reservation.plantId;
   const ticketCount = await prisma.batchTicket.count({ where: { plantId } });
   const ticketNumber = `BT-${new Date().getFullYear()}-${String(ticketCount + 1).padStart(4, "0")}`;
 
@@ -104,14 +104,13 @@ export async function releaseBatchTicket(formData: FormData) {
   if (!reservationId || !requestedVolume || requestedVolume <= 0) return;
   if (requestedVolume > MAX_LOAD_M3) return;
 
-  const reservation = await prisma.reservation.findUnique({ where: { id: reservationId }, include: { project: { select: { plant: { select: { siteId: true } } } } } });
+  const reservation = await prisma.reservation.findUnique({ where: { id: reservationId } });
   if (!reservation) return;
   // Re-check server-side — the picker on /production only ever lists
   // reservations that already cleared both sign-offs, but a stale page
   // or a second tab shouldn't be able to release against one that hasn't.
   if (!isReservationApproved(reservation)) return;
-  const siteId = effectiveSiteId(user!);
-  if (siteId !== null && reservation.project.plant.siteId !== siteId) return;
+  if (!(await isPlantInScope(reservation.plantId, effectiveSiteId(user!)))) return;
 
   const ticket = await releaseTicketForReservation(reservationId, requestedVolume);
   if (!ticket) return;
@@ -132,21 +131,22 @@ export async function createManualRelease(formData: FormData) {
   await requireActionPermission(user, "production", "manualBooking");
 
   const projectId = String(formData.get("projectId") ?? "");
+  const plantId = String(formData.get("plantId") ?? "");
   const mixId = String(formData.get("mixId") ?? "");
   const volumeM3 = Number(formData.get("volumeM3") ?? 0);
-  if (!projectId || !mixId || !volumeM3 || volumeM3 <= 0) return;
+  if (!projectId || !plantId || !mixId || !volumeM3 || volumeM3 <= 0) return;
   if (volumeM3 > MAX_LOAD_M3) return;
 
-  const project = await prisma.project.findUnique({ where: { id: projectId }, include: { plant: { select: { siteId: true, status: true } } } });
+  const project = await prisma.project.findUnique({ where: { id: projectId } });
   if (!project) return;
-  const siteId = effectiveSiteId(user!);
-  if (siteId !== null && project.plant.siteId !== siteId) return;
-  if (project.plant.status !== "ACTIVE") return; // frozen/decommissioned line: no new bookings
+  if (!(await isPlantInScope(plantId, effectiveSiteId(user!)))) return;
+  if (!(await isPlantActive(plantId))) return; // frozen/decommissioned line: no new bookings
 
   const now = new Date();
   const reservation = await prisma.reservation.create({
     data: {
       projectId,
+      plantId,
       mixId,
       requestedVolumeM3: volumeM3,
       pourWindowStart: now,

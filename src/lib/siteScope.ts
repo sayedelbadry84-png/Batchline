@@ -21,16 +21,10 @@ export function effectiveSiteId(user: CurrentUser | null): string | null {
   return user.plant?.siteId ?? NO_SITE_SENTINEL;
 }
 
-// For models with their own plantId scalar (Reservation via project,
-// Employee, Truck, Pump, MaterialReceipt, Silo, Hopper, ...).
+// For models with their own plantId scalar (Reservation, Employee, Truck,
+// Pump, MaterialReceipt, Silo, Hopper, Invoice, ...).
 export function plantScopeWhere(siteId: string | null) {
   return siteId ? { plant: { siteId } } : {};
-}
-
-// For models one hop further out via a project relation (Reservation,
-// Invoice).
-export function projectPlantScopeWhere(siteId: string | null) {
-  return siteId ? { project: { plant: { siteId } } } : {};
 }
 
 // For Trip and anything hanging off it (DrumReturn, TestBatch), which has

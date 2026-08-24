@@ -4,34 +4,27 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createProject, updateProject } from "./actions";
-import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
-import { SitePlantSelect } from "@/components/SitePlantSelect";
 
+// Company-wide — a project isn't tied to any one plant/line (see the
+// Project model comment in schema.prisma); which plant actually produces
+// for it is decided per Reservation instead. So this list, unlike almost
+// every other module this session, is never site-scoped.
 export default async function ProjectsPage({
   searchParams,
 }: {
   searchParams: Promise<{ edit?: string }>;
 }) {
-  const user = await requirePageAccess("projects");
+  await requirePageAccess("projects");
   const { dict } = await getDictionary();
   const m = dict.modules.projects;
   const { edit: editId } = await searchParams;
-  const siteId = effectiveSiteId(user);
 
-  const [projects, customers, sitesForPicker] = await Promise.all([
+  const [projects, customers] = await Promise.all([
     prisma.project.findMany({
-      where: { ...plantScopeWhere(siteId) },
       orderBy: { createdAt: "asc" },
-      include: { customer: true, plant: true, _count: { select: { reservations: true } } },
+      include: { customer: true, _count: { select: { reservations: true } } },
     }),
     prisma.customer.findMany({ orderBy: { legalName: "asc" } }),
-    // Plant picker is Site (by code) first, then that site's own lines —
-    // see SitePlantSelect.
-    prisma.site.findMany({
-      where: { ...(siteId ? { id: siteId } : {}), plants: { some: {} } },
-      orderBy: { code: "asc" },
-      include: { plants: { orderBy: { name: "asc" }, select: { id: true, name: true } } },
-    }),
   ]);
 
   return (
@@ -49,7 +42,6 @@ export default async function ProjectsPage({
               <tr>
                 <th className={ui.th}>{m.col.project}</th>
                 <th className={ui.th}>{m.col.customer}</th>
-                <th className={ui.th}>{m.col.plant}</th>
                 <th className={ui.th}>{m.col.contracted}</th>
                 <th className={ui.th}>{m.col.reservations}</th>
                 <th className={ui.th}>{m.col.status}</th>
@@ -60,7 +52,7 @@ export default async function ProjectsPage({
               {projects.map((p) =>
                 editId === p.id ? (
                   <tr key={p.id}>
-                    <td className={ui.td} colSpan={7}>
+                    <td className={ui.td} colSpan={6}>
                       <form action={updateProject} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={p.id} />
                         <div>
@@ -75,16 +67,6 @@ export default async function ProjectsPage({
                             ))}
                           </select>
                         </div>
-                        <SitePlantSelect
-                          sites={sitesForPicker}
-                          defaultPlantId={p.plantId}
-                          required
-                          className={`${ui.select} w-36`}
-                          siteLabel={dict.field.siteCode}
-                          plantLabel={m.f.plant}
-                          sitePlaceholder={dict.field.selectSite}
-                          plantPlaceholder={dict.field.selectPlant}
-                        />
                         <div>
                           <label className={ui.label}>{m.f.siteAddress}</label>
                           <input name="siteAddress" defaultValue={p.siteAddress} required className={`${ui.input} w-48`} />
@@ -116,7 +98,6 @@ export default async function ProjectsPage({
                       <div className="text-xs font-normal text-ink-muted">{p.siteAddress}</div>
                     </td>
                     <td className={ui.td}>{p.customer.legalName}</td>
-                    <td className={ui.td}>{p.plant.name}</td>
                     <td className={`${ui.td} font-mono tabular`}>{p.contractedVolumeM3 ?? "—"}</td>
                     <td className={`${ui.td} font-mono tabular`}>{p._count.reservations}</td>
                     <td className={ui.td}>
@@ -132,7 +113,7 @@ export default async function ProjectsPage({
               )}
               {projects.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={7}>
+                  <td className={ui.td} colSpan={6}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>
@@ -158,14 +139,6 @@ export default async function ProjectsPage({
               ))}
             </select>
           </div>
-          <SitePlantSelect
-            sites={sitesForPicker}
-            required
-            siteLabel={dict.field.siteCode}
-            plantLabel={m.f.plant}
-            sitePlaceholder={dict.field.selectSite}
-            plantPlaceholder={dict.field.selectPlant}
-          />
           <div>
             <label className={ui.label}>{m.f.siteAddress}</label>
             <input name="siteAddress" required className={ui.input} />

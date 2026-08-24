@@ -18,7 +18,7 @@ import {
   createSupportVehicle,
   updateSupportVehicle,
 } from "./actions";
-import { effectiveSiteId, plantScopeWhere, projectPlantScopeWhere } from "@/lib/siteScope";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { SitePlantSelect } from "@/components/SitePlantSelect";
 
 const TAB_KEYS = ["pumps", "mixers", "bulkers", "water", "loaders"] as const;
@@ -373,7 +373,7 @@ async function PumpsTab({
     // more than one pump (see the PumpAssignment schema note), so a
     // reservation that already has one scheduled can still take another.
     prisma.reservation.findMany({
-      where: { deliveryMethod: "PUMP", status: { in: ["CONFIRMED", "REQUESTED"] }, ...projectPlantScopeWhere(siteId) },
+      where: { deliveryMethod: "PUMP", status: { in: ["CONFIRMED", "REQUESTED"] }, ...plantScopeWhere(siteId) },
       include: { project: true },
       orderBy: { pourWindowStart: "asc" },
     }),

@@ -15,30 +15,30 @@ datasource db {
 // are enforced in application code: ADMIN, PLANT_OPERATOR, QUALITY_SUPERVISOR,
 // ACCOUNTANT, DRIVER, CUSTOMER.
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  name         String
-  passwordHash String
-  role         String
+  id                  String    @id @default(cuid())
+  email               String    @unique
+  name                String
+  passwordHash        String
+  role                String
   // ACTIVE, DISABLED — a disabled account fails login with the exact same
   // generic error as a wrong password or a lockout (see the note below),
   // so retiring the seeded demo accounts doesn't reveal which emails were
   // ever real. Deliberately not a delete: Session/AuditEvent rows still
   // reference the user.
-  status       String   @default("ACTIVE")
-  plantId      String?
-  plant        Plant?   @relation(fields: [plantId], references: [id])
+  status              String    @default("ACTIVE")
+  plantId             String?
+  plant               Plant?    @relation(fields: [plantId], references: [id])
   // Links a DRIVER-role account to their Employee record, so the driver app
   // resolves "my trips" from the logged-in session instead of a picker.
-  employeeId   String?  @unique
-  employee     Employee? @relation(fields: [employeeId], references: [id])
+  employeeId          String?   @unique
+  employee            Employee? @relation(fields: [employeeId], references: [id])
   // Brute-force lockout: failedLoginAttempts resets to 0 on any successful
   // login; once it reaches the threshold in login.ts, lockedUntil is set a
   // fixed window into the future and every login attempt is rejected with
   // the same generic error as a wrong password, until that window passes —
   // deliberately not a distinct error, so a locked account isn't a way to
   // fingerprint which emails exist in the system.
-  failedLoginAttempts Int @default(0)
+  failedLoginAttempts Int       @default(0)
   lockedUntil         DateTime?
   // TOTP two-factor (RFC 6238), hand-rolled on Node's built-in crypto — no
   // external auth service, no SMS provider. totpSecret is the CONFIRMED
@@ -47,17 +47,17 @@ model User {
   // the user proves they scanned/typed it correctly by submitting one
   // valid code — so 2FA can never end up "enabled" against a secret the
   // user never actually saved into their app.
-  totpSecret     String?
-  totpTempSecret String?
-  totpEnabled    Boolean  @default(false)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  totpSecret          String?
+  totpTempSecret      String?
+  totpEnabled         Boolean   @default(false)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
-  auditEvents  AuditEvent[]
-  sessions     Session[]
+  auditEvents                 AuditEvent[]
+  sessions                    Session[]
   reservationInitialApprovals Reservation[] @relation("ReservationInitialApproval")
   reservationFinalApprovals   Reservation[] @relation("ReservationFinalApproval")
-  apiKeysCreated ApiKey[]
+  apiKeysCreated              ApiKey[]
 }
 
 model Session {
@@ -109,12 +109,12 @@ model Site {
 }
 
 model Plant {
-  id        String   @id @default(cuid())
-  siteId    String
-  site      Site     @relation(fields: [siteId], references: [id])
+  id                          String   @id @default(cuid())
+  siteId                      String
+  site                        Site     @relation(fields: [siteId], references: [id])
   // The production line's own label within its site ("Line 1", "خط 2") —
   // address/city/country live on Site above now, not duplicated here.
-  name      String
+  name                        String
   // ACTIVE (normal), FROZEN (temporarily paused — new reservations/projects/
   // equipment/silos/material receipts against it are refused, but whatever
   // is already in flight or on file keeps working and stays visible), or
@@ -122,65 +122,66 @@ model Plant {
   // FROZEN, just meant as permanent). Never a real row delete: too much
   // hangs off a Plant (silos, employees, trucks, batch tickets, invoices,
   // ...) for that to ever be safe — same convention as Employee/Truck/Pump.
-  status    String   @default("ACTIVE")
-  currency  String   @default("EGP")
-  timezone  String   @default("Africa/Cairo")
+  status                      String   @default("ACTIVE")
+  currency                    String   @default("EGP")
+  timezone                    String   @default("Africa/Cairo")
   // Applied to every invoice generated for this plant's projects, snapshotted
   // onto the invoice at generation time (see Invoice.taxRatePct) so a later
   // rate change never rewrites an already-issued invoice. taxLabel is the
   // name shown on the invoice ("VAT", "GST", "Sales Tax"...) since which
   // term applies depends on the plant's own jurisdiction, not the app.
-  taxRatePct Float   @default(0)
-  taxLabel   String  @default("VAT")
+  taxRatePct                  Float    @default(0)
+  taxLabel                    String   @default("VAT")
   // Batching tolerance & alert configuration (Module 12 — Plant Management).
-  drumTimerLimitMinutes     Int   @default(90)
-  returnAbsorptionThresholdM3 Float @default(0.2)
+  drumTimerLimitMinutes       Int      @default(90)
+  returnAbsorptionThresholdM3 Float    @default(0.2)
   // Preventive-maintenance threshold, shared by trucks and pumps (see
   // src/lib/maintenance.ts) — a single per-plant number is simpler to
   // reason about than a per-vehicle one, matching the batching-tolerance
   // fields above.
-  maintenanceIntervalTrips Int @default(150)
+  maintenanceIntervalTrips    Int      @default(150)
   // Geofenced yard — "a mixer counts as home once it is inside this
   // circle" (from the RhinoMaster review). Purely informational: the
   // telematics webhook computes distance on each ping and the Equipment
   // map shows an "at yard" badge, but nothing here ever overwrites a
   // truck's manually-set status. All three null means geofencing is off
   // for this plant.
-  yardLat      Float?
-  yardLng      Float?
-  yardRadiusM  Float?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  yardLat                     Float?
+  yardLng                     Float?
+  yardRadiusM                 Float?
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
 
-  users      User[]
-  silos      Silo[]
-  hoppers    Hopper[]
-  employees  Employee[]
-  projects   Project[]
-  trucks     Truck[]
-  batchTickets BatchTicket[]
-  pumps      Pump[]
-  materialReceipts MaterialReceipt[]
-  pumpCrewMembers  PumpCrewMember[]
-  incentivePolicies DriverIncentivePolicy[]
-  supportVehicles  SupportVehicle[]
+  users                 User[]
+  silos                 Silo[]
+  hoppers               Hopper[]
+  employees             Employee[]
+  reservations          Reservation[]
+  invoices              Invoice[]
+  trucks                Truck[]
+  batchTickets          BatchTicket[]
+  pumps                 Pump[]
+  materialReceipts      MaterialReceipt[]
+  pumpCrewMembers       PumpCrewMember[]
+  incentivePolicies     DriverIncentivePolicy[]
+  supportVehicles       SupportVehicle[]
   // One row per role using the VOLUME_M3 incentive method — see the
   // model comment on PumpIncentivePolicy for why it's an array now.
   pumpIncentivePolicies PumpIncentivePolicy[]
-  incentiveMethods IncentiveMethod[]
-  chemicalTanks    ChemicalTank[]
+  incentiveMethods      IncentiveMethod[]
+  chemicalTanks         ChemicalTank[]
 }
 
 model Silo {
-  id               String   @id @default(cuid())
-  plantId          String
-  plant            Plant    @relation(fields: [plantId], references: [id], onDelete: Cascade)
-  name             String
-  materialType     String
-  capacityTons     Float
-  currentLevelTons Float    @default(0)
-  minThresholdPct  Float    @default(15)
-  lastCalibration  DateTime?
+  id                  String    @id @default(cuid())
+  plantId             String
+  plant               Plant     @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  name                String
+  materialType        String
+  capacityTons        Float
+  currentLevelTons    Float     @default(0)
+  minThresholdPct     Float     @default(15)
+  lastCalibration     DateTime?
   // Populated by the SCADA sensor-reading webhook (see /api/scada/silo-reading)
   // to distinguish a sensor-fed level from a manual dashboard override.
   lastSensorReadingAt DateTime?
@@ -189,29 +190,29 @@ model Silo {
   // completeBatch's consumption lookup (production/actions.ts) matches a
   // shared silo for ANY line's ticket at the SAME site, not just its own,
   // once this is true. Mirrors Hopper.sharedAcrossPlants below.
-  sharedAcrossPlants Boolean @default(false)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  sharedAcrossPlants  Boolean   @default(false)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   receipts MaterialReceipt[]
 }
 
 model Hopper {
-  id               String   @id @default(cuid())
-  plantId          String
-  plant            Plant    @relation(fields: [plantId], references: [id], onDelete: Cascade)
-  name             String
-  aggregateType    String
-  capacityTons     Float
-  currentLevelTons Float    @default(0)
+  id                 String   @id @default(cuid())
+  plantId            String
+  plant              Plant    @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  name               String
+  aggregateType      String
+  capacityTons       Float
+  currentLevelTons   Float    @default(0)
   // A yard heap multiple production lines at the same site draw from —
   // plantId above is still the "home"/organizational line, but
   // completeBatch's consumption lookup (production/actions.ts) matches a
   // shared hopper for any OTHER line's ticket at the SAME site (never a
   // different site), not just its own, once this is true.
-  sharedAcrossPlants Boolean @default(false)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  sharedAcrossPlants Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   receipts MaterialReceipt[]
 }
@@ -239,75 +240,79 @@ model ChemicalTank {
 }
 
 model MixDesign {
-  id             String   @id @default(cuid())
-  code           String   @unique
-  grade          String
-  exposureClass  String?
-  slumpTargetMm  Float
-  wcRatio        Float
-  yieldTargetM3  Float    @default(1)
-  status         String   @default("DRAFT") // DRAFT, PENDING_APPROVAL, APPROVED, RETIRED
-  standardCost   Float?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id            String   @id @default(cuid())
+  code          String   @unique
+  grade         String
+  exposureClass String?
+  slumpTargetMm Float
+  wcRatio       Float
+  yieldTargetM3 Float    @default(1)
+  status        String   @default("DRAFT") // DRAFT, PENDING_APPROVAL, APPROVED, RETIRED
+  standardCost  Float?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  components   MixComponent[]
-  reservations Reservation[]
-  batchTickets BatchTicket[]
-  certificates ComplianceCertificate[]
+  components       MixComponent[]
+  reservations     Reservation[]
+  batchTickets     BatchTicket[]
+  certificates     ComplianceCertificate[]
   priceListEntries PriceListEntry[]
 }
 
 model Material {
-  id               String   @id @default(cuid())
-  name             String
-  type             String   // CEMENT, FLY_ASH, SAND, COARSE_AGGREGATE, ADMIXTURE, WATER
-  brand            String?
-  specificGravity  Float?
-  absorptionPct    Float?
-  supplierId       String?
-  supplier         Supplier? @relation(fields: [supplierId], references: [id])
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id              String    @id @default(cuid())
+  name            String
+  type            String // CEMENT, FLY_ASH, SAND, COARSE_AGGREGATE, ADMIXTURE, WATER
+  brand           String?
+  specificGravity Float?
+  absorptionPct   Float?
+  supplierId      String?
+  supplier        Supplier? @relation(fields: [supplierId], references: [id])
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
-  mixComponents    MixComponent[]
-  batchActuals     BatchComponentActual[]
-  receipts         MaterialReceipt[]
-  chemicalTanks    ChemicalTank[]
+  mixComponents MixComponent[]
+  batchActuals  BatchComponentActual[]
+  receipts      MaterialReceipt[]
+  chemicalTanks ChemicalTank[]
 }
 
 model MixComponent {
-  id                 String    @id @default(cuid())
-  mixId              String
-  mix                MixDesign @relation(fields: [mixId], references: [id], onDelete: Cascade)
-  materialId         String
-  material           Material  @relation(fields: [materialId], references: [id])
-  designMassKgPerM3  Float
-  tolerancePct       Float     @default(2)
+  id                String    @id @default(cuid())
+  mixId             String
+  mix               MixDesign @relation(fields: [mixId], references: [id], onDelete: Cascade)
+  materialId        String
+  material          Material  @relation(fields: [materialId], references: [id])
+  designMassKgPerM3 Float
+  tolerancePct      Float     @default(2)
   // Display-only — the mass figure above stays the single source of truth
   // for every yield/tolerance calculation. Chemical admixtures are
   // conventionally dosed by volume on site; when set to LITER the
   // component table shows designMassKgPerM3 / material.specificGravity
   // instead of kg, without a second stored quantity to keep in sync.
-  dosageUnit         String    @default("KG") // KG, LITER
+  dosageUnit        String    @default("KG") // KG, LITER
 
   @@unique([mixId, materialId])
 }
 
 model Customer {
-  id            String   @id @default(cuid())
-  legalName     String
-  taxId         String?
-  creditLimit   Float    @default(0)
-  paymentTerms  String   @default("Net 30")
-  contactEmail  String?
-  contactPhone  String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id           String   @id @default(cuid())
+  // Company-wide customer identifier — auto-generated as "C-00001" style
+  // on create if left blank, or set by hand. Nullable/unique rather than
+  // required so existing rows never need a forced backfill.
+  code         String?  @unique
+  legalName    String
+  taxId        String?
+  creditLimit  Float    @default(0)
+  paymentTerms String   @default("Net 30")
+  contactEmail String?
+  contactPhone String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  projects   Project[]
+  projects         Project[]
   priceListEntries PriceListEntry[]
-  invoices   Invoice[]
+  invoices         Invoice[]
 }
 
 model Supplier {
@@ -319,73 +324,80 @@ model Supplier {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  materials Material[]
+  materials        Material[]
   materialReceipts MaterialReceipt[]
 }
 
+// A customer's job site — company-wide, not tied to any one plant/line.
+// Which plant actually produces for it is decided per Reservation (a big
+// job site can be poured from whichever nearby line has capacity that
+// day), not fixed at the project level.
 model Project {
-  id                  String   @id @default(cuid())
-  name                String
-  customerId          String
-  customer            Customer @relation(fields: [customerId], references: [id])
-  plantId             String
-  plant               Plant    @relation(fields: [plantId], references: [id])
-  siteAddress         String
-  contractedVolumeM3  Float?
-  status              String   @default("ACTIVE")
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id                 String   @id @default(cuid())
+  name               String
+  customerId         String
+  customer           Customer @relation(fields: [customerId], references: [id])
+  siteAddress        String
+  contractedVolumeM3 Float?
+  status             String   @default("ACTIVE")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   reservations Reservation[]
   invoices     Invoice[]
 }
 
 model Reservation {
-  id                 String    @id @default(cuid())
-  projectId          String
-  project            Project   @relation(fields: [projectId], references: [id])
-  mixId              String
-  mix                MixDesign @relation(fields: [mixId], references: [id])
-  requestedVolumeM3  Float
-  pourWindowStart    DateTime
-  status             String    @default("REQUESTED") // REQUESTED, CONFIRMED, IN_PRODUCTION, DELIVERED, CANCELLED
+  id                    String    @id @default(cuid())
+  projectId             String
+  project               Project   @relation(fields: [projectId], references: [id])
+  // The specific production line this reservation will be batched at —
+  // Project itself carries no plant, so this is where "which line" is
+  // actually decided (see the Project model comment).
+  plantId               String
+  plant                 Plant     @relation(fields: [plantId], references: [id])
+  mixId                 String
+  mix                   MixDesign @relation(fields: [mixId], references: [id])
+  requestedVolumeM3     Float
+  pourWindowStart       DateTime
+  status                String    @default("REQUESTED") // REQUESTED, CONFIRMED, IN_PRODUCTION, DELIVERED, CANCELLED
   // Pour-order details captured at intake — distinct from the mix design's
   // own slump target, since site conditions can call for an adjustment on
   // the day (e.g. a pump mix run wetter than the design slump).
-  slumpRequestedMm   Float?
+  slumpRequestedMm      Float?
   // How far the measured slump may miss slumpRequestedMm and still pass —
   // separate from the fixed SLUMP_TOLERANCE_MM the Reports module uses as
   // a plant-wide default, since a specific pour can call for a tighter or
   // looser band. Null means "use the plant-wide default."
-  slumpToleranceMm   Float?
+  slumpToleranceMm      Float?
   // Printed on the delivery ticket when the job specifies one — OPC or
   // SRC. Null means the job didn't ask, not "OPC by default": leaving it
   // unset is a real, distinct state from choosing OPC.
-  cementType         String?
+  cementType            String?
   // Maximum concrete temperature allowed at discharge — a real rejection
   // threshold checked against TestBatch.concreteTempC when a sample is
   // logged (see Quality), not just an informational number on the ticket.
-  temperatureC       Float?
-  siteLocation       String?
+  temperatureC          Float?
+  siteLocation          String?
   // A pasted maps share link, sent straight to the driver — simpler and
   // more directly actionable on site than structured lat/lng would be.
-  siteLocationUrl    String?
-  siteContactName    String?
-  siteContactPhone   String?
-  deliveryMethod     String?   @default("CHUTE") // PUMP, CHUTE
+  siteLocationUrl       String?
+  siteContactName       String?
+  siteContactPhone      String?
+  deliveryMethod        String?   @default("CHUTE") // PUMP, CHUTE
   // Free-text specific label ("Column C12", "Slab L3") — distinct from
   // structureType below, which is the fixed category used for reporting.
-  structuralElement  String?
+  structuralElement     String?
   // FOUNDATION, SLAB, COLUMN, COLUMN_NECK, BEAM, ROOF, RAFT, OTHER — a fixed
   // list (from the RhinoMaster/Dynamics comparison) so "how much concrete
   // went into columns this month" is a real query, not a free-text guess.
-  structureType      String?
+  structureType         String?
   // Required boom/line reach for a pump delivery — checked against
   // Pump.reachM when assigning a pump on the trip-start form (see
   // production/[id]/page.tsx), the same kind of real validation threshold
   // temperatureC already is for concrete temperature.
-  minPumpReachM      Float?
-  labTechnicianRequired Boolean @default(false)
+  minPumpReachM         Float?
+  labTechnicianRequired Boolean   @default(false)
   // Two-stage sign-off gate a reservation must clear before Production will
   // release a batch ticket against it — distinct from `status` above, which
   // tracks the delivery lifecycle rather than who signed off. Initial is
@@ -393,48 +405,48 @@ model Reservation {
   // is operations management clearing it to actually be produced. Both
   // null means "not yet activated," same meaning whether the reservation
   // was just created or was edited enough to warrant re-approval.
-  initialApprovedAt   DateTime?
-  initialApprovedById String?
-  initialApprovedBy   User?     @relation("ReservationInitialApproval", fields: [initialApprovedById], references: [id])
-  finalApprovedAt     DateTime?
-  finalApprovedById   String?
-  finalApprovedBy     User?     @relation("ReservationFinalApproval", fields: [finalApprovedById], references: [id])
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  initialApprovedAt     DateTime?
+  initialApprovedById   String?
+  initialApprovedBy     User?     @relation("ReservationInitialApproval", fields: [initialApprovedById], references: [id])
+  finalApprovedAt       DateTime?
+  finalApprovedById     String?
+  finalApprovedBy       User?     @relation("ReservationFinalApproval", fields: [finalApprovedById], references: [id])
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
-  batchTickets BatchTicket[]
+  batchTickets    BatchTicket[]
   pumpAssignments PumpAssignment[]
 }
 
 model Employee {
-  id             String    @id @default(cuid())
-  plantId        String
-  plant          Plant     @relation(fields: [plantId], references: [id])
-  name           String
-  role           String
+  id            String    @id @default(cuid())
+  plantId       String
+  plant         Plant     @relation(fields: [plantId], references: [id])
+  name          String
+  role          String
   // Per-employee identifier (badge/payroll number) — distinct from `role`,
   // which is the job title. Optional and unique when set; Postgres allows
   // any number of NULLs under a unique constraint, so employees without a
   // code on file never collide.
-  code           String?   @unique
-  licenseNumber  String?
-  licenseExpiry  DateTime?
-  shiftPattern   String?
+  code          String?   @unique
+  licenseNumber String?
+  licenseExpiry DateTime?
+  shiftPattern  String?
   // ACTIVE, FROZEN (temporarily suspended, kept on file), REMOVED (soft
   // delete — never a real row delete, same reasoning as User.status: the
   // employee's trip/receipt history must keep resolving to a real name).
   // "Transfer to another plant" is just editing plantId above, not a
   // separate status value.
-  status         String    @default("ACTIVE")
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  status        String    @default("ACTIVE")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
-  trips Trip[]
-  sampledTestBatches TestBatch[]
-  materialReceiptsDriven MaterialReceipt[]
-  defaultForTrucks Truck[]
+  trips                     Trip[]
+  sampledTestBatches        TestBatch[]
+  materialReceiptsDriven    MaterialReceipt[]
+  defaultForTrucks          Truck[]
   defaultForSupportVehicles SupportVehicle[]
-  user User?
+  user                      User?
 }
 
 // Admin-managed job-title catalog — supplements the hardcoded role list on
@@ -455,37 +467,37 @@ model JobTitle {
 // ---------------------------------------------------------------------------
 
 model MaterialReceipt {
-  id                 String    @id @default(cuid())
-  plantId            String
-  plant              Plant     @relation(fields: [plantId], references: [id])
-  supplierId         String
-  supplier           Supplier  @relation(fields: [supplierId], references: [id])
-  materialId         String
-  material           Material  @relation(fields: [materialId], references: [id])
-  poNumber           String?
-  orderedMassKg      Float?
-  grossWeightKg      Float
-  tareWeightKg       Float
-  netWeightKg        Float
-  moisturePct        Float?
-  qcStatus           String    @default("PENDING") // PENDING, PASSED, HELD, REJECTED
-  postedToInventory  Boolean   @default(false)
-  destinationSiloId  String?
-  destinationSilo    Silo?     @relation(fields: [destinationSiloId], references: [id])
+  id                  String    @id @default(cuid())
+  plantId             String
+  plant               Plant     @relation(fields: [plantId], references: [id])
+  supplierId          String
+  supplier            Supplier  @relation(fields: [supplierId], references: [id])
+  materialId          String
+  material            Material  @relation(fields: [materialId], references: [id])
+  poNumber            String?
+  orderedMassKg       Float?
+  grossWeightKg       Float
+  tareWeightKg        Float
+  netWeightKg         Float
+  moisturePct         Float?
+  qcStatus            String    @default("PENDING") // PENDING, PASSED, HELD, REJECTED
+  postedToInventory   Boolean   @default(false)
+  destinationSiloId   String?
+  destinationSilo     Silo?     @relation(fields: [destinationSiloId], references: [id])
   destinationHopperId String?
-  destinationHopper  Hopper?   @relation(fields: [destinationHopperId], references: [id])
+  destinationHopper   Hopper?   @relation(fields: [destinationHopperId], references: [id])
   // Who physically drove this delivery — a cement bulker for a CEMENT
   // receipt, a water tanker for a WATER one. Optional and free-text-
   // capable like Trip's pump-crew fields: pick from the roster (an
   // Employee with role BULKER_DRIVER/WATER_TANKER_DRIVER) when possible,
   // but a delivery can still be logged with just a typed name. Feeds the
   // per-role incentive tables on the Incentives page (src/lib/incentives.ts).
-  driverId           String?
-  driver             Employee? @relation(fields: [driverId], references: [id])
-  driverName         String?
-  receivedAt         DateTime  @default(now())
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  driverId            String?
+  driver              Employee? @relation(fields: [driverId], references: [id])
+  driverName          String?
+  receivedAt          DateTime  @default(now())
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 }
 
 // ---------------------------------------------------------------------------
@@ -493,35 +505,35 @@ model MaterialReceipt {
 // ---------------------------------------------------------------------------
 
 model Truck {
-  id                 String   @id @default(cuid())
-  plantId            String
-  plant              Plant    @relation(fields: [plantId], references: [id])
-  code               String
-  drumCapacityM3     Float
-  maxAgitationRpm    Float?
-  gpsDeviceId        String?
+  id                String    @id @default(cuid())
+  plantId           String
+  plant             Plant     @relation(fields: [plantId], references: [id])
+  code              String
+  drumCapacityM3    Float
+  maxAgitationRpm   Float?
+  gpsDeviceId       String?
   // Registration details — optional since older/imported records may not
   // have them on file yet; nothing downstream depends on these being set.
-  year               Int?
-  chassisNumber      String?
-  plateNumber        String?
+  year              Int?
+  chassisNumber     String?
+  plateNumber       String?
   // Pre-fills the driver field when this truck is picked to start a trip
   // (see startTrip/updateTripAssignment) — still just a default, not a
   // lock: the operator can always pick someone else for that specific trip.
-  defaultDriverId    String?
-  defaultDriver      Employee? @relation(fields: [defaultDriverId], references: [id])
-  status             String   @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
+  defaultDriverId   String?
+  defaultDriver     Employee? @relation(fields: [defaultDriverId], references: [id])
+  status            String    @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
   // Populated by the GPS telematics webhook (see /api/telematics/ping).
-  lastLat            Float?
-  lastLng            Float?
-  lastPingAt         DateTime?
+  lastLat           Float?
+  lastLng           Float?
+  lastPingAt        DateTime?
   // Reset by the "mark serviced" action — trips since this date (via
   // Trip.batchTime) feed the due-for-inspection flag in
   // src/lib/maintenance.ts. Null means "never recorded," which counts
   // every trip ever as "since last maintenance."
-  lastMaintenanceAt  DateTime?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  lastMaintenanceAt DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   trips Trip[]
 }
@@ -531,102 +543,102 @@ model Truck {
 // the requested volume) so a later mix-design edit never silently changes
 // a ticket that has already been batched.
 model BatchTicket {
-  id                String    @id @default(cuid())
-  reservationId     String
-  reservation       Reservation @relation(fields: [reservationId], references: [id])
-  mixId             String
-  mix               MixDesign @relation(fields: [mixId], references: [id])
-  plantId           String
-  plant             Plant     @relation(fields: [plantId], references: [id])
-  ticketNumber      String    @unique
-  volumeM3          Float
-  status            String    @default("RELEASED") // RELEASED, BATCHING, COMPLETE, CANCELLED
-  releasedAt        DateTime  @default(now())
-  batchCompletedAt  DateTime?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  id               String      @id @default(cuid())
+  reservationId    String
+  reservation      Reservation @relation(fields: [reservationId], references: [id])
+  mixId            String
+  mix              MixDesign   @relation(fields: [mixId], references: [id])
+  plantId          String
+  plant            Plant       @relation(fields: [plantId], references: [id])
+  ticketNumber     String      @unique
+  volumeM3         Float
+  status           String      @default("RELEASED") // RELEASED, BATCHING, COMPLETE, CANCELLED
+  releasedAt       DateTime    @default(now())
+  batchCompletedAt DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
 
   components BatchComponentActual[]
   trip       Trip?
 }
 
 model BatchComponentActual {
-  id              String      @id @default(cuid())
-  batchTicketId   String
-  batchTicket     BatchTicket @relation(fields: [batchTicketId], references: [id], onDelete: Cascade)
-  materialId      String
-  material        Material    @relation(fields: [materialId], references: [id])
-  targetMassKg    Float
-  actualMassKg    Float?
-  moisturePct     Float?
+  id            String      @id @default(cuid())
+  batchTicketId String
+  batchTicket   BatchTicket @relation(fields: [batchTicketId], references: [id], onDelete: Cascade)
+  materialId    String
+  material      Material    @relation(fields: [materialId], references: [id])
+  targetMassKg  Float
+  actualMassKg  Float?
+  moisturePct   Float?
 
   @@unique([batchTicketId, materialId])
 }
 
 model Trip {
-  id                String       @id @default(cuid())
-  batchTicketId     String       @unique
-  batchTicket       BatchTicket  @relation(fields: [batchTicketId], references: [id])
-  truckId           String
-  truck             Truck        @relation(fields: [truckId], references: [id])
-  driverId          String
-  driver            Employee     @relation(fields: [driverId], references: [id])
+  id                   String          @id @default(cuid())
+  batchTicketId        String          @unique
+  batchTicket          BatchTicket     @relation(fields: [batchTicketId], references: [id])
+  truckId              String
+  truck                Truck           @relation(fields: [truckId], references: [id])
+  driverId             String
+  driver               Employee        @relation(fields: [driverId], references: [id])
   // Only set when the reservation's delivery method is PUMP — the specific
   // pump unit and crew placing this load, as distinct from the pump
   // booking calendar (PumpAssignment), which schedules a pump against a
   // reservation for billing hours rather than recording who ran it.
-  pumpId            String?
-  pump              Pump?        @relation(fields: [pumpId], references: [id])
+  pumpId               String?
+  pump                 Pump?           @relation(fields: [pumpId], references: [id])
   // Free-text name is still the field every read path renders — picking a
   // crew member below just fills it from PumpCrewMember.name at write time
   // (see startTrip), so a trip can still name someone off-roster without
   // forcing every operator into master data on day one.
-  pumpOperatorName  String?
-  pumpAssistantName String?
-  pumpOperatorId    String?
-  pumpOperatorCrew  PumpCrewMember? @relation("PumpOperatorCrew", fields: [pumpOperatorId], references: [id])
-  pumpAssistantId   String?
-  pumpAssistantCrew PumpCrewMember? @relation("PumpAssistantCrew", fields: [pumpAssistantId], references: [id])
-  status            String       @default("LOADING") // LOADING, IN_TRANSIT, ON_SITE, DISCHARGING, CLOSED
-  batchTime         DateTime     @default(now())
-  departTime        DateTime?
-  arriveTime        DateTime?
-  dischargeStart    DateTime?
-  dischargeEnd      DateTime?
-  volumeDeliveredM3 Float?
+  pumpOperatorName     String?
+  pumpAssistantName    String?
+  pumpOperatorId       String?
+  pumpOperatorCrew     PumpCrewMember? @relation("PumpOperatorCrew", fields: [pumpOperatorId], references: [id])
+  pumpAssistantId      String?
+  pumpAssistantCrew    PumpCrewMember? @relation("PumpAssistantCrew", fields: [pumpAssistantId], references: [id])
+  status               String          @default("LOADING") // LOADING, IN_TRANSIT, ON_SITE, DISCHARGING, CLOSED
+  batchTime            DateTime        @default(now())
+  departTime           DateTime?
+  arriveTime           DateTime?
+  dischargeStart       DateTime?
+  dischargeEnd         DateTime?
+  volumeDeliveredM3    Float?
   // Driver-app delivery confirmation. The photo is stored as a data URL for
   // this phase (no object storage wired up yet) — fine for demo volumes,
   // swap for a real blob store (S3-compatible) before production traffic.
   deliveryPhotoDataUrl String?
   deliverySignedBy     String?
   deliverySignedAt     DateTime?
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
 
-  drumReturn DrumReturn?
+  drumReturn  DrumReturn?
   testBatches TestBatch[]
   invoiceLine InvoiceLine?
 }
 
 model DrumReturn {
-  id                 String   @id @default(cuid())
-  tripId             String   @unique
-  trip               Trip     @relation(fields: [tripId], references: [id])
-  returnedVolumeM3   Float
-  minutesSinceBatch  Int
-  disposition        String   // NO_CHARGE, REDISPATCHED, PARTIAL_CREDIT, FULL_WASTE
+  id                String   @id @default(cuid())
+  tripId            String   @unique
+  trip              Trip     @relation(fields: [tripId], references: [id])
+  returnedVolumeM3  Float
+  minutesSinceBatch Int
+  disposition       String // NO_CHARGE, REDISPATCHED, PARTIAL_CREDIT, FULL_WASTE
   // Why the load came back — orthogonal to disposition, which is the
   // time/volume-driven financial outcome. Unrecorded until now (from the
   // RhinoMaster/Dynamics return-ticket comparison): CUSTOMER_CANCELLED,
   // SITE_NOT_READY, OVER_ORDERED, ACCESS_BLOCKED, QUALITY_REJECTED,
   // TRAFFIC_DELAY, OTHER.
-  reasonCode         String?
+  reasonCode        String?
   // What physically happened to the returned concrete — DUMPED or
   // RECLAIMED (fed into a reclaimer / reused in another batch). Also
   // unrecorded until now; independent of disposition and reasonCode.
-  fate               String?
-  note               String?
-  createdAt          DateTime @default(now())
+  fate              String?
+  note              String?
+  createdAt         DateTime @default(now())
 }
 
 // ---------------------------------------------------------------------------
@@ -634,43 +646,43 @@ model DrumReturn {
 // ---------------------------------------------------------------------------
 
 model TestBatch {
-  id                String    @id @default(cuid())
-  tripId            String
-  trip              Trip      @relation(fields: [tripId], references: [id])
-  sampleType        String    @default("CYLINDER") // CYLINDER, CUBE, SLUMP_ONLY
-  sampleTime        DateTime  @default(now())
-  slumpMeasuredMm   Float?
-  airContentPct     Float?
-  concreteTempC     Float?
-  sampledById       String?
-  sampledBy         Employee? @relation(fields: [sampledById], references: [id])
-  createdAt         DateTime  @default(now())
+  id              String    @id @default(cuid())
+  tripId          String
+  trip            Trip      @relation(fields: [tripId], references: [id])
+  sampleType      String    @default("CYLINDER") // CYLINDER, CUBE, SLUMP_ONLY
+  sampleTime      DateTime  @default(now())
+  slumpMeasuredMm Float?
+  airContentPct   Float?
+  concreteTempC   Float?
+  sampledById     String?
+  sampledBy       Employee? @relation(fields: [sampledById], references: [id])
+  createdAt       DateTime  @default(now())
 
   labResults LabResult[]
 }
 
 model LabResult {
-  id                 String    @id @default(cuid())
-  testBatchId        String
-  testBatch          TestBatch @relation(fields: [testBatchId], references: [id], onDelete: Cascade)
-  ageDays            Int
-  breakStrengthMpa   Float
-  targetStrengthMpa  Float
-  passFail           String    // PASS, FAIL
-  testedOn           DateTime  @default(now())
-  createdAt          DateTime  @default(now())
+  id                String    @id @default(cuid())
+  testBatchId       String
+  testBatch         TestBatch @relation(fields: [testBatchId], references: [id], onDelete: Cascade)
+  ageDays           Int
+  breakStrengthMpa  Float
+  targetStrengthMpa Float
+  passFail          String // PASS, FAIL
+  testedOn          DateTime  @default(now())
+  createdAt         DateTime  @default(now())
 }
 
 model ComplianceCertificate {
-  id            String    @id @default(cuid())
-  mixId         String
-  mix           MixDesign @relation(fields: [mixId], references: [id])
-  standardRef   String
-  issuedDate    DateTime
-  expiryDate    DateTime
-  issuingBody   String
-  documentUrl   String?
-  createdAt     DateTime  @default(now())
+  id          String    @id @default(cuid())
+  mixId       String
+  mix         MixDesign @relation(fields: [mixId], references: [id])
+  standardRef String
+  issuedDate  DateTime
+  expiryDate  DateTime
+  issuingBody String
+  documentUrl String?
+  createdAt   DateTime  @default(now())
 }
 
 // ---------------------------------------------------------------------------
@@ -678,14 +690,14 @@ model ComplianceCertificate {
 // ---------------------------------------------------------------------------
 
 model Pump {
-  id           String   @id @default(cuid())
-  plantId      String
-  plant        Plant    @relation(fields: [plantId], references: [id])
-  code         String
-  pumpType     String   // BOOM, LINE, STATIONARY
-  reachM       Float?
-  hourlyRate   Float
-  standbyRate  Float?
+  id                 String          @id @default(cuid())
+  plantId            String
+  plant              Plant           @relation(fields: [plantId], references: [id])
+  code               String
+  pumpType           String // BOOM, LINE, STATIONARY
+  reachM             Float?
+  hourlyRate         Float
+  standbyRate        Float?
   // Registration details, same optional/informational role as on Truck.
   year               Int?
   chassisNumber      String?
@@ -697,11 +709,11 @@ model Pump {
   defaultOperator    PumpCrewMember? @relation("PumpDefaultOperator", fields: [defaultOperatorId], references: [id])
   defaultAssistantId String?
   defaultAssistant   PumpCrewMember? @relation("PumpDefaultAssistant", fields: [defaultAssistantId], references: [id])
-  status       String   @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
+  status             String          @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
   // Same due-for-inspection mechanism as Truck.lastMaintenanceAt.
-  lastMaintenanceAt DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  lastMaintenanceAt  DateTime?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
 
   assignments PumpAssignment[]
   trips       Trip[]
@@ -710,16 +722,16 @@ model Pump {
 // Not @unique on reservationId — a large pour can need more than one pump
 // working simultaneously, so a reservation may carry several assignments.
 model PumpAssignment {
-  id              String      @id @default(cuid())
-  pumpId          String
-  pump            Pump        @relation(fields: [pumpId], references: [id])
-  reservationId   String
-  reservation     Reservation @relation(fields: [reservationId], references: [id])
-  scheduledStart  DateTime
-  billedHours     Float?
-  status          String      @default("SCHEDULED") // SCHEDULED, ON_SITE, COMPLETE, CANCELLED
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  id             String      @id @default(cuid())
+  pumpId         String
+  pump           Pump        @relation(fields: [pumpId], references: [id])
+  reservationId  String
+  reservation    Reservation @relation(fields: [reservationId], references: [id])
+  scheduledStart DateTime
+  billedHours    Float?
+  status         String      @default("SCHEDULED") // SCHEDULED, ON_SITE, COMPLETE, CANCELLED
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +764,15 @@ model Invoice {
   customer      Customer @relation(fields: [customerId], references: [id])
   projectId     String?
   project       Project? @relation(fields: [projectId], references: [id])
+  // Which line the invoiced trips were actually produced at — a project
+  // itself carries no plant (see the Project model comment), so this is
+  // snapshotted from the trips' own reservation.plantId at generation
+  // time. Nullable for the same reason projectId is: an invoice with no
+  // project can't resolve one either. One invoice never mixes trips from
+  // more than one plant (see generateInvoiceForProject) specifically so
+  // this field — and the tax rate below — always means one real thing.
+  plantId       String?
+  plant         Plant?   @relation(fields: [plantId], references: [id])
   status        String   @default("DRAFT") // DRAFT, SENT, PAID, CANCELLED
   issueDate     DateTime @default(now())
   dueDate       DateTime
@@ -792,7 +813,7 @@ model Payment {
   invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   amount    Float
   paidAt    DateTime @default(now())
-  method    String?  // CASH, BANK_TRANSFER, CHEQUE
+  method    String? // CASH, BANK_TRANSFER, CHEQUE
   reference String?
   createdAt DateTime @default(now())
 }
@@ -810,7 +831,7 @@ model PumpCrewMember {
   plantId   String
   plant     Plant    @relation(fields: [plantId], references: [id])
   name      String
-  role      String   // OPERATOR, HELPER
+  role      String // OPERATOR, HELPER
   phone     String?
   // Same per-person identifier as Employee.code — lets a company-wide
   // report (see getWorkerProductivityReport) recognize the same crew
@@ -824,8 +845,8 @@ model PumpCrewMember {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  operatorTrips  Trip[] @relation("PumpOperatorCrew")
-  assistantTrips Trip[] @relation("PumpAssistantCrew")
+  operatorTrips              Trip[] @relation("PumpOperatorCrew")
+  assistantTrips             Trip[] @relation("PumpAssistantCrew")
   defaultForPumpsAsOperator  Pump[] @relation("PumpDefaultOperator")
   defaultForPumpsAsAssistant Pump[] @relation("PumpDefaultAssistant")
 }
@@ -868,13 +889,13 @@ model DriverIncentivePolicy {
 }
 
 model AuditEvent {
-  id         String   @id @default(cuid())
-  actorId    String?
-  actor      User?    @relation(fields: [actorId], references: [id])
-  role       String
-  module     String
-  recordId   String
-  field      String?
+  id          String   @id @default(cuid())
+  actorId     String?
+  actor       User?    @relation(fields: [actorId], references: [id])
+  role        String
+  module      String
+  recordId    String
+  field       String?
   beforeValue String?
   afterValue  String?
   reasonCode  String?
@@ -905,11 +926,11 @@ model RolePermission {
 // (src/lib/permissions.ts); a module/action pair with zero rows here
 // falls back to that default until an Admin actually customizes it.
 model ActionPermission {
-  id         String   @id @default(cuid())
-  moduleKey  String
-  actionKey  String
-  role       String
-  createdAt  DateTime @default(now())
+  id        String   @id @default(cuid())
+  moduleKey String
+  actionKey String
+  role      String
+  createdAt DateTime @default(now())
 
   @@unique([moduleKey, actionKey, role])
 }
@@ -969,7 +990,7 @@ model IncentiveMethod {
   plantId   String
   plant     Plant    @relation(fields: [plantId], references: [id])
   role      String
-  method    String   // TRIP_COUNT, VOLUME_M3
+  method    String // TRIP_COUNT, VOLUME_M3
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -982,19 +1003,19 @@ model IncentiveMethod {
 // registration details and a default driver. `type` is what the Equipment
 // screen's tabs filter on.
 model SupportVehicle {
-  id             String   @id @default(cuid())
-  plantId        String
-  plant          Plant    @relation(fields: [plantId], references: [id])
-  type           String   // BULKER, WATER_TANKER, LOADER
-  code           String
-  year           Int?
-  chassisNumber  String?
-  plateNumber    String?
+  id              String    @id @default(cuid())
+  plantId         String
+  plant           Plant     @relation(fields: [plantId], references: [id])
+  type            String // BULKER, WATER_TANKER, LOADER
+  code            String
+  year            Int?
+  chassisNumber   String?
+  plateNumber     String?
   defaultDriverId String?
   defaultDriver   Employee? @relation(fields: [defaultDriverId], references: [id])
-  status         String   @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  status          String    @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 }
 
 // A revocable, scoped credential for a machine-to-machine caller (a GPS

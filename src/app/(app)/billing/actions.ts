@@ -8,15 +8,15 @@ import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
-// Invoice.projectId is optional, so "in scope" for an invoice means: it
-// has a project, and that project's plant is in scope. An unassignable
-// (no-project) invoice is only ever visible/actionable to ADMIN, same as
-// the billing list's own filter.
+// Invoice.plantId is set at generation time from whichever line produced
+// the trips it bills (see generateInvoiceForProject) — an invoice with no
+// plant (predates this, or had no in-scope trips) is only ever
+// visible/actionable to ADMIN, same as the billing list's own filter.
 async function invoiceInScope(invoiceId: string, siteId: string | null): Promise<boolean> {
   if (siteId === null) return true;
-  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, select: { project: { select: { plantId: true } } } });
-  if (!invoice?.project) return false;
-  return isPlantInScope(invoice.project.plantId, siteId);
+  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, select: { plantId: true } });
+  if (!invoice?.plantId) return false;
+  return isPlantInScope(invoice.plantId, siteId);
 }
 
 // Create is an upsert (same customer+mix re-submitted just updates the
@@ -51,10 +51,18 @@ export async function savePriceListEntry(formData: FormData) {
 
 // The delivery ticket (a closed Trip) is the billing unit — a split
 // reservation dispatched as several trucks bills as several lines. Every
-// currently-unbilled closed trip for the project goes into one invoice;
+// currently-unbilled closed trip for the project goes into an invoice;
 // any trip whose mix has no price on file for this customer is silently
 // left out (it stays "ready to invoice" for next time) rather than
 // blocking the whole invoice or guessing a price.
+//
+// A project itself carries no plant (see the Project model comment) — its
+// trips can come from more than one line, so they're grouped by
+// trip.batchTicket.plantId and ONE INVOICE IS GENERATED PER PLANT. This is
+// deliberate and money-sensitive: never blend two lines' tax rates or
+// currencies onto a single invoice just because they billed the same
+// project (mirrors how incentive payouts are priced per-plant before any
+// merging happens — see reports/page.tsx).
 export async function generateInvoiceForProject(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["ACCOUNTANT", "ADMIN"]);
@@ -62,77 +70,93 @@ export async function generateInvoiceForProject(formData: FormData) {
   const projectId = String(formData.get("projectId") ?? "");
   if (!projectId) return;
 
-  const project = await prisma.project.findUnique({
-    where: { id: projectId },
-    include: { customer: true, plant: true },
-  });
+  const project = await prisma.project.findUnique({ where: { id: projectId }, include: { customer: true } });
   if (!project) return;
-  if (!(await isPlantInScope(project.plantId, effectiveSiteId(user)))) return;
 
   const uninvoicedTrips = await prisma.trip.findMany({
     where: { status: "CLOSED", invoiceLine: null, batchTicket: { reservation: { projectId } } },
-    include: { batchTicket: { include: { reservation: { include: { mix: true } } } } },
+    include: { batchTicket: { include: { plant: true, reservation: { include: { mix: true } } } } },
   });
   if (uninvoicedTrips.length === 0) return;
+
+  const siteId = effectiveSiteId(user);
+  const tripsByPlant = new Map<string, typeof uninvoicedTrips>();
+  for (const trip of uninvoicedTrips) {
+    const plantId = trip.batchTicket.plantId;
+    if (!(await isPlantInScope(plantId, siteId))) continue;
+    const group = tripsByPlant.get(plantId);
+    if (group) group.push(trip);
+    else tripsByPlant.set(plantId, [trip]);
+  }
 
   const priceEntries = await prisma.priceListEntry.findMany({ where: { customerId: project.customerId } });
   const priceByMix = new Map(priceEntries.map((p) => [p.mixId, p.pricePerM3]));
 
-  const lines = uninvoicedTrips
-    .map((trip) => {
-      const mix = trip.batchTicket.reservation.mix;
-      const unitPrice = priceByMix.get(mix.id);
-      if (unitPrice == null) return null;
-      const volumeM3 = trip.volumeDeliveredM3 ?? trip.batchTicket.volumeM3;
-      return {
-        tripId: trip.id,
-        description: `${trip.batchTicket.ticketNumber} — ${mix.code}`,
-        volumeM3,
-        unitPrice,
-        lineTotal: volumeM3 * unitPrice,
-      };
-    })
-    .filter((l): l is NonNullable<typeof l> => l !== null);
+  let firstInvoiceId: string | null = null;
 
-  if (lines.length === 0) return;
+  for (const trips of tripsByPlant.values()) {
+    const plant = trips[0].batchTicket.plant;
+    const lines = trips
+      .map((trip) => {
+        const mix = trip.batchTicket.reservation.mix;
+        const unitPrice = priceByMix.get(mix.id);
+        if (unitPrice == null) return null;
+        const volumeM3 = trip.volumeDeliveredM3 ?? trip.batchTicket.volumeM3;
+        return {
+          tripId: trip.id,
+          description: `${trip.batchTicket.ticketNumber} — ${mix.code}`,
+          volumeM3,
+          unitPrice,
+          lineTotal: volumeM3 * unitPrice,
+        };
+      })
+      .filter((l): l is NonNullable<typeof l> => l !== null);
 
-  const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0);
-  // Snapshotted from the plant's current rate/label rather than referenced
-  // live — a later change to Plant.taxRatePct must never rewrite the
-  // numbers on an invoice that already went out.
-  const taxRatePct = project.plant.taxRatePct;
-  const taxLabel = project.plant.taxLabel;
-  const taxAmount = subtotal * (taxRatePct / 100);
-  const total = subtotal + taxAmount;
-  const dueDate = new Date(Date.now() + parseNetDays(project.customer.paymentTerms) * 24 * 60 * 60 * 1000);
-  const invoiceCount = await prisma.invoice.count();
-  const invoiceNumber = `INV-${new Date().getFullYear()}-${String(invoiceCount + 1).padStart(4, "0")}`;
+    if (lines.length === 0) continue;
 
-  const invoice = await prisma.invoice.create({
-    data: {
-      invoiceNumber,
-      customerId: project.customerId,
-      projectId,
-      dueDate,
-      subtotal,
-      taxRatePct,
-      taxLabel,
-      taxAmount,
-      total,
-      currency: project.plant.currency,
-      lines: { create: lines },
-    },
-  });
+    const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0);
+    // Snapshotted from the plant's current rate/label rather than referenced
+    // live — a later change to Plant.taxRatePct must never rewrite the
+    // numbers on an invoice that already went out.
+    const taxRatePct = plant.taxRatePct;
+    const taxLabel = plant.taxLabel;
+    const taxAmount = subtotal * (taxRatePct / 100);
+    const total = subtotal + taxAmount;
+    const dueDate = new Date(Date.now() + parseNetDays(project.customer.paymentTerms) * 24 * 60 * 60 * 1000);
+    const invoiceCount = await prisma.invoice.count();
+    const invoiceNumber = `INV-${new Date().getFullYear()}-${String(invoiceCount + 1).padStart(4, "0")}`;
 
-  await logAudit({
-    module: "Billing",
-    recordId: invoice.id,
-    afterValue: `${invoiceNumber} — ${subtotal} + ${taxLabel} ${taxAmount} = ${total} ${project.plant.currency}`,
-    reasonCode: "INVOICE_GENERATED",
-  });
+    const invoice = await prisma.invoice.create({
+      data: {
+        invoiceNumber,
+        customerId: project.customerId,
+        projectId,
+        plantId: plant.id,
+        dueDate,
+        subtotal,
+        taxRatePct,
+        taxLabel,
+        taxAmount,
+        total,
+        currency: plant.currency,
+        lines: { create: lines },
+      },
+    });
+
+    await logAudit({
+      module: "Billing",
+      recordId: invoice.id,
+      afterValue: `${invoiceNumber} — ${subtotal} + ${taxLabel} ${taxAmount} = ${total} ${plant.currency}`,
+      reasonCode: "INVOICE_GENERATED",
+    });
+
+    firstInvoiceId ??= invoice.id;
+  }
+
+  if (!firstInvoiceId) return;
 
   revalidatePath("/billing");
-  redirect(`/billing/${invoice.id}`);
+  redirect(`/billing/${firstInvoiceId}`);
 }
 
 export async function markInvoiceSent(formData: FormData) {

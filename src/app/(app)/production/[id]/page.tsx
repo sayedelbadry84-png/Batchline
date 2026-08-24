@@ -38,7 +38,7 @@ export default async function BatchTicketPage({
     prisma.batchTicket.findUnique({
       where: { id },
       include: {
-        reservation: { include: { project: { include: { customer: true, plant: true } } } },
+        reservation: { include: { project: { include: { customer: true } } } },
         mix: { include: { components: true } },
         components: { include: { material: true } },
         trip: { include: { truck: true, driver: true, pump: true } },

@@ -33,6 +33,7 @@ export default async function CustomersPage({
           <table className={ui.table}>
             <thead>
               <tr>
+                <th className={ui.th}>{m.col.code}</th>
                 <th className={ui.th}>{m.col.customer}</th>
                 <th className={ui.th}>{m.col.creditLimit}</th>
                 <th className={ui.th}>{m.col.terms}</th>
@@ -45,9 +46,13 @@ export default async function CustomersPage({
               {customers.map((c) =>
                 editId === c.id ? (
                   <tr key={c.id}>
-                    <td className={ui.td} colSpan={6}>
+                    <td className={ui.td} colSpan={7}>
                       <form action={updateCustomer} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={c.id} />
+                        <div>
+                          <label className={ui.label}>{m.f.code}</label>
+                          <input name="code" defaultValue={c.code ?? ""} className={`${ui.input} w-28`} dir="ltr" />
+                        </div>
                         <div>
                           <label className={ui.label}>{m.f.legalName}</label>
                           <input name="legalName" defaultValue={c.legalName} required className={`${ui.input} w-44`} />
@@ -81,6 +86,7 @@ export default async function CustomersPage({
                   </tr>
                 ) : (
                   <tr key={c.id}>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{c.code ?? "—"}</td>
                     <td className={`${ui.td} font-medium`}>{c.legalName}</td>
                     <td className={`${ui.td} font-mono tabular`}>{c.creditLimit.toLocaleString()}</td>
                     <td className={ui.td}>{c.paymentTerms}</td>
@@ -96,7 +102,7 @@ export default async function CustomersPage({
               )}
               {customers.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={6}>
+                  <td className={ui.td} colSpan={7}>
                     <span className="text-ink-muted">{m.empty}</span>
                   </td>
                 </tr>
@@ -107,6 +113,11 @@ export default async function CustomersPage({
 
         <form action={createCustomer} className={`${ui.card} flex flex-col gap-3`}>
           <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
+          <div>
+            <label className={ui.label}>{m.f.code}</label>
+            <input name="code" className={ui.input} dir="ltr" placeholder="C-00335" />
+            <p className="mt-1 text-xs text-ink-muted">{m.codeHint}</p>
+          </div>
           <div>
             <label className={ui.label}>{m.f.legalName}</label>
             <input name="legalName" required className={ui.input} placeholder="Nile Towers Development" />
