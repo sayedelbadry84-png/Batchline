@@ -5,6 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createProject, updateProject } from "./actions";
 import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { SitePlantSelect } from "@/components/SitePlantSelect";
 
 export default async function ProjectsPage({
   searchParams,
@@ -17,14 +18,20 @@ export default async function ProjectsPage({
   const { edit: editId } = await searchParams;
   const siteId = effectiveSiteId(user);
 
-  const [projects, customers, plants] = await Promise.all([
+  const [projects, customers, sitesForPicker] = await Promise.all([
     prisma.project.findMany({
       where: { ...plantScopeWhere(siteId) },
       orderBy: { createdAt: "asc" },
       include: { customer: true, plant: true, _count: { select: { reservations: true } } },
     }),
     prisma.customer.findMany({ orderBy: { legalName: "asc" } }),
-    prisma.plant.findMany({ where: { ...(siteId ? { siteId } : {}) }, orderBy: { name: "asc" } }),
+    // Plant picker is Site (by code) first, then that site's own lines —
+    // see SitePlantSelect.
+    prisma.site.findMany({
+      where: { ...(siteId ? { id: siteId } : {}), plants: { some: {} } },
+      orderBy: { code: "asc" },
+      include: { plants: { orderBy: { name: "asc" }, select: { id: true, name: true } } },
+    }),
   ]);
 
   return (
@@ -68,14 +75,16 @@ export default async function ProjectsPage({
                             ))}
                           </select>
                         </div>
-                        <div>
-                          <label className={ui.label}>{m.f.plant}</label>
-                          <select name="plantId" defaultValue={p.plantId} required className={`${ui.select} w-36`}>
-                            {plants.map((pl) => (
-                              <option key={pl.id} value={pl.id}>{pl.name}</option>
-                            ))}
-                          </select>
-                        </div>
+                        <SitePlantSelect
+                          sites={sitesForPicker}
+                          defaultPlantId={p.plantId}
+                          required
+                          className={`${ui.select} w-36`}
+                          siteLabel={dict.field.siteCode}
+                          plantLabel={m.f.plant}
+                          sitePlaceholder={dict.field.selectSite}
+                          plantPlaceholder={dict.field.selectPlant}
+                        />
                         <div>
                           <label className={ui.label}>{m.f.siteAddress}</label>
                           <input name="siteAddress" defaultValue={p.siteAddress} required className={`${ui.input} w-48`} />
@@ -149,17 +158,14 @@ export default async function ProjectsPage({
               ))}
             </select>
           </div>
-          <div>
-            <label className={ui.label}>{m.f.plant}</label>
-            <select name="plantId" required className={ui.select}>
-              <option value="">{dict.field.selectPlant}</option>
-              {plants.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
+          <SitePlantSelect
+            sites={sitesForPicker}
+            required
+            siteLabel={dict.field.siteCode}
+            plantLabel={m.f.plant}
+            sitePlaceholder={dict.field.selectSite}
+            plantPlaceholder={dict.field.selectPlant}
+          />
           <div>
             <label className={ui.label}>{m.f.siteAddress}</label>
             <input name="siteAddress" required className={ui.input} />

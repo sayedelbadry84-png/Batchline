@@ -5,6 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createSilo, updateSilo, updateSiloLevel, setSiloSharing, createHopper, updateHopperLevel, setHopperSharing, createChemicalTank, updateChemicalTankLevel } from "./actions";
 import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { SitePlantSelect } from "@/components/SitePlantSelect";
 
 function levelColor(pct: number, minPct: number) {
   if (pct <= minPct) return "bg-critical";
@@ -23,9 +24,15 @@ export default async function SilosPage({
   const { edit: editId } = await searchParams;
   const siteId = effectiveSiteId(user);
 
-  const [silos, plants, hoppers, chemicalTanks, admixtureMaterials] = await Promise.all([
+  const [silos, sitesForPicker, hoppers, chemicalTanks, admixtureMaterials] = await Promise.all([
     prisma.silo.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true }, orderBy: { createdAt: "asc" } }),
-    prisma.plant.findMany({ where: { ...(siteId ? { siteId } : {}) }, orderBy: { name: "asc" } }),
+    // Plant picker is Site (by code) first, then that site's own lines —
+    // see SitePlantSelect.
+    prisma.site.findMany({
+      where: { ...(siteId ? { id: siteId } : {}), plants: { some: {} } },
+      orderBy: { code: "asc" },
+      include: { plants: { orderBy: { name: "asc" }, select: { id: true, name: true } } },
+    }),
     prisma.hopper.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true }, orderBy: { createdAt: "asc" } }),
     prisma.chemicalTank.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true, material: true }, orderBy: { createdAt: "asc" } }),
     prisma.material.findMany({ where: { type: "ADMIXTURE" }, orderBy: { name: "asc" } }),
@@ -92,14 +99,16 @@ export default async function SilosPage({
               return (
                 <form key={s.id} action={updateSilo} className="flex flex-wrap items-end gap-2 border-b border-border pb-4 last:border-0 last:pb-0">
                   <input type="hidden" name="id" value={s.id} />
-                  <div>
-                    <label className={ui.label}>{dict.field.plant}</label>
-                    <select name="plantId" defaultValue={s.plantId} required className={`${ui.select} w-36`}>
-                      {plants.map((p) => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </select>
-                  </div>
+                  <SitePlantSelect
+                    sites={sitesForPicker}
+                    defaultPlantId={s.plantId}
+                    required
+                    className={`${ui.select} w-36`}
+                    siteLabel={dict.field.siteCode}
+                    plantLabel={dict.field.plant}
+                    sitePlaceholder={dict.field.selectSite}
+                    plantPlaceholder={dict.field.selectPlant}
+                  />
                   <div>
                     <label className={ui.label}>{m.f.name}</label>
                     <input name="name" defaultValue={s.name} required className={`${ui.input} w-24`} dir="ltr" />
@@ -180,17 +189,14 @@ export default async function SilosPage({
 
         <form action={createSilo} className={`${ui.card} flex flex-col gap-3`}>
           <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
-          <div>
-            <label className={ui.label}>{dict.field.plant}</label>
-            <select name="plantId" required className={ui.select}>
-              <option value="">{dict.field.selectPlant}</option>
-              {plants.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
+          <SitePlantSelect
+            sites={sitesForPicker}
+            required
+            siteLabel={dict.field.siteCode}
+            plantLabel={dict.field.plant}
+            sitePlaceholder={dict.field.selectSite}
+            plantPlaceholder={dict.field.selectPlant}
+          />
           <div>
             <label className={ui.label}>{m.f.name}</label>
             <input name="name" required className={ui.input} placeholder="S-1" dir="ltr" />
@@ -274,13 +280,14 @@ export default async function SilosPage({
 
           <form action={createHopper} className={`${ui.card} flex flex-col gap-3`}>
             <h2 className="font-display text-lg font-semibold">{m.newHopperTitle}</h2>
-            <div>
-              <label className={ui.label}>{dict.field.plant}</label>
-              <select name="plantId" required className={ui.select}>
-                <option value="">{dict.field.selectPlant}</option>
-                {plants.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </div>
+            <SitePlantSelect
+              sites={sitesForPicker}
+              required
+              siteLabel={dict.field.siteCode}
+              plantLabel={dict.field.plant}
+              sitePlaceholder={dict.field.selectSite}
+              plantPlaceholder={dict.field.selectPlant}
+            />
             <div>
               <label className={ui.label}>{m.fHopper.name}</label>
               <input name="name" required className={ui.input} dir="ltr" />
@@ -348,13 +355,14 @@ export default async function SilosPage({
 
           <form action={createChemicalTank} className={`${ui.card} flex flex-col gap-3`}>
             <h2 className="font-display text-lg font-semibold">{m.newTankTitle}</h2>
-            <div>
-              <label className={ui.label}>{dict.field.plant}</label>
-              <select name="plantId" required className={ui.select}>
-                <option value="">{dict.field.selectPlant}</option>
-                {plants.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </div>
+            <SitePlantSelect
+              sites={sitesForPicker}
+              required
+              siteLabel={dict.field.siteCode}
+              plantLabel={dict.field.plant}
+              sitePlaceholder={dict.field.selectSite}
+              plantPlaceholder={dict.field.selectPlant}
+            />
             <div>
               <label className={ui.label}>{m.fTank.material}</label>
               <select name="materialId" required className={ui.select}>

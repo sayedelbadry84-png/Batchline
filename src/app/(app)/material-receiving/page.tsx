@@ -6,6 +6,7 @@ import { getDictionary } from "@/lib/i18n";
 import { createReceipt, updateReceipt, deleteReceipt, returnReceiptToSupplier, setQcStatus } from "./actions";
 import { createSupplier } from "../suppliers/actions";
 import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { SitePlantSelect } from "@/components/SitePlantSelect";
 
 const qcChip: Record<string, string> = {
   PENDING: "bg-surface-alt text-ink-muted",
@@ -26,13 +27,19 @@ export default async function MaterialReceivingPage({
   const { edit: editId, newSupplier } = await searchParams;
   const siteId = effectiveSiteId(user);
 
-  const [receipts, plants, suppliers, materials, silos, hoppers, deliveryDrivers] = await Promise.all([
+  const [receipts, sitesForPicker, suppliers, materials, silos, hoppers, deliveryDrivers] = await Promise.all([
     prisma.materialReceipt.findMany({
       where: { ...plantScopeWhere(siteId) },
       orderBy: { receivedAt: "desc" },
       include: { supplier: true, material: true, destinationSilo: true, destinationHopper: true, driver: true },
     }),
-    prisma.plant.findMany({ where: { ...(siteId ? { siteId } : {}) }, orderBy: { name: "asc" } }),
+    // Plant picker is Site (by code) first, then that site's own lines —
+    // see SitePlantSelect.
+    prisma.site.findMany({
+      where: { ...(siteId ? { id: siteId } : {}), plants: { some: {} } },
+      orderBy: { code: "asc" },
+      include: { plants: { orderBy: { name: "asc" }, select: { id: true, name: true } } },
+    }),
     prisma.supplier.findMany({ orderBy: { name: "asc" } }),
     prisma.material.findMany({ orderBy: { name: "asc" } }),
     // Includes every silo/hopper at every line within the user's site, not
@@ -240,17 +247,14 @@ export default async function MaterialReceivingPage({
       {newSupplier && <form id="inline-new-supplier" action={createSupplier} />}
       <form action={createReceipt} className={`${ui.card} grid grid-cols-3 gap-4`}>
         <h2 className="col-span-3 font-display text-lg font-semibold">{m.captureTitle}</h2>
-        <div>
-          <label className={ui.label}>{dict.field.plant}</label>
-          <select name="plantId" required className={ui.select}>
-            <option value="">{dict.field.selectPlant}</option>
-            {plants.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        <SitePlantSelect
+          sites={sitesForPicker}
+          required
+          siteLabel={dict.field.siteCode}
+          plantLabel={dict.field.plant}
+          sitePlaceholder={dict.field.selectSite}
+          plantPlaceholder={dict.field.selectPlant}
+        />
         <div>
           <div className="flex items-center justify-between">
             <label className={ui.label}>{m.f.supplier}</label>
