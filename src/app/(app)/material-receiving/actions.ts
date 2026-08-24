@@ -58,11 +58,14 @@ export async function createReceipt(formData: FormData) {
   revalidatePath("/material-receiving");
 }
 
-// Only while the shipment hasn't been posted to inventory yet — once QC
-// has passed it and its weight is already reflected in a silo/hopper
-// balance, changing the weight here would leave that balance wrong. Use
-// deleteReceipt or returnReceiptToSupplier instead for a posted receipt;
-// both reverse the posted amount before touching anything else.
+// Editable at any point, posted to inventory or not. A not-yet-posted
+// receipt is a plain field update. A posted one needs its old contribution
+// reversed from wherever it landed before the corrected one is applied —
+// same reverse-then-reapply pattern deleteReceipt/returnReceiptToSupplier/
+// setQcStatus below already use — so a silo/hopper balance stays exactly
+// as accurate as if the correction had been entered right the first time.
+// Which plant this happened at is deliberately never editable here — that's
+// a physical fact about where the truck actually weighed in, not a typo.
 export async function updateReceipt(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"]);
@@ -84,37 +87,61 @@ export async function updateReceipt(formData: FormData) {
   if (grossWeightKg <= tareWeightKg) return;
 
   const receipt = await prisma.materialReceipt.findUnique({ where: { id } });
-  if (!receipt || receipt.postedToInventory) return;
+  if (!receipt) return;
   if (!(await isPlantInScope(receipt.plantId, effectiveSiteId(user)))) return;
 
   const netWeightKg = grossWeightKg - tareWeightKg;
 
-  await prisma.materialReceipt.update({
-    where: { id },
-    data: {
-      supplierId,
-      materialId,
-      poNumber,
-      orderedMassKg,
-      grossWeightKg,
-      tareWeightKg,
-      netWeightKg,
-      moisturePct,
-      destinationSiloId,
-      destinationHopperId,
-      driverId,
-      driverName,
-    },
+  await prisma.$transaction(async (tx) => {
+    if (receipt.postedToInventory) {
+      const oldNetTons = receipt.netWeightKg / 1000;
+      if (receipt.destinationSiloId) {
+        const silo = await tx.silo.findUnique({ where: { id: receipt.destinationSiloId } });
+        if (silo) await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: Math.max(0, silo.currentLevelTons - oldNetTons) } });
+      } else if (receipt.destinationHopperId) {
+        const hopper = await tx.hopper.findUnique({ where: { id: receipt.destinationHopperId } });
+        if (hopper) await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: Math.max(0, hopper.currentLevelTons - oldNetTons) } });
+      }
+
+      const newNetTons = netWeightKg / 1000;
+      if (destinationSiloId) {
+        const silo = await tx.silo.findUnique({ where: { id: destinationSiloId } });
+        if (silo) await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + newNetTons } });
+      } else if (destinationHopperId) {
+        const hopper = await tx.hopper.findUnique({ where: { id: destinationHopperId } });
+        if (hopper) await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + newNetTons } });
+      }
+    }
+
+    await tx.materialReceipt.update({
+      where: { id },
+      data: {
+        supplierId,
+        materialId,
+        poNumber,
+        orderedMassKg,
+        grossWeightKg,
+        tareWeightKg,
+        netWeightKg,
+        moisturePct,
+        destinationSiloId,
+        destinationHopperId,
+        driverId,
+        driverName,
+      },
+    });
   });
 
   await logAudit({
     module: "MaterialReceiving",
     recordId: id,
     afterValue: `${netWeightKg.toFixed(0)} kg net, PO ${poNumber ?? "—"}`,
-    reasonCode: "RECEIPT_UPDATED",
+    reasonCode: receipt.postedToInventory ? "RECEIPT_UPDATED_INVENTORY_ADJUSTED" : "RECEIPT_UPDATED",
   });
 
   revalidatePath("/material-receiving");
+  revalidatePath("/silos");
+  revalidatePath("/");
 }
 
 // Reverses the posted amount (if any) from wherever it landed, then

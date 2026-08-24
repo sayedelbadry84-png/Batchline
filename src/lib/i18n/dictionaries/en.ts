@@ -453,7 +453,7 @@ const en: typeof ar = {
       selectDriver: "Select driver…",
       capture: "Capture receipt",
       returnToSupplier: "Return to supplier",
-      editLockedHint: "Already posted to inventory — delete or return to supplier instead of editing.",
+      editLockedHint: "Already posted to inventory — saving will immediately adjust the linked silo/hopper balance to match the corrected values.",
       addSupplierInline: "+ New supplier",
       addSupplierInlineSave: "Save supplier",
     },

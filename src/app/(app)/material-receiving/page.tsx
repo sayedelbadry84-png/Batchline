@@ -87,14 +87,16 @@ export default async function MaterialReceivingPage({
           <tbody>
             {receipts.map((r) => {
               const variancePct = r.orderedMassKg ? ((r.netWeightKg - r.orderedMassKg) / r.orderedMassKg) * 100 : null;
-              const editable = !r.postedToInventory;
 
-              if (editId === r.id && editable) {
+              if (editId === r.id) {
                 return (
                   <tr key={r.id}>
                     <td className={ui.td} colSpan={9}>
                       <form action={updateReceipt} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={r.id} />
+                        {r.postedToInventory && (
+                          <p className="w-full text-xs text-warn">{m.editLockedHint}</p>
+                        )}
                         <div>
                           <label className={ui.label}>{m.f.supplier}</label>
                           <select name="supplierId" defaultValue={r.supplierId} required className={`${ui.select} w-40`}>
@@ -232,11 +234,9 @@ export default async function MaterialReceivingPage({
                       <span className="text-xs text-ink-faint">{m.postedToInventory}</span>
                     )}
                     <div className="mt-1 flex flex-wrap gap-2">
-                      {editable && (
-                        <Link href={`/material-receiving?edit=${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
-                          {dict.field.edit}
-                        </Link>
-                      )}
+                      <Link href={`/material-receiving?edit=${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {dict.field.edit}
+                      </Link>
                       <form action={deleteReceipt}>
                         <input type="hidden" name="id" value={r.id} />
                         <button className="text-xs font-medium text-critical hover:underline">{dict.field.delete}</button>

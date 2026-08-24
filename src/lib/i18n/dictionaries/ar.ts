@@ -452,7 +452,7 @@ const ar = {
       selectDriver: "اختر السائق…",
       capture: "تسجيل الشحنة",
       returnToSupplier: "إرجاع للمورد",
-      editLockedHint: "تم ترحيلها إلى المخزون بالفعل — استخدم الحذف أو الإرجاع للمورد بدل التعديل.",
+      editLockedHint: "أُدرِجت في المخزون بالفعل — سيتم تعديل رصيد الصومعة/الحاوية فورًا ليطابق القيم المصححة.",
       addSupplierInline: "+ مورد جديد",
       addSupplierInlineSave: "حفظ المورد",
     },
