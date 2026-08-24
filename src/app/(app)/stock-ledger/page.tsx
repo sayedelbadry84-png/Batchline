@@ -11,28 +11,76 @@ export default async function StockLedgerPage() {
   const m = dict.modules.stockLedger;
   const siteId = effectiveSiteId(user);
 
-  const [materials, receipts, actuals] = await Promise.all([
+  const [materials, sites, receipts, actuals] = await Promise.all([
     // Material is a global catalog (like MixDesign) — only the stock
     // movements (receipts/consumption) are site-specific.
     prisma.material.findMany({ orderBy: [{ type: "asc" }, { name: "asc" }] }),
+    // Restricted to the caller's own plant (never more than one row per
+    // material for them); every plant for ADMIN, since a physical
+    // stockpile at one factory is never the same stock as another's —
+    // blending them into one number would be simply wrong.
+    prisma.site.findMany({ where: { ...(siteId ? { id: siteId } : {}) }, orderBy: { code: "asc" }, select: { id: true, code: true, name: true } }),
     prisma.materialReceipt.findMany({
       where: { postedToInventory: true, ...plantScopeWhere(siteId) },
-      select: { materialId: true, netWeightKg: true },
+      select: { materialId: true, netWeightKg: true, plant: { select: { siteId: true } } },
     }),
     prisma.batchComponentActual.findMany({
       where: { batchTicket: { status: "COMPLETE", ...plantScopeWhere(siteId) } },
-      select: { materialId: true, actualMassKg: true, targetMassKg: true },
+      select: { materialId: true, actualMassKg: true, targetMassKg: true, batchTicket: { select: { plant: { select: { siteId: true } } } } },
     }),
   ]);
+  const siteById = new Map(sites.map((s) => [s.id, s]));
 
+  // Keyed by `${materialId}::${siteId}` — a material's balance is only ever
+  // meaningful per physical plant (see the query comment above), never
+  // blended across plants.
   const inKg = new Map<string, number>();
-  for (const r of receipts) inKg.set(r.materialId, (inKg.get(r.materialId) ?? 0) + r.netWeightKg);
+  for (const r of receipts) {
+    const key = `${r.materialId}::${r.plant.siteId}`;
+    inKg.set(key, (inKg.get(key) ?? 0) + r.netWeightKg);
+  }
 
   const outKg = new Map<string, number>();
   for (const a of actuals) {
+    const key = `${a.materialId}::${a.batchTicket.plant.siteId}`;
     const mass = a.actualMassKg ?? a.targetMassKg;
-    outKg.set(a.materialId, (outKg.get(a.materialId) ?? 0) + mass);
+    outKg.set(key, (outKg.get(key) ?? 0) + mass);
   }
+
+  // One row per (material, plant) that has any activity — for a
+  // restricted (non-ADMIN) caller that's always their own single plant,
+  // shown even with zero activity so the catalog stays complete; for
+  // ADMIN, a material never received/consumed anywhere yet has no plant
+  // to attribute it to, so it gets one unassigned row instead of one per
+  // plant in the company.
+  const rows: { material: (typeof materials)[number]; siteId: string | null }[] = [];
+  for (const mat of materials) {
+    if (siteId) {
+      rows.push({ material: mat, siteId });
+      continue;
+    }
+    const activeSiteIds = new Set<string>();
+    for (const key of inKg.keys()) {
+      const [matId, sid] = key.split("::");
+      if (matId === mat.id) activeSiteIds.add(sid);
+    }
+    for (const key of outKg.keys()) {
+      const [matId, sid] = key.split("::");
+      if (matId === mat.id) activeSiteIds.add(sid);
+    }
+    if (activeSiteIds.size === 0) {
+      rows.push({ material: mat, siteId: null });
+    } else {
+      for (const sid of activeSiteIds) rows.push({ material: mat, siteId: sid });
+    }
+  }
+  rows.sort((a, b) => {
+    const typeCmp = a.material.type.localeCompare(b.material.type);
+    if (typeCmp !== 0) return typeCmp;
+    const nameCmp = a.material.name.localeCompare(b.material.name);
+    if (nameCmp !== 0) return nameCmp;
+    return (a.siteId ?? "").localeCompare(b.siteId ?? "");
+  });
 
   return (
     <div className="flex flex-col gap-8">
@@ -47,6 +95,7 @@ export default async function StockLedgerPage() {
           <thead>
             <tr>
               <th className={ui.th}>{m.col.material}</th>
+              <th className={ui.th}>{m.col.plant}</th>
               <th className={ui.th}>{m.col.type}</th>
               <th className={ui.th}>{m.col.received}</th>
               <th className={ui.th}>{m.col.consumed}</th>
@@ -55,15 +104,27 @@ export default async function StockLedgerPage() {
             </tr>
           </thead>
           <tbody>
-            {materials.map((mat) => {
-              const received = inKg.get(mat.id) ?? 0;
-              const consumed = outKg.get(mat.id) ?? 0;
+            {rows.map(({ material: mat, siteId: rowSiteId }) => {
+              const key = `${mat.id}::${rowSiteId}`;
+              const received = inKg.get(key) ?? 0;
+              const consumed = outKg.get(key) ?? 0;
               const balance = received - consumed;
+              const site = rowSiteId ? siteById.get(rowSiteId) : null;
               return (
-                <tr key={mat.id}>
+                <tr key={key}>
                   <td className={`${ui.td} font-medium`}>
                     {mat.name}
                     {mat.brand && <span className="ms-2 text-xs text-ink-muted" dir="ltr">({mat.brand})</span>}
+                  </td>
+                  <td className={ui.td}>
+                    {site ? (
+                      <>
+                        <span className="font-mono text-xs" dir="ltr">{site.code}</span>
+                        <div className="text-xs text-ink-muted">{site.name}</div>
+                      </>
+                    ) : (
+                      <span className="text-ink-faint">{m.unassignedPlant}</span>
+                    )}
                   </td>
                   <td className={ui.td}>{dict.materialTypes[mat.type as keyof typeof dict.materialTypes] ?? mat.type}</td>
                   <td className={`${ui.td} font-mono tabular`} dir="ltr">{received.toLocaleString()} kg</td>
@@ -72,16 +133,19 @@ export default async function StockLedgerPage() {
                     {balance.toLocaleString()} kg
                   </td>
                   <td className={ui.td}>
-                    <Link href={`/stock-ledger/${mat.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                    <Link
+                      href={`/stock-ledger/${mat.id}${rowSiteId ? `?site=${rowSiteId}` : ""}`}
+                      className="text-xs font-medium text-accent-strong hover:underline"
+                    >
                       {m.viewLedger}
                     </Link>
                   </td>
                 </tr>
               );
             })}
-            {materials.length === 0 && (
+            {rows.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={6}>
+                <td className={ui.td} colSpan={7}>
                   <span className="text-ink-muted">{m.empty}</span>
                 </td>
               </tr>

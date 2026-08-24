@@ -429,9 +429,14 @@ const ar = {
       intro:
         "استلام موثّق بميزان الجسر مقابل أمر شراء. يُحسب الوزن الصافي من الإجمالي والفارغ، ولا يُدخَل مباشرة — ولا يصل شيء إلى مخزون الصوامع أو الحاويات قبل اعتماد الجودة له.",
       col: {
-        received: "الاستلام", supplierMaterial: "المورد / المادة", po: "أمر الشراء", netWeight: "الوزن الصافي",
+        received: "الاستلام", plant: "المصنع / المحطة", supplierMaterial: "المورد / المادة", po: "أمر الشراء", netWeight: "الوزن الصافي",
         variance: "الفارق عن أمر الشراء", destination: "الوجهة", qcStatus: "حالة الجودة",
       },
+      // Whether the receiving destination (silo/hopper) is dedicated to
+      // this one station or shared across every station at the plant —
+      // see Silo/Hopper.sharedAcrossPlants in schema.prisma.
+      dedicated: "مخصصة لهذه المحطة",
+      shared: "مشتركة بين محطات المصنع",
       moisture: (v: number) => `الرطوبة ${v}%`,
       noPoQty: "لا توجد كمية أمر شراء",
       pass: "قبول", hold: "تعليق", reject: "رفض",
@@ -808,7 +813,10 @@ const ar = {
       eyebrow: "المواد الخام — الأرصدة",
       title: "دفتر الأرصدة",
       intro: "رصيد كل مادة، محسوب من الاستلامات المرحّلة واستهلاك الشحنات المكتملة — بلا إدخال جرد منفصل يحتاج مزامنة.",
-      col: { material: "المادة", type: "النوع", received: "الوارد", consumed: "المستهلك", balance: "الرصيد" },
+      col: { material: "المادة", plant: "المصنع", type: "النوع", received: "الوارد", consumed: "المستهلك", balance: "الرصيد" },
+      // Shown when a material has never been received/consumed at any
+      // plant yet, so there's no site to attribute the (zero) row to.
+      unassignedPlant: "—",
       viewLedger: "عرض الدفتر",
       empty: "لا توجد مواد مسجّلة بعد.",
       back: "العودة لدفتر الأرصدة",
@@ -821,6 +829,7 @@ const ar = {
         receipt: "استلام",
         consumption: "استهلاك",
         empty: "لا توجد حركات مسجّلة لهذه المادة بعد.",
+        allPlants: "كل المصانع",
       },
     },
     trips: {

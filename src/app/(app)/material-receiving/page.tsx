@@ -31,7 +31,14 @@ export default async function MaterialReceivingPage({
     prisma.materialReceipt.findMany({
       where: { ...plantScopeWhere(siteId) },
       orderBy: { receivedAt: "desc" },
-      include: { supplier: true, material: true, destinationSilo: true, destinationHopper: true, driver: true },
+      include: {
+        supplier: true,
+        material: true,
+        destinationSilo: true,
+        destinationHopper: true,
+        driver: true,
+        plant: { include: { site: true } },
+      },
     }),
     // Plant picker is Site (by code) first, then that site's own lines —
     // see SitePlantSelect.
@@ -67,6 +74,7 @@ export default async function MaterialReceivingPage({
           <thead>
             <tr>
               <th className={ui.th}>{m.col.received}</th>
+              <th className={ui.th}>{m.col.plant}</th>
               <th className={ui.th}>{m.col.supplierMaterial}</th>
               <th className={ui.th}>{m.col.po}</th>
               <th className={ui.th}>{m.col.netWeight}</th>
@@ -84,7 +92,7 @@ export default async function MaterialReceivingPage({
               if (editId === r.id && editable) {
                 return (
                   <tr key={r.id}>
-                    <td className={ui.td} colSpan={8}>
+                    <td className={ui.td} colSpan={9}>
                       <form action={updateReceipt} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={r.id} />
                         <div>
@@ -158,6 +166,10 @@ export default async function MaterialReceivingPage({
                 <tr key={r.id}>
                   <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.receivedAt).toLocaleString()}</td>
                   <td className={ui.td}>
+                    <div className="font-mono text-xs" dir="ltr">{r.plant.site.code}</div>
+                    <div className="text-xs text-ink-muted">{r.plant.name}</div>
+                  </td>
+                  <td className={ui.td}>
                     {r.supplier.name}
                     <div className="text-xs text-ink-muted">{r.material.name}</div>
                     {(r.driver?.name ?? r.driverName) && (
@@ -179,7 +191,14 @@ export default async function MaterialReceivingPage({
                       <span className="text-ink-faint">{m.noPoQty}</span>
                     )}
                   </td>
-                  <td className={ui.td}>{r.destinationSilo?.name || r.destinationHopper?.name || "—"}</td>
+                  <td className={ui.td}>
+                    {r.destinationSilo?.name || r.destinationHopper?.name || "—"}
+                    {(r.destinationSilo || r.destinationHopper) && (
+                      <div className="text-xs text-ink-faint">
+                        {(r.destinationSilo?.sharedAcrossPlants || r.destinationHopper?.sharedAcrossPlants) ? m.shared : m.dedicated}
+                      </div>
+                    )}
+                  </td>
                   <td className={ui.td}>
                     <span className={`${ui.chip} ${qcChip[r.qcStatus] ?? ""}`}>{dict.status[r.qcStatus as keyof typeof dict.status] ?? r.qcStatus}</span>
                   </td>
@@ -235,7 +254,7 @@ export default async function MaterialReceivingPage({
             })}
             {receipts.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={8}>
+                <td className={ui.td} colSpan={9}>
                   <span className="text-ink-muted">{m.empty}</span>
                 </td>
               </tr>

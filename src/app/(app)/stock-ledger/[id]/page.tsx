@@ -5,30 +5,42 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { buildStockLedger } from "@/lib/stock-ledger";
-import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { effectiveSiteId } from "@/lib/siteScope";
 
 export default async function StockLedgerDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ site?: string }>;
 }) {
   const user = await requirePageAccess("stockLedger");
   const { id } = await params;
+  const { site: siteParam } = await searchParams;
   const { dict } = await getDictionary();
   const m = dict.modules.stockLedger;
-  const siteId = effectiveSiteId(user);
+  // A restricted (non-ADMIN) caller always sees their own plant only,
+  // regardless of what's in the URL — the ?site= param exists purely for
+  // ADMIN, who has more than one to choose between. The stock-ledger list
+  // page always links here with it already set (per its own material+plant
+  // row); reaching this page without it falls back to every plant blended
+  // together, same as before this page understood plants at all.
+  const restrictedSiteId = effectiveSiteId(user);
+  const filterSiteId = restrictedSiteId ?? (siteParam || null);
 
   const material = await prisma.material.findUnique({ where: { id } });
   if (!material) notFound();
+  const filterSite = filterSiteId ? await prisma.site.findUnique({ where: { id: filterSiteId }, select: { code: true, name: true } }) : null;
 
+  const siteWhere = filterSiteId ? { plant: { siteId: filterSiteId } } : {};
   const [receipts, actuals] = await Promise.all([
     prisma.materialReceipt.findMany({
-      where: { materialId: id, postedToInventory: true, ...plantScopeWhere(siteId) },
+      where: { materialId: id, postedToInventory: true, ...siteWhere },
       include: { supplier: true },
       orderBy: { receivedAt: "asc" },
     }),
     prisma.batchComponentActual.findMany({
-      where: { materialId: id, batchTicket: { status: "COMPLETE", ...plantScopeWhere(siteId) } },
+      where: { materialId: id, batchTicket: { status: "COMPLETE", ...(filterSiteId ? { plant: { siteId: filterSiteId } } : {}) } },
       include: { batchTicket: true },
     }),
   ]);
@@ -58,6 +70,8 @@ export default async function StockLedgerDetailPage({
           </h1>
           <p className={ui.intro}>
             {dict.materialTypes[material.type as keyof typeof dict.materialTypes] ?? material.type}
+            {" — "}
+            {filterSite ? `${filterSite.code} · ${filterSite.name}` : m.detail.allPlants}
           </p>
         </div>
         <Link href="/stock-ledger" className="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt">

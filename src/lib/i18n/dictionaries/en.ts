@@ -430,9 +430,14 @@ const en: typeof ar = {
       intro:
         "Weighbridge-verified receipt against a purchase order. Net weight is computed from gross and tare, never entered directly — nothing reaches silo or hopper inventory until quality control passes it.",
       col: {
-        received: "Received", supplierMaterial: "Supplier / material", po: "PO", netWeight: "Net weight",
+        received: "Received", plant: "Plant / station", supplierMaterial: "Supplier / material", po: "PO", netWeight: "Net weight",
         variance: "Variance vs PO", destination: "Destination", qcStatus: "QC status",
       },
+      // Whether the receiving destination (silo/hopper) is dedicated to
+      // this one station or shared across every station at the plant —
+      // see Silo/Hopper.sharedAcrossPlants in schema.prisma.
+      dedicated: "Dedicated to this station",
+      shared: "Shared across the plant's stations",
       moisture: (v: number) => `moisture ${v}%`,
       noPoQty: "no PO qty",
       pass: "Pass", hold: "Hold", reject: "Reject",
@@ -815,7 +820,10 @@ const en: typeof ar = {
       eyebrow: "Raw materials — balances",
       title: "Stock ledger",
       intro: "Every material's balance, derived from posted receipts and completed batch consumption — no separate stock-count entry to keep in sync.",
-      col: { material: "Material", type: "Type", received: "Received", consumed: "Consumed", balance: "Balance" },
+      col: { material: "Material", plant: "Plant", type: "Type", received: "Received", consumed: "Consumed", balance: "Balance" },
+      // Shown when a material has never been received/consumed at any
+      // plant yet, so there's no site to attribute the (zero) row to.
+      unassignedPlant: "—",
       viewLedger: "View ledger",
       empty: "No materials on file yet.",
       back: "Back to stock ledger",
@@ -828,6 +836,7 @@ const en: typeof ar = {
         receipt: "Receipt",
         consumption: "Consumption",
         empty: "No movements recorded for this material yet.",
+        allPlants: "All plants",
       },
     },
     trips: {
