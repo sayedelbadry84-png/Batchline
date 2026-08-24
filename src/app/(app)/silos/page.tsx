@@ -280,14 +280,16 @@ export default async function SilosPage({
 
           <form action={createHopper} className={`${ui.card} flex flex-col gap-3`}>
             <h2 className="font-display text-lg font-semibold">{m.newHopperTitle}</h2>
-            <SitePlantSelect
-              sites={sitesForPicker}
-              required
-              siteLabel={dict.field.siteCode}
-              plantLabel={dict.field.plant}
-              sitePlaceholder={dict.field.selectSite}
-              plantPlaceholder={dict.field.selectPlant}
-            />
+            <p className="text-xs text-ink-muted">{m.hopperSiteHint}</p>
+            <div>
+              <label className={ui.label}>{dict.field.siteCode}</label>
+              <select name="siteId" required className={ui.select}>
+                <option value="">{dict.field.selectSite}</option>
+                {sitesForPicker.map((s) => (
+                  <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+                ))}
+              </select>
+            </div>
             <div>
               <label className={ui.label}>{m.fHopper.name}</label>
               <input name="name" required className={ui.input} dir="ltr" />
@@ -309,7 +311,7 @@ export default async function SilosPage({
               <input name="currentLevelTons" type="number" step="0.1" defaultValue={0} className={ui.input} />
             </div>
             <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" name="sharedAcrossPlants" />
+              <input type="checkbox" name="sharedAcrossPlants" defaultChecked />
               {m.sharedAcrossPlantsLabel}
             </label>
             <button type="submit" className={`${ui.button} mt-2`}>{m.addHopper}</button>

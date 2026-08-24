@@ -516,6 +516,7 @@ const en: typeof ar = {
       hoppersIntro: "Sand, coarse aggregate, and bulk water heaps — a hopper with type “WATER” is what completeBatch deducts water consumption from.",
       emptyHoppers: "No hoppers configured yet.",
       newHopperTitle: "New hopper",
+      hopperSiteHint: "Sand, coarse aggregate, and water are heaps every line at a site shares — so these register by site code directly, not by a specific production line.",
       fHopper: { name: "Name", aggregateType: "Type", capacity: "Capacity (tons)", currentLevel: "Current level (tons)" },
       addHopper: "Add hopper",
       sharedBadge: "Shared",

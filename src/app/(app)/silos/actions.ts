@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
+import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 export async function createSilo(formData: FormData) {
@@ -118,21 +118,29 @@ export async function updateSiloLevel(formData: FormData) {
 }
 
 // --- Hoppers (aggregate heaps — SAND, COARSE_AGGREGATE, and now WATER;
-// see completeBatch in production/actions.ts for how each is consumed). ---
+// see completeBatch in production/actions.ts for how each is consumed).
+// Registered by Site rather than by a specific line: a sand/aggregate/
+// water heap is physically one pile in the yard serving every line at
+// that site, unlike a cement silo (still line-specific — see createSilo
+// above). The form submits siteId; resolvePlantIdForSite picks a concrete
+// Plant row for the required FK, same pattern as Employees' site-code
+// registration. ---
 
 export async function createHopper(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const aggregateType = String(formData.get("aggregateType") ?? "").trim();
   const capacityTons = Number(formData.get("capacityTons") ?? 0);
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
   const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
 
-  if (!plantId || !name || !aggregateType || !capacityTons) return;
-  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
+  if (!siteId || !name || !aggregateType || !capacityTons) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
+  const plantId = await resolvePlantIdForSite(siteId);
+  if (!plantId) return;
   if (!(await isPlantActive(plantId))) return;
 
   const hopper = await prisma.hopper.create({
