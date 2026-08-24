@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getReleasedVolumeM3 } from "@/lib/reservations";
-import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
+import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 // Shared by create and update — the pour-order details captured at intake,
@@ -27,23 +27,23 @@ function readPourDetails(formData: FormData) {
   };
 }
 
-// Project itself carries no plant (see the Project model comment in
-// schema.prisma) — a reservation is where "which line will produce this"
-// is actually decided, so the site-scope guard here is on the submitted
-// plantId directly, not derived through the project.
+// A reservation is booked against a Plant (factory — see the model
+// comment in schema.prisma), never a specific Station: which station
+// actually produces it is decided later, at batch-ticket release time in
+// Production. So the only site-scope guard needed here is on the
+// submitted siteId directly.
 export async function createReservation(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "reservations", "create");
 
   const projectId = String(formData.get("projectId") ?? "");
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const mixId = String(formData.get("mixId") ?? "");
   const requestedVolumeM3 = Number(formData.get("requestedVolumeM3") ?? 0);
   const pourWindowStartRaw = String(formData.get("pourWindowStart") ?? "");
 
-  if (!projectId || !plantId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw) return;
-  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
-  if (!(await isPlantActive(plantId))) return; // frozen/decommissioned line: no new reservations
+  if (!projectId || !siteId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
   // Credit check: requested project's customer credit limit must cover
   // the standing balance implied by this reservation (simplified for Phase 1
@@ -55,7 +55,7 @@ export async function createReservation(formData: FormData) {
   const reservation = await prisma.reservation.create({
     data: {
       projectId,
-      plantId,
+      siteId,
       mixId,
       requestedVolumeM3,
       pourWindowStart: new Date(pourWindowStartRaw),
@@ -85,19 +85,19 @@ export async function updateReservation(formData: FormData) {
 
   const id = String(formData.get("id") ?? "");
   const projectId = String(formData.get("projectId") ?? "");
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const mixId = String(formData.get("mixId") ?? "");
   const requestedVolumeM3 = Number(formData.get("requestedVolumeM3") ?? 0);
   const pourWindowStartRaw = String(formData.get("pourWindowStart") ?? "");
   const status = String(formData.get("status") ?? "");
 
-  if (!id || !projectId || !plantId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw || !status) return;
+  if (!id || !projectId || !siteId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw || !status) return;
 
   const reservation = await prisma.reservation.findUnique({ where: { id } });
   if (!reservation) return;
   if (["DELIVERED", "CANCELLED"].includes(reservation.status)) return;
-  const siteId = effectiveSiteId(user);
-  if (!(await isPlantInScope(reservation.plantId, siteId)) || !(await isPlantInScope(plantId, siteId))) return;
+  const effSiteId = effectiveSiteId(user);
+  if (!isSiteInScope(reservation.siteId, effSiteId) || !isSiteInScope(siteId, effSiteId)) return;
 
   const released = await getReleasedVolumeM3(id);
   if (requestedVolumeM3 < released) return; // can't shrink below what's already gone out
@@ -106,7 +106,7 @@ export async function updateReservation(formData: FormData) {
     where: { id },
     data: {
       projectId,
-      plantId,
+      siteId,
       mixId,
       requestedVolumeM3,
       pourWindowStart: new Date(pourWindowStartRaw),

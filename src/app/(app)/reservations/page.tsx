@@ -4,8 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal } from "./actions";
-import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
-import { SitePlantSelect } from "@/components/SitePlantSelect";
+import { effectiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
 
 const statusChip: Record<string, string> = {
   REQUESTED: "bg-surface-alt text-ink-muted",
@@ -29,11 +28,11 @@ export default async function ReservationsPage({
 
   const [reservationsRaw, projects, mixes, sitesForPicker] = await Promise.all([
     prisma.reservation.findMany({
-      where: { ...plantScopeWhere(siteId) },
+      where: { ...reservationSiteScopeWhere(siteId) },
       orderBy: { pourWindowStart: "asc" },
       include: {
         project: { include: { customer: true } },
-        plant: true,
+        site: true,
         mix: true,
         batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
       },
@@ -44,13 +43,12 @@ export default async function ReservationsPage({
     // Mix designs are a shared company-wide recipe library, not tied to a
     // site — every site should be able to pour an approved mix.
     prisma.mixDesign.findMany({ where: { status: "APPROVED" }, orderBy: { code: "asc" } }),
-    // Plant picker is Site (by code) first, then that site's own lines —
-    // see SitePlantSelect. This is where a reservation's "which line" is
-    // actually decided now.
+    // A reservation is booked against a Plant (factory) only — no specific
+    // Station/line is picked here; that happens later at release time.
     prisma.site.findMany({
       where: { ...(siteId ? { id: siteId } : {}), plants: { some: {} } },
       orderBy: { code: "asc" },
-      include: { plants: { orderBy: { name: "asc" }, select: { id: true, name: true } } },
+      select: { id: true, code: true, name: true },
     }),
   ]);
 
@@ -100,16 +98,15 @@ export default async function ReservationsPage({
                               ))}
                             </select>
                           </div>
-                          <SitePlantSelect
-                            sites={sitesForPicker}
-                            defaultPlantId={r.plantId}
-                            required
-                            className={`${ui.select} w-36`}
-                            siteLabel={dict.field.siteCode}
-                            plantLabel={dict.field.plant}
-                            sitePlaceholder={dict.field.selectSite}
-                            plantPlaceholder={dict.field.selectPlant}
-                          />
+                          <div>
+                            <label className={ui.label}>{dict.field.siteCode}</label>
+                            <select name="siteId" defaultValue={r.siteId} required className={`${ui.select} w-36`}>
+                              <option value="">{dict.field.selectSite}</option>
+                              {sitesForPicker.map((s) => (
+                                <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+                              ))}
+                            </select>
+                          </div>
                           <div>
                             <label className={ui.label}>{m.f.mix}</label>
                             <select name="mixId" defaultValue={r.mixId} required className={`${ui.select} w-36`}>
@@ -221,7 +218,7 @@ export default async function ReservationsPage({
                     </td>
                     <td className={ui.td}>
                       {r.project.name}
-                      <div className="text-xs text-ink-muted">{r.project.customer.legalName} · {r.plant.name}</div>
+                      <div className="text-xs text-ink-muted">{r.project.customer.legalName} · {r.site.name}</div>
                       {(r.siteLocation || r.siteContactName || r.siteContactPhone) && (
                         <div className="text-xs text-ink-muted">
                           {[r.siteLocation, r.siteContactName, r.siteContactPhone].filter(Boolean).join(" · ")}
@@ -332,14 +329,15 @@ export default async function ReservationsPage({
               ))}
             </select>
           </div>
-          <SitePlantSelect
-            sites={sitesForPicker}
-            required
-            siteLabel={dict.field.siteCode}
-            plantLabel={dict.field.plant}
-            sitePlaceholder={dict.field.selectSite}
-            plantPlaceholder={dict.field.selectPlant}
-          />
+          <div>
+            <label className={ui.label}>{dict.field.siteCode}</label>
+            <select name="siteId" required className={ui.select}>
+              <option value="">{dict.field.selectSite}</option>
+              {sitesForPicker.map((s) => (
+                <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+              ))}
+            </select>
+          </div>
           <div>
             <label className={ui.label}>{m.f.mix}</label>
             <select name="mixId" required className={ui.select}>

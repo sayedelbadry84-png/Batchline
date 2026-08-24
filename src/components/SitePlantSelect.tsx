@@ -16,6 +16,7 @@ type SiteWithPlants = { id: string; code: string; name: string; plants: { id: st
 export function SitePlantSelect({
   sites,
   name = "plantId",
+  siteFieldName,
   defaultPlantId,
   required,
   className,
@@ -26,6 +27,11 @@ export function SitePlantSelect({
 }: {
   sites: SiteWithPlants[];
   name?: string;
+  // When set, the site-level pick is also posted as its own named field
+  // (needed anywhere a form wants both the Plant and the Station, e.g.
+  // Production's manual booking, which creates a Reservation.siteId and
+  // immediately releases a BatchTicket.plantId in one submit).
+  siteFieldName?: string;
   defaultPlantId?: string;
   required?: boolean;
   className?: string;
@@ -45,7 +51,13 @@ export function SitePlantSelect({
     <>
       <div>
         <label className={ui.label}>{siteLabel}</label>
-        <select value={siteId} onChange={(e) => setSiteId(e.target.value)} className={selectClass}>
+        <select
+          name={siteFieldName}
+          defaultValue={siteId}
+          onChange={(e) => setSiteId(e.target.value)}
+          required={siteFieldName ? required : undefined}
+          className={selectClass}
+        >
           <option value="">{sitePlaceholder}</option>
           {sites.map((s) => (
             <option key={s.id} value={s.id}>

@@ -9,7 +9,7 @@ import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
 import { flagMaintenanceDue } from "@/lib/maintenance";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { DrumTimer } from "@/components/DrumTimer";
-import { effectiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
+import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
 const SEVEN_DAYS = 7;
 const OUTLOOK_DAYS = 7;
@@ -62,7 +62,7 @@ export default async function DashboardPage() {
     prisma.mixDesign.count(), // company-wide recipe library — never site-scoped, same as everywhere else
     prisma.customer.count(), // company-wide customer list — never site-scoped, same as everywhere else
     prisma.project.count(), // company-wide — a project isn't tied to any one plant, see the Project model comment
-    prisma.reservation.count({ where: { ...plantScopeWhere(siteId) } }),
+    prisma.reservation.count({ where: { ...reservationSiteScopeWhere(siteId) } }),
     prisma.truck.count({ where: { ...plantScopeWhere(siteId) } }),
     prisma.silo.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true } }),
     prisma.trip.findMany({
@@ -75,10 +75,10 @@ export default async function DashboardPage() {
       include: { components: { include: { material: true } } },
     }),
     prisma.reservation.findMany({
-      where: { status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] }, pourWindowStart: { gte: todayStart, lt: outlookEnd }, ...plantScopeWhere(siteId) },
+      where: { status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] }, pourWindowStart: { gte: todayStart, lt: outlookEnd }, ...reservationSiteScopeWhere(siteId) },
       include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } } },
     }),
-    prisma.reservation.findMany({ where: { status: "ON_HOLD", ...plantScopeWhere(siteId) }, include: { project: true } }),
+    prisma.reservation.findMany({ where: { status: "ON_HOLD", ...reservationSiteScopeWhere(siteId) }, include: { project: true } }),
     prisma.complianceCertificate.findMany({ include: { mix: true } }), // attached to MixDesign, not a site — same as Quality module
     prisma.invoice.findMany({
       where: { status: "SENT", ...plantScopeWhere(siteId) },

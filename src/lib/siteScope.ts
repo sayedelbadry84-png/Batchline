@@ -2,6 +2,12 @@ import "server-only";
 import { prisma } from "@/lib/prisma";
 import type { CurrentUser } from "@/lib/session";
 
+// UI-terminology note (see the same note on the Site model in
+// schema.prisma): every "site"/"plant" identifier in this file is the
+// internal Prisma name, unchanged from what it's always been — Site is
+// shown to users as "Plant" and Plant is shown as "Station". Nothing
+// here needed renaming, only what the screens print did.
+//
 // Every non-ADMIN role is restricted to their own site (a site can run
 // more than one production line — see Site/Plant in schema.prisma); only
 // ADMIN sees every site. A non-ADMIN account with no plant assigned gets
@@ -21,10 +27,20 @@ export function effectiveSiteId(user: CurrentUser | null): string | null {
   return user.plant?.siteId ?? NO_SITE_SENTINEL;
 }
 
-// For models with their own plantId scalar (Reservation, Employee, Truck,
-// Pump, MaterialReceipt, Silo, Hopper, Invoice, ...).
+// For models with their own plantId scalar, i.e. tied to a specific
+// station (Employee, Truck, Pump, MaterialReceipt, Silo, Hopper, Invoice,
+// ...) — NOT Reservation, which is booked at the Plant/Site level; see
+// reservationSiteScopeWhere below for that one.
 export function plantScopeWhere(siteId: string | null) {
   return siteId ? { plant: { siteId } } : {};
+}
+
+// For Reservation, which carries its own siteId scalar directly — it's
+// booked against a factory (Site), not a specific station (Plant); which
+// station actually produces it is chosen later, at batch-ticket release
+// time (see the Reservation model comment).
+export function reservationSiteScopeWhere(siteId: string | null) {
+  return siteId ? { siteId } : {};
 }
 
 // For Trip and anything hanging off it (DrumReturn, TestBatch), which has

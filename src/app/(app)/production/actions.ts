@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
-import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
+import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -42,7 +42,14 @@ const MAX_LOAD_M3 = 15;
 // self-approves on the way in) — pulled out so neither has to duplicate
 // the ticket-number/component-snapshot logic. Doesn't redirect; each
 // caller does that itself since they land somewhere different.
-async function releaseTicketForReservation(reservationId: string, requestedVolume: number) {
+//
+// plantId here is the STATION — the reservation itself only committed to
+// a plant/site (see the Reservation model comment); which station within
+// it actually produces this ticket is decided right here, at release
+// time, by whoever's releasing it. The caller is responsible for
+// validating plantId belongs to reservation.siteId and is ACTIVE before
+// calling this.
+async function releaseTicketForReservation(reservationId: string, requestedVolume: number, plantId: string) {
   const reservation = await prisma.reservation.findUnique({
     where: { id: reservationId },
     include: { mix: { include: { components: true } } },
@@ -53,7 +60,6 @@ async function releaseTicketForReservation(reservationId: string, requestedVolum
   const volumeM3 = Math.min(requestedVolume, remaining);
   if (volumeM3 <= 0) return null;
 
-  const plantId = reservation.plantId;
   const ticketCount = await prisma.batchTicket.count({ where: { plantId } });
   const ticketNumber = `BT-${new Date().getFullYear()}-${String(ticketCount + 1).padStart(4, "0")}`;
 
@@ -91,17 +97,21 @@ async function releaseTicketForReservation(reservationId: string, requestedVolum
 // A reservation's requested volume is a target, not a single truck load —
 // a 200 m³ pour goes out as many partial tickets (one per truck), each
 // deducting from what's left, until the reservation is fully dispatched.
+// Which STATION each of those tickets actually comes from is picked right
+// here, per release — not fixed once on the reservation — since capacity
+// at a specific line can genuinely differ truck to truck.
 export async function releaseBatchTicket(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "release");
 
   const reservationId = String(formData.get("reservationId") ?? "");
+  const plantId = String(formData.get("plantId") ?? "");
   const requestedVolume = Number(formData.get("volumeM3") ?? 0);
   // Lets the mobile field view (/operator) land back on its own ticket
   // detail page instead of the desktop one after releasing — same action,
   // same business logic, just a different "where do I keep working" target.
   const returnPrefix = String(formData.get("returnPrefix") ?? "/production");
-  if (!reservationId || !requestedVolume || requestedVolume <= 0) return;
+  if (!reservationId || !plantId || !requestedVolume || requestedVolume <= 0) return;
   if (requestedVolume > MAX_LOAD_M3) return;
 
   const reservation = await prisma.reservation.findUnique({ where: { id: reservationId } });
@@ -110,9 +120,15 @@ export async function releaseBatchTicket(formData: FormData) {
   // reservations that already cleared both sign-offs, but a stale page
   // or a second tab shouldn't be able to release against one that hasn't.
   if (!isReservationApproved(reservation)) return;
-  if (!(await isPlantInScope(reservation.plantId, effectiveSiteId(user!)))) return;
+  const siteId = effectiveSiteId(user!);
+  if (siteId !== null && reservation.siteId !== siteId) return;
+  // The chosen station must actually belong to this reservation's plant
+  // (site), and must be active — same guards used everywhere else a
+  // station gets picked for something new.
+  if (!(await isPlantInScope(plantId, reservation.siteId))) return;
+  if (!(await isPlantActive(plantId))) return;
 
-  const ticket = await releaseTicketForReservation(reservationId, requestedVolume);
+  const ticket = await releaseTicketForReservation(reservationId, requestedVolume, plantId);
   if (!ticket) return;
 
   revalidatePath("/production");
@@ -131,22 +147,25 @@ export async function createManualRelease(formData: FormData) {
   await requireActionPermission(user, "production", "manualBooking");
 
   const projectId = String(formData.get("projectId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const plantId = String(formData.get("plantId") ?? "");
   const mixId = String(formData.get("mixId") ?? "");
   const volumeM3 = Number(formData.get("volumeM3") ?? 0);
-  if (!projectId || !plantId || !mixId || !volumeM3 || volumeM3 <= 0) return;
+  if (!projectId || !siteId || !plantId || !mixId || !volumeM3 || volumeM3 <= 0) return;
   if (volumeM3 > MAX_LOAD_M3) return;
 
   const project = await prisma.project.findUnique({ where: { id: projectId } });
   if (!project) return;
-  if (!(await isPlantInScope(plantId, effectiveSiteId(user!)))) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user!))) return;
+  // The chosen station must actually belong to the chosen plant (site).
+  if (!(await isPlantInScope(plantId, siteId))) return;
   if (!(await isPlantActive(plantId))) return; // frozen/decommissioned line: no new bookings
 
   const now = new Date();
   const reservation = await prisma.reservation.create({
     data: {
       projectId,
-      plantId,
+      siteId,
       mixId,
       requestedVolumeM3: volumeM3,
       pourWindowStart: now,
@@ -165,7 +184,7 @@ export async function createManualRelease(formData: FormData) {
     reasonCode: "MANUAL_BOOKING_CREATED",
   });
 
-  const ticket = await releaseTicketForReservation(reservation.id, volumeM3);
+  const ticket = await releaseTicketForReservation(reservation.id, volumeM3, plantId);
   if (!ticket) return;
 
   revalidatePath("/production");

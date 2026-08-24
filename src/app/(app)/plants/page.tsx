@@ -28,7 +28,7 @@ export default async function PlantsPage({
     include: {
       plants: {
         orderBy: { createdAt: "asc" },
-        include: { _count: { select: { silos: true, employees: true, reservations: true } } },
+        include: { _count: { select: { silos: true, employees: true, batchTickets: true } } },
       },
     },
   });
@@ -219,7 +219,7 @@ export default async function PlantsPage({
                           <td className={`${ui.td} font-mono tabular`} dir="ltr">{p.taxLabel} {p.taxRatePct}%</td>
                           <td className={`${ui.td} font-mono tabular`}>{p._count.silos}</td>
                           <td className={`${ui.td} font-mono tabular`}>{p._count.employees}</td>
-                          <td className={`${ui.td} font-mono tabular`}>{p._count.reservations}</td>
+                          <td className={`${ui.td} font-mono tabular`}>{p._count.batchTickets}</td>
                           <td className={ui.td}>
                             <span className={`${ui.chip} ${PLANT_STATUS_CHIP[p.status] ?? PLANT_STATUS_CHIP.ACTIVE}`}>
                               {dict.status[p.status as keyof typeof dict.status] ?? p.status}

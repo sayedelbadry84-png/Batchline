@@ -4,7 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { releaseBatchTicket, createManualRelease } from "./actions";
-import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { SitePlantSelect } from "@/components/SitePlantSelect";
 
 // A single mixer truck load — the same hard ceiling releaseBatchTicket
@@ -33,11 +33,15 @@ export default async function ProductionPage({
     prisma.reservation.findMany({
       // A reservation only shows up here — and can only be released against
       // — once it's cleared both sign-offs (see the Reservations module).
-      where: { status: { in: ["CONFIRMED", "IN_PRODUCTION"] }, initialApprovedAt: { not: null }, finalApprovedAt: { not: null }, ...plantScopeWhere(siteId) },
+      where: { status: { in: ["CONFIRMED", "IN_PRODUCTION"] }, initialApprovedAt: { not: null }, finalApprovedAt: { not: null }, ...reservationSiteScopeWhere(siteId) },
       include: {
         project: { include: { customer: true } },
         mix: true,
         batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
+        // The station (production line) is chosen right here, at release
+        // time — only that reservation's own plant's ACTIVE lines are
+        // offered (see the Reservation model comment in schema.prisma).
+        site: { include: { plants: { where: { status: "ACTIVE" }, orderBy: { name: "asc" }, select: { id: true, name: true } } } },
       },
       orderBy: { pourWindowStart: "asc" },
     }),
@@ -105,6 +109,7 @@ export default async function ProductionPage({
           </div>
           <SitePlantSelect
             sites={sitesForPicker}
+            siteFieldName="siteId"
             required
             className={`${ui.select} w-40`}
             siteLabel={dict.field.siteCode}
@@ -161,6 +166,17 @@ export default async function ProductionPage({
                   <td className={ui.td}>
                     <form action={releaseBatchTicket} className="flex items-center gap-1">
                       <input type="hidden" name="reservationId" value={r.id} />
+                      <select
+                        name="plantId"
+                        required
+                        defaultValue=""
+                        className="rounded-md border border-border bg-surface px-2 py-1.5 text-xs"
+                      >
+                        <option value="" disabled>{dict.field.selectPlant}</option>
+                        {r.site.plants.map((p) => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                      </select>
                       <input
                         name="volumeM3"
                         type="number"

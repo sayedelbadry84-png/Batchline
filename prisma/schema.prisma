@@ -92,6 +92,14 @@ model LoginAttempt {
 // What genuinely IS shared at the site level (raw-material silos/hoppers,
 // via sharedAcrossPlants below) is scoped by siteId, not globally, so two
 // unrelated sites' stock pools can never cross-contaminate each other.
+// UI-terminology note: this model is displayed to users as "Plant" /
+// "المصنع" (a physical factory location), and the Plant model below it is
+// displayed as "Station" / "المحطة" (one production line inside that
+// factory). The internal model/field names here (Site, Plant, siteId,
+// plantId) were never renamed to match — only the label text was — since
+// a full model rename is a far riskier migration for zero functional
+// gain; every "site"/"plant" identifier in code still means exactly what
+// it always did, it's only what the screen prints that changed.
 model Site {
   id        String   @id @default(cuid())
   // Short, human-assigned business code ("S1", "CAI") — distinct from the
@@ -105,7 +113,8 @@ model Site {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  plants Plant[]
+  plants       Plant[]
+  reservations Reservation[]
 }
 
 model Plant {
@@ -156,7 +165,6 @@ model Plant {
   silos                 Silo[]
   hoppers               Hopper[]
   employees             Employee[]
-  reservations          Reservation[]
   invoices              Invoice[]
   trucks                Truck[]
   batchTickets          BatchTicket[]
@@ -351,11 +359,16 @@ model Reservation {
   id                    String    @id @default(cuid())
   projectId             String
   project               Project   @relation(fields: [projectId], references: [id])
-  // The specific production line this reservation will be batched at —
-  // Project itself carries no plant, so this is where "which line" is
-  // actually decided (see the Project model comment).
-  plantId               String
-  plant                 Plant     @relation(fields: [plantId], references: [id])
+  // Which factory (Site — see the UI-terminology note on that model) this
+  // reservation is booked against. Deliberately NOT a specific production
+  // line: at booking time only the factory is committed to, since the
+  // customer/office side doesn't care and shouldn't have to care which of
+  // that factory's stations actually produces it. The specific line is
+  // chosen later, at batch-ticket release time (see BatchTicket.plantId
+  // in Production) — that's the operational decision, made when it's
+  // actually known which station has capacity right now.
+  siteId                String
+  site                  Site      @relation(fields: [siteId], references: [id])
   mixId                 String
   mix                   MixDesign @relation(fields: [mixId], references: [id])
   requestedVolumeM3     Float

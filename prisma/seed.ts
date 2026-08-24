@@ -95,7 +95,7 @@ async function main() {
   await prisma.reservation.create({
     data: {
       projectId: project.id,
-      plantId: plant.id,
+      siteId: site.id,
       mixId: mix.id,
       requestedVolumeM3: 7,
       pourWindowStart: new Date(Date.now() + 1000 * 60 * 60 * 24),

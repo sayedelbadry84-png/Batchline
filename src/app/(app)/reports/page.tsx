@@ -30,7 +30,7 @@ import {
   type IncentiveMethodKind,
 } from "@/lib/incentives";
 import { markDrumReturnFate } from "../trips/actions";
-import { effectiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
+import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
@@ -178,7 +178,7 @@ export default async function ReportsPage({
     where: {
       status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] },
       pourWindowStart: { gte: todayStart, lt: outlookEnd },
-      ...plantScopeWhere(restrictedSiteId),
+      ...reservationSiteScopeWhere(restrictedSiteId),
     },
     include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } } },
   });
