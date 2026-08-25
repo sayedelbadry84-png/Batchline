@@ -409,16 +409,18 @@ export async function startTrip(formData: FormData) {
     if (pump?.reachM != null && pump.reachM < ticket.reservation.minPumpReachM) return;
   }
 
-  // The select only ever offers this plant's active roster — re-verify the
-  // submitted id against it server-side rather than trusting the picker,
-  // same reasoning as the truck-busy check above. A stray id (stale page,
-  // crew member deactivated meanwhile) is dropped rather than trusted.
+  // The select offers the company-wide active roster (crew can work a
+  // different plant's pump the same day — see the picker's own comment) —
+  // re-verify the submitted id against that same company-wide set server-
+  // side rather than trusting the picker, same reasoning as the truck-busy
+  // check above. A stray id (stale page, crew member deactivated meanwhile)
+  // is dropped rather than trusted.
   let pumpOperatorId: string | null = null;
   let pumpAssistantId: string | null = null;
   let pumpOperatorName: string | null = null;
   let pumpAssistantName: string | null = null;
   if (isPumpDelivery && (pumpOperatorIdInput || pumpAssistantIdInput)) {
-    const crew = await prisma.pumpCrewMember.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" } });
+    const crew = await prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" } });
     if (pumpOperatorIdInput) {
       const match = crew.find((c) => c.id === pumpOperatorIdInput && c.role === "OPERATOR");
       if (match) {
@@ -497,7 +499,7 @@ export async function updateTripAssignment(formData: FormData) {
   let pumpOperatorName: string | null = null;
   let pumpAssistantName: string | null = null;
   if (isPumpDelivery && (pumpOperatorIdInput || pumpAssistantIdInput)) {
-    const crew = await prisma.pumpCrewMember.findMany({ where: { plantId: trip.batchTicket.plantId, status: "ACTIVE" } });
+    const crew = await prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" } });
     if (pumpOperatorIdInput) {
       const match = crew.find((c) => c.id === pumpOperatorIdInput && c.role === "OPERATOR");
       if (match) {
