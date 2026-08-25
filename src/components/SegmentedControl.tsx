@@ -3,18 +3,21 @@
 import { useState } from "react";
 
 // A button-group standing in for a single-select <select>, dropping one
-// hidden <input name> into the surrounding server-action form — same
-// "just a controlled hidden input" pattern as SearchableSelect.
+// hidden <input name> into the surrounding server-action form. Optional
+// onValueChange lets a parent client component (e.g. DeliveryPumpSection)
+// react to the choice too, without this component needing to know why.
 export function SegmentedControl({
   name,
   options,
   defaultValue = "",
   className,
+  onValueChange,
 }: {
   name: string;
   options: { value: string; label: string }[];
   defaultValue?: string;
   className?: string;
+  onValueChange?: (value: string) => void;
 }) {
   const [value, setValue] = useState(defaultValue);
 
@@ -25,7 +28,10 @@ export function SegmentedControl({
         <button
           key={o.value}
           type="button"
-          onClick={() => setValue(o.value)}
+          onClick={() => {
+            setValue(o.value);
+            onValueChange?.(o.value);
+          }}
           className={`rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
             value === o.value
               ? "border-accent bg-accent-soft text-accent-strong"

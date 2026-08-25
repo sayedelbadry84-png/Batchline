@@ -8,7 +8,7 @@ import { effectiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { canPerformAction } from "@/lib/permissions";
 import { Modal } from "@/components/Modal";
 import { SegmentedControl } from "@/components/SegmentedControl";
-import { PumpBookingRows } from "@/components/PumpBookingRows";
+import { DeliveryPumpSection } from "@/components/DeliveryPumpSection";
 import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
 
@@ -553,38 +553,28 @@ export default async function ReservationsPage({
                 <input name="temperatureC" type="number" step="0.5" className={ui.input} />
               </div>
             </div>
-            <div>
-              <label className={ui.label}>{m.f.deliveryMethod}</label>
-              <SegmentedControl
-                name="deliveryMethod"
-                defaultValue="CHUTE"
-                options={[
-                  { value: "CHUTE", label: dict.deliveryMethods.CHUTE },
-                  { value: "PUMP", label: dict.deliveryMethods.PUMP },
-                ]}
-              />
-            </div>
-            <div>
-              <label className={ui.label}>{m.f.minPumpReachM}</label>
-              <input name="minPumpReachM" type="number" step="0.5" className={ui.input} placeholder="42" />
-            </div>
-            <div>
-              <label className={ui.label}>{m.pumpSectionTitle}</label>
-              <PumpBookingRows
-                pumps={pumpsRaw}
-                operators={operators}
-                assistants={assistants}
-                labels={{
-                  pumpPlaceholder: m.f.pumpPlaceholder,
-                  operator: m.pumpOperator,
-                  assistant: m.pumpAssistant,
-                  none: dict.field.none,
-                  addAnother: m.addAnotherPump,
-                  remove: dict.field.delete,
-                  noCrewWarning: m.noCrewWarning,
-                }}
-              />
-            </div>
+            <DeliveryPumpSection
+              deliveryMethodLabel={m.f.deliveryMethod}
+              chuteLabel={dict.deliveryMethods.CHUTE}
+              pumpLabel={dict.deliveryMethods.PUMP}
+              minPumpReachLabel={m.f.minPumpReachM}
+              minPumpReachPlaceholder="42"
+              pumpSectionTitle={m.pumpSectionTitle}
+              pumps={pumpsRaw}
+              operators={operators}
+              assistants={assistants}
+              pumpRowLabels={{
+                pumpPlaceholder: m.f.pumpPlaceholder,
+                operator: m.pumpOperator,
+                assistant: m.pumpAssistant,
+                none: dict.field.none,
+                addAnother: m.addAnotherPump,
+                remove: dict.field.delete,
+                noCrewWarning: m.noCrewWarning,
+              }}
+              labelClassName={ui.label}
+              inputClassName={ui.input}
+            />
             <div>
               <label className={ui.label}>{m.f.structureType}</label>
               <select name="structureType" defaultValue="" className={ui.select}>

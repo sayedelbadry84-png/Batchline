@@ -17,6 +17,7 @@ export function PumpBookingRows({
   operators,
   assistants,
   labels,
+  disabled = false,
 }: {
   pumps: PumpOption[];
   operators: CrewOption[];
@@ -30,6 +31,11 @@ export function PumpBookingRows({
     remove: string;
     noCrewWarning: string;
   };
+  // Chute delivery has no pump to book — disabling (rather than unmounting)
+  // keeps the rows' state around if the person flips back to Pump, and a
+  // disabled <select> is simply omitted from the submitted FormData, so no
+  // server-side change is needed to keep chute submissions pump-free.
+  disabled?: boolean;
 }) {
   const [rows, setRows] = useState<number[]>([0]);
   const [nextId, setNextId] = useState(1);
@@ -44,7 +50,7 @@ export function PumpBookingRows({
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className={`flex flex-col gap-3 ${disabled ? "opacity-50" : ""}`}>
       {rows.map((id) => {
         const pump = pumps.find((p) => p.id === selectedPump[id]);
         const noCrew = pump != null && !pump.defaultOperatorId && !pump.defaultAssistantId;
@@ -54,6 +60,7 @@ export function PumpBookingRows({
               <select
                 name="pumpId"
                 defaultValue=""
+                disabled={disabled}
                 onChange={(e) => setSelectedPump((s) => ({ ...s, [id]: e.target.value }))}
                 className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
               >
@@ -71,6 +78,7 @@ export function PumpBookingRows({
                 key={`op-${pump?.id ?? id}`}
                 name="pumpOperatorId"
                 defaultValue={pump?.defaultOperatorId ?? ""}
+                disabled={disabled}
                 className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
               >
                 <option value="">{labels.none}</option>
@@ -84,6 +92,7 @@ export function PumpBookingRows({
                 key={`as-${pump?.id ?? id}`}
                 name="pumpAssistantId"
                 defaultValue={pump?.defaultAssistantId ?? ""}
+                disabled={disabled}
                 className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
               >
                 <option value="">{labels.none}</option>
@@ -94,8 +103,8 @@ export function PumpBookingRows({
                 ))}
               </select>
             </div>
-            {noCrew && <p className="mt-1 text-xs text-warn">{labels.noCrewWarning}</p>}
-            {rows.length > 1 && (
+            {!disabled && noCrew && <p className="mt-1 text-xs text-warn">{labels.noCrewWarning}</p>}
+            {!disabled && rows.length > 1 && (
               <button type="button" onClick={() => removeRow(id)} className="mt-1 text-xs font-medium text-critical hover:underline">
                 {labels.remove}
               </button>
@@ -103,7 +112,7 @@ export function PumpBookingRows({
           </div>
         );
       })}
-      <button type="button" onClick={addRow} className="text-sm font-medium text-accent-strong hover:underline">
+      <button type="button" onClick={addRow} disabled={disabled} className="text-sm font-medium text-accent-strong hover:underline disabled:pointer-events-none">
         + {labels.addAnother}
       </button>
     </div>
