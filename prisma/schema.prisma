@@ -113,8 +113,14 @@ model Site {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  plants       Plant[]
-  reservations Reservation[]
+  plants                Plant[]
+  reservations          Reservation[]
+  // Incentive policy/method lives at this level (Plant, in UI terms), not
+  // the specific Station below — see the migration note on
+  // DriverIncentivePolicy.
+  incentivePolicies     DriverIncentivePolicy[]
+  pumpIncentivePolicies PumpIncentivePolicy[]
+  incentiveMethods      IncentiveMethod[]
 }
 
 model Plant {
@@ -161,23 +167,18 @@ model Plant {
   createdAt                   DateTime @default(now())
   updatedAt                   DateTime @updatedAt
 
-  users                 User[]
-  silos                 Silo[]
-  hoppers               Hopper[]
-  employees             Employee[]
-  invoices              Invoice[]
-  trucks                Truck[]
-  batchTickets          BatchTicket[]
-  pumps                 Pump[]
-  materialReceipts      MaterialReceipt[]
-  pumpCrewMembers       PumpCrewMember[]
-  incentivePolicies     DriverIncentivePolicy[]
-  supportVehicles       SupportVehicle[]
-  // One row per role using the VOLUME_M3 incentive method — see the
-  // model comment on PumpIncentivePolicy for why it's an array now.
-  pumpIncentivePolicies PumpIncentivePolicy[]
-  incentiveMethods      IncentiveMethod[]
-  chemicalTanks         ChemicalTank[]
+  users            User[]
+  silos            Silo[]
+  hoppers          Hopper[]
+  employees        Employee[]
+  invoices         Invoice[]
+  trucks           Truck[]
+  batchTickets     BatchTicket[]
+  pumps            Pump[]
+  materialReceipts MaterialReceipt[]
+  pumpCrewMembers  PumpCrewMember[]
+  supportVehicles  SupportVehicle[]
+  chemicalTanks    ChemicalTank[]
 }
 
 model Silo {
@@ -883,8 +884,14 @@ model PumpCrewMember {
 // PUMP_ASSISTANT, BULKER_DRIVER, WATER_TANKER_DRIVER.
 model DriverIncentivePolicy {
   id                 String   @id @default(cuid())
-  plantId            String
-  plant              Plant    @relation(fields: [plantId], references: [id])
+  // Which factory (Site — see the UI-terminology note on that model) this
+  // policy applies to. Deliberately Plant-level, not a specific Station:
+  // a driver can load from more than one station at the same plant (or
+  // even a different plant) in one day, so the rate/threshold that
+  // applies is whichever plant a given trip actually happened at, not a
+  // station the driver happens to be nominally assigned to.
+  siteId             String
+  site               Site     @relation(fields: [siteId], references: [id])
   role               String   @default("MIXER_DRIVER")
   freeTripsThreshold Int      @default(10)
   tier2Threshold     Int      @default(15)
@@ -898,7 +905,7 @@ model DriverIncentivePolicy {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
-  @@unique([plantId, role])
+  @@unique([siteId, role])
 }
 
 model AuditEvent {
@@ -962,8 +969,11 @@ model ActionPermission {
 // One policy per (plant, role); its rate table is PumpReachRateBracket.
 model PumpIncentivePolicy {
   id           String   @id @default(cuid())
-  plantId      String
-  plant        Plant    @relation(fields: [plantId], references: [id])
+  // Plant-level, not Station-level — same reasoning as
+  // DriverIncentivePolicy.siteId above: a pump crew can work more than
+  // one station (even more than one plant) in a day.
+  siteId       String
+  site         Site     @relation(fields: [siteId], references: [id])
   role         String   @default("PUMP_OPERATOR")
   // "تارجت الشركة" — company target: m³ (or, for BULKER/WATER_TANKER
   // roles, tons) delivered up to this amount in the period earns
@@ -976,7 +986,7 @@ model PumpIncentivePolicy {
 
   rateBrackets PumpReachRateBracket[]
 
-  @@unique([plantId, role])
+  @@unique([siteId, role])
 }
 
 model PumpReachRateBracket {
@@ -1000,14 +1010,16 @@ model PumpReachRateBracket {
 // picks explicitly from the Incentives module's "plan" tab.
 model IncentiveMethod {
   id        String   @id @default(cuid())
-  plantId   String
-  plant     Plant    @relation(fields: [plantId], references: [id])
+  // Plant-level, not Station-level — same reasoning as
+  // DriverIncentivePolicy.siteId above.
+  siteId    String
+  site      Site     @relation(fields: [siteId], references: [id])
   role      String
   method    String // TRIP_COUNT, VOLUME_M3
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([plantId, role])
+  @@unique([siteId, role])
 }
 
 // Cement bulkers, water tankers, and loaders share one model (rather than

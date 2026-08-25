@@ -796,7 +796,7 @@ const en: typeof ar = {
       tier3Threshold: "Tier 3 up to trip #",
       tier3Rate: (currency: string) => `Tier 3 rate (${currency}/trip)`,
       beyondRate: (currency: string) => `Beyond tier 3 (${currency}/trip)`,
-      col: { driver: "Name", trips: "Trips this month", payout: "Payout" },
+      col: { driver: "Name", trips: "Trips this month", volume: "Volume (m³)", plants: "Plants", payout: "Payout" },
       empty: "No closed trips or deliveries this month yet.",
       roleLabel: {
         MIXER_DRIVER: "Mixer truck drivers",
@@ -901,6 +901,7 @@ const en: typeof ar = {
       wholeSite: "Whole plant (all stations)",
       applyScope: "Apply",
       scopeNote: "Scoped to the selected plant/station.",
+      equipmentScopeNote: "Equipment productivity is always company-wide, by equipment code — the plant/station filter above doesn't affect it.",
       overviewScopeNote: "Overview always covers every site — pick a specific site or line on any other tab.",
       productionTitle: "Production",
       producedToday: "Produced today",

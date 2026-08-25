@@ -107,9 +107,14 @@ export async function getTripsReport({ from, to, siteId, plantId }: ReportFilter
   return { rows: trips, totalDeliveredM3, tripCount: trips.length, avgCycleTimeMin };
 }
 
-export async function getEquipmentProductivityReport({ from, to, siteId, plantId }: ReportFilter) {
+// Deliberately ignores the siteId/plantId scope every other report here
+// takes — a truck or pump is grouped by its own CODE (below), and that
+// code's productivity is meant to read as one number for the asset across
+// wherever it actually worked, not fragmented by whichever plant a filter
+// happens to be narrowed to.
+export async function getEquipmentProductivityReport({ from, to }: Pick<ReportFilter, "from" | "to">) {
   const trips = await prisma.trip.findMany({
-    where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripPlantScopeWhere(siteId, plantId) },
+    where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to } },
     include: { truck: true, pump: true },
   });
 

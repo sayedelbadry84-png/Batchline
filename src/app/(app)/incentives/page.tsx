@@ -4,14 +4,13 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import {
-  rankDriversByIncentive,
-  rankByVolumeIncentive,
+  aggregateIncentiveResults,
   isReachBasedRole,
   DEFAULT_INCENTIVE_METHOD,
   INCENTIVE_ROLE_KEYS,
+  type ActivityEntry,
+  type SitePricing,
   type IncentivePolicy,
-  type DriverTripCount,
-  type PumpOperatorTrips,
   type IncentiveMethodKind,
 } from "@/lib/incentives";
 import {
@@ -32,24 +31,39 @@ const DEFAULT_POLICY: IncentivePolicy = {
   beyondRateSar: 20,
 };
 
-// --- Per-role trip/delivery sources — each of the five incentive roles is
+// --- Per-role activity sources — each of the five incentive roles is
 // backed by a different underlying record (Trip for mixer/pump crew,
-// MaterialReceipt filtered by material type for bulker/water drivers), so
-// each gets its own query rather than one generic lookup. Every role now
-// has BOTH a count- and a volume-shaped reader, since either the
-// TRIP_COUNT or the VOLUME_M3 method can apply to any of them (see
-// DEFAULT_INCENTIVE_METHOD / IncentiveMethod). ---
+// MaterialReceipt filtered by material type for bulker/water drivers).
+// Every source is fetched company-wide (no plantId filter) and each entry
+// carries its own siteId, derived from where the batch/receipt actually
+// happened — never from a driver's own current plant assignment, since a
+// driver can load from more than one plant in the same day (see the
+// aggregateIncentiveResults comment in src/lib/incentives.ts). ---
 
-async function mixerDriverTrips(plantId: string, monthStart: Date) {
-  return prisma.trip.findMany({
-    where: { status: "CLOSED", batchTime: { gte: monthStart }, driver: { plantId } },
-    select: { driverId: true, driver: { select: { name: true } }, volumeDeliveredM3: true },
+async function mixerDriverTrips(monthStart: Date): Promise<ActivityEntry[]> {
+  const trips = await prisma.trip.findMany({
+    where: { status: "CLOSED", batchTime: { gte: monthStart } },
+    select: {
+      driverId: true,
+      driver: { select: { name: true } },
+      volumeDeliveredM3: true,
+      batchTicket: { select: { plant: { select: { siteId: true } } } },
+    },
   });
+  return trips.map(
+    (t): ActivityEntry => ({
+      id: t.driverId,
+      name: t.driver.name,
+      siteId: t.batchTicket.plant.siteId,
+      volumeM3: t.volumeDeliveredM3 ?? 0,
+      reachM: null,
+    }),
+  );
 }
 
-async function pumpCrewTrips(plantId: string, monthStart: Date, crewField: "pumpOperatorId" | "pumpAssistantId") {
-  return prisma.trip.findMany({
-    where: { status: "CLOSED", batchTime: { gte: monthStart }, driver: { plantId }, [crewField]: { not: null } },
+async function pumpCrewTrips(monthStart: Date, crewField: "pumpOperatorId" | "pumpAssistantId"): Promise<ActivityEntry[]> {
+  const trips = await prisma.trip.findMany({
+    where: { status: "CLOSED", batchTime: { gte: monthStart }, [crewField]: { not: null } },
     select: {
       pumpOperatorId: true,
       pumpAssistantId: true,
@@ -57,67 +71,66 @@ async function pumpCrewTrips(plantId: string, monthStart: Date, crewField: "pump
       pumpAssistantCrew: { select: { name: true } },
       volumeDeliveredM3: true,
       pump: { select: { reachM: true } },
+      batchTicket: { select: { plant: { select: { siteId: true } } } },
     },
   });
+  return trips
+    .map((t): ActivityEntry | null => {
+      const id = crewField === "pumpOperatorId" ? t.pumpOperatorId : t.pumpAssistantId;
+      const name = crewField === "pumpOperatorId" ? t.pumpOperatorCrew?.name : t.pumpAssistantCrew?.name;
+      if (!id || !name) return null;
+      return {
+        id,
+        name,
+        siteId: t.batchTicket.plant.siteId,
+        volumeM3: t.volumeDeliveredM3 ?? 0,
+        reachM: t.pump?.reachM ?? null,
+      };
+    })
+    .filter((e): e is ActivityEntry => e !== null);
 }
 
-async function materialReceipts(plantId: string, monthStart: Date, materialType: string) {
-  return prisma.materialReceipt.findMany({
-    where: { plantId, receivedAt: { gte: monthStart }, material: { type: materialType } },
-    select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true },
+async function materialReceiptEntries(monthStart: Date, materialType: string): Promise<ActivityEntry[]> {
+  const receipts = await prisma.materialReceipt.findMany({
+    where: { receivedAt: { gte: monthStart }, material: { type: materialType } },
+    select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true, plant: { select: { siteId: true } } },
   });
+  return receipts
+    .map((r): ActivityEntry | null => {
+      const name = r.driver?.name ?? r.driverName;
+      if (!name) return null;
+      return {
+        id: r.driverId ?? `name:${name}`,
+        name,
+        siteId: r.plant.siteId,
+        volumeM3: r.netWeightKg / 1000,
+        reachM: null,
+      };
+    })
+    .filter((e): e is ActivityEntry => e !== null);
 }
 
-async function countsForRole(role: string, plantId: string, monthStart: Date): Promise<DriverTripCount[]> {
-  const counts = new Map<string, DriverTripCount>();
-  const bump = (id: string | null | undefined, name: string | null | undefined) => {
-    if (!id || !name) return;
-    const entry = counts.get(id) ?? { driverId: id, driverName: name, tripCount: 0 };
-    entry.tripCount += 1;
-    counts.set(id, entry);
-  };
-
-  if (role === "MIXER_DRIVER") {
-    for (const t of await mixerDriverTrips(plantId, monthStart)) bump(t.driverId, t.driver.name);
-  } else if (role === "PUMP_OPERATOR") {
-    for (const t of await pumpCrewTrips(plantId, monthStart, "pumpOperatorId")) bump(t.pumpOperatorId, t.pumpOperatorCrew?.name);
-  } else if (role === "PUMP_ASSISTANT") {
-    for (const t of await pumpCrewTrips(plantId, monthStart, "pumpAssistantId")) bump(t.pumpAssistantId, t.pumpAssistantCrew?.name);
-  } else if (role === "BULKER_DRIVER") {
-    for (const r of await materialReceipts(plantId, monthStart, "CEMENT")) bump(r.driverId ?? `name:${r.driver?.name ?? r.driverName}`, r.driver?.name ?? r.driverName);
-  } else if (role === "WATER_TANKER_DRIVER") {
-    for (const r of await materialReceipts(plantId, monthStart, "WATER")) bump(r.driverId ?? `name:${r.driver?.name ?? r.driverName}`, r.driver?.name ?? r.driverName);
-  }
-  return Array.from(counts.values());
-}
-
-async function volumeTripsForRole(role: string, plantId: string, monthStart: Date): Promise<PumpOperatorTrips[]> {
-  const byId = new Map<string, PumpOperatorTrips>();
-  const push = (id: string | null | undefined, name: string | null | undefined, volumeM3: number, reachM: number | null) => {
-    if (!id || !name) return;
-    const entry = byId.get(id) ?? { driverId: id, driverName: name, trips: [] };
-    entry.trips.push({ volumeM3, reachM });
-    byId.set(id, entry);
-  };
-
-  if (role === "MIXER_DRIVER") {
-    for (const t of await mixerDriverTrips(plantId, monthStart)) push(t.driverId, t.driver.name, t.volumeDeliveredM3 ?? 0, null);
-  } else if (role === "PUMP_OPERATOR") {
-    for (const t of await pumpCrewTrips(plantId, monthStart, "pumpOperatorId")) push(t.pumpOperatorId, t.pumpOperatorCrew?.name, t.volumeDeliveredM3 ?? 0, t.pump?.reachM ?? null);
-  } else if (role === "PUMP_ASSISTANT") {
-    for (const t of await pumpCrewTrips(plantId, monthStart, "pumpAssistantId")) push(t.pumpAssistantId, t.pumpAssistantCrew?.name, t.volumeDeliveredM3 ?? 0, t.pump?.reachM ?? null);
-  } else if (role === "BULKER_DRIVER") {
-    for (const r of await materialReceipts(plantId, monthStart, "CEMENT")) push(r.driverId ?? `name:${r.driver?.name ?? r.driverName}`, r.driver?.name ?? r.driverName, r.netWeightKg / 1000, null);
-  } else if (role === "WATER_TANKER_DRIVER") {
-    for (const r of await materialReceipts(plantId, monthStart, "WATER")) push(r.driverId ?? `name:${r.driver?.name ?? r.driverName}`, r.driver?.name ?? r.driverName, r.netWeightKg / 1000, null);
-  }
-  return Array.from(byId.values());
+async function activityForRole(role: string, monthStart: Date): Promise<ActivityEntry[]> {
+  if (role === "MIXER_DRIVER") return mixerDriverTrips(monthStart);
+  if (role === "PUMP_OPERATOR") return pumpCrewTrips(monthStart, "pumpOperatorId");
+  if (role === "PUMP_ASSISTANT") return pumpCrewTrips(monthStart, "pumpAssistantId");
+  if (role === "BULKER_DRIVER") return materialReceiptEntries(monthStart, "CEMENT");
+  if (role === "WATER_TANKER_DRIVER") return materialReceiptEntries(monthStart, "WATER");
+  return [];
 }
 
 type Dict = Awaited<ReturnType<typeof getDictionary>>["dict"];
 type M = Dict["modules"]["incentives"];
 
-function TripCountResultCard({ m, plant, role, ranked }: { m: M; plant: { id: string; currency: string }; role: string; ranked: ReturnType<typeof rankDriversByIncentive> }) {
+function ResultCard({
+  m,
+  role,
+  results,
+}: {
+  m: M;
+  role: string;
+  results: ReturnType<typeof aggregateIncentiveResults>;
+}) {
   return (
     <div className="flex flex-col gap-3 border-s-2 border-border ps-4">
       <h3 className="font-display text-sm font-semibold text-ink-muted">{m.roleLabel[role as keyof typeof m.roleLabel]}</h3>
@@ -127,50 +140,27 @@ function TripCountResultCard({ m, plant, role, ranked }: { m: M; plant: { id: st
             <tr>
               <th className={ui.th}>{m.col.driver}</th>
               <th className={ui.th}>{m.col.trips}</th>
+              <th className={ui.th}>{m.col.volume}</th>
+              <th className={ui.th}>{m.col.plants}</th>
               <th className={ui.th}>{m.col.payout}</th>
             </tr>
           </thead>
           <tbody>
-            {ranked.map((r) => (
-              <tr key={r.driverId}>
-                <td className={`${ui.td} font-medium`}>{r.driverName}</td>
+            {results.map((r) => (
+              <tr key={r.id}>
+                <td className={`${ui.td} font-medium`}>{r.name}</td>
                 <td className={`${ui.td} font-mono tabular`}>{r.tripCount}</td>
-                <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.payout.toLocaleString()} {plant.currency}</td>
-              </tr>
-            ))}
-            {ranked.length === 0 && (
-              <tr><td className={ui.td} colSpan={3}><span className="text-ink-muted">{m.empty}</span></td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function VolumeResultCard({ m, plant, role, ranked }: { m: M; plant: { id: string; currency: string }; role: string; ranked: ReturnType<typeof rankByVolumeIncentive> }) {
-  return (
-    <div className="flex flex-col gap-3 border-s-2 border-border ps-4">
-      <h3 className="font-display text-sm font-semibold text-ink-muted">{m.roleLabel[role as keyof typeof m.roleLabel]}</h3>
-      <div className={ui.card}>
-        <table className={ui.table}>
-          <thead>
-            <tr>
-              <th className={ui.th}>{m.col.driver}</th>
-              <th className={ui.th}>{m.pumpVolumeCol}</th>
-              <th className={ui.th}>{m.col.payout}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {ranked.map((r) => (
-              <tr key={r.driverId}>
-                <td className={`${ui.td} font-medium`}>{r.driverName}</td>
                 <td className={`${ui.td} font-mono tabular`}>{r.volumeM3.toFixed(1)}</td>
-                <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.payout.toLocaleString()} {plant.currency}</td>
+                <td className={`${ui.td} text-xs text-ink-muted`}>{r.siteNames.join(", ")}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">
+                  {r.payoutByCurrency.length === 0
+                    ? "—"
+                    : r.payoutByCurrency.map((p) => `${p.amount.toLocaleString()} ${p.currency}`).join(" + ")}
+                </td>
               </tr>
             ))}
-            {ranked.length === 0 && (
-              <tr><td className={ui.td} colSpan={3}><span className="text-ink-muted">{m.empty}</span></td></tr>
+            {results.length === 0 && (
+              <tr><td className={ui.td} colSpan={5}><span className="text-ink-muted">{m.empty}</span></td></tr>
             )}
           </tbody>
         </table>
@@ -186,9 +176,17 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
   const { tab: tabRaw } = await searchParams;
   const tab: "results" | "plan" = tabRaw === "plan" ? "plan" : "results";
 
-  const plants = await prisma.plant.findMany({
+  // Policy/method configuration lives at the Plant level (Site — see the
+  // UI-terminology note in schema.prisma), not the specific Station: a
+  // driver isn't tied to one line, so neither is the rate that applies to
+  // them. currency isn't itself a Site field (still a Station one — see
+  // Plant.currency) so a site's first station stands in as its
+  // representative currency for display; every station at one real-world
+  // site is expected to actually share one currency in practice.
+  const sites = await prisma.site.findMany({
     orderBy: { name: "asc" },
     include: {
+      plants: { orderBy: { name: "asc" }, take: 1, select: { currency: true } },
       incentivePolicies: true,
       pumpIncentivePolicies: { include: { rateBrackets: { orderBy: { minReachM: "asc" } } } },
       incentiveMethods: true,
@@ -199,10 +197,11 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
 
-  const plantData = plants.map((plant) => {
-    const methodOverride = new Map(plant.incentiveMethods.map((r) => [r.role, r.method as IncentiveMethodKind]));
+  const siteData = sites.map((site) => {
+    const methodOverride = new Map(site.incentiveMethods.map((r) => [r.role, r.method as IncentiveMethodKind]));
     const effectiveMethod = (role: string): IncentiveMethodKind => methodOverride.get(role) ?? DEFAULT_INCENTIVE_METHOD[role];
-    return { plant, effectiveMethod };
+    const currency = site.plants[0]?.currency ?? "EGP";
+    return { site, effectiveMethod, currency };
   });
 
   return (
@@ -227,41 +226,39 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
 
       {tab === "results" &&
         (await Promise.all(
-          plantData.map(async ({ plant, effectiveMethod }) => {
-            const roleCards = await Promise.all(
-              INCENTIVE_ROLE_KEYS.map(async (role) => {
-                const method = effectiveMethod(role);
-                if (method === "VOLUME_M3") {
-                  const policy = plant.pumpIncentivePolicies.find((p) => p.role === role);
-                  const trips = await volumeTripsForRole(role, plant.id, monthStart);
-                  const ranked = rankByVolumeIncentive(trips, policy?.freeVolumeM3 ?? 0, policy?.rateBrackets ?? []);
-                  return <VolumeResultCard key={role} m={m} plant={plant} role={role} ranked={ranked} />;
-                }
-                const policy: IncentivePolicy = plant.incentivePolicies.find((p) => p.role === role) ?? DEFAULT_POLICY;
-                const counts = await countsForRole(role, plant.id, monthStart);
-                const ranked = rankDriversByIncentive(counts, policy);
-                return <TripCountResultCard key={role} m={m} plant={plant} role={role} ranked={ranked} />;
+          INCENTIVE_ROLE_KEYS.map(async (role) => {
+            const entries = await activityForRole(role, monthStart);
+            const sitePricing = new Map<string, SitePricing>(
+              siteData.map(({ site, effectiveMethod, currency }) => {
+                const volumePolicy = site.pumpIncentivePolicies.find((p) => p.role === role);
+                return [
+                  site.id,
+                  {
+                    siteName: site.name,
+                    currency,
+                    method: effectiveMethod(role),
+                    tripPolicy: site.incentivePolicies.find((p) => p.role === role) ?? DEFAULT_POLICY,
+                    freeVolumeM3: volumePolicy?.freeVolumeM3 ?? 0,
+                    rateBrackets: volumePolicy?.rateBrackets ?? [],
+                  },
+                ];
               }),
             );
-            return (
-              <div key={plant.id} className="flex flex-col gap-6">
-                <h2 className="font-display text-lg font-semibold">{plant.name}</h2>
-                {roleCards}
-              </div>
-            );
+            const results = aggregateIncentiveResults(entries, sitePricing);
+            return <ResultCard key={role} m={m} role={role} results={results} />;
           }),
         ))}
 
       {tab === "plan" &&
-        plantData.map(({ plant, effectiveMethod }) => (
-          <div key={plant.id} className="flex flex-col gap-6">
-            <h2 className="font-display text-lg font-semibold">{plant.name}</h2>
+        siteData.map(({ site, effectiveMethod, currency }) => (
+          <div key={site.id} className="flex flex-col gap-6">
+            <h2 className="font-display text-lg font-semibold">{site.name}</h2>
             <p className="text-sm text-ink-muted">{m.planIntro}</p>
 
             {INCENTIVE_ROLE_KEYS.map((role) => {
               const method = effectiveMethod(role);
-              const tripPolicy: IncentivePolicy = plant.incentivePolicies.find((p) => p.role === role) ?? DEFAULT_POLICY;
-              const volumePolicy = plant.pumpIncentivePolicies.find((p) => p.role === role);
+              const tripPolicy: IncentivePolicy = site.incentivePolicies.find((p) => p.role === role) ?? DEFAULT_POLICY;
+              const volumePolicy = site.pumpIncentivePolicies.find((p) => p.role === role);
               const reachBased = isReachBasedRole(role);
               const flatRate = volumePolicy?.rateBrackets[0]?.ratePerM3Sar ?? 0;
 
@@ -270,7 +267,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                   <h3 className="font-display text-sm font-semibold text-ink-muted">{m.roleLabel[role as keyof typeof m.roleLabel]}</h3>
 
                   <form action={setIncentiveMethod} className="flex items-end gap-3">
-                    <input type="hidden" name="plantId" value={plant.id} />
+                    <input type="hidden" name="siteId" value={site.id} />
                     <input type="hidden" name="role" value={role} />
                     <div>
                       <label className={ui.label}>{m.methodCol.method}</label>
@@ -284,7 +281,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
 
                   {method === "TRIP_COUNT" ? (
                     <form action={updateIncentivePolicy} className={`${ui.card} flex flex-wrap items-end gap-4`}>
-                      <input type="hidden" name="plantId" value={plant.id} />
+                      <input type="hidden" name="siteId" value={site.id} />
                       <input type="hidden" name="role" value={role} />
                       <div>
                         <label className={ui.label}>{m.freeTrips}</label>
@@ -295,7 +292,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                         <input name="tier2Threshold" type="number" defaultValue={tripPolicy.tier2Threshold} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                       </div>
                       <div>
-                        <label className={ui.label}>{m.tier2Rate(plant.currency)}</label>
+                        <label className={ui.label}>{m.tier2Rate(currency)}</label>
                         <input name="tier2RateSar" type="number" step="0.5" defaultValue={tripPolicy.tier2RateSar} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                       </div>
                       <div>
@@ -303,11 +300,11 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                         <input name="tier3Threshold" type="number" defaultValue={tripPolicy.tier3Threshold} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                       </div>
                       <div>
-                        <label className={ui.label}>{m.tier3Rate(plant.currency)}</label>
+                        <label className={ui.label}>{m.tier3Rate(currency)}</label>
                         <input name="tier3RateSar" type="number" step="0.5" defaultValue={tripPolicy.tier3RateSar} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                       </div>
                       <div>
-                        <label className={ui.label}>{m.beyondRate(plant.currency)}</label>
+                        <label className={ui.label}>{m.beyondRate(currency)}</label>
                         <input name="beyondRateSar" type="number" step="0.5" defaultValue={tripPolicy.beyondRateSar} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                       </div>
                       <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">{dict.field.save}</button>
@@ -316,7 +313,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                     <>
                       <p className="text-xs text-ink-muted">{m.pumpIncentiveNote}</p>
                       <form action={updatePumpIncentivePolicy} className={`${ui.card} flex flex-wrap items-end gap-4`}>
-                        <input type="hidden" name="plantId" value={plant.id} />
+                        <input type="hidden" name="siteId" value={site.id} />
                         <input type="hidden" name="role" value={role} />
                         <div>
                           <label className={ui.label}>{m.pumpFreeVolume}</label>
@@ -340,7 +337,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                               {(volumePolicy?.rateBrackets ?? []).map((b) => (
                                 <tr key={b.id}>
                                   <td className={`${ui.td} font-mono tabular`} dir="ltr">{b.minReachM}–{b.maxReachM ?? "∞"} m</td>
-                                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{b.ratePerM3Sar} {plant.currency}/m³</td>
+                                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{b.ratePerM3Sar} {currency}/m³</td>
                                   <td className={ui.td}>
                                     <form action={deletePumpRateBracket}>
                                       <input type="hidden" name="id" value={b.id} />
@@ -355,7 +352,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                             </tbody>
                           </table>
                           <form action={addPumpRateBracket} className="mt-3 flex flex-wrap items-end gap-3">
-                            <input type="hidden" name="plantId" value={plant.id} />
+                            <input type="hidden" name="siteId" value={site.id} />
                             <input type="hidden" name="role" value={role} />
                             <div>
                               <label className={ui.label}>{m.pumpRateCol.minReach}</label>
@@ -374,10 +371,10 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                         </div>
                       ) : (
                         <form action={setFlatVolumeRate} className={`${ui.card} flex flex-wrap items-end gap-4`}>
-                          <input type="hidden" name="plantId" value={plant.id} />
+                          <input type="hidden" name="siteId" value={site.id} />
                           <input type="hidden" name="role" value={role} />
                           <div>
-                            <label className={ui.label}>{m.flatRate(plant.currency)}</label>
+                            <label className={ui.label}>{m.flatRate(currency)}</label>
                             <input name="ratePerM3Sar" type="number" step="0.5" defaultValue={flatRate} className="w-28 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                           </div>
                           <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">{dict.field.save}</button>

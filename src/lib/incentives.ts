@@ -139,3 +139,90 @@ export type IncentiveRoleKey = (typeof INCENTIVE_ROLE_KEYS)[number];
 export function isReachBasedRole(role: string): boolean {
   return role === "PUMP_OPERATOR" || role === "PUMP_ASSISTANT";
 }
+
+// --- Cross-plant aggregation ---------------------------------------------
+// A driver (or pump operator/assistant) can load from more than one plant
+// — even a different plant, not just a different station at the same one
+// — on the same day. The incentive policy itself now lives at the plant
+// level (see the schema migration note on DriverIncentivePolicy), so one
+// person's period total has to be priced per-plant first, using whichever
+// policy and method that specific plant has configured, then summed — the
+// same price-then-merge principle invoicing already follows, applied here
+// to a payout instead of a bill. Currencies are never blended: a person
+// who worked plants with different currencies gets one subtotal per
+// currency rather than one wrong combined number.
+
+export type ActivityEntry = { id: string; name: string; siteId: string; volumeM3: number; reachM: number | null };
+
+export type SitePricing = {
+  siteName: string;
+  currency: string;
+  method: IncentiveMethodKind;
+  tripPolicy: IncentivePolicy;
+  freeVolumeM3: number;
+  rateBrackets: PumpRateBracket[];
+};
+
+export type CurrencyAmount = { currency: string; amount: number };
+
+export type AggregatedIncentiveResult = {
+  id: string;
+  name: string;
+  tripCount: number;
+  volumeM3: number;
+  payoutByCurrency: CurrencyAmount[];
+  siteNames: string[];
+};
+
+export function aggregateIncentiveResults(
+  entries: ActivityEntry[],
+  sitePricing: Map<string, SitePricing>,
+): AggregatedIncentiveResult[] {
+  const byPerson = new Map<string, { name: string; bySite: Map<string, ActivityEntry[]> }>();
+  for (const e of entries) {
+    if (!e.id || !e.name) continue;
+    const person = byPerson.get(e.id) ?? { name: e.name, bySite: new Map<string, ActivityEntry[]>() };
+    const siteEntries = person.bySite.get(e.siteId) ?? [];
+    siteEntries.push(e);
+    person.bySite.set(e.siteId, siteEntries);
+    byPerson.set(e.id, person);
+  }
+
+  const results: AggregatedIncentiveResult[] = [];
+  for (const [id, { name, bySite }] of byPerson) {
+    let tripCount = 0;
+    let volumeM3 = 0;
+    const payoutByCurrency = new Map<string, number>();
+    const siteNames: string[] = [];
+
+    for (const [siteId, siteEntries] of bySite) {
+      const pricing = sitePricing.get(siteId);
+      if (!pricing) continue;
+      tripCount += siteEntries.length;
+      volumeM3 += siteEntries.reduce((sum, e) => sum + e.volumeM3, 0);
+      siteNames.push(pricing.siteName);
+
+      const payout =
+        pricing.method === "VOLUME_M3"
+          ? calculateVolumeIncentivePayout(siteEntries, pricing.freeVolumeM3, pricing.rateBrackets)
+          : calculateDriverPayout(siteEntries.length, pricing.tripPolicy);
+
+      payoutByCurrency.set(pricing.currency, (payoutByCurrency.get(pricing.currency) ?? 0) + payout);
+    }
+
+    results.push({
+      id,
+      name,
+      tripCount,
+      volumeM3,
+      payoutByCurrency: Array.from(payoutByCurrency.entries()).map(([currency, amount]) => ({ currency, amount })),
+      siteNames,
+    });
+  }
+
+  return results.sort((a, b) => {
+    const totalA = a.payoutByCurrency.reduce((s, p) => s + p.amount, 0);
+    const totalB = b.payoutByCurrency.reduce((s, p) => s + p.amount, 0);
+    return totalB - totalA || b.tripCount - a.tripCount;
+  });
+}

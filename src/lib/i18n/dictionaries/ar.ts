@@ -789,7 +789,7 @@ const ar = {
       tier3Threshold: "المستوى الثالث حتى الرحلة رقم",
       tier3Rate: (currency: string) => `سعر المستوى الثالث (${currency}/رحلة)`,
       beyondRate: (currency: string) => `بعد المستوى الثالث (${currency}/رحلة)`,
-      col: { driver: "الاسم", trips: "رحلات هذا الشهر", payout: "الحافز" },
+      col: { driver: "الاسم", trips: "رحلات هذا الشهر", volume: "الكمية (م³)", plants: "المصانع", payout: "الحافز" },
       empty: "لا توجد رحلات أو توريدات مغلقة هذا الشهر بعد.",
       roleLabel: {
         MIXER_DRIVER: "سائقو الخلاطات",
@@ -894,6 +894,7 @@ const ar = {
       wholeSite: "المصنع بالكامل (كل المحطات)",
       applyScope: "تطبيق",
       scopeNote: "مقيّد بالمصنع/المحطة المحددة.",
+      equipmentScopeNote: "إنتاجية المعدات دائمًا على مستوى الشركة بالكامل، بحسب كود المعدة — فلتر المصنع/المحطة أعلاه لا يؤثر عليها.",
       overviewScopeNote: "النظرة العامة تغطي دائماً كل المواقع — اختر موقعاً أو خطاً محدداً من أي تبويبة أخرى.",
       productionTitle: "الإنتاج",
       producedToday: "المنتَج اليوم",

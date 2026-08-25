@@ -302,7 +302,9 @@ export default async function ReportsPage({
   const consumption = tab === "consumption" ? await getConsumptionReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
   const returnsData = tab === "returns" ? await getReturnsReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
   const tripsData = tab === "trips" ? await getTripsReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  // Deliberately company-wide regardless of the site/plant filter above —
+  // see the comment on getEquipmentProductivityReport itself.
+  const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport({ from: rangeStart, to: rangeEnd }) : null;
   const workersData = tab === "workers" ? await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
 
   const incentivesData =
@@ -338,19 +340,19 @@ export default async function ReportsPage({
                 const trips = await getVolumeTripDetailsForRole(role, { from: rangeStart, to: rangeEnd, ...scope });
                 const isPumpRole = role === "PUMP_OPERATOR" || role === "PUMP_ASSISTANT";
                 const plantRows = isPumpRole
-                  ? await prisma.pumpCrewMember.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, plantId: true, code: true } })
-                  : await prisma.employee.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, plantId: true, code: true } });
+                  ? await prisma.pumpCrewMember.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, code: true, plant: { select: { siteId: true } } } })
+                  : await prisma.employee.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, code: true, plant: { select: { siteId: true } } } });
                 const infoByDriver = new Map(plantRows.map((c) => [c.id, c]));
                 // Priced per driver row against ITS OWN plant's policy —
-                // never blindly merged before pricing, since two lines at
-                // different sites can (and do) run different rates. Only
-                // the already-correct payouts get merged next, by CODE
-                // when the person has one on file, so the same real
-                // worker registered under more than one site still shows
-                // as one company-wide total.
+                // never blindly merged before pricing, since two plants
+                // can (and do) run different rates. Only the already-
+                // correct payouts get merged next, by CODE when the
+                // person has one on file, so the same real worker
+                // registered under more than one plant still shows as one
+                // company-wide total.
                 return trips.map((op) => {
                   const info = infoByDriver.get(op.driverId);
-                  const policy = info?.plantId ? pumpPolicies.find((p) => p.plantId === info.plantId && p.role === role) : undefined;
+                  const policy = info ? pumpPolicies.find((p) => p.siteId === info.plant.siteId && p.role === role) : undefined;
                   const payout = policy ? calculateVolumeIncentivePayout(op.trips, policy.freeVolumeM3, policy.rateBrackets) : 0;
                   return { groupKey: info?.code || op.driverId, name: op.driverName, role, count: op.trips.length, payout };
                 });
@@ -432,7 +434,8 @@ export default async function ReportsPage({
           </div>
         )}
         <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">{m.applyScope}</button>
-        {tab !== "overview" && (siteId || plantId) && <p className="text-xs text-ink-muted">{m.scopeNote}</p>}
+        {tab !== "overview" && tab !== "equipment" && (siteId || plantId) && <p className="text-xs text-ink-muted">{m.scopeNote}</p>}
+        {tab === "equipment" && <p className="text-xs text-ink-muted">{m.equipmentScopeNote}</p>}
       </form>
       {tab === "overview" && <p className="no-print text-xs text-ink-muted">{m.overviewScopeNote}</p>}
 
