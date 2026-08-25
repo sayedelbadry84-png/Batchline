@@ -360,6 +360,7 @@ const en: typeof ar = {
       pendingInitial: "Awaiting initial approval",
       pendingFinal: "Awaiting final approval",
       alreadyReleased: (n: number) => `${n} m³ already released — can't reduce below this`,
+      closeReservation: "End reservation",
     },
     production: {
       eyebrow: "Module 03 — Production",

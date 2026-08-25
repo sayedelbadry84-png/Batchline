@@ -138,7 +138,7 @@ export default async function OperatorHomePage() {
                 type="number"
                 step="0.5"
                 max={r.remaining}
-                defaultValue={r.remaining}
+                placeholder={String(r.remaining)}
                 className="w-24 rounded-md border border-border bg-bg px-2 py-1.5 text-end font-mono text-sm"
               />
             </div>

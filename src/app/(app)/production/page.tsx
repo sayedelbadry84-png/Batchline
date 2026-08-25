@@ -182,7 +182,7 @@ export default async function ProductionPage({
                         type="number"
                         step="0.5"
                         max={Math.min(r.remaining, MAX_LOAD_M3)}
-                        defaultValue={Math.min(r.remaining, MAX_LOAD_M3)}
+                        placeholder={String(Math.min(r.remaining, MAX_LOAD_M3))}
                         className="w-20 rounded-md border border-border bg-surface px-2 py-1.5 font-mono text-xs"
                       />
                       <button className={ui.button}>{m.release}</button>

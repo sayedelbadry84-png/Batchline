@@ -359,6 +359,7 @@ const ar = {
       pendingInitial: "بانتظار الاعتماد الأولي",
       pendingFinal: "بانتظار الاعتماد النهائي",
       alreadyReleased: (n: number) => `${n} م³ صُرفت بالفعل — لا يمكن التقليل عن هذا الحد`,
+      closeReservation: "إنهاء الحجز",
     },
     production: {
       eyebrow: "الوحدة 03 — الإنتاج",

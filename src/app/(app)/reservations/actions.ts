@@ -126,6 +126,38 @@ export async function updateReservation(formData: FormData) {
   revalidatePath("/production");
 }
 
+// One-click "end this reservation now" for a booking that's done in
+// practice even though the requested volume was never fully delivered
+// (e.g. the site decided they don't need the rest of the pour). Doesn't
+// touch requestedVolumeM3, so there's no released-volume floor to check —
+// unlike updateReservation, which blocks shrinking the volume below what
+// already went out, closing early has nothing to shrink.
+export async function closeReservation(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "reservations", "edit");
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const reservation = await prisma.reservation.findUnique({ where: { id } });
+  if (!reservation) return;
+  if (["DELIVERED", "CANCELLED"].includes(reservation.status)) return;
+  const effSiteId = effectiveSiteId(user);
+  if (!isSiteInScope(reservation.siteId, effSiteId)) return;
+
+  await prisma.reservation.update({ where: { id }, data: { status: "DELIVERED" } });
+
+  await logAudit({
+    module: "Reservations",
+    recordId: id,
+    afterValue: "DELIVERED (closed early)",
+    reasonCode: "RESERVATION_CLOSED",
+  });
+
+  revalidatePath("/reservations");
+  revalidatePath("/production");
+}
+
 // "مسئول الحجوزات" — the reservations officer confirming the booking
 // itself (project, mix, volume, site details) is correct and ready to
 // move forward. First of the two required sign-offs.

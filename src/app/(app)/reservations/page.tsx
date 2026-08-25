@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal } from "./actions";
+import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal, closeReservation } from "./actions";
 import { effectiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { canPerformAction } from "@/lib/permissions";
 
@@ -301,9 +301,15 @@ export default async function ReservationsPage({
                     </td>
                     <td className={ui.td}>
                       {editable && (
-                        <Link href={`/reservations?edit=${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
-                          {dict.field.edit}
-                        </Link>
+                        <div className="flex flex-col items-start gap-1">
+                          <Link href={`/reservations?edit=${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                            {dict.field.edit}
+                          </Link>
+                          <form action={closeReservation}>
+                            <input type="hidden" name="id" value={r.id} />
+                            <button className="text-xs font-medium text-warn hover:underline">{m.closeReservation}</button>
+                          </form>
+                        </div>
                       )}
                     </td>
                   </tr>
