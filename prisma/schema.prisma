@@ -57,6 +57,7 @@ model User {
   sessions                    Session[]
   reservationInitialApprovals Reservation[] @relation("ReservationInitialApproval")
   reservationFinalApprovals   Reservation[] @relation("ReservationFinalApproval")
+  reservationClosures         Reservation[] @relation("ReservationClosedBy")
   apiKeysCreated              ApiKey[]
 }
 
@@ -373,6 +374,13 @@ model Reservation {
   mixId                 String
   mix                   MixDesign @relation(fields: [mixId], references: [id])
   requestedVolumeM3     Float
+  // Snapshotted once at creation and never touched again by
+  // updateReservation — requestedVolumeM3 above is the current (possibly
+  // revised) figure, this is what was actually booked first, so a report
+  // can show "booked 21, now 39" instead of losing the revision history
+  // (from the Dynamics Job Qty / Net Qty comparison). Null on rows created
+  // before this field existed; treat null as "same as requestedVolumeM3."
+  originalVolumeM3      Float?
   pourWindowStart       DateTime
   status                String    @default("REQUESTED") // REQUESTED, CONFIRMED, IN_PRODUCTION, DELIVERED, CANCELLED
   // Pour-order details captured at intake — distinct from the mix design's
@@ -425,6 +433,15 @@ model Reservation {
   finalApprovedAt       DateTime?
   finalApprovedById     String?
   finalApprovedBy       User?     @relation("ReservationFinalApproval", fields: [finalApprovedById], references: [id])
+  // Set only by closeReservation (the "end this reservation now" action) —
+  // a structured reason (from the Dynamics ModCancelReason comparison,
+  // same style as DrumReturn.reasonCode) plus an optional free-text note,
+  // so closing early is an accountable action, not a silent status flip.
+  closedAt              DateTime?
+  closedById            String?
+  closedBy              User?     @relation("ReservationClosedBy", fields: [closedById], references: [id])
+  closeReasonCode       String?
+  closeNote             String?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 

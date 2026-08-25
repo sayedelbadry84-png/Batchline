@@ -246,6 +246,9 @@ export default async function ReservationsPage({
                       {r.released > 0 && r.released < r.requestedVolumeM3
                         ? `${r.released} / ${r.requestedVolumeM3} m³`
                         : `${r.requestedVolumeM3} m³`}
+                      {r.originalVolumeM3 != null && r.originalVolumeM3 !== r.requestedVolumeM3 && (
+                        <div className="font-normal text-xs text-ink-muted">{m.originalVolume(r.originalVolumeM3)}</div>
+                      )}
                       {(r.slumpRequestedMm != null || r.temperatureC != null || r.cementType) && (
                         <div className="font-normal text-xs text-ink-muted">
                           {[
@@ -305,8 +308,14 @@ export default async function ReservationsPage({
                           <Link href={`/reservations?edit=${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
                             {dict.field.edit}
                           </Link>
-                          <form action={closeReservation}>
+                          <form action={closeReservation} className="flex items-center gap-1">
                             <input type="hidden" name="id" value={r.id} />
+                            <select name="closeReasonCode" required defaultValue="" className="rounded-md border border-border bg-surface px-1.5 py-1 text-xs">
+                              <option value="" disabled>{dict.closeReasonPlaceholder}</option>
+                              {Object.entries(dict.closeReasons).map(([k, label]) => (
+                                <option key={k} value={k}>{label}</option>
+                              ))}
+                            </select>
                             <button className="text-xs font-medium text-warn hover:underline">{m.closeReservation}</button>
                           </form>
                         </div>

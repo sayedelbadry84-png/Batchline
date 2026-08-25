@@ -5,6 +5,7 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getReleasedVolumeM3 } from "@/lib/reservations";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
+import { getCustomerOutstandingBalance } from "@/lib/billing";
 import { revalidatePath } from "next/cache";
 
 // Shared by create and update — the pour-order details captured at intake,
@@ -45,12 +46,15 @@ export async function createReservation(formData: FormData) {
   if (!projectId || !siteId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
-  // Credit check: requested project's customer credit limit must cover
-  // the standing balance implied by this reservation (simplified for Phase 1
-  // — a real implementation would sum outstanding invoices, not just flag).
+  // Credit check: the customer's real outstanding balance (unpaid invoice
+  // total, see getCustomerOutstandingBalance) must still be under their
+  // credit limit — a reservation booked while already over goes ON_HOLD
+  // instead of straight to CONFIRMED, same shape as the "no balance"
+  // cancel-pending state seen in the Dynamics comparison data.
   const project = await prisma.project.findUnique({ where: { id: projectId }, include: { customer: true } });
   if (!project) return;
-  const overCreditLimit = project.customer.creditLimit <= 0;
+  const outstandingBalance = await getCustomerOutstandingBalance(project.customer.id);
+  const overCreditLimit = outstandingBalance >= project.customer.creditLimit;
 
   const reservation = await prisma.reservation.create({
     data: {
@@ -58,6 +62,7 @@ export async function createReservation(formData: FormData) {
       siteId,
       mixId,
       requestedVolumeM3,
+      originalVolumeM3: requestedVolumeM3,
       pourWindowStart: new Date(pourWindowStartRaw),
       status: overCreditLimit ? "ON_HOLD" : "CONFIRMED",
       ...readPourDetails(formData),
@@ -137,7 +142,9 @@ export async function closeReservation(formData: FormData) {
   await requireActionPermission(user, "reservations", "edit");
 
   const id = String(formData.get("id") ?? "");
-  if (!id) return;
+  const closeReasonCode = String(formData.get("closeReasonCode") ?? "").trim();
+  const closeNote = String(formData.get("closeNote") ?? "").trim() || null;
+  if (!id || !closeReasonCode) return;
 
   const reservation = await prisma.reservation.findUnique({ where: { id } });
   if (!reservation) return;
@@ -145,12 +152,21 @@ export async function closeReservation(formData: FormData) {
   const effSiteId = effectiveSiteId(user);
   if (!isSiteInScope(reservation.siteId, effSiteId)) return;
 
-  await prisma.reservation.update({ where: { id }, data: { status: "DELIVERED" } });
+  await prisma.reservation.update({
+    where: { id },
+    data: {
+      status: "DELIVERED",
+      closedAt: new Date(),
+      closedById: user!.id,
+      closeReasonCode,
+      closeNote,
+    },
+  });
 
   await logAudit({
     module: "Reservations",
     recordId: id,
-    afterValue: "DELIVERED (closed early)",
+    afterValue: `DELIVERED (closed early — ${closeReasonCode})`,
     reasonCode: "RESERVATION_CLOSED",
   });
 

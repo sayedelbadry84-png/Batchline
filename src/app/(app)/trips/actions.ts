@@ -96,8 +96,14 @@ export async function closeTripWithReturn(formData: FormData) {
   const minutesSinceBatch = Math.round((now.getTime() - trip.batchTime.getTime()) / 60000);
   const plant = trip.batchTicket.plant;
 
+  // A load rejected on quality grounds (bad slump, contamination, etc.) is
+  // the plant's own failure, not the customer's — never charge for it
+  // regardless of how long it sat in the drum, unlike every other return
+  // reason below where the drum timer is what actually matters.
   let disposition: string;
-  if (minutesSinceBatch > plant.drumTimerLimitMinutes) {
+  if (reasonCode === "QUALITY_REJECTED") {
+    disposition = "NO_CHARGE";
+  } else if (minutesSinceBatch > plant.drumTimerLimitMinutes) {
     disposition = "FULL_WASTE";
   } else if (returnedVolumeM3 <= plant.returnAbsorptionThresholdM3) {
     disposition = "NO_CHARGE";

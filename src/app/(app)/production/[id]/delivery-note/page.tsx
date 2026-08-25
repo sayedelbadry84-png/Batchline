@@ -38,6 +38,7 @@ const L = {
   returnTime: "Return Time وقت العودة",
   pouringStart: "Pouring Start Time وقت بداية الصب",
   pouringEnd: "Pouring End Time وقت نهاية الصب",
+  loadNo: "Load No. رقم الحمولة",
   qtyDelivered: "QTY Delivered كمية المورد",
   qtyInMix: "QTY In Mix الكمية في الشاحنة",
   totalQty: "Total Qty اجمالى الكمية",
@@ -102,7 +103,9 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
     select: { id: true, volumeM3: true },
   });
   let cumulativeQtyM3 = 0;
+  let loadNumber = 0;
   for (const t of siblingTickets) {
+    loadNumber += 1;
     cumulativeQtyM3 += t.volumeM3;
     if (t.id === ticket.id) break;
   }
@@ -149,8 +152,9 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
           </div>
         </div>
 
-        <div className="grid grid-cols-3">
+        <div className="grid grid-cols-4">
           <Cell label={L.bookingRef} value={ticket.ticketNumber} />
+          <Cell label={L.loadNo} value={loadNumber} className="text-center" />
           <Cell label={L.customerCode} value={reservation.project.customer.code ?? "—"} />
           <Cell label={L.customerName} value={reservation.project.customer.legalName} className="text-end" />
         </div>

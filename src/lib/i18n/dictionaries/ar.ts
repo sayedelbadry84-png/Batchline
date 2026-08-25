@@ -234,6 +234,14 @@ const ar = {
     TRAFFIC_DELAY: "تأخر مروري",
     OTHER: "أخرى",
   },
+  closeReasonPlaceholder: "سبب الإنهاء…",
+  closeReasons: {
+    SITE_COMPLETE: "اكتمل الصب — لا حاجة للكمية المتبقية",
+    CUSTOMER_REQUEST: "طلب العميل",
+    NO_CREDIT_BALANCE: "حجز بدون رصيد ائتماني",
+    MIX_CHANGED: "تغيير الخلطة",
+    OTHER: "أخرى",
+  },
   returnFates: {
     DUMPED: "إغراق",
     RECLAIMED: "إعادة استخدام",
@@ -359,6 +367,7 @@ const ar = {
       pendingInitial: "بانتظار الاعتماد الأولي",
       pendingFinal: "بانتظار الاعتماد النهائي",
       alreadyReleased: (n: number) => `${n} م³ صُرفت بالفعل — لا يمكن التقليل عن هذا الحد`,
+      originalVolume: (n: number) => `الكمية الأصلية عند الحجز: ${n} م³`,
       closeReservation: "إنهاء الحجز",
     },
     production: {

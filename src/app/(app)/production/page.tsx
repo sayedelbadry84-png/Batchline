@@ -188,8 +188,14 @@ export default async function ProductionPage({
                       />
                       <button className={ui.button}>{m.release}</button>
                     </form>
-                    <form action={closeReservation} className="mt-1">
+                    <form action={closeReservation} className="mt-1 flex items-center gap-1">
                       <input type="hidden" name="id" value={r.id} />
+                      <select name="closeReasonCode" required defaultValue="" className="rounded-md border border-border bg-surface px-1.5 py-1 text-xs">
+                        <option value="" disabled>{dict.closeReasonPlaceholder}</option>
+                        {Object.entries(dict.closeReasons).map(([k, label]) => (
+                          <option key={k} value={k}>{label}</option>
+                        ))}
+                      </select>
                       <button className="text-xs font-medium text-warn hover:underline">
                         {dict.modules.reservations.closeReservation}
                       </button>

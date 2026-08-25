@@ -233,6 +233,14 @@ const en: typeof ar = {
     TRAFFIC_DELAY: "Traffic delay",
     OTHER: "Other",
   },
+  closeReasonPlaceholder: "Close reason…",
+  closeReasons: {
+    SITE_COMPLETE: "Pour complete — remaining volume not needed",
+    CUSTOMER_REQUEST: "Customer request",
+    NO_CREDIT_BALANCE: "Booked without credit balance",
+    MIX_CHANGED: "Mix design changed",
+    OTHER: "Other",
+  },
   returnFates: {
     DUMPED: "Dumped",
     RECLAIMED: "Reclaimed",
@@ -360,6 +368,7 @@ const en: typeof ar = {
       pendingInitial: "Awaiting initial approval",
       pendingFinal: "Awaiting final approval",
       alreadyReleased: (n: number) => `${n} m³ already released — can't reduce below this`,
+      originalVolume: (n: number) => `Original volume at booking: ${n} m³`,
       closeReservation: "End reservation",
     },
     production: {
