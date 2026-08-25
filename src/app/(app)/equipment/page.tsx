@@ -135,7 +135,7 @@ async function MixersTab({
     prisma.truck.findMany({
       where: { ...plantScopeWhere(siteId) },
       orderBy: { createdAt: "asc" },
-      include: { plant: true, defaultDriver: true, trips: { select: { status: true, batchTime: true } } },
+      include: { plant: { include: { site: true } }, defaultDriver: true, trips: { select: { status: true, batchTime: true } } },
     }),
     prisma.employee.findMany({ where: { role: "DRIVER", status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: true } }),
   ]);
@@ -250,9 +250,12 @@ async function MixersTab({
                     <span dir="ltr">{t.code}</span>
                     {t.openTripsCount > 0 && <span className={`${ui.chip} bg-accent-soft text-accent-strong ms-2`}>{m.mixers.onTrip}</span>}
                     {t.atYard && <span className={`${ui.chip} bg-good-soft text-good ms-2`}>{m.mixers.atYard}</span>}
-                    <div className="text-xs text-ink-faint">{t.plant.name}</div>
+                    <div className="text-xs text-ink-faint">{t.plant.site.code} — {t.plant.site.name}</div>
                   </td>
-                  <td className={ui.td}>{t.plant.name}</td>
+                  <td className={ui.td}>
+                    <span className="font-mono text-xs" dir="ltr">{t.plant.site.code}</span>
+                    <div className="text-xs text-ink-muted">{t.plant.site.name}</div>
+                  </td>
                   <td className={`${ui.td} font-mono tabular`}>{t.drumCapacityM3} m³</td>
                   <td className={ui.td}>{t.defaultDriver?.name || "—"}</td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.plateNumber || "—"}</td>
@@ -361,7 +364,7 @@ async function PumpsTab({
     prisma.pump.findMany({
       where: { ...plantScopeWhere(siteId) },
       orderBy: { createdAt: "asc" },
-      include: { plant: true, defaultOperator: true, defaultAssistant: true, trips: { select: { batchTime: true } } },
+      include: { plant: { include: { site: true } }, defaultOperator: true, defaultAssistant: true, trips: { select: { batchTime: true } } },
     }),
     prisma.pumpAssignment.findMany({
       where: { ...(siteId ? { pump: { plant: { siteId } } } : {}) },
@@ -489,7 +492,10 @@ async function PumpsTab({
                 ) : (
                   <tr key={p.id}>
                     <td className={`${ui.td} font-medium`} dir="ltr">{p.code}</td>
-                    <td className={ui.td}>{p.plant.name}</td>
+                    <td className={ui.td}>
+                      <span className="font-mono text-xs" dir="ltr">{p.plant.site.code}</span>
+                      <div className="text-xs text-ink-muted">{p.plant.site.name}</div>
+                    </td>
                     <td className={`${ui.td} font-mono text-xs`}>{dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}</td>
                     <td className={ui.td}>{p.defaultOperator?.name || "—"}</td>
                     <td className={ui.td}>{p.defaultAssistant?.name || "—"}</td>
@@ -707,7 +713,7 @@ async function SupportVehicleTab({
     prisma.supportVehicle.findMany({
       where: { type, ...plantScopeWhere(siteId) },
       orderBy: { createdAt: "asc" },
-      include: { plant: true, defaultDriver: true },
+      include: { plant: { include: { site: true } }, defaultDriver: true },
     }),
     prisma.employee.findMany({ where: { role: driverRole, status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: true } }),
   ]);
@@ -782,7 +788,10 @@ async function SupportVehicleTab({
               ) : (
                 <tr key={v.id}>
                   <td className={`${ui.td} font-medium`} dir="ltr">{v.code}</td>
-                  <td className={ui.td}>{v.plant.name}</td>
+                  <td className={ui.td}>
+                    <span className="font-mono text-xs" dir="ltr">{v.plant.site.code}</span>
+                    <div className="text-xs text-ink-muted">{v.plant.site.name}</div>
+                  </td>
                   <td className={`${ui.td} font-mono tabular`}>{v.year ?? "—"}</td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{v.chassisNumber || "—"}</td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{v.plateNumber || "—"}</td>

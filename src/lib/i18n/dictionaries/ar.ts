@@ -468,7 +468,7 @@ const ar = {
       markServiced: "تعليم كمُصانة",
       save: "حفظ",
       shared: {
-        code: "الرمز", plant: "المحطة", year: "سنة الصنع", chassisNumber: "رقم الشاسيه", plateNumber: "رقم لوحة المرور", status: "الحالة", actions: "الإجراءات",
+        code: "الرمز", plant: "المصنع", year: "سنة الصنع", chassisNumber: "رقم الشاسيه", plateNumber: "رقم لوحة المرور", status: "الحالة", actions: "الإجراءات",
       },
       mixers: {
         col: { truck: "الشاحنة", drumCapacity: "سعة الأسطوانة", maxRpm: "أقصى سرعة دوران", gpsDevice: "جهاز GPS", defaultDriver: "السائق الافتراضي", maintenance: "الصيانة" },
