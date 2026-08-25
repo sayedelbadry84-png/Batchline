@@ -422,6 +422,7 @@ const en: typeof ar = {
         stageOnSite: "On site",
         stageDischarging: "Discharging",
         stageClosed: "Closed",
+        printTicket: "Print delivery note",
       },
     },
     materialReceiving: {

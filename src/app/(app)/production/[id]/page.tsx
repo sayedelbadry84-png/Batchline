@@ -310,6 +310,9 @@ export default async function BatchTicketPage({
                 {dict.field.edit}
               </Link>
             )}
+            <Link href={`/production/${ticket.id}/delivery-note`} className="text-sm font-medium text-accent-strong hover:underline">
+              {d.printTicket}
+            </Link>
             <Link href="/trips" className="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt">
               {d.goToTrips}
             </Link>

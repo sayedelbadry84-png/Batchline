@@ -421,6 +421,7 @@ const ar = {
         stageOnSite: "وصول الموقع",
         stageDischarging: "التفريغ",
         stageClosed: "مغلقة",
+        printTicket: "طباعة تذكرة توريد",
       },
     },
     materialReceiving: {
