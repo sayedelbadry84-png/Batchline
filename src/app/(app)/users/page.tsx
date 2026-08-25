@@ -5,7 +5,6 @@ import { ui } from "@/lib/ui";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createUser, updateUser, resetUserPassword } from "./actions";
-import { SitePlantSelect } from "@/components/SitePlantSelect";
 
 // The real login-capable roles — a superset like Employee.role (which also
 // has DISPATCHER for HR purposes) doesn't apply here, since every value
@@ -28,12 +27,12 @@ export default async function UsersPage({
   const { edit: editId, resetPassword: resetId } = await searchParams;
 
   const [users, sitesForPicker, employees] = await Promise.all([
-    prisma.user.findMany({ orderBy: { createdAt: "asc" }, include: { plant: true, employee: true } }),
-    // Plant picker is Site (by code) first, then that site's own lines —
-    // see SitePlantSelect. Leaving the site unset (an ADMIN account needs
-    // no home plant) leaves the line select empty and disabled, so nothing
-    // is submitted for plantId — same "no plant" outcome as before.
-    prisma.site.findMany({ where: { plants: { some: {} } }, orderBy: { code: "asc" }, include: { plants: { orderBy: { name: "asc" }, select: { id: true, name: true } } } }),
+    prisma.user.findMany({ orderBy: { createdAt: "asc" }, include: { plant: { include: { site: true } }, employee: true } }),
+    // Registered by Plant code only, not a specific Station — same
+    // reasoning as Employees/Equipment (see resolvePlantIdForSite in
+    // siteScope.ts). Leaving the site unset (an ADMIN account needs no
+    // home plant) leaves plantId null — same "no plant" outcome as before.
+    prisma.site.findMany({ where: { plants: { some: {} } }, orderBy: { code: "asc" }, select: { id: true, code: true, name: true } }),
     prisma.employee.findMany({ orderBy: { name: "asc" } }),
   ]);
 
@@ -79,15 +78,15 @@ export default async function UsersPage({
                               ))}
                             </select>
                           </div>
-                          <SitePlantSelect
-                            sites={sitesForPicker}
-                            defaultPlantId={u.plantId ?? undefined}
-                            className={`${ui.select} w-36`}
-                            siteLabel={dict.field.siteCode}
-                            plantLabel={dict.field.plant}
-                            sitePlaceholder={dict.field.none}
-                            plantPlaceholder={dict.field.none}
-                          />
+                          <div>
+                            <label className={ui.label}>{dict.field.siteCode}</label>
+                            <select name="siteId" defaultValue={u.plant?.siteId ?? ""} className={`${ui.select} w-36`}>
+                              <option value="">{dict.field.none}</option>
+                              {sitesForPicker.map((s) => (
+                                <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+                              ))}
+                            </select>
+                          </div>
                           <div>
                             <label className={ui.label}>{m.f.employee}</label>
                             <select name="employeeId" defaultValue={u.employeeId ?? ""} className={`${ui.select} w-36`}>
@@ -144,7 +143,7 @@ export default async function UsersPage({
                     <td className={`${ui.td} font-medium`}>{u.name}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{u.email}</td>
                     <td className={`${ui.td} font-mono text-xs`}>{dict.roles[u.role as keyof typeof dict.roles] ?? u.role}</td>
-                    <td className={ui.td}>{u.plant?.name ?? "—"}</td>
+                    <td className={ui.td}>{u.plant ? `${u.plant.site.code} — ${u.plant.site.name}` : "—"}</td>
                     <td className={ui.td}>{u.employee?.name ?? "—"}</td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${u.status === "ACTIVE" ? "bg-good-soft text-good" : "bg-surface-alt text-ink-muted"}`}>
@@ -198,13 +197,15 @@ export default async function UsersPage({
               ))}
             </select>
           </div>
-          <SitePlantSelect
-            sites={sitesForPicker}
-            siteLabel={dict.field.siteCode}
-            plantLabel={dict.field.plant}
-            sitePlaceholder={dict.field.none}
-            plantPlaceholder={dict.field.none}
-          />
+          <div>
+            <label className={ui.label}>{dict.field.siteCode}</label>
+            <select name="siteId" className={ui.select}>
+              <option value="">{dict.field.none}</option>
+              {sitesForPicker.map((s) => (
+                <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+              ))}
+            </select>
+          </div>
           <div>
             <label className={ui.label}>{m.f.employee}</label>
             <select name="employeeId" className={ui.select}>

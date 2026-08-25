@@ -137,7 +137,7 @@ async function MixersTab({
       orderBy: { createdAt: "asc" },
       include: { plant: { include: { site: true } }, defaultDriver: true, trips: { select: { status: true, batchTime: true } } },
     }),
-    prisma.employee.findMany({ where: { role: "DRIVER", status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: true } }),
+    prisma.employee.findMany({ where: { role: "DRIVER", status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: { include: { site: true } } } }),
   ]);
 
   const trucks = trucksRaw.map((t) => {
@@ -228,7 +228,7 @@ async function MixersTab({
                         <label className={ui.label}>{m.mixers.f.defaultDriver}</label>
                         <select name="defaultDriverId" defaultValue={t.defaultDriverId ?? ""} className={`${ui.select} w-40`}>
                           <option value="">{dict.field.none}</option>
-                          {drivers.map((d) => <option key={d.id} value={d.id}>{d.name} — {d.plant.name}</option>)}
+                          {drivers.map((d) => <option key={d.id} value={d.id}>{d.name} — {d.plant.site.code} — {d.plant.site.name}</option>)}
                         </select>
                       </div>
                       <div>
@@ -335,7 +335,7 @@ async function MixersTab({
           <label className={ui.label}>{m.mixers.f.defaultDriver}</label>
           <select name="defaultDriverId" className={ui.select}>
             <option value="">{dict.field.none}</option>
-            {drivers.map((d) => <option key={d.id} value={d.id}>{d.name} — {d.plant.name}</option>)}
+            {drivers.map((d) => <option key={d.id} value={d.id}>{d.name} — {d.plant.site.code} — {d.plant.site.name}</option>)}
           </select>
         </div>
         <button type="submit" className={`${ui.button} mt-2`}>{m.mixers.add}</button>
@@ -379,7 +379,7 @@ async function PumpsTab({
       include: { project: true },
       orderBy: { pourWindowStart: "asc" },
     }),
-    prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: true } }),
+    prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: { include: { site: true } } } }),
   ]);
 
   const pumps = pumpsRaw.map((p) => {
@@ -466,14 +466,14 @@ async function PumpsTab({
                           <label className={ui.label}>{m.pumps.f.defaultOperator}</label>
                           <select name="defaultOperatorId" defaultValue={p.defaultOperatorId ?? ""} className={`${ui.select} w-40`}>
                             <option value="">{dict.field.none}</option>
-                            {operators.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.plant.name}</option>)}
+                            {operators.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.plant.site.code} — {c.plant.site.name}</option>)}
                           </select>
                         </div>
                         <div>
                           <label className={ui.label}>{m.pumps.f.defaultAssistant}</label>
                           <select name="defaultAssistantId" defaultValue={p.defaultAssistantId ?? ""} className={`${ui.select} w-40`}>
                             <option value="">{dict.field.none}</option>
-                            {assistants.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.plant.name}</option>)}
+                            {assistants.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.plant.site.code} — {c.plant.site.name}</option>)}
                           </select>
                         </div>
                         <div>
@@ -584,14 +584,14 @@ async function PumpsTab({
             <label className={ui.label}>{m.pumps.f.defaultOperator}</label>
             <select name="defaultOperatorId" className={ui.select}>
               <option value="">{dict.field.none}</option>
-              {operators.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.plant.name}</option>)}
+              {operators.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.plant.site.code} — {c.plant.site.name}</option>)}
             </select>
           </div>
           <div>
             <label className={ui.label}>{m.pumps.f.defaultAssistant}</label>
             <select name="defaultAssistantId" className={ui.select}>
               <option value="">{dict.field.none}</option>
-              {assistants.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.plant.name}</option>)}
+              {assistants.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.plant.site.code} — {c.plant.site.name}</option>)}
             </select>
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>{m.pumps.add}</button>
@@ -715,7 +715,7 @@ async function SupportVehicleTab({
       orderBy: { createdAt: "asc" },
       include: { plant: { include: { site: true } }, defaultDriver: true },
     }),
-    prisma.employee.findMany({ where: { role: driverRole, status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: true } }),
+    prisma.employee.findMany({ where: { role: driverRole, status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: { include: { site: true } } } }),
   ]);
 
   return (
@@ -769,7 +769,7 @@ async function SupportVehicleTab({
                         <label className={ui.label}>{m.supportVehicle.f.defaultDriver}</label>
                         <select name="defaultDriverId" defaultValue={v.defaultDriverId ?? ""} className={`${ui.select} w-40`}>
                           <option value="">{dict.field.none}</option>
-                          {drivers.map((d) => <option key={d.id} value={d.id}>{d.name} — {d.plant.name}</option>)}
+                          {drivers.map((d) => <option key={d.id} value={d.id}>{d.name} — {d.plant.site.code} — {d.plant.site.name}</option>)}
                         </select>
                       </div>
                       <div>
@@ -846,7 +846,7 @@ async function SupportVehicleTab({
           <label className={ui.label}>{m.supportVehicle.f.defaultDriver}</label>
           <select name="defaultDriverId" className={ui.select}>
             <option value="">{dict.field.none}</option>
-            {drivers.map((d) => <option key={d.id} value={d.id}>{d.name} — {d.plant.name}</option>)}
+            {drivers.map((d) => <option key={d.id} value={d.id}>{d.name} — {d.plant.site.code} — {d.plant.site.name}</option>)}
           </select>
         </div>
         <button type="submit" className={`${ui.button} mt-2`}>{m.supportVehicle.add}</button>

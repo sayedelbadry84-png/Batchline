@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
+import { resolvePlantIdForSite } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 const SALT_ROUNDS = 10;
@@ -16,11 +17,17 @@ export async function createUser(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const password = String(formData.get("password") ?? "");
   const role = String(formData.get("role") ?? "").trim();
-  const plantId = String(formData.get("plantId") ?? "") || null;
+  // Registered by Plant code, not a specific Station — same reasoning as
+  // Employees/pump crew (see resolvePlantIdForSite in siteScope.ts). An
+  // ADMIN account needs no home plant at all, so a blank siteId stays
+  // plantId null rather than trying to resolve one.
+  const siteId = String(formData.get("siteId") ?? "") || null;
   const employeeId = String(formData.get("employeeId") ?? "") || null;
 
   if (!email || !name || !password || !role) return;
   if (password.length < 8) return;
+
+  const plantId = siteId ? await resolvePlantIdForSite(siteId) : null;
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
 
@@ -42,11 +49,15 @@ export async function updateUser(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const role = String(formData.get("role") ?? "").trim();
-  const plantId = String(formData.get("plantId") ?? "") || null;
+  const siteId = String(formData.get("siteId") ?? "") || null;
   const employeeId = String(formData.get("employeeId") ?? "") || null;
   const status = String(formData.get("status") ?? "ACTIVE");
 
   if (!id || !name || !role) return;
+
+  const existing = await prisma.user.findUnique({ where: { id }, select: { plantId: true } });
+  if (!existing) return;
+  const plantId = siteId ? await resolvePlantIdForSite(siteId, existing.plantId) : null;
 
   await prisma.user.update({
     where: { id },
