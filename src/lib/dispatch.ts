@@ -16,7 +16,12 @@ export type RankedTruck = TruckOption & {
   recommended: boolean;
 };
 
-export function rankTrucksForVolume(trucks: TruckOption[], volumeM3: number): RankedTruck[] {
+// Generic over T so callers can pass extra fields through (e.g. plant/site
+// info for the assign-truck picker's label) without losing them off the
+// return type — the function only ever reads the TruckOption fields, but
+// preserves everything else via the spread below, same as it always did
+// at runtime; this just lets the type system agree.
+export function rankTrucksForVolume<T extends TruckOption>(trucks: T[], volumeM3: number): (T & { surplusM3: number; undersized: boolean; recommended: boolean })[] {
   const withFit = trucks.map((t) => ({
     ...t,
     surplusM3: t.drumCapacityM3 - volumeM3,

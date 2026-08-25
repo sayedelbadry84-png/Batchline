@@ -63,24 +63,28 @@ export default async function BatchTicketPage({
   const [trucksRaw, drivers, pumps, pumpCrew] = showAssignForm || showEditTripForm
     ? await Promise.all([
         prisma.truck.findMany({
-          // A truck already on an open trip elsewhere can't be assigned
-          // here too — matches the guarantee the Fleet page's own intro
-          // text makes ("can't be double-booked from Production"). When
-          // editing an existing trip, that trip's own truck doesn't count
-          // as "busy" against itself.
+          // Company-wide, not scoped to this ticket's own plant — a truck
+          // (or driver, pump, pump crew member below) commonly works more
+          // than one plant, so whoever is dispatching should be able to
+          // pull any of them in, not just the ones nominally registered
+          // here. A truck already on an open trip elsewhere still can't be
+          // assigned here too — matches the guarantee the Fleet page's own
+          // intro text makes ("can't be double-booked from Production").
+          // When editing an existing trip, that trip's own truck doesn't
+          // count as "busy" against itself.
           where: {
-            plantId: ticket.plantId,
             status: "ACTIVE",
             trips: { none: { status: { not: "CLOSED" }, ...(ticket.trip ? { id: { not: ticket.trip.id } } : {}) } },
           },
           orderBy: { code: "asc" },
+          include: { plant: { include: { site: true } } },
         }),
-        prisma.employee.findMany({ where: { plantId: ticket.plantId, role: "DRIVER" }, orderBy: { name: "asc" } }),
+        prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" }, include: { plant: { include: { site: true } } } }),
         isPumpDelivery
-          ? prisma.pump.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" }, orderBy: { code: "asc" } })
+          ? prisma.pump.findMany({ where: { status: "ACTIVE" }, orderBy: { code: "asc" }, include: { plant: { include: { site: true } } } })
           : Promise.resolve([]),
         isPumpDelivery
-          ? prisma.pumpCrewMember.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" }, orderBy: { name: "asc" } })
+          ? prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" }, include: { plant: { include: { site: true } } } })
           : Promise.resolve([]),
       ])
     : [[], [], [], []];
@@ -88,24 +92,26 @@ export default async function BatchTicketPage({
   const trucks = rankTrucksForVolume(trucksRaw, ticket.volumeM3);
 
   // Selecting the equipment pre-fills its registered default person(s) —
-  // still freely editable afterward — via EquipmentAssignPicker.
+  // still freely editable afterward — via EquipmentAssignPicker. Every
+  // option is labeled with its own plant (site) code/name now that the
+  // list spans the whole company, not just this ticket's plant.
   const truckOptions = trucks.map((t) => ({
     value: t.id,
-    label: `${t.code} (${t.drumCapacityM3} m³)${t.recommended ? ` — ${d.bestFit}` : ""}${t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}`,
+    label: `${t.code} (${t.drumCapacityM3} m³) — ${t.plant.site.code} — ${t.plant.site.name}${t.recommended ? ` — ${d.bestFit}` : ""}${t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}`,
     defaults: { driverId: t.defaultDriverId ?? "" },
   }));
-  const driverOptions = drivers.map((dr) => ({ value: dr.id, label: dr.name }));
+  const driverOptions = drivers.map((dr) => ({ value: dr.id, label: `${dr.name} — ${dr.plant.site.code} — ${dr.plant.site.name}` }));
   const pumpOptions = pumps.map((p) => {
     const insufficientReach =
       ticket.reservation.minPumpReachM != null && p.reachM != null && p.reachM < ticket.reservation.minPumpReachM;
     return {
       value: p.id,
-      label: `${p.code} (${dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}${p.reachM != null ? ` · ${p.reachM}m` : ""})${insufficientReach ? ` — ${d.pumpReachInsufficient}` : ""}`,
+      label: `${p.code} (${dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}${p.reachM != null ? ` · ${p.reachM}m` : ""}) — ${p.plant.site.code} — ${p.plant.site.name}${insufficientReach ? ` — ${d.pumpReachInsufficient}` : ""}`,
       defaults: { pumpOperatorId: p.defaultOperatorId ?? "", pumpAssistantId: p.defaultAssistantId ?? "" },
     };
   });
-  const operatorOptions = pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => ({ value: c.id, label: c.name }));
-  const assistantOptions = pumpCrew.filter((c) => c.role === "HELPER").map((c) => ({ value: c.id, label: c.name }));
+  const operatorOptions = pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => ({ value: c.id, label: `${c.name} — ${c.plant.site.code} — ${c.plant.site.name}` }));
+  const assistantOptions = pumpCrew.filter((c) => c.role === "HELPER").map((c) => ({ value: c.id, label: `${c.name} — ${c.plant.site.code} — ${c.plant.site.name}` }));
 
   return (
     <div className="flex flex-col gap-8">

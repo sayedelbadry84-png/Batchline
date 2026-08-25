@@ -40,18 +40,21 @@ export default async function OperatorTicketPage({
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
 
+  // Company-wide, not scoped to this ticket's own plant — see the same
+  // comment in production/[id]/page.tsx.
   const [trucksRaw, drivers, pumps, pumpCrew] = ticket.status === "COMPLETE" && !ticket.trip
     ? await Promise.all([
         prisma.truck.findMany({
-          where: { plantId: ticket.plantId, status: "ACTIVE", trips: { none: { status: { not: "CLOSED" } } } },
+          where: { status: "ACTIVE", trips: { none: { status: { not: "CLOSED" } } } },
           orderBy: { code: "asc" },
+          include: { plant: { include: { site: true } } },
         }),
-        prisma.employee.findMany({ where: { plantId: ticket.plantId, role: "DRIVER" }, orderBy: { name: "asc" } }),
+        prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" }, include: { plant: { include: { site: true } } } }),
         isPumpDelivery
-          ? prisma.pump.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" }, orderBy: { code: "asc" } })
+          ? prisma.pump.findMany({ where: { status: "ACTIVE" }, orderBy: { code: "asc" }, include: { plant: { include: { site: true } } } })
           : Promise.resolve([]),
         isPumpDelivery
-          ? prisma.pumpCrewMember.findMany({ where: { plantId: ticket.plantId, status: "ACTIVE" }, orderBy: { name: "asc" } })
+          ? prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" }, include: { plant: { include: { site: true } } } })
           : Promise.resolve([]),
       ])
     : [[], [], [], []];
@@ -61,21 +64,21 @@ export default async function OperatorTicketPage({
   const mobileSelect = "w-full rounded-md border border-border bg-bg px-2 py-2 text-sm";
   const truckOptions = trucks.map((t) => ({
     value: t.id,
-    label: `${t.code} (${t.drumCapacityM3} m³)${t.recommended ? ` — ${d.bestFit}` : ""}${t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}`,
+    label: `${t.code} (${t.drumCapacityM3} m³) — ${t.plant.site.code} — ${t.plant.site.name}${t.recommended ? ` — ${d.bestFit}` : ""}${t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}`,
     defaults: { driverId: t.defaultDriverId ?? "" },
   }));
-  const driverOptions = drivers.map((dr) => ({ value: dr.id, label: dr.name }));
+  const driverOptions = drivers.map((dr) => ({ value: dr.id, label: `${dr.name} — ${dr.plant.site.code} — ${dr.plant.site.name}` }));
   const pumpOptions = pumps.map((p) => {
     const insufficientReach =
       ticket.reservation.minPumpReachM != null && p.reachM != null && p.reachM < ticket.reservation.minPumpReachM;
     return {
       value: p.id,
-      label: `${p.code} (${dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}${p.reachM != null ? ` · ${p.reachM}m` : ""})${insufficientReach ? ` — ${d.pumpReachInsufficient}` : ""}`,
+      label: `${p.code} (${dict.pumpTypes[p.pumpType as keyof typeof dict.pumpTypes] ?? p.pumpType}${p.reachM != null ? ` · ${p.reachM}m` : ""}) — ${p.plant.site.code} — ${p.plant.site.name}${insufficientReach ? ` — ${d.pumpReachInsufficient}` : ""}`,
       defaults: { pumpOperatorId: p.defaultOperatorId ?? "", pumpAssistantId: p.defaultAssistantId ?? "" },
     };
   });
-  const operatorOptions = pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => ({ value: c.id, label: c.name }));
-  const assistantOptions = pumpCrew.filter((c) => c.role === "HELPER").map((c) => ({ value: c.id, label: c.name }));
+  const operatorOptions = pumpCrew.filter((c) => c.role === "OPERATOR").map((c) => ({ value: c.id, label: `${c.name} — ${c.plant.site.code} — ${c.plant.site.name}` }));
+  const assistantOptions = pumpCrew.filter((c) => c.role === "HELPER").map((c) => ({ value: c.id, label: `${c.name} — ${c.plant.site.code} — ${c.plant.site.name}` }));
 
   return (
     <div className="mx-auto flex min-h-screen max-w-sm flex-col gap-5 bg-bg px-5 py-6">
