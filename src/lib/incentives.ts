@@ -1,3 +1,5 @@
+import { prisma } from "@/lib/prisma";
+
 // Fourth AI/decision-layer feature this session: a tiered per-trip driver
 // bonus, modeled on the reviewed competitor's "TripMaster" scheme. Nothing
 // is stored precomputed — payout is derived live from closed Trip counts
@@ -225,4 +227,170 @@ export function aggregateIncentiveResults(
     const totalB = b.payoutByCurrency.reduce((s, p) => s + p.amount, 0);
     return totalB - totalA || b.tripCount - a.tripCount;
   });
+}
+
+// Fallback for a site with no policy row configured for a given role yet
+// (see updateIncentivePolicy) — free trips, no rate. Shared so a
+// not-yet-configured site prices identically everywhere, rather than each
+// caller inventing its own "reasonable" default.
+export const DEFAULT_POLICY: IncentivePolicy = {
+  freeTripsThreshold: 10,
+  tier2Threshold: 15,
+  tier2RateSar: 0,
+  tier3Threshold: 20,
+  tier3RateSar: 0,
+  beyondRateSar: 20,
+};
+
+// --- Per-role activity sources — the ONE place every incentive-payout
+// consumer (the Incentives module itself, and the Reports module's own
+// Incentives tab) reads trip/delivery activity from. Previously
+// reports/page.tsx kept its own separate copy of this logic that had
+// drifted out of sync with the real one here (wrong site resolution for
+// both the trip-count and volume-based roles), so the two screens could
+// — and did — disagree on the same person's payout. Never duplicate this
+// again; both pages call these same functions. `to` open-ended (the
+// Incentives module's own "since the 1st of this month, ongoing" view)
+// when omitted, bounded when Reports passes an explicit range.
+//
+// Each of the five incentive roles is backed by a different underlying
+// record (Trip for mixer/pump crew, MaterialReceipt filtered by material
+// type for bulker/water drivers). Every source is fetched company-wide (no
+// plantId filter) and each entry carries its own siteId, derived from
+// where the batch/receipt actually happened — never from a driver's own
+// current plant assignment, since a driver can load from more than one
+// plant in the same day (see the cross-plant aggregation note above). ---
+
+async function mixerDriverTrips(from: Date, to?: Date): Promise<ActivityEntry[]> {
+  const trips = await prisma.trip.findMany({
+    where: { status: "CLOSED", batchTime: { gte: from, ...(to ? { lte: to } : {}) } },
+    select: {
+      driverId: true,
+      driver: { select: { name: true } },
+      volumeDeliveredM3: true,
+      batchTicket: { select: { plant: { select: { siteId: true } } } },
+    },
+  });
+  return trips.map(
+    (t): ActivityEntry => ({
+      id: t.driverId,
+      name: t.driver.name,
+      siteId: t.batchTicket.plant.siteId,
+      volumeM3: t.volumeDeliveredM3 ?? 0,
+      reachM: null,
+    }),
+  );
+}
+
+async function pumpCrewTrips(from: Date, to: Date | undefined, crewField: "pumpOperatorId" | "pumpAssistantId"): Promise<ActivityEntry[]> {
+  const trips = await prisma.trip.findMany({
+    where: { status: "CLOSED", batchTime: { gte: from, ...(to ? { lte: to } : {}) }, [crewField]: { not: null } },
+    select: {
+      pumpOperatorId: true,
+      pumpAssistantId: true,
+      pumpOperatorCrew: { select: { name: true } },
+      pumpAssistantCrew: { select: { name: true } },
+      volumeDeliveredM3: true,
+      pump: { select: { reachM: true } },
+      batchTicket: { select: { plant: { select: { siteId: true } } } },
+    },
+  });
+  return trips
+    .map((t): ActivityEntry | null => {
+      const id = crewField === "pumpOperatorId" ? t.pumpOperatorId : t.pumpAssistantId;
+      const name = crewField === "pumpOperatorId" ? t.pumpOperatorCrew?.name : t.pumpAssistantCrew?.name;
+      if (!id || !name) return null;
+      return {
+        id,
+        name,
+        siteId: t.batchTicket.plant.siteId,
+        volumeM3: t.volumeDeliveredM3 ?? 0,
+        reachM: t.pump?.reachM ?? null,
+      };
+    })
+    .filter((e): e is ActivityEntry => e !== null);
+}
+
+async function materialReceiptEntries(from: Date, to: Date | undefined, materialType: string): Promise<ActivityEntry[]> {
+  const receipts = await prisma.materialReceipt.findMany({
+    where: { receivedAt: { gte: from, ...(to ? { lte: to } : {}) }, material: { type: materialType } },
+    select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true, plant: { select: { siteId: true } } },
+  });
+  return receipts
+    .map((r): ActivityEntry | null => {
+      const name = r.driver?.name ?? r.driverName;
+      if (!name) return null;
+      return {
+        id: r.driverId ?? `name:${name}`,
+        name,
+        siteId: r.plant.siteId,
+        volumeM3: r.netWeightKg / 1000,
+        reachM: null,
+      };
+    })
+    .filter((e): e is ActivityEntry => e !== null);
+}
+
+export async function activityForRole(role: string, from: Date, to?: Date): Promise<ActivityEntry[]> {
+  if (role === "MIXER_DRIVER") return mixerDriverTrips(from, to);
+  if (role === "PUMP_OPERATOR") return pumpCrewTrips(from, to, "pumpOperatorId");
+  if (role === "PUMP_ASSISTANT") return pumpCrewTrips(from, to, "pumpAssistantId");
+  if (role === "BULKER_DRIVER") return materialReceiptEntries(from, to, "CEMENT");
+  if (role === "WATER_TANKER_DRIVER") return materialReceiptEntries(from, to, "WATER");
+  return [];
+}
+
+export type IncentiveSiteDatum = {
+  site: Awaited<ReturnType<typeof getIncentiveSiteData>>[number]["site"];
+  effectiveMethod: (role: string) => IncentiveMethodKind;
+  currency: string;
+};
+
+// Every site's own incentive configuration (trip-count policy, volume/
+// reach-based policy, and any per-role method override), in the one shape
+// both the Incentives module and the Reports module's Incentives tab price
+// against — see the activity-sources comment above for why this can never
+// be allowed to drift into two copies again.
+export async function getIncentiveSiteData() {
+  const sites = await prisma.site.findMany({
+    orderBy: { name: "asc" },
+    include: {
+      // currency isn't itself a Site field (still a Station one) so a
+      // site's first station stands in as its representative currency —
+      // every station at one real-world site is expected to actually
+      // share one currency in practice.
+      plants: { orderBy: { name: "asc" }, take: 1, select: { currency: true } },
+      incentivePolicies: true,
+      pumpIncentivePolicies: { include: { rateBrackets: { orderBy: { minReachM: "asc" } } } },
+      incentiveMethods: true,
+    },
+  });
+
+  return sites.map((site) => {
+    const methodOverride = new Map(site.incentiveMethods.map((r) => [r.role, r.method as IncentiveMethodKind]));
+    const effectiveMethod = (role: string): IncentiveMethodKind => methodOverride.get(role) ?? DEFAULT_INCENTIVE_METHOD[role];
+    const currency = site.plants[0]?.currency ?? "EGP";
+    return { site, effectiveMethod, currency };
+  });
+}
+
+// The per-site pricing map aggregateIncentiveResults needs for one role,
+// built from getIncentiveSiteData's output.
+export function buildSitePricingMap(siteData: Awaited<ReturnType<typeof getIncentiveSiteData>>, role: string): Map<string, SitePricing> {
+  return new Map(
+    siteData.map(({ site, effectiveMethod, currency }) => {
+      const volumePolicy = site.pumpIncentivePolicies.find((p) => p.role === role);
+      return [
+        site.id,
+        {
+          siteName: site.name,
+          currency,
+          method: effectiveMethod(role),
+          tripPolicy: site.incentivePolicies.find((p) => p.role === role) ?? DEFAULT_POLICY,
+          freeVolumeM3: volumePolicy?.freeVolumeM3 ?? 0,
+          rateBrackets: volumePolicy?.rateBrackets ?? [],
+        },
+      ];
+    }),
+  );
 }

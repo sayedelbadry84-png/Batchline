@@ -19,15 +19,13 @@ import {
   getTripsReport,
   getEquipmentProductivityReport,
   getWorkerProductivityReport,
-  getVolumeTripDetailsForRole,
 } from "@/lib/reportQueries";
 import {
-  calculateDriverPayout,
-  calculateVolumeIncentivePayout,
-  DEFAULT_INCENTIVE_METHOD,
+  aggregateIncentiveResults,
+  activityForRole,
+  getIncentiveSiteData,
+  buildSitePricingMap,
   INCENTIVE_ROLE_KEYS,
-  type IncentivePolicy,
-  type IncentiveMethodKind,
 } from "@/lib/incentives";
 import { markDrumReturnFate } from "../trips/actions";
 import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
@@ -39,15 +37,6 @@ const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target b
 const SILO_MATERIAL_TYPES = new Set(["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"]);
 const REPORT_TABS = ["overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers"] as const;
 type ReportTab = (typeof REPORT_TABS)[number];
-
-const DEFAULT_POLICY: IncentivePolicy = {
-  freeTripsThreshold: 10,
-  tier2Threshold: 15,
-  tier2RateSar: 0,
-  tier3Threshold: 20,
-  tier3RateSar: 0,
-  beyondRateSar: 20,
-};
 
 function fmt(n: number | null, digits = 1, suffix = "") {
   if (n === null || !Number.isFinite(n)) return "—";
@@ -310,66 +299,35 @@ export default async function ReportsPage({
   const incentivesData =
     tab === "incentives"
       ? await (async () => {
-          const worker = await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd, ...scope });
-          const policies = await prisma.driverIncentivePolicy.findMany();
-          const policyByRole = new Map(policies.map((p) => [p.role, p]));
-          const methodOverrides = await prisma.incentiveMethod.findMany();
-          const methodByRole = new Map(methodOverrides.map((r) => [r.role, r.method as IncentiveMethodKind]));
-          const pumpPolicies = await prisma.pumpIncentivePolicy.findMany({ include: { rateBrackets: true } });
-
-          // Which of the five roles are priced by volume (VOLUME_M3) vs
-          // trip/delivery count (TRIP_COUNT) — see IncentiveMethod and
-          // DEFAULT_INCENTIVE_METHOD. Trip-count roles keep this report's
-          // pre-existing simplification of collapsing across plants (this
-          // range-wide report isn't grouped per plant the way the
-          // Incentives module page itself is); volume roles resolve each
-          // person's own plant so the right target/rate bracket applies.
-          const methodForRole = (role: string): IncentiveMethodKind => methodByRole.get(role) ?? DEFAULT_INCENTIVE_METHOD[role];
-
-          const countBasedRows = worker.rows
-            .filter((r) => methodForRole(r.role) !== "VOLUME_M3")
-            .map((r) => {
-              const policy: IncentivePolicy = policyByRole.get(r.role) ?? DEFAULT_POLICY;
-              return { key: r.key, name: r.name, role: r.role, count: r.count, payout: calculateDriverPayout(r.count, policy) };
-            });
-
-          const volumeRoles = INCENTIVE_ROLE_KEYS.filter((role) => methodForRole(role) === "VOLUME_M3");
-          const volumeRoleRows = (
+          // Delegates to the exact same functions the Incentives module
+          // itself uses (src/lib/incentives.ts) — this used to be a
+          // separate, hand-rolled computation here that had drifted out
+          // of sync with the real one (wrong site resolution for both
+          // trip-count and volume-based roles), so the two screens could
+          // show different numbers for the same person. Always
+          // company-wide, same as the Incentives module and the
+          // Equipment tab above — not scoped to the site/plant filter,
+          // since a person can work more than one plant in the same
+          // period (see aggregateIncentiveResults' own comment).
+          const siteData = await getIncentiveSiteData();
+          const rows = (
             await Promise.all(
-              volumeRoles.map(async (role) => {
-                const trips = await getVolumeTripDetailsForRole(role, { from: rangeStart, to: rangeEnd, ...scope });
-                const isPumpRole = role === "PUMP_OPERATOR" || role === "PUMP_ASSISTANT";
-                const plantRows = isPumpRole
-                  ? await prisma.pumpCrewMember.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, code: true, plant: { select: { siteId: true } } } })
-                  : await prisma.employee.findMany({ where: { id: { in: trips.map((t) => t.driverId) } }, select: { id: true, code: true, plant: { select: { siteId: true } } } });
-                const infoByDriver = new Map(plantRows.map((c) => [c.id, c]));
-                // Priced per driver row against ITS OWN plant's policy —
-                // never blindly merged before pricing, since two plants
-                // can (and do) run different rates. Only the already-
-                // correct payouts get merged next, by CODE when the
-                // person has one on file, so the same real worker
-                // registered under more than one plant still shows as one
-                // company-wide total.
-                return trips.map((op) => {
-                  const info = infoByDriver.get(op.driverId);
-                  const policy = info ? pumpPolicies.find((p) => p.siteId === info.plant.siteId && p.role === role) : undefined;
-                  const payout = policy ? calculateVolumeIncentivePayout(op.trips, policy.freeVolumeM3, policy.rateBrackets) : 0;
-                  return { groupKey: info?.code || op.driverId, name: op.driverName, role, count: op.trips.length, payout };
-                });
+              INCENTIVE_ROLE_KEYS.map(async (role) => {
+                const entries = await activityForRole(role, rangeStart, rangeEnd);
+                const sitePricing = buildSitePricingMap(siteData, role);
+                const results = aggregateIncentiveResults(entries, sitePricing);
+                return results.map((r) => ({
+                  key: `${role}:${r.id}`,
+                  name: r.name,
+                  role,
+                  count: r.tripCount,
+                  payout: r.payoutByCurrency.reduce((sum, p) => sum + p.amount, 0),
+                }));
               }),
             )
-          ).flat();
-
-          const mergedVolumeRows = new Map<string, { key: string; name: string; role: string; count: number; payout: number }>();
-          for (const r of volumeRoleRows) {
-            const mergeKey = `${r.role}:${r.groupKey}`;
-            const entry = mergedVolumeRows.get(mergeKey) ?? { key: mergeKey, name: r.name, role: r.role, count: 0, payout: 0 };
-            entry.count += r.count;
-            entry.payout += r.payout;
-            mergedVolumeRows.set(mergeKey, entry);
-          }
-
-          const rows = [...countBasedRows, ...mergedVolumeRows.values()].sort((a, b) => b.payout - a.payout);
+          )
+            .flat()
+            .sort((a, b) => b.payout - a.payout);
           return { rows, totalPayout: rows.reduce((sum, r) => sum + r.payout, 0) };
         })()
       : null;
@@ -434,8 +392,9 @@ export default async function ReportsPage({
           </div>
         )}
         <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">{m.applyScope}</button>
-        {tab !== "overview" && tab !== "equipment" && (siteId || plantId) && <p className="text-xs text-ink-muted">{m.scopeNote}</p>}
+        {tab !== "overview" && tab !== "equipment" && tab !== "incentives" && (siteId || plantId) && <p className="text-xs text-ink-muted">{m.scopeNote}</p>}
         {tab === "equipment" && <p className="text-xs text-ink-muted">{m.equipmentScopeNote}</p>}
+        {tab === "incentives" && <p className="text-xs text-ink-muted">{m.incentivesScopeNote}</p>}
       </form>
       {tab === "overview" && <p className="no-print text-xs text-ink-muted">{m.overviewScopeNote}</p>}
 

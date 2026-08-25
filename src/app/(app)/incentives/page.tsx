@@ -1,17 +1,16 @@
 import Link from "next/link";
-import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import {
   aggregateIncentiveResults,
   isReachBasedRole,
-  DEFAULT_INCENTIVE_METHOD,
+  activityForRole,
+  getIncentiveSiteData,
+  buildSitePricingMap,
+  DEFAULT_POLICY,
   INCENTIVE_ROLE_KEYS,
-  type ActivityEntry,
-  type SitePricing,
   type IncentivePolicy,
-  type IncentiveMethodKind,
 } from "@/lib/incentives";
 import {
   updateIncentivePolicy,
@@ -21,103 +20,6 @@ import {
   setFlatVolumeRate,
   setIncentiveMethod,
 } from "./actions";
-
-const DEFAULT_POLICY: IncentivePolicy = {
-  freeTripsThreshold: 10,
-  tier2Threshold: 15,
-  tier2RateSar: 0,
-  tier3Threshold: 20,
-  tier3RateSar: 0,
-  beyondRateSar: 20,
-};
-
-// --- Per-role activity sources — each of the five incentive roles is
-// backed by a different underlying record (Trip for mixer/pump crew,
-// MaterialReceipt filtered by material type for bulker/water drivers).
-// Every source is fetched company-wide (no plantId filter) and each entry
-// carries its own siteId, derived from where the batch/receipt actually
-// happened — never from a driver's own current plant assignment, since a
-// driver can load from more than one plant in the same day (see the
-// aggregateIncentiveResults comment in src/lib/incentives.ts). ---
-
-async function mixerDriverTrips(monthStart: Date): Promise<ActivityEntry[]> {
-  const trips = await prisma.trip.findMany({
-    where: { status: "CLOSED", batchTime: { gte: monthStart } },
-    select: {
-      driverId: true,
-      driver: { select: { name: true } },
-      volumeDeliveredM3: true,
-      batchTicket: { select: { plant: { select: { siteId: true } } } },
-    },
-  });
-  return trips.map(
-    (t): ActivityEntry => ({
-      id: t.driverId,
-      name: t.driver.name,
-      siteId: t.batchTicket.plant.siteId,
-      volumeM3: t.volumeDeliveredM3 ?? 0,
-      reachM: null,
-    }),
-  );
-}
-
-async function pumpCrewTrips(monthStart: Date, crewField: "pumpOperatorId" | "pumpAssistantId"): Promise<ActivityEntry[]> {
-  const trips = await prisma.trip.findMany({
-    where: { status: "CLOSED", batchTime: { gte: monthStart }, [crewField]: { not: null } },
-    select: {
-      pumpOperatorId: true,
-      pumpAssistantId: true,
-      pumpOperatorCrew: { select: { name: true } },
-      pumpAssistantCrew: { select: { name: true } },
-      volumeDeliveredM3: true,
-      pump: { select: { reachM: true } },
-      batchTicket: { select: { plant: { select: { siteId: true } } } },
-    },
-  });
-  return trips
-    .map((t): ActivityEntry | null => {
-      const id = crewField === "pumpOperatorId" ? t.pumpOperatorId : t.pumpAssistantId;
-      const name = crewField === "pumpOperatorId" ? t.pumpOperatorCrew?.name : t.pumpAssistantCrew?.name;
-      if (!id || !name) return null;
-      return {
-        id,
-        name,
-        siteId: t.batchTicket.plant.siteId,
-        volumeM3: t.volumeDeliveredM3 ?? 0,
-        reachM: t.pump?.reachM ?? null,
-      };
-    })
-    .filter((e): e is ActivityEntry => e !== null);
-}
-
-async function materialReceiptEntries(monthStart: Date, materialType: string): Promise<ActivityEntry[]> {
-  const receipts = await prisma.materialReceipt.findMany({
-    where: { receivedAt: { gte: monthStart }, material: { type: materialType } },
-    select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true, plant: { select: { siteId: true } } },
-  });
-  return receipts
-    .map((r): ActivityEntry | null => {
-      const name = r.driver?.name ?? r.driverName;
-      if (!name) return null;
-      return {
-        id: r.driverId ?? `name:${name}`,
-        name,
-        siteId: r.plant.siteId,
-        volumeM3: r.netWeightKg / 1000,
-        reachM: null,
-      };
-    })
-    .filter((e): e is ActivityEntry => e !== null);
-}
-
-async function activityForRole(role: string, monthStart: Date): Promise<ActivityEntry[]> {
-  if (role === "MIXER_DRIVER") return mixerDriverTrips(monthStart);
-  if (role === "PUMP_OPERATOR") return pumpCrewTrips(monthStart, "pumpOperatorId");
-  if (role === "PUMP_ASSISTANT") return pumpCrewTrips(monthStart, "pumpAssistantId");
-  if (role === "BULKER_DRIVER") return materialReceiptEntries(monthStart, "CEMENT");
-  if (role === "WATER_TANKER_DRIVER") return materialReceiptEntries(monthStart, "WATER");
-  return [];
-}
 
 type Dict = Awaited<ReturnType<typeof getDictionary>>["dict"];
 type M = Dict["modules"]["incentives"];
@@ -179,30 +81,12 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
   // Policy/method configuration lives at the Plant level (Site — see the
   // UI-terminology note in schema.prisma), not the specific Station: a
   // driver isn't tied to one line, so neither is the rate that applies to
-  // them. currency isn't itself a Site field (still a Station one — see
-  // Plant.currency) so a site's first station stands in as its
-  // representative currency for display; every station at one real-world
-  // site is expected to actually share one currency in practice.
-  const sites = await prisma.site.findMany({
-    orderBy: { name: "asc" },
-    include: {
-      plants: { orderBy: { name: "asc" }, take: 1, select: { currency: true } },
-      incentivePolicies: true,
-      pumpIncentivePolicies: { include: { rateBrackets: { orderBy: { minReachM: "asc" } } } },
-      incentiveMethods: true,
-    },
-  });
+  // them.
+  const siteData = await getIncentiveSiteData();
 
   const monthStart = new Date();
   monthStart.setDate(1);
   monthStart.setHours(0, 0, 0, 0);
-
-  const siteData = sites.map((site) => {
-    const methodOverride = new Map(site.incentiveMethods.map((r) => [r.role, r.method as IncentiveMethodKind]));
-    const effectiveMethod = (role: string): IncentiveMethodKind => methodOverride.get(role) ?? DEFAULT_INCENTIVE_METHOD[role];
-    const currency = site.plants[0]?.currency ?? "EGP";
-    return { site, effectiveMethod, currency };
-  });
 
   return (
     <div className="flex flex-col gap-8">
@@ -228,22 +112,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
         (await Promise.all(
           INCENTIVE_ROLE_KEYS.map(async (role) => {
             const entries = await activityForRole(role, monthStart);
-            const sitePricing = new Map<string, SitePricing>(
-              siteData.map(({ site, effectiveMethod, currency }) => {
-                const volumePolicy = site.pumpIncentivePolicies.find((p) => p.role === role);
-                return [
-                  site.id,
-                  {
-                    siteName: site.name,
-                    currency,
-                    method: effectiveMethod(role),
-                    tripPolicy: site.incentivePolicies.find((p) => p.role === role) ?? DEFAULT_POLICY,
-                    freeVolumeM3: volumePolicy?.freeVolumeM3 ?? 0,
-                    rateBrackets: volumePolicy?.rateBrackets ?? [],
-                  },
-                ];
-              }),
-            );
+            const sitePricing = buildSitePricingMap(siteData, role);
             const results = aggregateIncentiveResults(entries, sitePricing);
             return <ResultCard key={role} m={m} role={role} results={results} />;
           }),
