@@ -435,16 +435,22 @@ export default async function ReservationsPage({
                         <Link href={`${baseUrl}&edit=${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
                           {dict.field.edit}
                         </Link>
-                        <form action={closeReservation} className="flex items-center gap-1">
-                          <input type="hidden" name="id" value={r.id} />
-                          <select name="closeReasonCode" required defaultValue="" className="rounded-md border border-border bg-surface px-1.5 py-1 text-xs">
-                            <option value="" disabled>{dict.closeReasonPlaceholder}</option>
-                            {Object.entries(dict.closeReasons).map(([k, label]) => (
-                              <option key={k} value={k}>{label}</option>
-                            ))}
-                          </select>
-                          <button className="text-xs font-medium text-warn hover:underline">{m.closeReservation}</button>
-                        </form>
+                        {/* Only offered while still open — closeReservation itself
+                            already no-ops once DELIVERED, but showing the form
+                            anyway looked like "end" silently did nothing when
+                            clicked on an already-closed row. */}
+                        {r.status !== "DELIVERED" && (
+                          <form action={closeReservation} className="flex items-center gap-1">
+                            <input type="hidden" name="id" value={r.id} />
+                            <select name="closeReasonCode" required defaultValue="" className="rounded-md border border-border bg-surface px-1.5 py-1 text-xs">
+                              <option value="" disabled>{dict.closeReasonPlaceholder}</option>
+                              {Object.entries(dict.closeReasons).map(([k, label]) => (
+                                <option key={k} value={k}>{label}</option>
+                              ))}
+                            </select>
+                            <button className="text-xs font-medium text-warn hover:underline">{m.closeReservation}</button>
+                          </form>
+                        )}
                       </div>
                     )}
                   </td>
