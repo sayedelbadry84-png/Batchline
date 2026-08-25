@@ -63,21 +63,29 @@ export default async function ReservationsPage({
     canPerformAction(user.role, "reservations", "approveFinal"),
   ]);
 
-  const [reservationsRaw, projects, mixes, sitesForPicker, pumpsRaw, crew] = await Promise.all([
+  const reservationInclude = {
+    project: { include: { customer: true } },
+    site: true,
+    mix: true,
+    batchTickets: { where: { status: { not: "CANCELLED" as const } }, select: { volumeM3: true } },
+    pumpAssignments: { include: { pump: true, pumpOperator: true, pumpAssistant: true } },
+  };
+
+  const [reservationsRaw, editReservation, projects, mixes, sitesForPicker, pumpsRaw, crew] = await Promise.all([
     prisma.reservation.findMany({
       where: {
         ...reservationSiteScopeWhere(siteId),
         pourWindowStart: { gte: dayStart, lt: new Date(`${dayEnd}T00:00:00`) },
       },
       orderBy: { pourWindowStart: "asc" },
-      include: {
-        project: { include: { customer: true } },
-        site: true,
-        mix: true,
-        batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
-        pumpAssignments: { include: { pump: true, pumpOperator: true, pumpAssistant: true } },
-      },
+      include: reservationInclude,
     }),
+    // A reservation opened for edit (e.g. linked from Production's
+    // grouped delivery log) may have been booked for a different day than
+    // the one currently selected here — fetch it directly so its edit row
+    // still renders even when it falls outside today's day-filtered list,
+    // instead of the edit link silently doing nothing.
+    editId ? prisma.reservation.findUnique({ where: { id: editId }, include: reservationInclude }) : Promise.resolve(null),
     // Company-wide — a project isn't tied to any one plant/line (see the
     // Project model comment), so every site can book against any project.
     prisma.project.findMany({ orderBy: { name: "asc" }, include: { customer: true } }),
@@ -106,6 +114,14 @@ export default async function ReservationsPage({
     ...r,
     released: r.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0),
   }));
+
+  // The row list actually rendered — includes the out-of-day editReservation
+  // (if any) so its edit form has a row to render into, but doesn't affect
+  // the rollup/WhatsApp summary below, which stays strictly "today."
+  const displayReservations =
+    editReservation && !reservations.some((r) => r.id === editReservation.id)
+      ? [...reservations, { ...editReservation, released: editReservation.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0) }]
+      : reservations;
 
   const rollup = {
     count: reservations.length,
@@ -168,8 +184,11 @@ export default async function ReservationsPage({
             </tr>
           </thead>
           <tbody>
-            {reservations.map((r) => {
-              const editable = !["DELIVERED", "CANCELLED"].includes(r.status);
+            {displayReservations.map((r) => {
+              // Completed (DELIVERED) reservations stay editable — e.g. to
+              // fix a detail after the fact, or from the grouped delivery
+              // log in Production. Only CANCELLED is a true dead end.
+              const editable = r.status !== "CANCELLED";
               if (editId === r.id && editable) {
                 return (
                   <tr key={r.id}>
@@ -414,7 +433,7 @@ export default async function ReservationsPage({
                 </tr>
               );
             })}
-            {reservations.length === 0 && (
+            {displayReservations.length === 0 && (
               <tr>
                 <td className={ui.td} colSpan={10}>
                   <span className="text-ink-muted">{m.empty}</span>

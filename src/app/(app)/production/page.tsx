@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
@@ -86,7 +87,15 @@ export default async function ProductionPage({
       include: {
         mix: true,
         plant: true,
-        reservation: { include: { project: { include: { customer: true } } } },
+        reservation: {
+          include: {
+            project: { include: { customer: true } },
+            // Lifetime total, not just today's — the parent row's own
+            // "released of requested" needs to reflect the whole
+            // reservation, even split across more than one day.
+            batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
+          },
+        },
         trip: { include: { truck: true, driver: true } },
       },
       orderBy: { releasedAt: "desc" },
@@ -111,6 +120,21 @@ export default async function ProductionPage({
       return { ...r, released, remaining: Math.max(0, r.requestedVolumeM3 - released), trips: r.batchTickets.length };
     })
     .filter((r) => r.remaining > 0.001);
+
+  // Group today's tickets by their reservation — each reservation (even a
+  // completed/DELIVERED one) becomes a parent row with its tickets
+  // branching underneath, instead of a flat ticket list, so a finished
+  // job's own record (status, total delivered, notes) is visible right
+  // alongside the loads that made it up. Grouped in JS rather than via a
+  // reservation-first query since "today's" scope is naturally ticket-
+  // driven (a reservation can span more than one day).
+  const deliveryGroups = new Map<string, { reservation: (typeof allDeliveries)[number]["reservation"]; tickets: typeof allDeliveries }>();
+  for (const t of allDeliveries) {
+    const existing = deliveryGroups.get(t.reservationId);
+    if (existing) existing.tickets.push(t);
+    else deliveryGroups.set(t.reservationId, { reservation: t.reservation, tickets: [t] });
+  }
+  const deliveryGroupList = Array.from(deliveryGroups.values());
 
   const rollup = { count: allDeliveries.length, qty: allDeliveries.reduce((sum, t) => sum + t.volumeM3, 0) };
   const waMessage =
@@ -283,30 +307,51 @@ export default async function ProductionPage({
             </tr>
           </thead>
           <tbody>
-            {allDeliveries.map((t) => (
-              <tr key={t.id}>
-                <td className={`${ui.td} font-mono text-xs tabular`}>
-                  {t.releasedAt ? fmtTime(t.releasedAt) : "—"}
-                  <div className="font-normal">
-                    <Link href={`/production/${t.id}`} className="font-mono text-xs font-medium text-accent-strong hover:underline" dir="ltr">
-                      {t.ticketNumber}
-                    </Link>
-                  </div>
-                </td>
-                <td className={`${ui.td} text-xs`}>{t.plant.name}</td>
-                <td className={ui.td}>
-                  {t.reservation.project.name}
-                  <div className="text-xs text-ink-muted">{t.reservation.project.customer.legalName}</div>
-                </td>
-                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.mix.code}</td>
-                <td className={`${ui.td} font-mono tabular`}>{t.volumeM3} m³</td>
-                <td className={`${ui.td} text-xs`}>{t.trip?.driver.name ?? "—"}</td>
-                <td className={ui.td}>
-                  <span className={`${ui.chip} ${statusChip[t.status] ?? ""}`}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</span>
-                </td>
-              </tr>
-            ))}
-            {allDeliveries.length === 0 && (
+            {deliveryGroupList.map(({ reservation, tickets }) => {
+              const totalReleased = reservation.batchTickets.reduce((sum, bt) => sum + bt.volumeM3, 0);
+              return (
+                <Fragment key={reservation.id}>
+                  <tr className="bg-surface-alt">
+                    <td className={ui.td}></td>
+                    <td className={ui.td}></td>
+                    <td className={`${ui.td} font-medium`}>
+                      {reservation.project.name}
+                      <div className="text-xs font-normal text-ink-muted">{reservation.project.customer.legalName}</div>
+                      <Link href={`/reservations?edit=${reservation.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {dict.field.edit}
+                      </Link>
+                    </td>
+                    <td className={ui.td}></td>
+                    <td className={`${ui.td} font-mono tabular`}>{totalReleased} / {reservation.requestedVolumeM3} m³</td>
+                    <td className={ui.td}></td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${statusChip[reservation.status] ?? ""}`}>
+                        {dict.status[reservation.status as keyof typeof dict.status] ?? reservation.status}
+                      </span>
+                    </td>
+                  </tr>
+                  {tickets.map((t) => (
+                    <tr key={t.id}>
+                      <td className={`${ui.td} font-mono text-xs tabular`}>{t.releasedAt ? fmtTime(t.releasedAt) : "—"}</td>
+                      <td className={`${ui.td} text-xs`}>{t.plant.name}</td>
+                      <td className={ui.td}>
+                        <span className="text-ink-faint">↳</span>{" "}
+                        <Link href={`/production/${t.id}`} className="font-mono text-xs font-medium text-accent-strong hover:underline" dir="ltr">
+                          {t.ticketNumber}
+                        </Link>
+                      </td>
+                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.mix.code}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{t.volumeM3} m³</td>
+                      <td className={`${ui.td} text-xs`}>{t.trip?.driver.name ?? "—"}</td>
+                      <td className={ui.td}>
+                        <span className={`${ui.chip} ${statusChip[t.status] ?? ""}`}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </Fragment>
+              );
+            })}
+            {deliveryGroupList.length === 0 && (
               <tr>
                 <td className={ui.td} colSpan={7}>
                   <span className="text-ink-muted">{m.emptyAll}</span>

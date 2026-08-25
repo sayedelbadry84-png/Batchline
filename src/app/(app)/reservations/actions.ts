@@ -102,11 +102,13 @@ export async function createReservation(formData: FormData) {
   revalidatePath("/reservations");
 }
 
-// Editable at any point in the delivery lifecycle short of DELIVERED or
-// CANCELLED — including after partial release, so a site's actual pour
-// can be scaled up or down mid-job. The one hard rule: requested volume
-// can never drop below what's already gone out as a batch ticket, since
-// that concrete is already real and can't un-happen.
+// Editable at any point in the delivery lifecycle short of CANCELLED —
+// including after partial release, so a site's actual pour can be scaled
+// up or down mid-job, AND after DELIVERED, so a detail can still be fixed
+// after the fact (e.g. from the grouped delivery log in Production). The
+// one hard rule: requested volume can never drop below what's already
+// gone out as a batch ticket, since that concrete is already real and
+// can't un-happen.
 export async function updateReservation(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "reservations", "edit");
@@ -123,7 +125,7 @@ export async function updateReservation(formData: FormData) {
 
   const reservation = await prisma.reservation.findUnique({ where: { id } });
   if (!reservation) return;
-  if (["DELIVERED", "CANCELLED"].includes(reservation.status)) return;
+  if (reservation.status === "CANCELLED") return;
   const effSiteId = effectiveSiteId(user);
   if (!isSiteInScope(reservation.siteId, effSiteId) || !isSiteInScope(siteId, effSiteId)) return;
 
