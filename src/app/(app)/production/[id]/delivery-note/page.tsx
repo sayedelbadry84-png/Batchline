@@ -90,6 +90,23 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
   // (a Trip exists) — matches when this document is meant to be issued.
   if (!ticket || !ticket.trip) notFound();
 
+  // "Total Qty" is a running cumulative total across every load released
+  // against this SAME reservation so far, in release order — not just
+  // this one truck's own volume — the same way a weighbridge ticket
+  // accumulates on a multi-load pour. Ordered deterministically (release
+  // time, then id as a tiebreaker) so a reprint always shows the same
+  // number for a given ticket regardless of when it's printed.
+  const siblingTickets = await prisma.batchTicket.findMany({
+    where: { reservationId: ticket.reservationId, status: { not: "CANCELLED" } },
+    orderBy: [{ releasedAt: "asc" }, { id: "asc" }],
+    select: { id: true, volumeM3: true },
+  });
+  let cumulativeQtyM3 = 0;
+  for (const t of siblingTickets) {
+    cumulativeQtyM3 += t.volumeM3;
+    if (t.id === ticket.id) break;
+  }
+
   const { trip, reservation, mix, plant } = ticket;
   const structureType = reservation.structureType
     ? dict.structureTypes[reservation.structureType as keyof typeof dict.structureTypes] ?? reservation.structureType
@@ -176,7 +193,7 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
         <div className="grid grid-cols-3">
           <Cell label={L.qtyDelivered} value={(trip.volumeDeliveredM3 ?? 0).toFixed(2)} className="text-center" />
           <Cell label={L.qtyInMix} value={ticket.volumeM3.toFixed(2)} className="text-center" />
-          <Cell label={L.totalQty} value={ticket.volumeM3.toFixed(2)} className="text-center" />
+          <Cell label={L.totalQty} value={cumulativeQtyM3.toFixed(2)} className="text-center" />
         </div>
 
         <div style={cellBorder} className="whitespace-pre-line p-3 text-center text-sm font-semibold">{L.waterNote}</div>
