@@ -293,7 +293,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                       </div>
                       <div>
                         <label className={ui.label}>{m.tier2Rate(currency)}</label>
-                        <input name="tier2RateSar" type="number" step="0.5" defaultValue={tripPolicy.tier2RateSar} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
+                        <input name="tier2RateSar" type="number" step="0.001" defaultValue={tripPolicy.tier2RateSar} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                       </div>
                       <div>
                         <label className={ui.label}>{m.tier3Threshold}</label>
@@ -301,11 +301,11 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                       </div>
                       <div>
                         <label className={ui.label}>{m.tier3Rate(currency)}</label>
-                        <input name="tier3RateSar" type="number" step="0.5" defaultValue={tripPolicy.tier3RateSar} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
+                        <input name="tier3RateSar" type="number" step="0.001" defaultValue={tripPolicy.tier3RateSar} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                       </div>
                       <div>
                         <label className={ui.label}>{m.beyondRate(currency)}</label>
-                        <input name="beyondRateSar" type="number" step="0.5" defaultValue={tripPolicy.beyondRateSar} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
+                        <input name="beyondRateSar" type="number" step="0.001" defaultValue={tripPolicy.beyondRateSar} className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                       </div>
                       <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">{dict.field.save}</button>
                     </form>
@@ -364,7 +364,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                             </div>
                             <div>
                               <label className={ui.label}>{m.pumpRateCol.rate}</label>
-                              <input name="ratePerM3Sar" type="number" step="0.5" required className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
+                              <input name="ratePerM3Sar" type="number" step="0.001" required className="w-24 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                             </div>
                             <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">{m.pumpRateCol.add}</button>
                           </form>
@@ -375,7 +375,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                           <input type="hidden" name="role" value={role} />
                           <div>
                             <label className={ui.label}>{m.flatRate(currency)}</label>
-                            <input name="ratePerM3Sar" type="number" step="0.5" defaultValue={flatRate} className="w-28 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
+                            <input name="ratePerM3Sar" type="number" step="0.001" defaultValue={flatRate} className="w-28 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
                           </div>
                           <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">{dict.field.save}</button>
                         </form>
