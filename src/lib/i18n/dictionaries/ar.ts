@@ -596,6 +596,8 @@ const ar = {
       empty: "لا يوجد أحد في هذا التبويب بعد.",
       newTitle: "إضافة لهذا التبويب",
       f: { plant: "كود المصنع", name: "الاسم", code: "الكود الوظيفي", role: "الدور", shiftPattern: "نمط الوردية", licenseExpiry: "انتهاء الرخصة / الشهادة", status: "الحالة", jobTitleName: "المسمى الوظيفي" },
+      otherRole: "أخرى…",
+      newRoleNamePlaceholder: "اكتب المسمى الوظيفي الجديد",
       add: "إضافة",
       newJobTitle: "مسمى وظيفي جديد",
       addJobTitle: "إضافة المسمى الوظيفي",
@@ -814,6 +816,7 @@ const ar = {
       title: "دفتر الأرصدة",
       intro: "رصيد كل مادة، محسوب من الاستلامات المرحّلة واستهلاك الشحنات المكتملة — بلا إدخال جرد منفصل يحتاج مزامنة.",
       col: { material: "المادة", plant: "المصنع", type: "النوع", received: "الوارد", consumed: "المستهلك", balance: "الرصيد" },
+      applyFilter: "تطبيق",
       // Shown when a material has never been received/consumed at any
       // plant yet, so there's no site to attribute the (zero) row to.
       unassignedPlant: "—",

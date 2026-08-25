@@ -5,6 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal } from "./actions";
 import { effectiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
+import { canPerformAction } from "@/lib/permissions";
 
 const statusChip: Record<string, string> = {
   REQUESTED: "bg-surface-alt text-ink-muted",
@@ -25,6 +26,10 @@ export default async function ReservationsPage({
   const m = dict.modules.reservations;
   const { edit: editId } = await searchParams;
   const siteId = effectiveSiteId(user);
+  const [canApproveInitial, canApproveFinal] = await Promise.all([
+    canPerformAction(user.role, "reservations", "approveInitial"),
+    canPerformAction(user.role, "reservations", "approveFinal"),
+  ]);
 
   const [reservationsRaw, projects, mixes, sitesForPicker] = await Promise.all([
     prisma.reservation.findMany({
@@ -273,20 +278,19 @@ export default async function ReservationsPage({
                       ) : r.initialApprovedAt ? (
                         <>
                           <span className={`${ui.chip} bg-warn-soft text-warn`}>{m.approvedInitial}</span>
-                          {user.role === "ADMIN" && r.initialApprovedById !== user.id && (
+                          {canApproveFinal ? (
                             <form action={approveReservationFinal} className="mt-1">
                               <input type="hidden" name="id" value={r.id} />
                               <button className="text-xs font-medium text-accent-strong hover:underline">{m.approveFinal}</button>
                             </form>
-                          )}
-                          {(user.role !== "ADMIN" || r.initialApprovedById === user.id) && (
+                          ) : (
                             <div className="mt-1 text-xs text-ink-faint">{m.pendingFinal}</div>
                           )}
                         </>
                       ) : (
                         <>
                           <span className={`${ui.chip} bg-surface-alt text-ink-muted`}>{m.pendingInitial}</span>
-                          {(user.role === "PLANT_OPERATOR" || user.role === "ADMIN") && (
+                          {canApproveInitial && (
                             <form action={approveReservationInitial} className="mt-1">
                               <input type="hidden" name="id" value={r.id} />
                               <button className="text-xs font-medium text-accent-strong hover:underline">{m.approveInitial}</button>

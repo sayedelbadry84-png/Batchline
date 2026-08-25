@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
+import { effectiveSiteId, isPlantInScope, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { logTransferIfChanged } from "@/lib/transferAudit";
 import { revalidatePath } from "next/cache";
 
@@ -14,11 +14,15 @@ function refresh() {
 
 // --- Mixer trucks -----------------------------------------------------
 
+// Registered by Plant code, not a specific Station — a truck moves between
+// a plant's own lines as work demands, same reasoning as Employees/pump
+// crew (see resolvePlantIdForSite in siteScope.ts). The form submits
+// siteId; this resolves it down to one concrete Plant row.
 export async function createTruck(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
   const drumCapacityM3 = Number(formData.get("drumCapacityM3") ?? 0);
   const maxAgitationRpm = Number(formData.get("maxAgitationRpm") ?? 0) || null;
@@ -28,9 +32,10 @@ export async function createTruck(formData: FormData) {
   const plateNumber = String(formData.get("plateNumber") ?? "").trim() || null;
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
 
-  if (!plantId || !code || !drumCapacityM3) return;
-  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
-  if (!(await isPlantActive(plantId))) return;
+  if (!siteId || !code || !drumCapacityM3) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
+  const plantId = await resolvePlantIdForSite(siteId);
+  if (!plantId) return;
 
   const truck = await prisma.truck.create({
     data: { plantId, code, drumCapacityM3, maxAgitationRpm, gpsDeviceId, year, chassisNumber, plateNumber, defaultDriverId },
@@ -45,7 +50,7 @@ export async function updateTruck(formData: FormData) {
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
   const id = String(formData.get("id") ?? "");
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
   const drumCapacityM3 = Number(formData.get("drumCapacityM3") ?? 0);
   const maxAgitationRpm = Number(formData.get("maxAgitationRpm") ?? 0) || null;
@@ -56,13 +61,16 @@ export async function updateTruck(formData: FormData) {
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
   // status change (active/idle/maintenance/out-of-service) and plant
   // transfer both go through this same edit form — a plant transfer is
-  // just picking a different plantId here, no separate action needed.
+  // just picking a different siteId here, no separate action needed.
   const status = String(formData.get("status") ?? "ACTIVE");
 
-  if (!id || !plantId || !code || !drumCapacityM3) return;
-  const siteId = effectiveSiteId(user);
+  if (!id || !siteId || !code || !drumCapacityM3) return;
+  const scopeSiteId = effectiveSiteId(user);
+  if (!isSiteInScope(siteId, scopeSiteId)) return;
   const existing = await prisma.truck.findUnique({ where: { id }, select: { plantId: true } });
-  if (!existing || !(await isPlantInScope(existing.plantId, siteId)) || !(await isPlantInScope(plantId, siteId))) return;
+  if (!existing || !(await isPlantInScope(existing.plantId, scopeSiteId))) return;
+  const plantId = await resolvePlantIdForSite(siteId, existing.plantId);
+  if (!plantId) return;
 
   await prisma.truck.update({
     where: { id },
@@ -95,11 +103,13 @@ export async function markTruckServiced(formData: FormData) {
 
 // --- Pumps --------------------------------------------------------------
 
+// Registered by Plant code, not a specific Station — same reasoning as
+// createTruck above.
 export async function createPump(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
   const pumpType = String(formData.get("pumpType") ?? "BOOM");
   const reachM = Number(formData.get("reachM") ?? 0) || null;
@@ -111,9 +121,10 @@ export async function createPump(formData: FormData) {
   const defaultOperatorId = String(formData.get("defaultOperatorId") ?? "") || null;
   const defaultAssistantId = String(formData.get("defaultAssistantId") ?? "") || null;
 
-  if (!plantId || !code || !hourlyRate) return;
-  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
-  if (!(await isPlantActive(plantId))) return;
+  if (!siteId || !code || !hourlyRate) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
+  const plantId = await resolvePlantIdForSite(siteId);
+  if (!plantId) return;
 
   const pump = await prisma.pump.create({
     data: { plantId, code, pumpType, reachM, hourlyRate, standbyRate, year, chassisNumber, plateNumber, defaultOperatorId, defaultAssistantId },
@@ -128,7 +139,7 @@ export async function updatePump(formData: FormData) {
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
   const id = String(formData.get("id") ?? "");
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
   const pumpType = String(formData.get("pumpType") ?? "BOOM");
   const reachM = Number(formData.get("reachM") ?? 0) || null;
@@ -141,10 +152,13 @@ export async function updatePump(formData: FormData) {
   const defaultAssistantId = String(formData.get("defaultAssistantId") ?? "") || null;
   const status = String(formData.get("status") ?? "ACTIVE");
 
-  if (!id || !plantId || !code || !hourlyRate) return;
+  if (!id || !siteId || !code || !hourlyRate) return;
   const pumpSiteId = effectiveSiteId(user);
+  if (!isSiteInScope(siteId, pumpSiteId)) return;
   const existingPump = await prisma.pump.findUnique({ where: { id }, select: { plantId: true } });
-  if (!existingPump || !(await isPlantInScope(existingPump.plantId, pumpSiteId)) || !(await isPlantInScope(plantId, pumpSiteId))) return;
+  if (!existingPump || !(await isPlantInScope(existingPump.plantId, pumpSiteId))) return;
+  const plantId = await resolvePlantIdForSite(siteId, existingPump.plantId);
+  if (!plantId) return;
 
   await prisma.pump.update({
     where: { id },
@@ -227,11 +241,13 @@ export async function updateAssignmentStatus(formData: FormData) {
 // One model, one pair of actions for all three — see the SupportVehicle
 // comment in schema.prisma for why they're not three separate models.
 
+// Registered by Plant code, not a specific Station — same reasoning as
+// createTruck above.
 export async function createSupportVehicle(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const type = String(formData.get("type") ?? "");
   const code = String(formData.get("code") ?? "").trim();
   const year = Number(formData.get("year") ?? 0) || null;
@@ -239,10 +255,11 @@ export async function createSupportVehicle(formData: FormData) {
   const plateNumber = String(formData.get("plateNumber") ?? "").trim() || null;
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
 
-  if (!plantId || !type || !code) return;
+  if (!siteId || !type || !code) return;
   if (!["BULKER", "WATER_TANKER", "LOADER"].includes(type)) return;
-  if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
-  if (!(await isPlantActive(plantId))) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
+  const plantId = await resolvePlantIdForSite(siteId);
+  if (!plantId) return;
 
   const vehicle = await prisma.supportVehicle.create({
     data: { plantId, type, code, year, chassisNumber, plateNumber, defaultDriverId },
@@ -257,7 +274,7 @@ export async function updateSupportVehicle(formData: FormData) {
   requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
 
   const id = String(formData.get("id") ?? "");
-  const plantId = String(formData.get("plantId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
   const year = Number(formData.get("year") ?? 0) || null;
   const chassisNumber = String(formData.get("chassisNumber") ?? "").trim() || null;
@@ -265,10 +282,13 @@ export async function updateSupportVehicle(formData: FormData) {
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
   const status = String(formData.get("status") ?? "ACTIVE");
 
-  if (!id || !plantId || !code) return;
+  if (!id || !siteId || !code) return;
   const vehicleSiteId = effectiveSiteId(user);
+  if (!isSiteInScope(siteId, vehicleSiteId)) return;
   const existingVehicle = await prisma.supportVehicle.findUnique({ where: { id }, select: { plantId: true } });
-  if (!existingVehicle || !(await isPlantInScope(existingVehicle.plantId, vehicleSiteId)) || !(await isPlantInScope(plantId, vehicleSiteId))) return;
+  if (!existingVehicle || !(await isPlantInScope(existingVehicle.plantId, vehicleSiteId))) return;
+  const plantId = await resolvePlantIdForSite(siteId, existingVehicle.plantId);
+  if (!plantId) return;
 
   await prisma.supportVehicle.update({
     where: { id },

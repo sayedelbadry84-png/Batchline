@@ -5,21 +5,37 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 
-export default async function StockLedgerPage() {
+export default async function StockLedgerPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ site?: string }>;
+}) {
   const user = await requirePageAccess("stockLedger");
   const { dict } = await getDictionary();
   const m = dict.modules.stockLedger;
-  const siteId = effectiveSiteId(user);
+  const { site: siteParam } = await searchParams;
+  const restrictedSiteId = effectiveSiteId(user);
 
-  const [materials, sites, receipts, actuals] = await Promise.all([
+  // Restricted to the caller's own plant (never more than one row per
+  // material for them); every plant for ADMIN, since a physical
+  // stockpile at one factory is never the same stock as another's —
+  // blending them into one number would be simply wrong.
+  const sites = await prisma.site.findMany({
+    where: { ...(restrictedSiteId ? { id: restrictedSiteId } : {}) },
+    orderBy: { code: "asc" },
+    select: { id: true, code: true, name: true },
+  });
+  const siteById = new Map(sites.map((s) => [s.id, s]));
+  // A restricted (non-ADMIN) caller's own plant always wins; for an
+  // unrestricted ADMIN, an explicit ?site= filter narrows the whole
+  // ledger down to one plant — same pattern Reports uses for its site
+  // filter. Left unset, ADMIN sees every plant's rows blended in below.
+  const siteId = restrictedSiteId ?? (sites.some((s) => s.id === siteParam) ? siteParam! : null);
+
+  const [materials, receipts, actuals] = await Promise.all([
     // Material is a global catalog (like MixDesign) — only the stock
     // movements (receipts/consumption) are site-specific.
     prisma.material.findMany({ orderBy: [{ type: "asc" }, { name: "asc" }] }),
-    // Restricted to the caller's own plant (never more than one row per
-    // material for them); every plant for ADMIN, since a physical
-    // stockpile at one factory is never the same stock as another's —
-    // blending them into one number would be simply wrong.
-    prisma.site.findMany({ where: { ...(siteId ? { id: siteId } : {}) }, orderBy: { code: "asc" }, select: { id: true, code: true, name: true } }),
     prisma.materialReceipt.findMany({
       where: { postedToInventory: true, ...plantScopeWhere(siteId) },
       select: { materialId: true, netWeightKg: true, plant: { select: { siteId: true } } },
@@ -29,7 +45,6 @@ export default async function StockLedgerPage() {
       select: { materialId: true, actualMassKg: true, targetMassKg: true, batchTicket: { select: { plant: { select: { siteId: true } } } } },
     }),
   ]);
-  const siteById = new Map(sites.map((s) => [s.id, s]));
 
   // Keyed by `${materialId}::${siteId}` — a material's balance is only ever
   // meaningful per physical plant (see the query comment above), never
@@ -89,6 +104,21 @@ export default async function StockLedgerPage() {
         <h1 className={ui.h1}>{m.title}</h1>
         <p className={ui.intro}>{m.intro}</p>
       </header>
+
+      {restrictedSiteId === null && (
+        <form action="/stock-ledger" className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className={ui.label}>{dict.field.siteCode}</label>
+            <select name="site" defaultValue={siteId ?? ""} className={`${ui.select} w-56`}>
+              <option value="">{m.detail.allPlants}</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+              ))}
+            </select>
+          </div>
+          <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">{m.applyFilter}</button>
+        </form>
+      )}
 
       <div className={ui.card}>
         <table className={ui.table}>

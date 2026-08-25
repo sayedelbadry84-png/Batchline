@@ -19,11 +19,10 @@ import {
   updateSupportVehicle,
 } from "./actions";
 import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
-import { SitePlantSelect } from "@/components/SitePlantSelect";
 
 const TAB_KEYS = ["pumps", "mixers", "bulkers", "water", "loaders"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
-type SitesForPicker = { id: string; code: string; name: string; plants: { id: string; name: string }[] }[];
+type SitesForPicker = { id: string; code: string; name: string }[];
 
 const SUPPORT_TYPE: Partial<Record<TabKey, string>> = {
   bulkers: "BULKER",
@@ -63,12 +62,13 @@ export default async function EquipmentPage({
   const tab: TabKey = (TAB_KEYS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as TabKey) : "pumps";
   const siteId = effectiveSiteId(user);
 
-  // Plant picker is Site (by code) first, then that site's own lines — see
-  // SitePlantSelect.
+  // Registered by Plant code only — no specific Station is chosen here (see
+  // createTruck/createPump/createSupportVehicle in actions.ts); a truck or
+  // pump moves between a plant's own lines as work demands.
   const sitesForPicker = await prisma.site.findMany({
     where: { ...(siteId ? { id: siteId } : {}), plants: { some: {} } },
     orderBy: { code: "asc" },
-    include: { plants: { orderBy: { name: "asc" }, select: { id: true, name: true } } },
+    select: { id: true, code: true, name: true },
   });
 
   const tabs: { key: TabKey; label: string }[] = [
@@ -188,16 +188,14 @@ async function MixersTab({
                   <td className={ui.td} colSpan={8}>
                     <form action={updateTruck} className="flex flex-wrap items-end gap-2">
                       <input type="hidden" name="id" value={t.id} />
-                      <SitePlantSelect
-                        sites={sitesForPicker}
-                        defaultPlantId={t.plantId}
-                        required
-                        className={`${ui.select} w-36`}
-                        siteLabel={dict.field.siteCode}
-                        plantLabel={m.shared.plant}
-                        sitePlaceholder={dict.field.selectSite}
-                        plantPlaceholder={dict.field.selectPlant}
-                      />
+                      <div>
+                        <label className={ui.label}>{dict.field.siteCode}</label>
+                        <select name="siteId" defaultValue={t.plant.siteId} required className={`${ui.select} w-36`}>
+                          {sitesForPicker.map((s) => (
+                            <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+                          ))}
+                        </select>
+                      </div>
                       <div>
                         <label className={ui.label}>{m.shared.code}</label>
                         <input name="code" defaultValue={t.code} required className={`${ui.input} w-24`} dir="ltr" />
@@ -293,14 +291,15 @@ async function MixersTab({
 
       <form action={createTruck} className={`${ui.card} flex flex-col gap-3`}>
         <h2 className="font-display text-lg font-semibold">{m.mixers.newTitle}</h2>
-        <SitePlantSelect
-          sites={sitesForPicker}
-          required
-          siteLabel={dict.field.siteCode}
-          plantLabel={m.shared.plant}
-          sitePlaceholder={dict.field.selectSite}
-          plantPlaceholder={dict.field.selectPlant}
-        />
+        <div>
+          <label className={ui.label}>{dict.field.siteCode}</label>
+          <select name="siteId" required className={ui.select}>
+            <option value="">{dict.field.selectSite}</option>
+            {sitesForPicker.map((s) => (
+              <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+            ))}
+          </select>
+        </div>
         <div>
           <label className={ui.label}>{m.shared.code}</label>
           <input name="code" required className={ui.input} placeholder="MX-14" dir="ltr" />
@@ -416,16 +415,14 @@ async function PumpsTab({
                     <td className={ui.td} colSpan={9}>
                       <form action={updatePump} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={p.id} />
-                        <SitePlantSelect
-                          sites={sitesForPicker}
-                          defaultPlantId={p.plantId}
-                          required
-                          className={`${ui.select} w-36`}
-                          siteLabel={dict.field.siteCode}
-                          plantLabel={m.shared.plant}
-                          sitePlaceholder={dict.field.selectSite}
-                          plantPlaceholder={dict.field.selectPlant}
-                        />
+                        <div>
+                          <label className={ui.label}>{dict.field.siteCode}</label>
+                          <select name="siteId" defaultValue={p.plant.siteId} required className={`${ui.select} w-36`}>
+                            {sitesForPicker.map((s) => (
+                              <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+                            ))}
+                          </select>
+                        </div>
                         <div>
                           <label className={ui.label}>{m.shared.code}</label>
                           <input name="code" defaultValue={p.code} required className={`${ui.input} w-24`} dir="ltr" />
@@ -532,14 +529,15 @@ async function PumpsTab({
 
         <form action={createPump} className={`${ui.card} flex flex-col gap-3`}>
           <h2 className="font-display text-lg font-semibold">{m.pumps.newTitle}</h2>
-          <SitePlantSelect
-            sites={sitesForPicker}
-            required
-            siteLabel={dict.field.siteCode}
-            plantLabel={m.shared.plant}
-            sitePlaceholder={dict.field.selectSite}
-            plantPlaceholder={dict.field.selectPlant}
-          />
+          <div>
+            <label className={ui.label}>{dict.field.siteCode}</label>
+            <select name="siteId" required className={ui.select}>
+              <option value="">{dict.field.selectSite}</option>
+              {sitesForPicker.map((s) => (
+                <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+              ))}
+            </select>
+          </div>
           <div>
             <label className={ui.label}>{m.shared.code}</label>
             <input name="code" required className={ui.input} placeholder="PMP-3" dir="ltr" />
@@ -737,16 +735,14 @@ async function SupportVehicleTab({
                   <td className={ui.td} colSpan={8}>
                     <form action={updateSupportVehicle} className="flex flex-wrap items-end gap-2">
                       <input type="hidden" name="id" value={v.id} />
-                      <SitePlantSelect
-                        sites={sitesForPicker}
-                        defaultPlantId={v.plantId}
-                        required
-                        className={`${ui.select} w-36`}
-                        siteLabel={dict.field.siteCode}
-                        plantLabel={m.shared.plant}
-                        sitePlaceholder={dict.field.selectSite}
-                        plantPlaceholder={dict.field.selectPlant}
-                      />
+                      <div>
+                        <label className={ui.label}>{dict.field.siteCode}</label>
+                        <select name="siteId" defaultValue={v.plant.siteId} required className={`${ui.select} w-36`}>
+                          {sitesForPicker.map((s) => (
+                            <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+                          ))}
+                        </select>
+                      </div>
                       <div>
                         <label className={ui.label}>{m.shared.code}</label>
                         <input name="code" defaultValue={v.code} required className={`${ui.input} w-28`} dir="ltr" />
@@ -812,14 +808,15 @@ async function SupportVehicleTab({
       <form action={createSupportVehicle} className={`${ui.card} flex flex-col gap-3`}>
         <h2 className="font-display text-lg font-semibold">{m.supportVehicle.newTitle}</h2>
         <input type="hidden" name="type" value={type} />
-        <SitePlantSelect
-          sites={sitesForPicker}
-          required
-          siteLabel={dict.field.siteCode}
-          plantLabel={m.shared.plant}
-          sitePlaceholder={dict.field.selectSite}
-          plantPlaceholder={dict.field.selectPlant}
-        />
+        <div>
+          <label className={ui.label}>{dict.field.siteCode}</label>
+          <select name="siteId" required className={ui.select}>
+            <option value="">{dict.field.selectSite}</option>
+            {sitesForPicker.map((s) => (
+              <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+            ))}
+          </select>
+        </div>
         <div>
           <label className={ui.label}>{m.shared.code}</label>
           <input name="code" required className={ui.input} dir="ltr" />

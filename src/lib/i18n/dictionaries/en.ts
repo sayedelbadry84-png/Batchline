@@ -599,6 +599,8 @@ const en: typeof ar = {
       empty: "Nobody in this tab yet.",
       newTitle: "Add to this tab",
       f: { plant: "Plant code", name: "Name", code: "Employee code", role: "Role", shiftPattern: "Shift pattern", licenseExpiry: "License / cert expiry", status: "Status", jobTitleName: "Job title" },
+      otherRole: "Other…",
+      newRoleNamePlaceholder: "Type the new job title",
       add: "Add",
       newJobTitle: "New job title",
       addJobTitle: "Add job title",
@@ -821,6 +823,7 @@ const en: typeof ar = {
       title: "Stock ledger",
       intro: "Every material's balance, derived from posted receipts and completed batch consumption — no separate stock-count entry to keep in sync.",
       col: { material: "Material", plant: "Plant", type: "Type", received: "Received", consumed: "Consumed", balance: "Balance" },
+      applyFilter: "Apply",
       // Shown when a material has never been received/consumed at any
       // plant yet, so there's no site to attribute the (zero) row to.
       unassignedPlant: "—",

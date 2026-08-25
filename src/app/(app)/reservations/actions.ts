@@ -152,7 +152,11 @@ export async function approveReservationInitial(formData: FormData) {
 // "مدير التشغيل" — operations management's final clearance. Only
 // meaningful once the initial approval is already on file; a reservation
 // only becomes releasable in Production once both are set (see
-// isReservationApproved in src/lib/reservations.ts).
+// isReservationApproved in src/lib/reservations.ts). Whether the same
+// person may clear both stages of one reservation is a permissions
+// question, not a rule hardcoded here — requireActionPermission above is
+// the only gate: a role granted both approveInitial and approveFinal (see
+// the Permissions screen) may complete both on the same record.
 export async function approveReservationFinal(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "reservations", "approveFinal");
@@ -162,10 +166,6 @@ export async function approveReservationFinal(formData: FormData) {
 
   const reservation = await prisma.reservation.findUnique({ where: { id } });
   if (!reservation || !reservation.initialApprovedAt || reservation.finalApprovedAt) return;
-  // Separation of duties: the same person can't clear both stages of one
-  // reservation, whoever they are — an ADMIN is allowed to hold either
-  // role individually, just not both on the same record.
-  if (reservation.initialApprovedById === user!.id) return;
 
   await prisma.reservation.update({
     where: { id },

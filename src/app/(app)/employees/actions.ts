@@ -5,7 +5,22 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { logTransferIfChanged } from "@/lib/transferAudit";
+import { OTHER_ROLE_SENTINEL } from "@/lib/employeeRole";
 import { revalidatePath } from "next/cache";
+
+// Picking "Other" in the admin-tab role select submits this sentinel plus
+// a typed newRoleName instead of a catalog value — resolve it down to a
+// real role string, growing the JobTitle catalog on the way so the same
+// title shows up as a normal option next time (same dedupe-safe upsert
+// createJobTitle below uses standalone).
+async function resolveRole(role: string, newRoleNameRaw: string): Promise<string | null> {
+  if (role !== OTHER_ROLE_SENTINEL) return role || null;
+  const name = newRoleNameRaw.trim();
+  if (!name) return null;
+  const existing = await prisma.jobTitle.findUnique({ where: { name } });
+  if (!existing) await prisma.jobTitle.create({ data: { name } });
+  return name;
+}
 
 export async function createEmployee(formData: FormData) {
   const user = await getCurrentUser();
@@ -13,7 +28,7 @@ export async function createEmployee(formData: FormData) {
 
   const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
-  const role = String(formData.get("role") ?? "").trim();
+  const role = await resolveRole(String(formData.get("role") ?? "").trim(), String(formData.get("newRoleName") ?? ""));
   const code = String(formData.get("code") ?? "").trim() || null;
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
@@ -49,7 +64,7 @@ export async function updateEmployee(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
-  const role = String(formData.get("role") ?? "").trim();
+  const role = await resolveRole(String(formData.get("role") ?? "").trim(), String(formData.get("newRoleName") ?? ""));
   const code = String(formData.get("code") ?? "").trim() || null;
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();

@@ -5,6 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createEmployee, updateEmployee, createPumpCrewMember, updatePumpCrewMember, createJobTitle } from "./actions";
 import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { RoleSelect } from "@/components/RoleSelect";
 
 const ADMIN_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DISPATCHER", "ADMIN"] as const;
 const EMPLOYEE_STATUSES = ["ACTIVE", "FROZEN", "REMOVED"] as const;
@@ -77,10 +78,21 @@ export default async function EmployeesPage({
   // Built-in roles plus whatever an Admin has added from this screen —
   // deduped since a custom title could in principle repeat a built-in name.
   const roleOptions = Array.from(new Set([...ADMIN_ROLES, ...jobTitles.map((j) => j.name)]));
+  // A plain map, not a function — RoleSelect is a Client Component and
+  // can't receive a function prop across the RSC boundary.
+  const roleLabels = Object.fromEntries(roleOptions.map((r) => [r, dict.roles[r as keyof typeof dict.roles] ?? r]));
 
+  // The admin tab has no fixedRole of its own — it's everyone NOT already
+  // claimed by one of the other (driver) tabs, not just the built-in
+  // ADMIN_ROLES list. A custom job title (built-in or picked via "Other"
+  // on this same tab) belongs here too, or it would vanish from every
+  // tab's listing the moment it's saved.
   const employees = !isCrewTab
     ? await prisma.employee.findMany({
-        where: { role: fixedRole ?? { in: [...ADMIN_ROLES] }, ...plantScopeWhere(siteId) },
+        where: {
+          role: fixedRole ?? { notIn: Object.values(EMPLOYEE_TAB_ROLE) },
+          ...plantScopeWhere(siteId),
+        },
         orderBy: { createdAt: "asc" },
         include: { plant: { include: { site: true } } },
       })
@@ -290,11 +302,14 @@ export default async function EmployeesPage({
                             {tab === "admin" && (
                               <div>
                                 <label className={ui.label}>{m.f.role}</label>
-                                <select name="role" defaultValue={e.role} required className={`${ui.select} w-40`}>
-                                  {roleOptions.map((r) => (
-                                    <option key={r} value={r}>{dict.roles[r as keyof typeof dict.roles] ?? r}</option>
-                                  ))}
-                                </select>
+                                <RoleSelect
+                                  roleOptions={roleOptions}
+                                  roleLabels={roleLabels}
+                                  defaultValue={e.role}
+                                  otherLabel={m.otherRole}
+                                  newRoleNamePlaceholder={m.newRoleNamePlaceholder}
+                                  className={`${ui.select} w-40`}
+                                />
                               </div>
                             )}
                             <div>
@@ -390,13 +405,12 @@ export default async function EmployeesPage({
             {tab === "admin" && (
               <div>
                 <label className={ui.label}>{m.f.role}</label>
-                <select name="role" required className={ui.select}>
-                  {roleOptions.map((r) => (
-                    <option key={r} value={r}>
-                      {dict.roles[r as keyof typeof dict.roles] ?? r}
-                    </option>
-                  ))}
-                </select>
+                <RoleSelect
+                  roleOptions={roleOptions}
+                  roleLabels={roleLabels}
+                  otherLabel={m.otherRole}
+                  newRoleNamePlaceholder={m.newRoleNamePlaceholder}
+                />
               </div>
             )}
             <div>
