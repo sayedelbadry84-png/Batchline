@@ -39,23 +39,32 @@ function addDays(dateParam: string, delta: number): string {
 function fmtTime(d: Date): string {
   return new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
+function fmtDateTime(d: Date): string {
+  return new Date(d).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
 
 export default async function ProductionPage({
   searchParams,
 }: {
-  searchParams: Promise<{ manualBooking?: string; date?: string }>;
+  searchParams: Promise<{ manualBooking?: string; date?: string; dateTo?: string }>;
 }) {
   const user = await requirePageAccess("production");
   const { dict } = await getDictionary();
   const m = dict.modules.production;
-  const { manualBooking, date: dateRaw } = await searchParams;
+  const { manualBooking, date: dateRaw, dateTo: dateToRaw } = await searchParams;
   const siteId = effectiveSiteId(user);
-  const selectedDate = dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : toDateParam(new Date());
+  const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const selectedDate = isDateParam(dateRaw) ? dateRaw : toDateParam(new Date());
+  // Optional end date — when set and later than selectedDate, the delivery
+  // log covers that whole range instead of one day (same from/to pattern
+  // as Reservations and Reports). Never before selectedDate.
+  const selectedDateTo = isDateParam(dateToRaw) && dateToRaw >= selectedDate ? dateToRaw : selectedDate;
+  const isRange = selectedDate !== selectedDateTo;
   // Local (no "Z") — matches how releasedAt/pourWindowStart are actually
   // written elsewhere in this app (see the same note in reservations/page.tsx).
   const dayStart = new Date(`${selectedDate}T00:00:00`);
-  const dayEnd = new Date(`${addDays(selectedDate, 1)}T00:00:00`);
-  const baseUrl = `/production?date=${selectedDate}`;
+  const dayEnd = new Date(`${addDays(selectedDateTo, 1)}T00:00:00`);
+  const baseUrl = `/production?date=${selectedDate}&dateTo=${selectedDateTo}`;
 
   const [readyReservationsRaw, allDeliveries, projects, approvedMixes, sitesForPicker] = await Promise.all([
     prisma.reservation.findMany({
@@ -138,7 +147,7 @@ export default async function ProductionPage({
 
   const rollup = { count: allDeliveries.length, qty: allDeliveries.reduce((sum, t) => sum + t.volumeM3, 0) };
   const waMessage =
-    `${m.title} — ${selectedDate}\n${m.rollup(rollup.count, rollup.qty)}\n\n` +
+    `${m.title} — ${selectedDate}${isRange ? ` → ${selectedDateTo}` : ""}\n${m.rollup(rollup.count, rollup.qty)}\n\n` +
     allDeliveries
       .map((t) => `- ${t.ticketNumber}: ${t.reservation.project.name} (${t.reservation.project.customer.legalName}) · ${t.mix.code} ${t.volumeM3}m³`)
       .join("\n");
@@ -151,23 +160,31 @@ export default async function ProductionPage({
         <p className={ui.intro}>{m.intro}</p>
       </header>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <Link href={`/production?date=${addDays(selectedDate, -1)}`} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt" aria-label={m.prevDay}>
+      <form action="/production" className="flex flex-wrap items-end gap-3">
+        <Link href={`/production?date=${addDays(selectedDate, -1)}`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt" aria-label={m.prevDay}>
           ‹
         </Link>
-        <input type="date" defaultValue={selectedDate} disabled className={`${ui.input} w-40`} />
-        <Link href={`/production?date=${addDays(selectedDate, 1)}`} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt" aria-label={m.nextDay}>
+        <div>
+          <label className={ui.label}>{m.dateFrom}</label>
+          <input type="date" name="date" defaultValue={selectedDate} className={`${ui.input} w-40`} />
+        </div>
+        <div>
+          <label className={ui.label}>{m.dateTo}</label>
+          <input type="date" name="dateTo" defaultValue={selectedDateTo} className={`${ui.input} w-40`} />
+        </div>
+        <button className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">{m.applyRange}</button>
+        <Link href={`/production?date=${addDays(selectedDate, 1)}`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt" aria-label={m.nextDay}>
           ›
         </Link>
-        <span className="text-sm text-ink-muted">{m.rollup(rollup.count, rollup.qty)}</span>
-        <div className="ms-auto flex items-center gap-2">
+        <span className="mb-2 text-sm text-ink-muted">{m.rollup(rollup.count, rollup.qty)}</span>
+        <div className="ms-auto mb-0.5 flex items-center gap-2">
           <PrintButton label={m.exportPdf} />
           <WhatsAppShareButton label={m.sendWhatsApp} promptLabel={m.whatsAppPrompt} message={waMessage} />
           <Link href={`${baseUrl}&manualBooking=1`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
             {m.manualBooking}
           </Link>
         </div>
-      </div>
+      </form>
 
       {manualBooking === "1" && (
         <Modal title={m.manualBookingTitle} closeHref={baseUrl}>
@@ -332,7 +349,7 @@ export default async function ProductionPage({
                   </tr>
                   {tickets.map((t) => (
                     <tr key={t.id}>
-                      <td className={`${ui.td} font-mono text-xs tabular`}>{t.releasedAt ? fmtTime(t.releasedAt) : "—"}</td>
+                      <td className={`${ui.td} font-mono text-xs tabular`}>{t.releasedAt ? (isRange ? fmtDateTime(t.releasedAt) : fmtTime(t.releasedAt)) : "—"}</td>
                       <td className={`${ui.td} text-xs`}>{t.plant.name}</td>
                       <td className={ui.td}>
                         <span className="text-ink-faint">↳</span>{" "}

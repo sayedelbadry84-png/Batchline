@@ -7,7 +7,6 @@ import { createReservation, updateReservation, approveReservationInitial, approv
 import { effectiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { canPerformAction } from "@/lib/permissions";
 import { Modal } from "@/components/Modal";
-import { SearchableSelect } from "@/components/SearchableSelect";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { PumpBookingRows } from "@/components/PumpBookingRows";
 import { PrintButton } from "@/components/PrintButton";
@@ -39,25 +38,35 @@ function addDays(dateParam: string, delta: number): string {
 function fmtTime(d: Date): string {
   return new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
+function fmtDateTime(d: Date): string {
+  return new Date(d).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
 
 export default async function ReservationsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ edit?: string; date?: string; new?: string }>;
+  searchParams: Promise<{ edit?: string; date?: string; dateTo?: string; new?: string }>;
 }) {
   const user = await requirePageAccess("reservations");
   const { dict } = await getDictionary();
   const m = dict.modules.reservations;
-  const { edit: editId, date: dateRaw, new: newFlag } = await searchParams;
+  const { edit: editId, date: dateRaw, dateTo: dateToRaw, new: newFlag } = await searchParams;
   const siteId = effectiveSiteId(user);
-  const selectedDate = dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : toDateParam(new Date());
+  const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const selectedDate = isDateParam(dateRaw) ? dateRaw : toDateParam(new Date());
+  // A plain single date input defaulting to "today" plus an optional
+  // second (end) date — when both are set and differ, the board covers
+  // that whole range instead of one day (RhinoMaster itself has no range
+  // mode; this is the same from/to pattern already used in Reports).
+  // Never before selectedDate: swapped back if entered backwards.
+  const selectedDateTo = isDateParam(dateToRaw) && dateToRaw >= selectedDate ? dateToRaw : selectedDate;
   // Local (no "Z"), NOT UTC — matches how pourWindowStart itself gets
   // parsed from a plain datetime-local string in createReservation, so
   // the query's day boundary lines up with how the data was actually
   // written rather than introducing a second, differently-interpreted
   // "day" concept.
   const dayStart = new Date(`${selectedDate}T00:00:00`);
-  const dayEnd = addDays(selectedDate, 1);
+  const dayEnd = addDays(selectedDateTo, 1);
   const [canApproveInitial, canApproveFinal] = await Promise.all([
     canPerformAction(user.role, "reservations", "approveInitial"),
     canPerformAction(user.role, "reservations", "approveFinal"),
@@ -134,9 +143,10 @@ export default async function ReservationsPage({
   const operators = crew.filter((c) => c.role === "OPERATOR").map((c) => ({ id: c.id, name: c.name }));
   const assistants = crew.filter((c) => c.role === "HELPER").map((c) => ({ id: c.id, name: c.name }));
 
-  const baseUrl = `/reservations?date=${selectedDate}`;
+  const baseUrl = `/reservations?date=${selectedDate}&dateTo=${selectedDateTo}`;
+  const isRange = selectedDate !== selectedDateTo;
   const waMessage =
-    `${m.title} — ${selectedDate}\n${m.rollup(rollup.count, rollup.booked, rollup.delivered)}\n\n` +
+    `${m.title} — ${selectedDate}${isRange ? ` → ${selectedDateTo}` : ""}\n${m.rollup(rollup.count, rollup.booked, rollup.delivered)}\n\n` +
     reservations
       .map((r) => `- ${r.project.name} (${r.project.customer.legalName}): ${r.mix.code} ${r.requestedVolumeM3}m³, ${m.releasedShort(r.released)}`)
       .join("\n");
@@ -149,23 +159,31 @@ export default async function ReservationsPage({
         <p className={ui.intro}>{m.intro}</p>
       </header>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <Link href={`/reservations?date=${addDays(selectedDate, -1)}`} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt" aria-label={m.prevDay}>
+      <form action="/reservations" className="flex flex-wrap items-end gap-3">
+        <Link href={`/reservations?date=${addDays(selectedDate, -1)}`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt" aria-label={m.prevDay}>
           ‹
         </Link>
-        <input type="date" defaultValue={selectedDate} disabled className={`${ui.input} w-40`} />
-        <Link href={`/reservations?date=${addDays(selectedDate, 1)}`} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt" aria-label={m.nextDay}>
+        <div>
+          <label className={ui.label}>{m.dateFrom}</label>
+          <input type="date" name="date" defaultValue={selectedDate} className={`${ui.input} w-40`} />
+        </div>
+        <div>
+          <label className={ui.label}>{m.dateTo}</label>
+          <input type="date" name="dateTo" defaultValue={selectedDateTo} className={`${ui.input} w-40`} />
+        </div>
+        <button className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">{m.applyRange}</button>
+        <Link href={`/reservations?date=${addDays(selectedDate, 1)}`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt" aria-label={m.nextDay}>
           ›
         </Link>
-        <span className="text-sm text-ink-muted">{m.rollup(rollup.count, rollup.booked, rollup.delivered)}</span>
-        <div className="ms-auto flex items-center gap-2">
+        <span className="mb-2 text-sm text-ink-muted">{m.rollup(rollup.count, rollup.booked, rollup.delivered)}</span>
+        <div className="ms-auto mb-0.5 flex items-center gap-2">
           <PrintButton label={m.exportPdf} />
           <WhatsAppShareButton label={m.sendWhatsApp} promptLabel={m.whatsAppPrompt} message={waMessage} />
           <Link href={`${baseUrl}&new=1`} className={ui.button}>
             + {m.newBooking}
           </Link>
         </div>
-      </div>
+      </form>
 
       <div className={ui.card}>
         <table className={ui.table}>
@@ -324,7 +342,7 @@ export default async function ReservationsPage({
                 : "—";
               return (
                 <tr key={r.id}>
-                  <td className={`${ui.td} font-mono text-xs tabular`}>{fmtTime(r.pourWindowStart)}</td>
+                  <td className={`${ui.td} font-mono text-xs tabular`}>{isRange ? fmtDateTime(r.pourWindowStart) : fmtTime(r.pourWindowStart)}</td>
                   <td className={ui.td}>
                     {r.project.name}
                     <div className="text-xs text-ink-muted">{r.project.customer.legalName} · {r.site.name}</div>
@@ -449,7 +467,12 @@ export default async function ReservationsPage({
           <form action={createReservation} className="flex flex-col gap-3">
             <div>
               <label className={ui.label}>{m.f.project}</label>
-              <SearchableSelect name="projectId" options={projectOptions} placeholder={dict.field.selectProject} className={ui.input} />
+              <select name="projectId" required defaultValue="" className={ui.select}>
+                <option value="" disabled>{dict.field.selectProject}</option>
+                {projectOptions.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -486,7 +509,12 @@ export default async function ReservationsPage({
             </div>
             <div>
               <label className={ui.label}>{m.f.mix}</label>
-              <SearchableSelect name="mixId" options={mixOptions} placeholder={dict.field.selectMix} className={ui.input} />
+              <select name="mixId" required defaultValue="" className={ui.select}>
+                <option value="" disabled>{dict.field.selectMix}</option>
+                {mixOptions.map((mx) => (
+                  <option key={mx.value} value={mx.value}>{mx.label}</option>
+                ))}
+              </select>
               {mixes.length === 0 && <p className="mt-1 text-xs text-warn">{m.noApprovedMix}</p>}
             </div>
             <div>
