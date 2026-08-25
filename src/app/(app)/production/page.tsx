@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { releaseBatchTicket, createManualRelease } from "./actions";
+import { closeReservation } from "../reservations/actions";
 import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { SitePlantSelect } from "@/components/SitePlantSelect";
 
@@ -186,6 +187,12 @@ export default async function ProductionPage({
                         className="w-20 rounded-md border border-border bg-surface px-2 py-1.5 font-mono text-xs"
                       />
                       <button className={ui.button}>{m.release}</button>
+                    </form>
+                    <form action={closeReservation} className="mt-1">
+                      <input type="hidden" name="id" value={r.id} />
+                      <button className="text-xs font-medium text-warn hover:underline">
+                        {dict.modules.reservations.closeReservation}
+                      </button>
                     </form>
                   </td>
                 </tr>
