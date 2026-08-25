@@ -442,6 +442,10 @@ model Reservation {
   closedBy              User?     @relation("ReservationClosedBy", fields: [closedById], references: [id])
   closeReasonCode       String?
   closeNote             String?
+  // Free-text notes captured at booking time (site/pump/timing remarks) —
+  // distinct from the structured pour-detail fields above, same role as
+  // RhinoMaster's "Remarks" field on its own booking form.
+  notes                 String?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
@@ -753,16 +757,25 @@ model Pump {
 // Not @unique on reservationId — a large pour can need more than one pump
 // working simultaneously, so a reservation may carry several assignments.
 model PumpAssignment {
-  id             String      @id @default(cuid())
+  id             String          @id @default(cuid())
   pumpId         String
-  pump           Pump        @relation(fields: [pumpId], references: [id])
+  pump           Pump            @relation(fields: [pumpId], references: [id])
   reservationId  String
-  reservation    Reservation @relation(fields: [reservationId], references: [id])
+  reservation    Reservation     @relation(fields: [reservationId], references: [id])
   scheduledStart DateTime
   billedHours    Float?
-  status         String      @default("SCHEDULED") // SCHEDULED, ON_SITE, COMPLETE, CANCELLED
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
+  status         String          @default("SCHEDULED") // SCHEDULED, ON_SITE, COMPLETE, CANCELLED
+  // Crew reserved for this pump at booking time — same free-choice pattern
+  // as Trip's own pumpOperatorId/pumpAssistantId (optional, from the
+  // company-wide PumpCrewMember roster; not required to match the pump's
+  // own default crew). Set from the New Booking form's pump section; the
+  // trip actually dispatched later can still pick different crew.
+  pumpOperatorId  String?
+  pumpOperator    PumpCrewMember? @relation("PumpAssignmentOperator", fields: [pumpOperatorId], references: [id])
+  pumpAssistantId String?
+  pumpAssistant   PumpCrewMember? @relation("PumpAssignmentAssistant", fields: [pumpAssistantId], references: [id])
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
 }
 
 // ---------------------------------------------------------------------------
@@ -876,10 +889,12 @@ model PumpCrewMember {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  operatorTrips              Trip[] @relation("PumpOperatorCrew")
-  assistantTrips             Trip[] @relation("PumpAssistantCrew")
-  defaultForPumpsAsOperator  Pump[] @relation("PumpDefaultOperator")
-  defaultForPumpsAsAssistant Pump[] @relation("PumpDefaultAssistant")
+  operatorTrips              Trip[]           @relation("PumpOperatorCrew")
+  assistantTrips             Trip[]           @relation("PumpAssistantCrew")
+  defaultForPumpsAsOperator  Pump[]           @relation("PumpDefaultOperator")
+  defaultForPumpsAsAssistant Pump[]           @relation("PumpDefaultAssistant")
+  operatorAssignments        PumpAssignment[] @relation("PumpAssignmentOperator")
+  assistantAssignments       PumpAssignment[] @relation("PumpAssignmentAssistant")
 }
 
 // A tiered per-trip bonus, one policy per plant — trips 1..freeTripsThreshold

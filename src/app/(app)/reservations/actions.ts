@@ -42,6 +42,7 @@ export async function createReservation(formData: FormData) {
   const mixId = String(formData.get("mixId") ?? "");
   const requestedVolumeM3 = Number(formData.get("requestedVolumeM3") ?? 0);
   const pourWindowStartRaw = String(formData.get("pourWindowStart") ?? "");
+  const notes = String(formData.get("notes") ?? "").trim() || null;
 
   if (!projectId || !siteId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
@@ -56,6 +57,24 @@ export async function createReservation(formData: FormData) {
   const outstandingBalance = await getCustomerOutstandingBalance(project.customer.id);
   const overCreditLimit = outstandingBalance >= project.customer.creditLimit;
 
+  const pourWindowStart = new Date(pourWindowStartRaw);
+
+  // Pump(s) reserved for this job right now, from the New Booking modal's
+  // repeatable pump rows (PumpBookingRows) — each row posts under the same
+  // three field names, read back here as parallel arrays. A row where the
+  // pump was never actually picked (still on its placeholder) is skipped
+  // rather than creating an empty assignment.
+  const pumpIds = formData.getAll("pumpId").map(String);
+  const pumpOperatorIds = formData.getAll("pumpOperatorId").map(String);
+  const pumpAssistantIds = formData.getAll("pumpAssistantId").map(String);
+  const pumpRows = pumpIds
+    .map((pumpId, i) => ({
+      pumpId,
+      pumpOperatorId: pumpOperatorIds[i] || null,
+      pumpAssistantId: pumpAssistantIds[i] || null,
+    }))
+    .filter((row) => row.pumpId);
+
   const reservation = await prisma.reservation.create({
     data: {
       projectId,
@@ -63,9 +82,13 @@ export async function createReservation(formData: FormData) {
       mixId,
       requestedVolumeM3,
       originalVolumeM3: requestedVolumeM3,
-      pourWindowStart: new Date(pourWindowStartRaw),
+      pourWindowStart,
+      notes,
       status: overCreditLimit ? "ON_HOLD" : "CONFIRMED",
       ...readPourDetails(formData),
+      pumpAssignments: pumpRows.length
+        ? { create: pumpRows.map((row) => ({ ...row, scheduledStart: pourWindowStart })) }
+        : undefined,
     },
   });
 
