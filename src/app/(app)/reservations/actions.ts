@@ -167,9 +167,20 @@ export async function approveReservationFinal(formData: FormData) {
   const reservation = await prisma.reservation.findUnique({ where: { id } });
   if (!reservation || !reservation.initialApprovedAt || reservation.finalApprovedAt) return;
 
+  // ON_HOLD is an automatic flag set at creation (see createReservation's
+  // credit-limit check) — it's a "needs review" marker, not a separate
+  // veto that survives review. Final approval IS that review completing
+  // successfully, so it clears the hold too; otherwise an approved
+  // reservation would sit invisible to Production forever; the listing
+  // there only ever shows CONFIRMED/IN_PRODUCTION (see readyReservationsRaw
+  // in production/page.tsx).
   await prisma.reservation.update({
     where: { id },
-    data: { finalApprovedAt: new Date(), finalApprovedById: user!.id },
+    data: {
+      finalApprovedAt: new Date(),
+      finalApprovedById: user!.id,
+      status: reservation.status === "ON_HOLD" ? "CONFIRMED" : reservation.status,
+    },
   });
 
   await logAudit({ module: "Reservations", recordId: id, reasonCode: "RESERVATION_FINAL_APPROVED" });
