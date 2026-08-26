@@ -77,6 +77,19 @@ export default async function BatchTicketPage({
             trips: { none: { status: { not: "CLOSED" }, ...(ticket.trip ? { id: { not: ticket.trip.id } } : {}) } },
           },
           orderBy: { code: "asc" },
+          // Each truck's own most recent CLOSED trip — used below to tell
+          // whether it's still carrying an unconsumed RECLAIMED load for
+          // this same mix (see getAvailableReclaimForTruck in
+          // src/lib/reclaim.ts, which startTrip re-checks server-side;
+          // this is just the picker's own informational badge).
+          include: {
+            trips: {
+              where: { status: "CLOSED" },
+              orderBy: { createdAt: "desc" },
+              take: 1,
+              select: { drumReturn: { select: { fate: true, consumedAt: true, returnedVolumeM3: true } }, batchTicket: { select: { mixId: true } } },
+            },
+          },
         }),
         prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" } }),
         isPumpDelivery
@@ -88,13 +101,25 @@ export default async function BatchTicketPage({
       ])
     : [[], [], [], []];
 
-  const trucks = rankTrucksForVolume(trucksRaw, ticket.volumeM3);
+  // Same match rule as getAvailableReclaimForTruck: the truck's last
+  // CLOSED trip has to be an unconsumed RECLAIMED return for THIS ticket's
+  // own mix — a different mix, an already-consumed return, or no return
+  // at all all mean "nothing usable in the drum."
+  const trucksWithReclaim = trucksRaw.map((t) => {
+    const lastReturn = t.trips[0]?.drumReturn;
+    const reclaimedVolumeM3 =
+      lastReturn && lastReturn.fate === "RECLAIMED" && !lastReturn.consumedAt && t.trips[0]?.batchTicket.mixId === ticket.mixId
+        ? lastReturn.returnedVolumeM3
+        : null;
+    return { ...t, reclaimedVolumeM3 };
+  });
+  const trucks = rankTrucksForVolume(trucksWithReclaim, ticket.volumeM3);
 
   // Selecting the equipment pre-fills its registered default person(s) —
   // still freely editable afterward — via EquipmentAssignPicker.
   const truckOptions = trucks.map((t) => ({
     value: t.id,
-    label: `${t.code} (${t.drumCapacityM3} m³)${t.recommended ? ` — ${d.bestFit}` : ""}${t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}`,
+    label: `${t.code} (${t.drumCapacityM3} m³)${t.recommended ? ` — ${d.bestFit}` : ""}${t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}${t.reclaimedVolumeM3 ? ` — ${d.reclaimedInDrum(t.reclaimedVolumeM3)}` : ""}`,
     defaults: { driverId: t.defaultDriverId ?? "" },
   }));
   const driverOptions = drivers.map((dr) => ({ value: dr.id, label: dr.name }));
@@ -306,6 +331,11 @@ export default async function BatchTicketPage({
                 </>
               )}
             </p>
+            {/* Internal-only note — never printed on the customer-facing
+                delivery note, which always shows the full ticket volume. */}
+            {ticket.trip.reclaimedVolumeM3 != null && (
+              <p className={`${ui.chip} bg-good-soft text-good mt-1 inline-block`}>{d.reclaimedNote(ticket.trip.reclaimedVolumeM3)}</p>
+            )}
           </div>
           <div className="flex items-center gap-3">
             {canEditTrip && (

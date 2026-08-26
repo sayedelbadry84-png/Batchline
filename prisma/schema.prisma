@@ -647,6 +647,14 @@ model Trip {
   dischargeStart       DateTime?
   dischargeEnd         DateTime?
   volumeDeliveredM3    Float?
+  // How much of THIS ticket's own volume was fulfilled by topping up
+  // reclaimed material already in the truck's drum, rather than freshly
+  // batched — set by startTrip when the chosen truck has an unconsumed
+  // RECLAIMED DrumReturn for a matching mix (see src/lib/reclaim.ts).
+  // Never reduces BatchTicket.volumeM3 itself — the customer is still
+  // billed/ticketed for the full amount; only the component target
+  // masses drawn from inventory shrink by this much.
+  reclaimedVolumeM3    Float?
   // Driver-app delivery confirmation. The photo is stored as a data URL for
   // this phase (no object storage wired up yet) — fine for demo volumes,
   // swap for a real blob store (S3-compatible) before production traffic.
@@ -656,9 +664,14 @@ model Trip {
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
-  drumReturn  DrumReturn?
-  testBatches TestBatch[]
-  invoiceLine InvoiceLine?
+  drumReturn         DrumReturn?
+  // The (different, earlier) DrumReturn this trip itself consumed by
+  // topping up a truck's leftover reclaimed material — opposite side of
+  // DrumReturn.consumedInTripId above. Distinct from `drumReturn`, which
+  // is whatever THIS trip returns when IT closes.
+  consumedDrumReturn DrumReturn? @relation("ReclaimConsumedInTrip")
+  testBatches        TestBatch[]
+  invoiceLine        InvoiceLine?
 }
 
 model DrumReturn {
@@ -679,6 +692,16 @@ model DrumReturn {
   // unrecorded until now; independent of disposition and reasonCode.
   fate              String?
   note              String?
+  // Set once a LATER trip on the same truck actually tops this reclaimed
+  // load up with fresh material and reuses it — distinguishes "flagged
+  // reclaimable, still sitting in the drum" from "already reused," so a
+  // truck's current drum content can be derived from its most recent
+  // CLOSED trip's own DrumReturn (see getAvailableReclaimForTruck in
+  // src/lib/reclaim.ts) without a separate stored "current drum content"
+  // field on Truck.
+  consumedAt        DateTime?
+  consumedInTripId  String?   @unique
+  consumedInTrip    Trip?     @relation("ReclaimConsumedInTrip", fields: [consumedInTripId], references: [id])
   createdAt         DateTime @default(now())
 }
 

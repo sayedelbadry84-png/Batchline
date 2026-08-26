@@ -774,6 +774,10 @@ export default async function ReportsPage({
               <div className="font-mono text-2xl tabular text-critical">{returnsData.wastedM3.toFixed(1)} m³</div>
               <div className="mt-1 text-sm text-ink-muted">{m.returnsReport.wasted(returnsData.wastedM3.toFixed(1))}</div>
             </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular text-good">{returnsData.reclaimedAndReusedM3.toFixed(1)} m³</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.returnsReport.reclaimedAndReused}</div>
+            </div>
           </div>
           <div className={ui.card}>
             <table className={ui.table}>

@@ -92,7 +92,17 @@ export async function getReturnsReport({ from, to, siteId, plantId }: ReportFilt
     orderBy: { trip: { dischargeEnd: "desc" } },
   });
 
-  return { rows: returns, totalReturnedM3, wastedM3, reclaimedM3, returnCount: returns.length, pendingFate };
+  // Distinct from reclaimedM3 above (volume flagged reclaimable) — this is
+  // volume actually topped up and reused in a later load (see
+  // Trip.reclaimedVolumeM3, set by startTrip via getAvailableReclaimForTruck),
+  // i.e. materials that never had to be freshly batched at all.
+  const reclaimedAndReusedTrips = await prisma.trip.findMany({
+    where: { reclaimedVolumeM3: { not: null }, dischargeEnd: { gte: from, lte: to }, ...tripPlantScopeWhere(siteId, plantId) },
+    select: { reclaimedVolumeM3: true },
+  });
+  const reclaimedAndReusedM3 = reclaimedAndReusedTrips.reduce((sum, t) => sum + (t.reclaimedVolumeM3 ?? 0), 0);
+
+  return { rows: returns, totalReturnedM3, wastedM3, reclaimedM3, reclaimedAndReusedM3, returnCount: returns.length, pendingFate };
 }
 
 export async function getTripsReport({ from, to, siteId, plantId }: ReportFilter) {

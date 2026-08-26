@@ -6,6 +6,7 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
+import { getAvailableReclaimForTruck } from "@/lib/reclaim";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -402,7 +403,7 @@ export async function startTrip(formData: FormData) {
 
   const ticket = await prisma.batchTicket.findUnique({
     where: { id: batchTicketId },
-    include: { reservation: true },
+    include: { reservation: true, components: true },
   });
   if (!ticket) return;
 
@@ -455,19 +456,47 @@ export async function startTrip(formData: FormData) {
     }
   }
 
-  const trip = await prisma.trip.create({
-    data: {
-      batchTicketId,
-      truckId,
-      driverId,
-      pumpId,
-      pumpOperatorName,
-      pumpAssistantName,
-      pumpOperatorId,
-      pumpAssistantId,
-      status: "LOADING",
-      batchTime: ticket.batchCompletedAt ?? new Date(),
-    },
+  // If the chosen truck is still carrying reclaimed material from its
+  // last CLOSED trip (same mix, not yet consumed — see getAvailableReclaimForTruck),
+  // top it up instead of drawing full fresh materials: shrink every
+  // component's target mass by the reclaimed share and mark that earlier
+  // return consumed, atomically with creating this trip. The ticket's own
+  // volumeM3 (what the customer is billed/ticketed for) is never touched.
+  const availableReclaim = await getAvailableReclaimForTruck(truckId, ticket.mixId);
+  const reclaimedVolumeM3 = availableReclaim ? Math.min(availableReclaim.volumeM3, ticket.volumeM3) : null;
+
+  const trip = await prisma.$transaction(async (tx) => {
+    const created = await tx.trip.create({
+      data: {
+        batchTicketId,
+        truckId,
+        driverId,
+        pumpId,
+        pumpOperatorName,
+        pumpAssistantName,
+        pumpOperatorId,
+        pumpAssistantId,
+        status: "LOADING",
+        batchTime: ticket.batchCompletedAt ?? new Date(),
+        reclaimedVolumeM3,
+      },
+    });
+
+    if (availableReclaim && reclaimedVolumeM3) {
+      const freshFraction = 1 - reclaimedVolumeM3 / ticket.volumeM3;
+      for (const c of ticket.components) {
+        await tx.batchComponentActual.update({
+          where: { id: c.id },
+          data: { targetMassKg: c.targetMassKg * freshFraction },
+        });
+      }
+      await tx.drumReturn.update({
+        where: { id: availableReclaim.drumReturnId },
+        data: { consumedAt: new Date(), consumedInTripId: created.id },
+      });
+    }
+
+    return created;
   });
 
   await logAudit({ module: "Fleet", recordId: trip.id, afterValue: "LOADING", reasonCode: "TRIP_STARTED" });

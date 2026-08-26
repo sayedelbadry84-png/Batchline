@@ -47,6 +47,17 @@ export default async function OperatorTicketPage({
         prisma.truck.findMany({
           where: { status: "ACTIVE", trips: { none: { status: { not: "CLOSED" } } } },
           orderBy: { code: "asc" },
+          // Each truck's own most recent CLOSED trip — see the same badge
+          // in production/[id]/page.tsx and getAvailableReclaimForTruck
+          // in src/lib/reclaim.ts.
+          include: {
+            trips: {
+              where: { status: "CLOSED" },
+              orderBy: { createdAt: "desc" },
+              take: 1,
+              select: { drumReturn: { select: { fate: true, consumedAt: true, returnedVolumeM3: true } }, batchTicket: { select: { mixId: true } } },
+            },
+          },
         }),
         prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" } }),
         isPumpDelivery
@@ -58,12 +69,20 @@ export default async function OperatorTicketPage({
       ])
     : [[], [], [], []];
 
-  const trucks = rankTrucksForVolume(trucksRaw, ticket.volumeM3);
+  const trucksWithReclaim = trucksRaw.map((t) => {
+    const lastReturn = t.trips[0]?.drumReturn;
+    const reclaimedVolumeM3 =
+      lastReturn && lastReturn.fate === "RECLAIMED" && !lastReturn.consumedAt && t.trips[0]?.batchTicket.mixId === ticket.mixId
+        ? lastReturn.returnedVolumeM3
+        : null;
+    return { ...t, reclaimedVolumeM3 };
+  });
+  const trucks = rankTrucksForVolume(trucksWithReclaim, ticket.volumeM3);
 
   const mobileSelect = "w-full rounded-md border border-border bg-bg px-2 py-2 text-sm";
   const truckOptions = trucks.map((t) => ({
     value: t.id,
-    label: `${t.code} (${t.drumCapacityM3} m³)${t.recommended ? ` — ${d.bestFit}` : ""}${t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}`,
+    label: `${t.code} (${t.drumCapacityM3} m³)${t.recommended ? ` — ${d.bestFit}` : ""}${t.undersized ? ` — ${d.undersized(t.drumCapacityM3, ticket.volumeM3)}` : ""}${t.reclaimedVolumeM3 ? ` — ${d.reclaimedInDrum(t.reclaimedVolumeM3)}` : ""}`,
     defaults: { driverId: t.defaultDriverId ?? "" },
   }));
   const driverOptions = drivers.map((dr) => ({ value: dr.id, label: dr.name }));
@@ -218,6 +237,9 @@ export default async function OperatorTicketPage({
               </>
             )}
           </p>
+          {ticket.trip.reclaimedVolumeM3 != null && (
+            <p className="mt-1 inline-block rounded-full bg-good-soft px-2.5 py-0.5 font-mono text-xs text-good">{d.reclaimedNote(ticket.trip.reclaimedVolumeM3)}</p>
+          )}
         </div>
       )}
     </div>
