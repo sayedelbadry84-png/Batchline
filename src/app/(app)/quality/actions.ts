@@ -163,7 +163,11 @@ export async function approveWasteMemo(formData: FormData) {
   requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
 
   const id = String(formData.get("id") ?? "");
-  if (!id) return;
+  // A written finding is mandatory — reasonCode alone is just the coarse
+  // category picked at return-close time, not an actual QA explanation of
+  // what was wrong with the load. No note, no approval.
+  const approvalNote = String(formData.get("approvalNote") ?? "").trim();
+  if (!id || !approvalNote) return;
   if (!(await wasteMemoInScope(id, effectiveSiteId(user)))) return;
 
   const existing = await prisma.wasteIncidentMemo.findUnique({ where: { id } });
@@ -171,13 +175,13 @@ export async function approveWasteMemo(formData: FormData) {
 
   const memo = await prisma.wasteIncidentMemo.update({
     where: { id },
-    data: { status: "APPROVED", approvedAt: new Date(), approvedById: user!.id },
+    data: { status: "APPROVED", approvalNote, approvedAt: new Date(), approvedById: user!.id },
   });
 
   await logAudit({
     module: "Quality",
     recordId: id,
-    afterValue: `${memo.wastedVolumeM3} m3 — ${memo.reasonCode}`,
+    afterValue: `${memo.wastedVolumeM3} m3 — ${memo.reasonCode} — ${approvalNote}`,
     reasonCode: "WASTE_MEMO_APPROVED",
   });
 

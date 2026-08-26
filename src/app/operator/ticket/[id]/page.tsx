@@ -255,6 +255,9 @@ export default async function OperatorTicketPage({
               </span>
             </div>
           )}
+          {ticket.trip.drumReturn?.wasteMemo?.approvalNote && (
+            <p className="text-xs text-ink-muted">{d.wasteMemoNote}: {ticket.trip.drumReturn.wasteMemo.approvalNote}</p>
+          )}
         </div>
       )}
     </div>

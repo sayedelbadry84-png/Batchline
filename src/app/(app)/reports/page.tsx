@@ -767,7 +767,7 @@ export default async function ReportsPage({
             message={`${m.tabs.returns} ${rangeFrom} → ${rangeTo}\n${m.returnsReport.totalReturned(returnsData.totalReturnedM3.toFixed(1))}\n${m.returnsReport.wasted(returnsData.wastedM3.toFixed(1))}`}
             csvFilename={`returns-${rangeFrom}-${rangeTo}.csv`}
             csv={rowsToCsv(
-              ["Discharged", "Truck", "Driver", "Project", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Returned m3", "Disposition", "Reason", "Quality approval"],
+              ["Discharged", "Truck", "Driver", "Project", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Returned m3", "Disposition", "Reason", "Quality approval", "Quality finding"],
               returnsData.rows.map((r) => [
                 r.trip.dischargeEnd ? new Date(r.trip.dischargeEnd).toISOString() : "",
                 r.trip.truck.code,
@@ -782,6 +782,7 @@ export default async function ReportsPage({
                 r.disposition,
                 r.reasonCode ?? "",
                 r.reasonCode === "QUALITY_REJECTED" ? (r.wasteMemo?.status === "APPROVED" ? "APPROVED" : "PENDING") : "",
+                r.wasteMemo?.approvalNote ?? "",
               ]),
             )}
           />
@@ -840,11 +841,16 @@ export default async function ReportsPage({
                     <td className={ui.td}>{r.reasonCode ? (dict.returnReasons[r.reasonCode as keyof typeof dict.returnReasons] ?? r.reasonCode) : "—"}</td>
                     <td className={ui.td}>
                       {r.reasonCode === "QUALITY_REJECTED" ? (
-                        <span className={`${ui.chip} ${r.wasteMemo?.status === "APPROVED" ? "bg-good-soft text-good" : "bg-warn-soft text-warn"}`}>
-                          {r.wasteMemo?.status === "APPROVED" && r.wasteMemo.approvedBy
-                            ? dict.modules.production.detail.wasteMemoApproved(r.wasteMemo.approvedBy.name, new Date(r.wasteMemo.approvedAt!).toLocaleDateString())
-                            : dict.modules.production.detail.wasteMemoPending}
-                        </span>
+                        <>
+                          <span className={`${ui.chip} ${r.wasteMemo?.status === "APPROVED" ? "bg-good-soft text-good" : "bg-warn-soft text-warn"}`}>
+                            {r.wasteMemo?.status === "APPROVED" && r.wasteMemo.approvedBy
+                              ? dict.modules.production.detail.wasteMemoApproved(r.wasteMemo.approvedBy.name, new Date(r.wasteMemo.approvedAt!).toLocaleDateString())
+                              : dict.modules.production.detail.wasteMemoPending}
+                          </span>
+                          {r.wasteMemo?.approvalNote && (
+                            <div className="mt-1 max-w-xs text-xs text-ink-muted">{r.wasteMemo.approvalNote}</div>
+                          )}
+                        </>
                       ) : (
                         <span className="text-ink-faint">—</span>
                       )}

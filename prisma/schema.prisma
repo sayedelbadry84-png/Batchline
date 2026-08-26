@@ -729,6 +729,12 @@ model WasteIncidentMemo {
   wastedVolumeM3 Float
   reasonCode     String
   status         String      @default("PENDING") // PENDING, APPROVED
+  // The written explanation of what was actually found wrong with the
+  // load — required at approval time (see approveWasteMemo in
+  // quality/actions.ts), since reasonCode alone is just the coarse
+  // category picked from the return-close dropdown, not a real QA
+  // finding. Null until approved.
+  approvalNote   String?
   approvedAt     DateTime?
   approvedById   String?
   approvedBy     User?       @relation("WasteMemoApproval", fields: [approvedById], references: [id])

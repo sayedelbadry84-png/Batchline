@@ -245,57 +245,41 @@ export default async function QualityPage({
       <div className={`${ui.card} ${pendingWasteMemos.length > 0 ? "border-warn/40" : ""}`}>
         <h2 className="mb-1 font-display text-lg font-semibold">{m.wasteMemos.title}</h2>
         <p className="mb-3 text-sm text-ink-muted">{m.wasteMemos.intro}</p>
-        <table className={ui.table}>
-          <thead>
-            <tr>
-              <th className={ui.th}>{m.wasteMemos.col.ticket}</th>
-              <th className={ui.th}>{m.wasteMemos.col.reservation}</th>
-              <th className={ui.th}>{m.wasteMemos.col.project}</th>
-              <th className={ui.th}>{m.wasteMemos.col.mix}</th>
-              <th className={ui.th}>{m.wasteMemos.col.truck}</th>
-              <th className={ui.th}>{m.wasteMemos.col.wasted}</th>
-              <th className={ui.th}>{m.wasteMemos.col.reason}</th>
-              <th className={ui.th}>{m.wasteMemos.col.date}</th>
-              <th className={ui.th}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {pendingWasteMemos.map((memo) => (
-              <tr key={memo.id}>
-                <td className={`${ui.td} font-mono text-xs`} dir="ltr">
-                  <Link href={`/production/${memo.batchTicketId}`} className="font-medium text-accent-strong hover:underline">
-                    {memo.batchTicket.ticketNumber}
-                  </Link>
-                </td>
-                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{memo.batchTicket.reservation.reservationNumber}</td>
-                <td className={ui.td}>{memo.batchTicket.reservation.project.name}</td>
-                <td className={ui.td}>
-                  <span className="font-mono text-xs" dir="ltr">{memo.batchTicket.mix.code}</span>
-                  <div className="text-xs text-ink-muted">{memo.batchTicket.mix.grade}</div>
-                </td>
-                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{memo.drumReturn.trip.truck.code}</td>
-                <td className={`${ui.td} font-mono tabular`}>{memo.wastedVolumeM3} m³</td>
-                <td className={ui.td}>{dict.returnReasons[memo.reasonCode as keyof typeof dict.returnReasons] ?? memo.reasonCode}</td>
-                <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(memo.createdAt).toLocaleDateString()}</td>
-                <td className={ui.td}>
-                  <form action={approveWasteMemo}>
-                    <input type="hidden" name="id" value={memo.id} />
-                    <button className="rounded-md border border-good bg-good-soft px-3 py-1.5 text-xs font-medium text-good hover:opacity-80">
-                      {m.wasteMemos.approve}
-                    </button>
-                  </form>
-                </td>
-              </tr>
-            ))}
-            {pendingWasteMemos.length === 0 && (
-              <tr>
-                <td className={ui.td} colSpan={9}>
-                  <span className="text-ink-muted">{m.wasteMemos.empty}</span>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+        <div className="flex flex-col gap-3">
+          {pendingWasteMemos.map((memo) => (
+            <form key={memo.id} action={approveWasteMemo} className="flex flex-col gap-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
+              <input type="hidden" name="id" value={memo.id} />
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                <Link href={`/production/${memo.batchTicketId}`} className="font-mono text-xs font-medium text-accent-strong hover:underline" dir="ltr">
+                  {memo.batchTicket.ticketNumber}
+                </Link>
+                <span className="font-mono text-xs text-ink-muted" dir="ltr">{memo.batchTicket.reservation.reservationNumber}</span>
+                <span>{memo.batchTicket.reservation.project.name}</span>
+                <span className="font-mono text-xs" dir="ltr">{memo.batchTicket.mix.code} ({memo.batchTicket.mix.grade})</span>
+                <span className="font-mono text-xs" dir="ltr">{memo.drumReturn.trip.truck.code}</span>
+                <span className="font-mono tabular">{memo.wastedVolumeM3} m³</span>
+                <span>{dict.returnReasons[memo.reasonCode as keyof typeof dict.returnReasons] ?? memo.reasonCode}</span>
+                <span className="font-mono text-xs tabular text-ink-muted">{new Date(memo.createdAt).toLocaleDateString()}</span>
+              </div>
+              <div className="flex items-end gap-2">
+                <div className="flex-1">
+                  <label className={ui.label}>{m.wasteMemos.noteLabel}</label>
+                  <textarea
+                    name="approvalNote"
+                    required
+                    rows={2}
+                    placeholder={m.wasteMemos.notePlaceholder}
+                    className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+                  />
+                </div>
+                <button className="rounded-md border border-good bg-good-soft px-3 py-1.5 text-xs font-medium text-good hover:opacity-80">
+                  {m.wasteMemos.approve}
+                </button>
+              </div>
+            </form>
+          ))}
+          {pendingWasteMemos.length === 0 && <p className="text-sm text-ink-muted">{m.wasteMemos.empty}</p>}
+        </div>
       </div>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">

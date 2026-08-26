@@ -337,13 +337,18 @@ export default async function BatchTicketPage({
               <p className={`${ui.chip} bg-good-soft text-good mt-1 inline-block`}>{d.reclaimedNote(ticket.trip.reclaimedVolumeM3)}</p>
             )}
             {ticket.trip.drumReturn?.reasonCode === "QUALITY_REJECTED" && (
-              <div className="mt-1 flex flex-wrap items-center gap-1">
-                <span className={`${ui.chip} bg-critical-soft text-critical inline-block`}>{d.wasteNote(ticket.trip.drumReturn.returnedVolumeM3)}</span>
-                <span className={`${ui.chip} ${ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" ? "bg-good-soft text-good" : "bg-warn-soft text-warn"} inline-block`}>
-                  {ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" && ticket.trip.drumReturn.wasteMemo.approvedBy
-                    ? d.wasteMemoApproved(ticket.trip.drumReturn.wasteMemo.approvedBy.name, new Date(ticket.trip.drumReturn.wasteMemo.approvedAt!).toLocaleDateString())
-                    : d.wasteMemoPending}
-                </span>
+              <div className="mt-1 flex flex-col items-start gap-1">
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className={`${ui.chip} bg-critical-soft text-critical inline-block`}>{d.wasteNote(ticket.trip.drumReturn.returnedVolumeM3)}</span>
+                  <span className={`${ui.chip} ${ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" ? "bg-good-soft text-good" : "bg-warn-soft text-warn"} inline-block`}>
+                    {ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" && ticket.trip.drumReturn.wasteMemo.approvedBy
+                      ? d.wasteMemoApproved(ticket.trip.drumReturn.wasteMemo.approvedBy.name, new Date(ticket.trip.drumReturn.wasteMemo.approvedAt!).toLocaleDateString())
+                      : d.wasteMemoPending}
+                  </span>
+                </div>
+                {ticket.trip.drumReturn.wasteMemo?.approvalNote && (
+                  <p className="max-w-md text-xs text-ink-muted">{d.wasteMemoNote}: {ticket.trip.drumReturn.wasteMemo.approvalNote}</p>
+                )}
               </div>
             )}
           </div>

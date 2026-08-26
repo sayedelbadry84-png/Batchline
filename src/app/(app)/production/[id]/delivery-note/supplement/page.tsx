@@ -29,6 +29,7 @@ const L = {
   acceptedQty: "Accepted Qty الكمية المعتمدة من العميل",
   rejectionReason: "Rejection Reason سبب الرفض",
   qualitySignoff: "Quality Sign-off اعتماد الجودة",
+  qualityFinding: "Quality Finding نتيجة فحص الجودة",
   pending: "Pending اعتماد معلّق",
   operator: "Operator",
   qualityControl: "Quality Control",
@@ -126,6 +127,12 @@ export default async function DeliveryNoteSupplementPage({ params }: { params: P
             className={wasteMemo?.status === "APPROVED" ? "text-end" : "text-end text-critical"}
           />
         </div>
+
+        {wasteMemo?.approvalNote && (
+          <div className="grid grid-cols-1">
+            <Cell label={L.qualityFinding} value={wasteMemo.approvalNote} />
+          </div>
+        )}
 
         <div className="grid grid-cols-4">
           <Cell label={L.operator} value={trip.driver.name} />
