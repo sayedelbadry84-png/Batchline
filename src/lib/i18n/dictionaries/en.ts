@@ -413,6 +413,7 @@ const en: typeof ar = {
       whatsAppPrompt: "WhatsApp number with country code",
       allDeliveriesTitle: "All deliveries — today",
       colAll: { when: "When", plant: "Plant", customer: "Customer", reservation: "Reservation #", mix: "Mix", pourLocation: "Pour location", qty: "Qty", driver: "Driver", status: "Status" },
+      wastedFromTotal: (n: number) => `− ${n} m³ rejected and wasted`,
       emptyAll: "No deliveries recorded today yet.",
       manualBooking: "Manual booking",
       manualBookingTitle: "Manual booking",

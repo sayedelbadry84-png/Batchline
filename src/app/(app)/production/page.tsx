@@ -7,6 +7,7 @@ import { getDictionary } from "@/lib/i18n";
 import { releaseBatchTicket, createManualRelease } from "./actions";
 import { closeReservation } from "../reservations/actions";
 import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
+import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { SitePlantSelect } from "@/components/SitePlantSelect";
 import { Modal } from "@/components/Modal";
 import { PrintButton } from "@/components/PrintButton";
@@ -78,7 +79,7 @@ export default async function ProductionPage({
       include: {
         project: { include: { customer: true } },
         mix: true,
-        batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
+        batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true, trip: { select: { volumeDeliveredM3: true } } } },
         // The station (production line) is chosen right here, at release
         // time — only that reservation's own plant's ACTIVE lines are
         // offered (see the Reservation model comment in schema.prisma).
@@ -102,10 +103,16 @@ export default async function ProductionPage({
             // Lifetime total, not just today's — the parent row's own
             // "released of requested" needs to reflect the whole
             // reservation, even split across more than one day.
-            batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
+            batchTickets: {
+              where: { status: { not: "CANCELLED" } },
+              select: {
+                volumeM3: true,
+                trip: { select: { volumeDeliveredM3: true, drumReturn: { select: { reasonCode: true, returnedVolumeM3: true } } } },
+              },
+            },
           },
         },
-        trip: { include: { truck: true, driver: true } },
+        trip: { include: { truck: true, driver: true, drumReturn: { select: { reasonCode: true, returnedVolumeM3: true } } } },
       },
       orderBy: { releasedAt: "desc" },
     }),
@@ -125,7 +132,7 @@ export default async function ProductionPage({
 
   const readyReservations = readyReservationsRaw
     .map((r) => {
-      const released = r.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0);
+      const released = sumAcceptedVolumeM3(r.batchTickets);
       return { ...r, released, remaining: Math.max(0, r.requestedVolumeM3 - released), trips: r.batchTickets.length };
     })
     .filter((r) => r.remaining > 0.001);
@@ -334,7 +341,11 @@ export default async function ProductionPage({
           </thead>
           <tbody>
             {deliveryGroupList.map(({ reservation, tickets }) => {
-              const totalReleased = reservation.batchTickets.reduce((sum, bt) => sum + bt.volumeM3, 0);
+              const totalReleased = sumAcceptedVolumeM3(reservation.batchTickets);
+              const wastedM3 = reservation.batchTickets.reduce(
+                (sum, t) => sum + (t.trip?.drumReturn?.reasonCode === "QUALITY_REJECTED" ? t.trip.drumReturn.returnedVolumeM3 : 0),
+                0,
+              );
               return (
                 <Fragment key={reservation.id}>
                   <tr className="bg-surface-alt">
@@ -350,7 +361,10 @@ export default async function ProductionPage({
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{reservation.reservationNumber}</td>
                     <td className={ui.td}></td>
                     <td className={`${ui.td} text-xs`}>{reservation.siteLocation ?? "—"}</td>
-                    <td className={`${ui.td} font-mono tabular`}>{totalReleased} / {reservation.requestedVolumeM3} m³</td>
+                    <td className={`${ui.td} font-mono tabular`}>
+                      {totalReleased} / {reservation.requestedVolumeM3} m³
+                      {wastedM3 > 0 && <div className="font-normal text-xs text-critical">{m.wastedFromTotal(wastedM3)}</div>}
+                    </td>
                     <td className={ui.td}></td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${statusChip[reservation.status] ?? ""}`}>
@@ -374,7 +388,14 @@ export default async function ProductionPage({
                         <div className="text-xs text-ink-muted">{t.mix.grade}</div>
                       </td>
                       <td className={ui.td}></td>
-                      <td className={`${ui.td} font-mono tabular`}>{t.volumeM3} m³</td>
+                      <td className={`${ui.td} font-mono tabular`}>
+                        {t.volumeM3} m³
+                        {t.trip?.drumReturn?.reasonCode === "QUALITY_REJECTED" && (
+                          <div className="font-normal text-xs text-critical">
+                            {m.wastedFromTotal(t.trip.drumReturn.returnedVolumeM3)} — {dict.returnReasons.QUALITY_REJECTED}
+                          </div>
+                        )}
+                      </td>
                       <td className={`${ui.td} text-xs`}>{t.trip?.driver.name ?? "—"}</td>
                       <td className={ui.td}>
                         <span className={`${ui.chip} ${statusChip[t.status] ?? ""}`}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</span>

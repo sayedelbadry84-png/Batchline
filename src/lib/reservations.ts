@@ -3,6 +3,26 @@ import { prisma } from "@/lib/prisma";
 const VOLUME_EPSILON_M3 = 0.01;
 
 /**
+ * A ticket's own volumeM3 is what got LOADED, not necessarily what the
+ * customer actually ended up accepting — a load closed with a quality
+ * rejection has its billed/accepted amount reduced on the trip itself
+ * (Trip.volumeDeliveredM3, set by closeTripWithReturn in
+ * trips/actions.ts), while every other return reason still bills the full
+ * ticket volume. This is the one shared rule every "how much of this
+ * reservation is actually released/delivered" figure — Production's
+ * release form, the Reservations progress column, the grouped delivery
+ * log, the demand outlook, the fully-delivered check below — must use, so
+ * a quality-rejected load doesn't silently overstate what the customer
+ * received. Falls back to the full ticket volume for a still-open trip
+ * (volumeDeliveredM3 is only set at close time), matching the existing
+ * "counts the moment it's released, not once delivered" behavior for a
+ * normal ticket.
+ */
+export function sumAcceptedVolumeM3(tickets: { volumeM3: number; trip?: { volumeDeliveredM3: number | null } | null }[]): number {
+  return tickets.reduce((sum, t) => sum + (t.trip?.volumeDeliveredM3 ?? t.volumeM3), 0);
+}
+
+/**
  * A large reservation (e.g. 200 m³) can't go out as one truck load — it's
  * dispatched as many partial batch tickets, each deducting from what's left.
  * This is the one place that sums "already released" so Production's
@@ -12,9 +32,9 @@ const VOLUME_EPSILON_M3 = 0.01;
 export async function getReleasedVolumeM3(reservationId: string): Promise<number> {
   const tickets = await prisma.batchTicket.findMany({
     where: { reservationId, status: { not: "CANCELLED" } },
-    select: { volumeM3: true },
+    select: { volumeM3: true, trip: { select: { volumeDeliveredM3: true } } },
   });
-  return tickets.reduce((sum, t) => sum + t.volumeM3, 0);
+  return sumAcceptedVolumeM3(tickets);
 }
 
 export async function getRemainingVolumeM3(reservationId: string, requestedVolumeM3: number): Promise<number> {
@@ -44,7 +64,7 @@ export async function isReservationFullyDelivered(reservationId: string): Promis
   });
   if (!reservation) return false;
 
-  const released = reservation.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0);
+  const released = sumAcceptedVolumeM3(reservation.batchTickets);
   if (released < reservation.requestedVolumeM3 - VOLUME_EPSILON_M3) return false;
 
   return reservation.batchTickets.every((t) => t.trip?.status === "CLOSED");

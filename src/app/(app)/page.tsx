@@ -10,6 +10,7 @@ import { flagMaintenanceDue } from "@/lib/maintenance";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { DrumTimer } from "@/components/DrumTimer";
 import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
+import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 
 const SEVEN_DAYS = 7;
 const OUTLOOK_DAYS = 7;
@@ -76,7 +77,7 @@ export default async function DashboardPage() {
     }),
     prisma.reservation.findMany({
       where: { status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] }, pourWindowStart: { gte: todayStart, lt: outlookEnd }, ...reservationSiteScopeWhere(siteId) },
-      include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } } },
+      include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true, trip: { select: { volumeDeliveredM3: true } } } } },
     }),
     prisma.reservation.findMany({ where: { status: "ON_HOLD", ...reservationSiteScopeWhere(siteId) }, include: { project: true } }),
     prisma.complianceCertificate.findMany({ include: { mix: true } }), // attached to MixDesign, not a site — same as Quality module
@@ -173,7 +174,7 @@ export default async function DashboardPage() {
   const demandOutlook = groupReservationsByDay(
     upcomingReservations.map((res) => ({
       pourWindowStart: res.pourWindowStart,
-      remainingVolumeM3: res.requestedVolumeM3 - res.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0),
+      remainingVolumeM3: res.requestedVolumeM3 - sumAcceptedVolumeM3(res.batchTickets),
     })),
     OUTLOOK_DAYS,
     todayStart,

@@ -412,6 +412,7 @@ const ar = {
       whatsAppPrompt: "رقم واتساب مع رمز الدولة",
       allDeliveriesTitle: "كل تسليمات اليوم",
       colAll: { when: "الوقت", plant: "المحطة", customer: "العميل", reservation: "رقم الحجز", mix: "الخلطة", pourLocation: "موقع الصب", qty: "الكمية", driver: "السائق", status: "الحالة" },
+      wastedFromTotal: (n: number) => `− ${n} م³ مرفوضة ومهدرة`,
       emptyAll: "لا توجد تسليمات مسجَّلة في هذا اليوم بعد.",
       manualBooking: "حجز يدوي",
       manualBookingTitle: "حجز يدوي",

@@ -6,6 +6,7 @@ import { getDictionary } from "@/lib/i18n";
 import { logout } from "@/app/login/actions";
 import { setLocale } from "@/app/locale-actions";
 import { releaseBatchTicket } from "@/app/(app)/production/actions";
+import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 
 const ACTION_STATUS_CHIP: Record<string, string> = {
   RELEASED: "bg-info-soft text-ink",
@@ -40,7 +41,7 @@ export default async function OperatorHomePage() {
       include: {
         project: { include: { customer: true } },
         mix: true,
-        batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } },
+        batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true, trip: { select: { volumeDeliveredM3: true } } } },
         // The station (line) is picked right here at release time, from
         // this reservation's own plant's ACTIVE lines — see the
         // Reservation model comment in schema.prisma.
@@ -60,7 +61,7 @@ export default async function OperatorHomePage() {
 
   const readyReservations = readyReservationsRaw
     .map((r) => {
-      const released = r.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0);
+      const released = sumAcceptedVolumeM3(r.batchTickets);
       return { ...r, remaining: Math.max(0, r.requestedVolumeM3 - released) };
     })
     .filter((r) => r.remaining > 0.001);

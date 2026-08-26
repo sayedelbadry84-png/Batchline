@@ -29,6 +29,7 @@ import {
 } from "@/lib/incentives";
 import { markDrumReturnFate } from "../trips/actions";
 import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
+import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
@@ -169,7 +170,7 @@ export default async function ReportsPage({
       pourWindowStart: { gte: todayStart, lt: outlookEnd },
       ...reservationSiteScopeWhere(restrictedSiteId),
     },
-    include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true } } },
+    include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true, trip: { select: { volumeDeliveredM3: true } } } } },
   });
   const weekdayAverages = computeWeekdayAverages(
     completedTickets.filter((t) => t.batchCompletedAt).map((t) => ({ date: t.batchCompletedAt!, volumeM3: t.volumeM3 })),
@@ -179,7 +180,7 @@ export default async function ReportsPage({
   const demandOutlook = groupReservationsByDay(
     upcomingReservations.map((r) => ({
       pourWindowStart: r.pourWindowStart,
-      remainingVolumeM3: r.requestedVolumeM3 - r.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0),
+      remainingVolumeM3: r.requestedVolumeM3 - sumAcceptedVolumeM3(r.batchTickets),
     })),
     OUTLOOK_DAYS,
     todayStart,

@@ -5,6 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal, closeReservation } from "./actions";
 import { effectiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
+import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { canPerformAction } from "@/lib/permissions";
 import { Modal } from "@/components/Modal";
 import { SegmentedControl } from "@/components/SegmentedControl";
@@ -76,7 +77,7 @@ export default async function ReservationsPage({
     project: { include: { customer: true } },
     site: true,
     mix: true,
-    batchTickets: { where: { status: { not: "CANCELLED" as const } }, select: { volumeM3: true } },
+    batchTickets: { where: { status: { not: "CANCELLED" as const } }, select: { volumeM3: true, trip: { select: { volumeDeliveredM3: true } } } },
     pumpAssignments: { include: { pump: true, pumpOperator: true, pumpAssistant: true } },
   };
 
@@ -121,7 +122,7 @@ export default async function ReservationsPage({
 
   const reservations = reservationsRaw.map((r) => ({
     ...r,
-    released: r.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0),
+    released: sumAcceptedVolumeM3(r.batchTickets),
   }));
 
   // The row list actually rendered — includes the out-of-day editReservation
@@ -129,7 +130,7 @@ export default async function ReservationsPage({
   // the rollup/WhatsApp summary below, which stays strictly "today."
   const displayReservations =
     editReservation && !reservations.some((r) => r.id === editReservation.id)
-      ? [...reservations, { ...editReservation, released: editReservation.batchTickets.reduce((sum, t) => sum + t.volumeM3, 0) }]
+      ? [...reservations, { ...editReservation, released: sumAcceptedVolumeM3(editReservation.batchTickets) }]
       : reservations;
 
   const rollup = {
