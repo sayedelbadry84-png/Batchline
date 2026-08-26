@@ -20,6 +20,13 @@ async function testBatchInScope(testBatchId: string, siteId: string | null): Pro
   return isPlantInScope(tb.trip.batchTicket.plantId, siteId);
 }
 
+async function wasteMemoInScope(wasteMemoId: string, siteId: string | null): Promise<boolean> {
+  if (siteId === null) return true;
+  const memo = await prisma.wasteIncidentMemo.findUnique({ where: { id: wasteMemoId }, select: { batchTicket: { select: { plantId: true } } } });
+  if (!memo) return false;
+  return isPlantInScope(memo.batchTicket.plantId, siteId);
+}
+
 export async function createTestBatch(formData: FormData) {
   const user = await getCurrentUser();
   requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
@@ -144,4 +151,36 @@ export async function updateCertificate(formData: FormData) {
   });
 
   revalidatePath("/quality");
+}
+
+// Signs off on an auto-created WasteIncidentMemo (see closeTripWithReturn
+// in trips/actions.ts, which creates one whenever a load is closed with
+// reasonCode QUALITY_REJECTED) — a real state transition distinct from the
+// return-billing reduction, which already applied regardless of this
+// approval.
+export async function approveWasteMemo(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+  if (!(await wasteMemoInScope(id, effectiveSiteId(user)))) return;
+
+  const existing = await prisma.wasteIncidentMemo.findUnique({ where: { id } });
+  if (!existing || existing.status !== "PENDING") return;
+
+  const memo = await prisma.wasteIncidentMemo.update({
+    where: { id },
+    data: { status: "APPROVED", approvedAt: new Date(), approvedById: user!.id },
+  });
+
+  await logAudit({
+    module: "Quality",
+    recordId: id,
+    afterValue: `${memo.wastedVolumeM3} m3 — ${memo.reasonCode}`,
+    reasonCode: "WASTE_MEMO_APPROVED",
+  });
+
+  revalidatePath("/quality");
+  revalidatePath(`/production/${memo.batchTicketId}`);
 }

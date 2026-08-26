@@ -65,6 +65,7 @@ model User {
   reservationFinalApprovals   Reservation[] @relation("ReservationFinalApproval")
   reservationClosures         Reservation[] @relation("ReservationClosedBy")
   apiKeysCreated              ApiKey[]
+  wasteMemoApprovals          WasteIncidentMemo[] @relation("WasteMemoApproval")
 }
 
 model Session {
@@ -606,6 +607,7 @@ model BatchTicket {
 
   components BatchComponentActual[]
   trip       Trip?
+  wasteMemos WasteIncidentMemo[]
 }
 
 model BatchComponentActual {
@@ -708,6 +710,29 @@ model DrumReturn {
   consumedInTripId  String?   @unique
   consumedInTrip    Trip?     @relation("ReclaimConsumedInTrip", fields: [consumedInTripId], references: [id])
   createdAt         DateTime @default(now())
+
+  wasteMemo WasteIncidentMemo?
+}
+
+// Auto-created alongside a DrumReturn whenever a load is closed with
+// reasonCode QUALITY_REJECTED — a formal, approvable record of the waste
+// event (as distinct from the return-billing reduction on Trip.volumeDeliveredM3,
+// which happens regardless of whether this memo is ever approved). Quality
+// signs off on it from the Quality module; the sign-off is surfaced back on
+// the original ticket and its supplement document.
+model WasteIncidentMemo {
+  id             String      @id @default(cuid())
+  drumReturnId   String      @unique
+  drumReturn     DrumReturn  @relation(fields: [drumReturnId], references: [id])
+  batchTicketId  String
+  batchTicket    BatchTicket @relation(fields: [batchTicketId], references: [id])
+  wastedVolumeM3 Float
+  reasonCode     String
+  status         String      @default("PENDING") // PENDING, APPROVED
+  approvedAt     DateTime?
+  approvedById   String?
+  approvedBy     User?       @relation("WasteMemoApproval", fields: [approvedById], references: [id])
+  createdAt      DateTime    @default(now())
 }
 
 // ---------------------------------------------------------------------------

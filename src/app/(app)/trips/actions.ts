@@ -124,15 +124,29 @@ export async function closeTripWithReturn(formData: FormData) {
   const volumeDeliveredM3 =
     reasonCode === "QUALITY_REJECTED" ? Math.max(0, trip.batchTicket.volumeM3 - returnedVolumeM3) : trip.batchTicket.volumeM3;
 
-  await prisma.$transaction([
-    prisma.trip.update({
+  await prisma.$transaction(async (tx) => {
+    await tx.trip.update({
       where: { id: tripId },
       data: { status: "CLOSED", dischargeEnd: now, volumeDeliveredM3 },
-    }),
-    prisma.drumReturn.create({
+    });
+    const drumReturn = await tx.drumReturn.create({
       data: { tripId, returnedVolumeM3, minutesSinceBatch, disposition, reasonCode, fate },
-    }),
-  ]);
+    });
+    // A quality rejection needs a formal, approvable incident record — not
+    // just the billing reduction above — since "approved by Quality" is a
+    // real state transition someone has to sign off on, distinct from
+    // whether the customer was charged for the load.
+    if (reasonCode === "QUALITY_REJECTED") {
+      await tx.wasteIncidentMemo.create({
+        data: {
+          drumReturnId: drumReturn.id,
+          batchTicketId: trip.batchTicketId,
+          wastedVolumeM3: returnedVolumeM3,
+          reasonCode,
+        },
+      });
+    }
+  });
 
   // Only the reservation's LAST truck load flips it to DELIVERED — a split
   // load isn't done just because one of its many trips closed.

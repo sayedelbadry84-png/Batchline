@@ -41,7 +41,7 @@ export default async function BatchTicketPage({
         reservation: { include: { project: { include: { customer: true } } } },
         mix: { include: { components: true } },
         components: { include: { material: true } },
-        trip: { include: { truck: true, driver: true, pump: true } },
+        trip: { include: { truck: true, driver: true, pump: true, drumReturn: { include: { wasteMemo: { include: { approvedBy: true } } } } } },
       },
     }),
     prisma.material.findMany({ orderBy: { name: "asc" } }),
@@ -336,6 +336,16 @@ export default async function BatchTicketPage({
             {ticket.trip.reclaimedVolumeM3 != null && (
               <p className={`${ui.chip} bg-good-soft text-good mt-1 inline-block`}>{d.reclaimedNote(ticket.trip.reclaimedVolumeM3)}</p>
             )}
+            {ticket.trip.drumReturn?.reasonCode === "QUALITY_REJECTED" && (
+              <div className="mt-1 flex flex-wrap items-center gap-1">
+                <span className={`${ui.chip} bg-critical-soft text-critical inline-block`}>{d.wasteNote(ticket.trip.drumReturn.returnedVolumeM3)}</span>
+                <span className={`${ui.chip} ${ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" ? "bg-good-soft text-good" : "bg-warn-soft text-warn"} inline-block`}>
+                  {ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" && ticket.trip.drumReturn.wasteMemo.approvedBy
+                    ? d.wasteMemoApproved(ticket.trip.drumReturn.wasteMemo.approvedBy.name, new Date(ticket.trip.drumReturn.wasteMemo.approvedAt!).toLocaleDateString())
+                    : d.wasteMemoPending}
+                </span>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-3">
             {canEditTrip && (
@@ -346,6 +356,11 @@ export default async function BatchTicketPage({
             <Link href={`/production/${ticket.id}/delivery-note`} className="text-sm font-medium text-accent-strong hover:underline">
               {d.printTicket}
             </Link>
+            {ticket.trip.drumReturn?.reasonCode === "QUALITY_REJECTED" && (
+              <Link href={`/production/${ticket.id}/delivery-note/supplement`} className="text-sm font-medium text-accent-strong hover:underline">
+                {d.printSupplement}
+              </Link>
+            )}
             <Link href="/trips" className="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt">
               {d.goToTrips}
             </Link>

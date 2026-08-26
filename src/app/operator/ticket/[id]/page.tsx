@@ -32,7 +32,7 @@ export default async function OperatorTicketPage({
       reservation: { include: { project: { include: { customer: true } } } },
       mix: { include: { components: true } },
       components: { include: { material: true } },
-      trip: { include: { truck: true, driver: true, pump: true } },
+      trip: { include: { truck: true, driver: true, pump: true, drumReturn: { include: { wasteMemo: { include: { approvedBy: true } } } } } },
     },
   });
   if (!ticket) notFound();
@@ -242,6 +242,18 @@ export default async function OperatorTicketPage({
           </p>
           {ticket.trip.reclaimedVolumeM3 != null && (
             <p className="mt-1 inline-block rounded-full bg-good-soft px-2.5 py-0.5 font-mono text-xs text-good">{d.reclaimedNote(ticket.trip.reclaimedVolumeM3)}</p>
+          )}
+          {ticket.trip.drumReturn?.reasonCode === "QUALITY_REJECTED" && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              <span className="inline-block rounded-full bg-critical-soft px-2.5 py-0.5 font-mono text-xs text-critical">
+                {d.wasteNote(ticket.trip.drumReturn.returnedVolumeM3)}
+              </span>
+              <span className={`inline-block rounded-full px-2.5 py-0.5 font-mono text-xs ${ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" ? "bg-good-soft text-good" : "bg-warn-soft text-warn"}`}>
+                {ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" && ticket.trip.drumReturn.wasteMemo.approvedBy
+                  ? d.wasteMemoApproved(ticket.trip.drumReturn.wasteMemo.approvedBy.name, new Date(ticket.trip.drumReturn.wasteMemo.approvedAt!).toLocaleDateString())
+                  : d.wasteMemoPending}
+              </span>
+            </div>
           )}
         </div>
       )}

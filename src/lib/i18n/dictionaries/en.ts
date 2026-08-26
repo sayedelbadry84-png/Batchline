@@ -467,6 +467,10 @@ const en: typeof ar = {
         stageDischarging: "Discharging",
         stageClosed: "Closed",
         printTicket: "Print delivery note",
+        wasteNote: (n: number) => `⚠ ${n} m³ of this ticket was wasted due to quality rejection`,
+        wasteMemoPending: "Pending Quality approval",
+        wasteMemoApproved: (name: string, date: string) => `Approved by Quality — ${name} on ${date}`,
+        printSupplement: "Print ticket supplement",
       },
     },
     materialReceiving: {
@@ -935,6 +939,13 @@ const en: typeof ar = {
       newCertTitle: "New certificate",
       fCert: { mix: "Mix design", standardRef: "Standard reference", issuingBody: "Issuing body", issuedDate: "Issued date", expiryDate: "Expiry date", documentUrl: "Document link (optional)" },
       addCert: "Add certificate",
+      wasteMemos: {
+        title: "Waste incident memos pending Quality approval",
+        intro: "Auto-created whenever a trip is closed with a quality-rejected return — approve to formally record the incident.",
+        col: { ticket: "Ticket", reservation: "Reservation #", project: "Project", mix: "Mix", truck: "Truck", wasted: "Wasted", reason: "Reason", date: "Date" },
+        approve: "Approve",
+        empty: "No waste incident memos pending approval.",
+      },
     },
     reports: {
       eyebrow: "Reports & KPIs",

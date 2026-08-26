@@ -466,6 +466,10 @@ const ar = {
         stageDischarging: "التفريغ",
         stageClosed: "مغلقة",
         printTicket: "طباعة تذكرة توريد",
+        wasteNote: (n: number) => `⚠ تم اهدار ${n} م³ من هذه التذكرة بسبب رفض الجودة`,
+        wasteMemoPending: "بانتظار اعتماد الجودة",
+        wasteMemoApproved: (name: string, date: string) => `اعتمدته الجودة — ${name} بتاريخ ${date}`,
+        printSupplement: "طباعة ملحق التذكرة",
       },
     },
     materialReceiving: {
@@ -928,6 +932,13 @@ const ar = {
       newCertTitle: "شهادة جديدة",
       fCert: { mix: "تصميم الخلطة", standardRef: "المرجع المعياري", issuingBody: "جهة الإصدار", issuedDate: "تاريخ الإصدار", expiryDate: "تاريخ الانتهاء", documentUrl: "رابط المستند (اختياري)" },
       addCert: "إضافة شهادة",
+      wasteMemos: {
+        title: "مذكرات إهدار بانتظار اعتماد الجودة",
+        intro: "أُنشئت تلقائيًا عند إغلاق رحلة بمرتجع مرفوض لأسباب جودة — اعتمدها لتوثيق الواقعة رسميًا.",
+        col: { ticket: "التذكرة", reservation: "رقم الحجز", project: "المشروع", mix: "الخلطة", truck: "الشاحنة", wasted: "الكمية المهدرة", reason: "السبب", date: "التاريخ" },
+        approve: "اعتماد",
+        empty: "لا توجد مذكرات إهدار بانتظار الاعتماد.",
+      },
     },
     reports: {
       eyebrow: "التقارير ومؤشرات الأداء",

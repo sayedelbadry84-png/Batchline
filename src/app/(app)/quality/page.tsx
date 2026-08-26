@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createTestBatch, addLabResult, createCertificate, updateCertificate } from "./actions";
+import { createTestBatch, addLabResult, createCertificate, updateCertificate, approveWasteMemo } from "./actions";
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
 import { effectiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
@@ -22,7 +22,7 @@ export default async function QualityPage({
   const { editCert: editCertId } = await searchParams;
   const siteId = effectiveSiteId(user);
 
-  const [testBatches, sampleableTrips, employees, certificates, mixes] = await Promise.all([
+  const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos] = await Promise.all([
     prisma.testBatch.findMany({
       where: { ...(siteId ? { trip: tripPlantScopeWhere(siteId) } : {}) },
       orderBy: { sampleTime: "desc" },
@@ -44,6 +44,14 @@ export default async function QualityPage({
     // as everywhere else this appears (reservations, billing, etc).
     prisma.complianceCertificate.findMany({ include: { mix: true }, orderBy: { expiryDate: "asc" } }),
     prisma.mixDesign.findMany({ orderBy: { code: "asc" } }),
+    prisma.wasteIncidentMemo.findMany({
+      where: { status: "PENDING", ...(siteId ? { batchTicket: plantScopeWhere(siteId) } : {}) },
+      orderBy: { createdAt: "desc" },
+      include: {
+        batchTicket: { include: { mix: true, reservation: { include: { project: true } } } },
+        drumReturn: { include: { trip: { include: { truck: true, driver: true } } } },
+      },
+    }),
   ]);
 
   // Train the early-vs-final strength regression from every test batch that
@@ -232,6 +240,62 @@ export default async function QualityPage({
             {m.logSample}
           </button>
         </form>
+      </div>
+
+      <div className={`${ui.card} ${pendingWasteMemos.length > 0 ? "border-warn/40" : ""}`}>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.wasteMemos.title}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.wasteMemos.intro}</p>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              <th className={ui.th}>{m.wasteMemos.col.ticket}</th>
+              <th className={ui.th}>{m.wasteMemos.col.reservation}</th>
+              <th className={ui.th}>{m.wasteMemos.col.project}</th>
+              <th className={ui.th}>{m.wasteMemos.col.mix}</th>
+              <th className={ui.th}>{m.wasteMemos.col.truck}</th>
+              <th className={ui.th}>{m.wasteMemos.col.wasted}</th>
+              <th className={ui.th}>{m.wasteMemos.col.reason}</th>
+              <th className={ui.th}>{m.wasteMemos.col.date}</th>
+              <th className={ui.th}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {pendingWasteMemos.map((memo) => (
+              <tr key={memo.id}>
+                <td className={`${ui.td} font-mono text-xs`} dir="ltr">
+                  <Link href={`/production/${memo.batchTicketId}`} className="font-medium text-accent-strong hover:underline">
+                    {memo.batchTicket.ticketNumber}
+                  </Link>
+                </td>
+                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{memo.batchTicket.reservation.reservationNumber}</td>
+                <td className={ui.td}>{memo.batchTicket.reservation.project.name}</td>
+                <td className={ui.td}>
+                  <span className="font-mono text-xs" dir="ltr">{memo.batchTicket.mix.code}</span>
+                  <div className="text-xs text-ink-muted">{memo.batchTicket.mix.grade}</div>
+                </td>
+                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{memo.drumReturn.trip.truck.code}</td>
+                <td className={`${ui.td} font-mono tabular`}>{memo.wastedVolumeM3} m³</td>
+                <td className={ui.td}>{dict.returnReasons[memo.reasonCode as keyof typeof dict.returnReasons] ?? memo.reasonCode}</td>
+                <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(memo.createdAt).toLocaleDateString()}</td>
+                <td className={ui.td}>
+                  <form action={approveWasteMemo}>
+                    <input type="hidden" name="id" value={memo.id} />
+                    <button className="rounded-md border border-good bg-good-soft px-3 py-1.5 text-xs font-medium text-good hover:opacity-80">
+                      {m.wasteMemos.approve}
+                    </button>
+                  </form>
+                </td>
+              </tr>
+            ))}
+            {pendingWasteMemos.length === 0 && (
+              <tr>
+                <td className={ui.td} colSpan={9}>
+                  <span className="text-ink-muted">{m.wasteMemos.empty}</span>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       <div className="grid grid-cols-[1fr_320px] gap-6">
