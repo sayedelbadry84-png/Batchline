@@ -1,12 +1,12 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
-import { Prisma } from "@prisma/client";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { getAvailableReclaimForTruck } from "@/lib/reclaim";
+import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -66,17 +66,12 @@ async function releaseTicketForReservation(reservationId: string, requestedVolum
   // per-plant) — it used to be counted per plantId while the column
   // itself has no per-plant scoping, so the FIRST ticket at any second
   // plant always collided with "BT-<year>-0001" from the first one ever
-  // used. Counted globally now, with a short retry loop as a second line
-  // of defense against the inherent count-then-insert race (two releases
-  // landing in the same instant, anywhere) rather than just the
-  // guaranteed collision this specific bug caused.
-  const year = new Date().getFullYear();
-  let ticket = null;
-  for (let attempt = 0; attempt < 5 && !ticket; attempt++) {
-    const ticketCount = await prisma.batchTicket.count();
-    const ticketNumber = `BT-${year}-${String(ticketCount + 1 + attempt).padStart(4, "0")}`;
-    try {
-      ticket = await prisma.batchTicket.create({
+  // used. See withSequentialNumber's own comment for the full story.
+  const ticket = await withSequentialNumber(
+    "BT",
+    () => prisma.batchTicket.count(),
+    (ticketNumber) =>
+      prisma.batchTicket.create({
         data: {
           reservationId,
           mixId: reservation.mixId,
@@ -91,13 +86,8 @@ async function releaseTicketForReservation(reservationId: string, requestedVolum
             })),
           },
         },
-      });
-    } catch (e) {
-      if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") throw e;
-      // Someone else just took this number — loop and try the next one.
-    }
-  }
-  if (!ticket) throw new Error("Could not allocate a unique ticket number after 5 attempts.");
+      }),
+  );
 
   if (reservation.status !== "IN_PRODUCTION") {
     await prisma.reservation.update({ where: { id: reservationId }, data: { status: "IN_PRODUCTION" } });
@@ -181,20 +171,26 @@ export async function createManualRelease(formData: FormData) {
   if (!(await isPlantActive(plantId))) return; // frozen/decommissioned line: no new bookings
 
   const now = new Date();
-  const reservation = await prisma.reservation.create({
-    data: {
-      projectId,
-      siteId,
-      mixId,
-      requestedVolumeM3: volumeM3,
-      pourWindowStart: now,
-      status: "CONFIRMED",
-      initialApprovedAt: now,
-      initialApprovedById: user!.id,
-      finalApprovedAt: now,
-      finalApprovedById: user!.id,
-    },
-  });
+  const reservation = await withSequentialNumber(
+    "RES",
+    () => prisma.reservation.count(),
+    (reservationNumber) =>
+      prisma.reservation.create({
+        data: {
+          reservationNumber,
+          projectId,
+          siteId,
+          mixId,
+          requestedVolumeM3: volumeM3,
+          pourWindowStart: now,
+          status: "CONFIRMED",
+          initialApprovedAt: now,
+          initialApprovedById: user!.id,
+          finalApprovedAt: now,
+          finalApprovedById: user!.id,
+        },
+      }),
+  );
 
   await logAudit({
     module: "Reservations",

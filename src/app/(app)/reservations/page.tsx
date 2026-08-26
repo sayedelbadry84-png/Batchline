@@ -345,6 +345,7 @@ export default async function ReservationsPage({
                   <td className={`${ui.td} font-mono text-xs tabular`}>{isRange ? fmtDateTime(r.pourWindowStart) : fmtTime(r.pourWindowStart)}</td>
                   <td className={ui.td}>
                     {r.project.name}
+                    <div className="font-mono text-xs text-ink-muted" dir="ltr">{r.reservationNumber}</div>
                     <div className="text-xs text-ink-muted">{r.project.customer.legalName} · {r.site.name}</div>
                     {(r.siteLocation || r.siteContactName || r.siteContactPhone) && (
                       <div className="text-xs text-ink-muted">
@@ -376,6 +377,7 @@ export default async function ReservationsPage({
                   </td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">
                     {r.mix.code}
+                    <div className="text-ink-muted" dir="rtl">{r.mix.grade}</div>
                     {(r.slumpRequestedMm != null || r.temperatureC != null || r.cementType) && (
                       <div className="font-normal text-ink-muted" dir="rtl">
                         {[

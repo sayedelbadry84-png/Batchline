@@ -6,6 +6,7 @@ import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getReleasedVolumeM3 } from "@/lib/reservations";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { getCustomerOutstandingBalance } from "@/lib/billing";
+import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 
 // Shared by create and update — the pour-order details captured at intake,
@@ -75,22 +76,28 @@ export async function createReservation(formData: FormData) {
     }))
     .filter((row) => row.pumpId);
 
-  const reservation = await prisma.reservation.create({
-    data: {
-      projectId,
-      siteId,
-      mixId,
-      requestedVolumeM3,
-      originalVolumeM3: requestedVolumeM3,
-      pourWindowStart,
-      notes,
-      status: overCreditLimit ? "ON_HOLD" : "CONFIRMED",
-      ...readPourDetails(formData),
-      pumpAssignments: pumpRows.length
-        ? { create: pumpRows.map((row) => ({ ...row, scheduledStart: pourWindowStart })) }
-        : undefined,
-    },
-  });
+  const reservation = await withSequentialNumber(
+    "RES",
+    () => prisma.reservation.count(),
+    (reservationNumber) =>
+      prisma.reservation.create({
+        data: {
+          reservationNumber,
+          projectId,
+          siteId,
+          mixId,
+          requestedVolumeM3,
+          originalVolumeM3: requestedVolumeM3,
+          pourWindowStart,
+          notes,
+          status: overCreditLimit ? "ON_HOLD" : "CONFIRMED",
+          ...readPourDetails(formData),
+          pumpAssignments: pumpRows.length
+            ? { create: pumpRows.map((row) => ({ ...row, scheduledStart: pourWindowStart })) }
+            : undefined,
+        },
+      }),
+  );
 
   await logAudit({
     module: "Reservations",

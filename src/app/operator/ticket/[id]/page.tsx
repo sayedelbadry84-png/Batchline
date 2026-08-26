@@ -116,8 +116,11 @@ export default async function OperatorTicketPage({
       <div>
         <h1 className="font-display text-lg font-semibold" dir="ltr">{ticket.ticketNumber}</h1>
         <p className="text-sm text-ink-muted">
-          {ticket.reservation.project.name} · {ticket.mix.code} · {ticket.volumeM3} m³
+          {ticket.reservation.project.name} · {ticket.reservation.reservationNumber} · {ticket.mix.code} ({ticket.mix.grade}) · {ticket.volumeM3} m³
         </p>
+        {ticket.reservation.siteLocation && (
+          <p className="text-xs text-ink-muted">{ticket.reservation.siteLocation}</p>
+        )}
       </div>
 
       <OfflineSyncBanner labels={{ offline: o.offlineBanner, pending: o.offlinePending, synced: o.offlineSynced }} />

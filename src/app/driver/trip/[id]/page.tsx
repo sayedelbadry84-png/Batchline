@@ -54,8 +54,11 @@ export default async function DriverTripPage({
           {trip.batchTicket.ticketNumber}
         </div>
         <h1 className="font-display text-xl font-semibold">{project.name}</h1>
+        <div className="text-xs text-ink-muted" dir="ltr">
+          {trip.batchTicket.reservation.reservationNumber}
+        </div>
         <div className="text-xs text-ink-muted">
-          {project.customer.legalName} · {trip.batchTicket.mix.code} · {trip.batchTicket.volumeM3} m³
+          {project.customer.legalName} · {trip.batchTicket.mix.code} ({trip.batchTicket.mix.grade}) · {trip.batchTicket.volumeM3} m³
         </div>
       </div>
 
@@ -67,7 +70,7 @@ export default async function DriverTripPage({
           )}
         </div>
         <div className="mt-2 text-xs text-ink-muted" dir="ltr">
-          {trip.truck.code} · {project.siteAddress}
+          {trip.truck.code} · {trip.batchTicket.reservation.siteLocation || project.siteAddress}
         </div>
       </div>
 

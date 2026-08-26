@@ -233,7 +233,9 @@ export default async function ProductionPage({
           <thead>
             <tr>
               <th className={ui.th}>{m.col.project}</th>
+              <th className={ui.th}>{m.col.reservation}</th>
               <th className={ui.th}>{m.col.mix}</th>
+              <th className={ui.th}>{m.col.pourLocation}</th>
               <th className={ui.th}>{m.col.remaining}</th>
               <th className={ui.th}>{m.col.trips}</th>
               <th className={ui.th}>{m.col.status}</th>
@@ -247,7 +249,12 @@ export default async function ProductionPage({
                   {r.project.name}
                   <div className="text-xs text-ink-muted">{r.project.customer.legalName}</div>
                 </td>
-                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.mix.code}</td>
+                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.reservationNumber}</td>
+                <td className={ui.td}>
+                  <span className="font-mono text-xs" dir="ltr">{r.mix.code}</span>
+                  <div className="text-xs text-ink-muted">{r.mix.grade}</div>
+                </td>
+                <td className={`${ui.td} text-xs`}>{r.siteLocation ?? "—"}</td>
                 <td className={`${ui.td} font-mono tabular`}>
                   {r.remaining} / {r.requestedVolumeM3} m³
                   {r.released > 0 && (
@@ -299,7 +306,7 @@ export default async function ProductionPage({
             ))}
             {readyReservations.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={6}>
+                <td className={ui.td} colSpan={8}>
                   <span className="text-ink-muted">{m.emptyReady}</span>
                 </td>
               </tr>
@@ -317,7 +324,9 @@ export default async function ProductionPage({
               <th className={ui.th}>{m.colAll.when}</th>
               <th className={ui.th}>{m.colAll.plant}</th>
               <th className={ui.th}>{m.colAll.customer}</th>
+              <th className={ui.th}>{m.colAll.reservation}</th>
               <th className={ui.th}>{m.colAll.mix}</th>
+              <th className={ui.th}>{m.colAll.pourLocation}</th>
               <th className={ui.th}>{m.colAll.qty}</th>
               <th className={ui.th}>{m.colAll.driver}</th>
               <th className={ui.th}>{m.colAll.status}</th>
@@ -338,7 +347,9 @@ export default async function ProductionPage({
                         {dict.field.edit}
                       </Link>
                     </td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{reservation.reservationNumber}</td>
                     <td className={ui.td}></td>
+                    <td className={`${ui.td} text-xs`}>{reservation.siteLocation ?? "—"}</td>
                     <td className={`${ui.td} font-mono tabular`}>{totalReleased} / {reservation.requestedVolumeM3} m³</td>
                     <td className={ui.td}></td>
                     <td className={ui.td}>
@@ -357,7 +368,12 @@ export default async function ProductionPage({
                           {t.ticketNumber}
                         </Link>
                       </td>
-                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.mix.code}</td>
+                      <td className={ui.td}></td>
+                      <td className={ui.td}>
+                        <span className="font-mono text-xs" dir="ltr">{t.mix.code}</span>
+                        <div className="text-xs text-ink-muted">{t.mix.grade}</div>
+                      </td>
+                      <td className={ui.td}></td>
                       <td className={`${ui.td} font-mono tabular`}>{t.volumeM3} m³</td>
                       <td className={`${ui.td} text-xs`}>{t.trip?.driver.name ?? "—"}</td>
                       <td className={ui.td}>
@@ -370,7 +386,7 @@ export default async function ProductionPage({
             })}
             {deliveryGroupList.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={7}>
+                <td className={ui.td} colSpan={9}>
                   <span className="text-ink-muted">{m.emptyAll}</span>
                 </td>
               </tr>

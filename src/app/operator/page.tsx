@@ -100,8 +100,11 @@ export default async function OperatorHomePage() {
               </span>
             </div>
             <div className="text-xs text-ink-muted" dir="ltr">
-              {t.ticketNumber} · {t.mix.code} · {t.volumeM3} m³ · {t.plant.name}
+              {t.ticketNumber} · {t.reservation.reservationNumber} · {t.mix.code} ({t.mix.grade}) · {t.volumeM3} m³ · {t.plant.name}
             </div>
+            {t.reservation.siteLocation && (
+              <div className="text-xs text-ink-muted">{t.reservation.siteLocation}</div>
+            )}
           </Link>
         ))}
         {actionTickets.length === 0 && (
@@ -123,7 +126,9 @@ export default async function OperatorHomePage() {
             <input type="hidden" name="returnPrefix" value="/operator/ticket" />
             <div>
               <span className="font-medium">{r.project.name}</span>
+              <div className="font-mono text-xs text-ink-muted" dir="ltr">{r.reservationNumber}</div>
               <div className="text-xs text-ink-muted">{r.project.customer.legalName} · {r.site.name}</div>
+              {r.siteLocation && <div className="text-xs text-ink-muted">{r.siteLocation}</div>}
             </div>
             <select name="plantId" required defaultValue="" className="w-full rounded-md border border-border bg-bg px-2 py-1.5 text-sm">
               <option value="" disabled>{dict.field.selectPlant}</option>
@@ -132,7 +137,7 @@ export default async function OperatorHomePage() {
               ))}
             </select>
             <div className="flex items-center justify-between gap-2" dir="ltr">
-              <span className="font-mono text-xs text-ink-muted">{r.mix.code}</span>
+              <span className="font-mono text-xs text-ink-muted">{r.mix.code} ({r.mix.grade})</span>
               <input
                 name="volumeM3"
                 type="number"

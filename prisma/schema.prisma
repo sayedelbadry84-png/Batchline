@@ -365,6 +365,11 @@ model Project {
 
 model Reservation {
   id                    String    @id @default(cuid())
+  // The human-facing booking number ("RES-2026-0001") shown wherever a
+  // reservation appears — same globally-sequential, collision-safe
+  // pattern as BatchTicket.ticketNumber (see withSequentialNumber in
+  // src/lib/sequence.ts).
+  reservationNumber     String    @unique
   projectId             String
   project               Project   @relation(fields: [projectId], references: [id])
   // Which factory (Site — see the UI-terminology note on that model) this

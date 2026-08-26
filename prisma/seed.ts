@@ -94,6 +94,7 @@ async function main() {
 
   await prisma.reservation.create({
     data: {
+      reservationNumber: `RES-${new Date().getFullYear()}-0001`,
       projectId: project.id,
       siteId: site.id,
       mixId: mix.id,

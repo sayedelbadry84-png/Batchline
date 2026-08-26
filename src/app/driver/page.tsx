@@ -29,12 +29,12 @@ export default async function DriverHomePage() {
   const [openTrips, closedTrips] = await Promise.all([
     prisma.trip.findMany({
       where: { driverId: user.employeeId, status: { not: "CLOSED" } },
-      include: { truck: true, batchTicket: { include: { plant: true, reservation: { include: { project: true } } } } },
+      include: { truck: true, batchTicket: { include: { plant: true, mix: true, reservation: { include: { project: true } } } } },
       orderBy: { batchTime: "asc" },
     }),
     prisma.trip.findMany({
       where: { driverId: user.employeeId, status: "CLOSED" },
-      include: { batchTicket: { include: { reservation: { include: { project: true } } } } },
+      include: { batchTicket: { include: { mix: true, reservation: { include: { project: true } } } } },
       orderBy: { updatedAt: "desc" },
       take: 5,
     }),
@@ -73,8 +73,11 @@ export default async function DriverHomePage() {
               <span className="font-mono text-xs text-ink-muted" dir="ltr">{t.truck.code}</span>
             </div>
             <div className="text-xs text-ink-muted" dir="ltr">
-              {t.batchTicket.ticketNumber} · {t.batchTicket.volumeM3} m³
+              {t.batchTicket.ticketNumber} · {t.batchTicket.reservation.reservationNumber} · {t.batchTicket.mix.code} ({t.batchTicket.mix.grade}) · {t.batchTicket.volumeM3} m³
             </div>
+            {t.batchTicket.reservation.siteLocation && (
+              <div className="text-xs text-ink-muted">{t.batchTicket.reservation.siteLocation}</div>
+            )}
             <div className="mt-1 flex items-center justify-between">
               <span className="text-xs font-medium">{d.status[t.status as keyof typeof d.status] ?? t.status}</span>
               <DrumTimer batchTimeIso={t.batchTime.toISOString()} limitMinutes={t.batchTicket.plant.drumTimerLimitMinutes} />
@@ -95,6 +98,9 @@ export default async function DriverHomePage() {
             <div key={t.id} className="rounded-lg border border-border bg-surface px-3 py-2 text-sm">
               {t.batchTicket.reservation.project.name}
               <span className="ms-2 font-mono text-xs text-ink-muted">{t.volumeDeliveredM3?.toFixed(1)} m³</span>
+              <div className="font-mono text-xs text-ink-muted" dir="ltr">
+                {t.batchTicket.ticketNumber} · {t.batchTicket.reservation.reservationNumber} · {t.batchTicket.mix.code}
+              </div>
             </div>
           ))}
         </div>
