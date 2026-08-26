@@ -3,13 +3,38 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createTestBatch, addLabResult, createCertificate, updateCertificate, approveWasteMemo } from "./actions";
+import { createTestBatch, addLabResult, createCertificate, updateCertificate, approveWasteMemo, recordWasteMemoNote } from "./actions";
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
 import { effectiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
 function daysUntil(date: Date) {
   return Math.ceil((date.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
 }
+
+// Suggestions only (datalist, not a closed enum) — the common international
+// and regional ready-mix concrete standards, so issuing a certificate
+// doesn't start from a blank field every time. A plant is free to type
+// anything else a customer's spec actually calls for.
+const STANDARD_REF_OPTIONS = [
+  "ASTM C94 / C94M",
+  "EN 206",
+  "BS 8500-2",
+  "ACI 318",
+  "ES 4756-1",
+  "SASO GSO 2559-1",
+  "IS 456",
+  "AS 1379",
+] as const;
+const ISSUING_BODY_OPTIONS = [
+  "ASTM International",
+  "European Committee for Standardization (CEN)",
+  "British Standards Institution (BSI)",
+  "American Concrete Institute (ACI)",
+  "Egyptian Organization for Standardization and Quality (EOS)",
+  "Saudi Standards, Metrology and Quality Organization (SASO)",
+  "Bureau of Indian Standards (BIS)",
+  "Standards Australia",
+] as const;
 
 export default async function QualityPage({
   searchParams,
@@ -22,7 +47,7 @@ export default async function QualityPage({
   const { editCert: editCertId } = await searchParams;
   const siteId = effectiveSiteId(user);
 
-  const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos] = await Promise.all([
+  const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos, unfinishedWasteMemos] = await Promise.all([
     prisma.testBatch.findMany({
       where: { ...(siteId ? { trip: tripPlantScopeWhere(siteId) } : {}) },
       orderBy: { sampleTime: "desc" },
@@ -50,6 +75,19 @@ export default async function QualityPage({
       include: {
         batchTicket: { include: { mix: true, reservation: { include: { project: true } } } },
         drumReturn: { include: { trip: { include: { truck: true, driver: true } } } },
+      },
+    }),
+    // Approved before the written-finding requirement existed (see
+    // approveWasteMemo/recordWasteMemoNote in ./actions) — surfaced
+    // separately so Quality can backfill the finding without reopening
+    // the approval itself.
+    prisma.wasteIncidentMemo.findMany({
+      where: { status: "APPROVED", approvalNote: null, ...(siteId ? { batchTicket: plantScopeWhere(siteId) } : {}) },
+      orderBy: { approvedAt: "desc" },
+      include: {
+        batchTicket: { include: { mix: true, reservation: { include: { project: true } } } },
+        drumReturn: { include: { trip: { include: { truck: true, driver: true } } } },
+        approvedBy: true,
       },
     }),
   ]);
@@ -282,6 +320,46 @@ export default async function QualityPage({
         </div>
       </div>
 
+      {unfinishedWasteMemos.length > 0 && (
+        <div className={`${ui.card} border-warn/40`}>
+          <h2 className="mb-1 font-display text-lg font-semibold">{m.wasteMemos.backfillTitle}</h2>
+          <p className="mb-3 text-sm text-ink-muted">{m.wasteMemos.backfillIntro}</p>
+          <div className="flex flex-col gap-3">
+            {unfinishedWasteMemos.map((memo) => (
+              <form key={memo.id} action={recordWasteMemoNote} className="flex flex-col gap-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                <input type="hidden" name="id" value={memo.id} />
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                  <Link href={`/production/${memo.batchTicketId}`} className="font-mono text-xs font-medium text-accent-strong hover:underline" dir="ltr">
+                    {memo.batchTicket.ticketNumber}
+                  </Link>
+                  <span className="font-mono text-xs text-ink-muted" dir="ltr">{memo.batchTicket.reservation.reservationNumber}</span>
+                  <span>{memo.batchTicket.reservation.project.name}</span>
+                  <span className="font-mono tabular">{memo.wastedVolumeM3} m³</span>
+                  <span className="text-xs text-ink-muted">
+                    {memo.approvedBy ? dict.modules.production.detail.wasteMemoApproved(memo.approvedBy.name, new Date(memo.approvedAt!).toLocaleDateString()) : ""}
+                  </span>
+                </div>
+                <div className="flex items-end gap-2">
+                  <div className="flex-1">
+                    <label className={ui.label}>{m.wasteMemos.noteLabel}</label>
+                    <textarea
+                      name="approvalNote"
+                      required
+                      rows={2}
+                      placeholder={m.wasteMemos.notePlaceholder}
+                      className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+                    />
+                  </div>
+                  <button className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-alt">
+                    {m.wasteMemos.saveNote}
+                  </button>
+                </div>
+              </form>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-[1fr_320px] gap-6">
         <div className={ui.card}>
           <h2 className="mb-3 font-display text-lg font-semibold">{m.certsTitle}</h2>
@@ -314,11 +392,11 @@ export default async function QualityPage({
                           </div>
                           <div>
                             <label className={ui.label}>{m.fCert.standardRef}</label>
-                            <input name="standardRef" defaultValue={c.standardRef} required className={`${ui.input} w-32`} dir="ltr" />
+                            <input name="standardRef" defaultValue={c.standardRef} required list="standardRefOptions" className={`${ui.input} w-32`} dir="ltr" />
                           </div>
                           <div>
                             <label className={ui.label}>{m.fCert.issuingBody}</label>
-                            <input name="issuingBody" defaultValue={c.issuingBody} required className={`${ui.input} w-44`} />
+                            <input name="issuingBody" defaultValue={c.issuingBody} required list="issuingBodyOptions" className={`${ui.input} w-44`} />
                           </div>
                           <div>
                             <label className={ui.label}>{m.fCert.issuedDate}</label>
@@ -387,11 +465,11 @@ export default async function QualityPage({
           </div>
           <div>
             <label className={ui.label}>{m.fCert.standardRef}</label>
-            <input name="standardRef" required className={ui.input} placeholder="ES 4756-1 / EN 206" dir="ltr" />
+            <input name="standardRef" required list="standardRefOptions" className={ui.input} placeholder="ES 4756-1 / EN 206" dir="ltr" />
           </div>
           <div>
             <label className={ui.label}>{m.fCert.issuingBody}</label>
-            <input name="issuingBody" required className={ui.input} placeholder="Egyptian Organization for Standardization" />
+            <input name="issuingBody" required list="issuingBodyOptions" className={ui.input} placeholder="Egyptian Organization for Standardization" />
           </div>
           <div>
             <label className={ui.label}>{m.fCert.issuedDate}</label>
@@ -410,6 +488,13 @@ export default async function QualityPage({
           </button>
         </form>
       </div>
+
+      <datalist id="standardRefOptions">
+        {STANDARD_REF_OPTIONS.map((ref) => <option key={ref} value={ref} />)}
+      </datalist>
+      <datalist id="issuingBodyOptions">
+        {ISSUING_BODY_OPTIONS.map((body) => <option key={body} value={body} />)}
+      </datalist>
     </div>
   );
 }

@@ -188,3 +188,33 @@ export async function approveWasteMemo(formData: FormData) {
   revalidatePath("/quality");
   revalidatePath(`/production/${memo.batchTicketId}`);
 }
+
+// Backfills a written finding onto a memo that was approved before that
+// requirement existed (approveWasteMemo above now refuses to approve
+// without one going forward). Deliberately only fills a genuinely missing
+// note rather than allowing an edit — once a finding is on file it's part
+// of the audit record, not something to quietly rewrite later.
+export async function recordWasteMemoNote(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const approvalNote = String(formData.get("approvalNote") ?? "").trim();
+  if (!id || !approvalNote) return;
+  if (!(await wasteMemoInScope(id, effectiveSiteId(user)))) return;
+
+  const existing = await prisma.wasteIncidentMemo.findUnique({ where: { id } });
+  if (!existing || existing.status !== "APPROVED" || existing.approvalNote) return;
+
+  const memo = await prisma.wasteIncidentMemo.update({ where: { id }, data: { approvalNote } });
+
+  await logAudit({
+    module: "Quality",
+    recordId: id,
+    afterValue: approvalNote,
+    reasonCode: "WASTE_MEMO_NOTE_BACKFILLED",
+  });
+
+  revalidatePath("/quality");
+  revalidatePath(`/production/${memo.batchTicketId}`);
+}

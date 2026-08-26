@@ -949,6 +949,9 @@ const en: typeof ar = {
         notePlaceholder: "Write the actual inspection finding — e.g. slump below the required minimum…",
         approve: "Approve",
         empty: "No waste incident memos pending approval.",
+        backfillTitle: "Approved memos missing a written finding",
+        backfillIntro: "Approved before writing a finding was required — fill in the actual finding for each to complete the record.",
+        saveNote: "Save finding",
       },
     },
     reports: {
