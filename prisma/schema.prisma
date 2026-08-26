@@ -7,8 +7,14 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  // Pooled at runtime (see .env's own comment — Neon's PgBouncer endpoint,
+  // needed so concurrent serverless/script connections don't exhaust the
+  // direct endpoint's much lower connection cap); directUrl is the
+  // unpooled endpoint the Prisma CLI itself uses for `db push`/migrate,
+  // which need a real session-mode connection.
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 // Role is a plain string (SQLite has no native enum support); valid values
