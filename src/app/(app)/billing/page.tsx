@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
@@ -32,6 +33,7 @@ export default async function BillingPage({
       include: {
         batchTicket: {
           include: {
+            mix: true,
             reservation: { include: { project: { include: { customer: true } }, mix: true } },
           },
         },
@@ -55,6 +57,15 @@ export default async function BillingPage({
 
   const priceByCustomerMix = new Map(priceEntries.map((p) => [`${p.customerId}:${p.mixId}`, p.pricePerM3]));
 
+  type TripRow = {
+    id: string;
+    ticketNumber: string;
+    reservationNumber: string;
+    mixCode: string;
+    mixGrade: string;
+    siteLocation: string | null;
+    volumeM3: number;
+  };
   type ProjectGroup = {
     projectId: string;
     projectName: string;
@@ -62,6 +73,7 @@ export default async function BillingPage({
     count: number;
     volumeM3: number;
     missingMixCodes: Set<string>;
+    trips: TripRow[];
   };
   const byProject = new Map<string, ProjectGroup>();
   for (const trip of uninvoicedTrips) {
@@ -74,12 +86,23 @@ export default async function BillingPage({
       count: 0,
       volumeM3: 0,
       missingMixCodes: new Set<string>(),
+      trips: [],
     };
+    const deliveredM3 = trip.volumeDeliveredM3 ?? trip.batchTicket.volumeM3;
     group.count += 1;
-    group.volumeM3 += trip.volumeDeliveredM3 ?? trip.batchTicket.volumeM3;
+    group.volumeM3 += deliveredM3;
     if (!priceByCustomerMix.has(`${project.customerId}:${reservation.mixId}`)) {
       group.missingMixCodes.add(reservation.mix.code);
     }
+    group.trips.push({
+      id: trip.id,
+      ticketNumber: trip.batchTicket.ticketNumber,
+      reservationNumber: reservation.reservationNumber,
+      mixCode: trip.batchTicket.mix.code,
+      mixGrade: trip.batchTicket.mix.grade,
+      siteLocation: reservation.siteLocation,
+      volumeM3: deliveredM3,
+    });
     byProject.set(project.id, group);
   }
   const projectGroups = [...byProject.values()];
@@ -107,6 +130,10 @@ export default async function BillingPage({
             <tr>
               <th className={ui.th}>{m.col.project}</th>
               <th className={ui.th}>{m.col.customer}</th>
+              <th className={ui.th}>{m.col.ticket}</th>
+              <th className={ui.th}>{m.col.reservation}</th>
+              <th className={ui.th}>{m.col.mix}</th>
+              <th className={ui.th}>{m.col.pourLocation}</th>
               <th className={ui.th}>{m.col.deliveries}</th>
               <th className={ui.th}>{m.col.volume}</th>
               <th className={ui.th}></th>
@@ -114,26 +141,50 @@ export default async function BillingPage({
           </thead>
           <tbody>
             {projectGroups.map((g) => (
-              <tr key={g.projectId}>
-                <td className={`${ui.td} font-medium`}>{g.projectName}</td>
-                <td className={ui.td}>{g.customerName}</td>
-                <td className={`${ui.td} font-mono tabular`}>{g.count}</td>
-                <td className={`${ui.td} font-mono tabular`}>{g.volumeM3} m³</td>
-                <td className={ui.td}>
-                  {g.missingMixCodes.size === 0 ? (
-                    <form action={generateInvoiceForProject}>
-                      <input type="hidden" name="projectId" value={g.projectId} />
-                      <button className={ui.button}>{m.generate}</button>
-                    </form>
-                  ) : (
-                    <span className="text-xs text-warn">{m.needsPricing([...g.missingMixCodes].join(", "))}</span>
-                  )}
-                </td>
-              </tr>
+              <Fragment key={g.projectId}>
+                <tr className="bg-surface-alt">
+                  <td className={`${ui.td} font-medium`}>{g.projectName}</td>
+                  <td className={ui.td}>{g.customerName}</td>
+                  <td className={ui.td}></td>
+                  <td className={ui.td}></td>
+                  <td className={ui.td}></td>
+                  <td className={ui.td}></td>
+                  <td className={`${ui.td} font-mono tabular`}>{g.count}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{g.volumeM3} m³</td>
+                  <td className={ui.td}>
+                    {g.missingMixCodes.size === 0 ? (
+                      <form action={generateInvoiceForProject}>
+                        <input type="hidden" name="projectId" value={g.projectId} />
+                        <button className={ui.button}>{m.generate}</button>
+                      </form>
+                    ) : (
+                      <span className="text-xs text-warn">{m.needsPricing([...g.missingMixCodes].join(", "))}</span>
+                    )}
+                  </td>
+                </tr>
+                {g.trips.map((t) => (
+                  <tr key={t.id}>
+                    <td className={ui.td}></td>
+                    <td className={ui.td}></td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">
+                      <span className="text-ink-faint">↳</span> {t.ticketNumber}
+                    </td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.reservationNumber}</td>
+                    <td className={ui.td}>
+                      <span className="font-mono text-xs" dir="ltr">{t.mixCode}</span>
+                      <div className="text-xs text-ink-muted">{t.mixGrade}</div>
+                    </td>
+                    <td className={`${ui.td} text-xs`}>{t.siteLocation ?? "—"}</td>
+                    <td className={ui.td}></td>
+                    <td className={`${ui.td} font-mono tabular`}>{t.volumeM3} m³</td>
+                    <td className={ui.td}></td>
+                  </tr>
+                ))}
+              </Fragment>
             ))}
             {projectGroups.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={5}>
+                <td className={ui.td} colSpan={9}>
                   <span className="text-ink-muted">{m.empty}</span>
                 </td>
               </tr>

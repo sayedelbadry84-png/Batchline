@@ -67,7 +67,7 @@ export default async function DashboardPage() {
     prisma.silo.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true } }),
     prisma.trip.findMany({
       where: { status: { not: "CLOSED" }, ...tripPlantScopeWhere(siteId) },
-      include: { truck: true, driver: true, batchTicket: { include: { plant: true, reservation: { include: { project: true } } } } },
+      include: { truck: true, driver: true, batchTicket: { include: { plant: true, mix: true, reservation: { include: { project: true } } } } },
       orderBy: { batchTime: "asc" },
     }),
     prisma.batchTicket.findMany({
@@ -347,6 +347,12 @@ export default async function DashboardPage() {
                   <span className="font-medium" dir="ltr">{t.truck.code}</span>
                   <span className="text-ink-muted"> · {t.driver.name}</span>
                   <div className="text-xs text-ink-muted">{t.batchTicket.reservation.project.name}</div>
+                  <div className="font-mono text-xs text-ink-faint" dir="ltr">
+                    {t.batchTicket.ticketNumber} · {t.batchTicket.reservation.reservationNumber} · {t.batchTicket.mix.code}
+                  </div>
+                  {t.batchTicket.reservation.siteLocation && (
+                    <div className="text-xs text-ink-faint">{t.batchTicket.reservation.siteLocation}</div>
+                  )}
                 </div>
                 <div className="text-end">
                   <span className={`${ui.chip} bg-surface-alt text-ink-muted mb-1 inline-block`}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</span>

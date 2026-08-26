@@ -34,7 +34,7 @@ export default async function QualityPage({
     }),
     prisma.trip.findMany({
       where: { status: { in: ["DISCHARGING", "CLOSED"] }, ...tripPlantScopeWhere(siteId) },
-      include: { batchTicket: { include: { reservation: { include: { project: true } } } } },
+      include: { batchTicket: { include: { mix: true, reservation: { include: { project: true } } } } },
       orderBy: { batchTime: "desc" },
       take: 20,
     }),
@@ -87,9 +87,14 @@ export default async function QualityPage({
                     {dict.sampleTypes[tb.sampleType as keyof typeof dict.sampleTypes] ?? tb.sampleType} — {tb.trip.batchTicket.reservation.project.name}
                   </div>
                   <div className="text-xs text-ink-muted">
-                    <span dir="ltr">{tb.trip.batchTicket.mix.code} · {tb.trip.batchTicket.ticketNumber}</span> · {m.sampledAt(new Date(tb.sampleTime).toLocaleString())}{" "}
+                    <span dir="ltr">
+                      {tb.trip.batchTicket.mix.code} ({tb.trip.batchTicket.mix.grade}) · {tb.trip.batchTicket.ticketNumber} · {tb.trip.batchTicket.reservation.reservationNumber}
+                    </span> · {m.sampledAt(new Date(tb.sampleTime).toLocaleString())}{" "}
                     {tb.sampledBy ? m.by(tb.sampledBy.name) : ""}
                   </div>
+                  {tb.trip.batchTicket.reservation.siteLocation && (
+                    <div className="text-xs text-ink-muted">{tb.trip.batchTicket.reservation.siteLocation}</div>
+                  )}
                 </div>
                 <div className="font-mono text-xs text-ink-muted tabular" dir="ltr">
                   {tb.slumpMeasuredMm != null && <div>{m.slump(tb.slumpMeasuredMm)}</div>}
@@ -186,7 +191,7 @@ export default async function QualityPage({
               <option value="">{dict.field.selectTrip}</option>
               {sampleableTrips.map((t) => (
                 <option key={t.id} value={t.id}>
-                  {t.batchTicket.ticketNumber} — {t.batchTicket.reservation.project.name}
+                  {t.batchTicket.ticketNumber} · {t.batchTicket.reservation.reservationNumber} — {t.batchTicket.reservation.project.name} · {t.batchTicket.mix.code} ({t.batchTicket.mix.grade}){t.batchTicket.reservation.siteLocation ? ` · ${t.batchTicket.reservation.siteLocation}` : ""}
                 </option>
               ))}
             </select>

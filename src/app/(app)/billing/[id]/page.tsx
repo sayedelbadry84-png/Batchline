@@ -31,7 +31,7 @@ export default async function InvoiceDetailPage({
       customer: true,
       project: true,
       plant: true,
-      lines: { include: { trip: { include: { truck: true } } } },
+      lines: { include: { trip: { include: { truck: true, batchTicket: { include: { mix: true, reservation: true } } } } } },
       payments: { orderBy: { paidAt: "desc" } },
     },
   });
@@ -86,6 +86,8 @@ export default async function InvoiceDetailPage({
           <thead>
             <tr>
               <th className={ui.th}>{d.colLine.description}</th>
+              <th className={ui.th}>{d.colLine.reservation}</th>
+              <th className={ui.th}>{d.colLine.pourLocation}</th>
               <th className={ui.th}>{d.colLine.volume}</th>
               <th className={ui.th}>{d.colLine.unitPrice}</th>
               <th className={ui.th}>{d.colLine.lineTotal}</th>
@@ -95,6 +97,8 @@ export default async function InvoiceDetailPage({
             {invoice.lines.map((l) => (
               <tr key={l.id}>
                 <td className={`${ui.td} font-mono text-xs`} dir="ltr">{l.description}</td>
+                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{l.trip.batchTicket.reservation.reservationNumber}</td>
+                <td className={`${ui.td} text-xs`}>{l.trip.batchTicket.reservation.siteLocation ?? "—"}</td>
                 <td className={`${ui.td} font-mono tabular`}>{l.volumeM3} m³</td>
                 <td className={`${ui.td} font-mono tabular`} dir="ltr">{l.unitPrice.toLocaleString()}</td>
                 <td className={`${ui.td} font-mono tabular`} dir="ltr">{l.lineTotal.toLocaleString()}</td>
@@ -102,7 +106,7 @@ export default async function InvoiceDetailPage({
             ))}
             {invoice.lines.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={4}>
+                <td className={ui.td} colSpan={6}>
                   <span className="text-ink-muted">{d.emptyLinesCancelled}</span>
                 </td>
               </tr>
