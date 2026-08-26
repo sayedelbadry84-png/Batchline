@@ -1035,7 +1035,7 @@ const ar = {
         ticketCount: (n: number) => `عبر ${n} تذكرة مكتملة`,
       },
       returnsReport: {
-        col: { discharged: "تاريخ التفريغ", truck: "الشاحنة", driver: "السائق", project: "المشروع", ticket: "التذكرة", reservation: "رقم الحجز", mix: "الخلطة", pourLocation: "موقع الصب", returned: "المرتجع", disposition: "المصير", reason: "السبب" },
+        col: { discharged: "تاريخ التفريغ", truck: "الشاحنة", driver: "السائق", project: "المشروع", ticket: "التذكرة", reservation: "رقم الحجز", mix: "الخلطة", pourLocation: "موقع الصب", returned: "المرتجع", disposition: "المصير", reason: "السبب", qualityApproval: "اعتماد الجودة" },
         totalReturned: (v: string) => `${v} م³ مرتجعة`,
         wasted: (v: string) => `${v} م³ لم تُعاد استخدامها`,
         reclaimed: (v: string) => `${v} م³ أُعيد استخدامها — مواد لم يضطر المصنع لخلطها مرتين`,

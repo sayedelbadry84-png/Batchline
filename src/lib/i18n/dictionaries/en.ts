@@ -1042,7 +1042,7 @@ const en: typeof ar = {
         ticketCount: (n: number) => `across ${n} completed tickets`,
       },
       returnsReport: {
-        col: { discharged: "Discharged", truck: "Truck", driver: "Driver", project: "Project", ticket: "Ticket", reservation: "Reservation #", mix: "Mix", pourLocation: "Pour location", returned: "Returned", disposition: "Disposition", reason: "Reason" },
+        col: { discharged: "Discharged", truck: "Truck", driver: "Driver", project: "Project", ticket: "Ticket", reservation: "Reservation #", mix: "Mix", pourLocation: "Pour location", returned: "Returned", disposition: "Disposition", reason: "Reason", qualityApproval: "Quality approval" },
         totalReturned: (v: string) => `${v} m³ returned`,
         wasted: (v: string) => `${v} m³ never reused`,
         reclaimed: (v: string) => `${v} m³ reclaimed — material the plant didn't have to batch twice`,

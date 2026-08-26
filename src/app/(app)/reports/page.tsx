@@ -767,7 +767,7 @@ export default async function ReportsPage({
             message={`${m.tabs.returns} ${rangeFrom} → ${rangeTo}\n${m.returnsReport.totalReturned(returnsData.totalReturnedM3.toFixed(1))}\n${m.returnsReport.wasted(returnsData.wastedM3.toFixed(1))}`}
             csvFilename={`returns-${rangeFrom}-${rangeTo}.csv`}
             csv={rowsToCsv(
-              ["Discharged", "Truck", "Driver", "Project", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Returned m3", "Disposition", "Reason"],
+              ["Discharged", "Truck", "Driver", "Project", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Returned m3", "Disposition", "Reason", "Quality approval"],
               returnsData.rows.map((r) => [
                 r.trip.dischargeEnd ? new Date(r.trip.dischargeEnd).toISOString() : "",
                 r.trip.truck.code,
@@ -781,6 +781,7 @@ export default async function ReportsPage({
                 r.returnedVolumeM3,
                 r.disposition,
                 r.reasonCode ?? "",
+                r.reasonCode === "QUALITY_REJECTED" ? (r.wasteMemo?.status === "APPROVED" ? "APPROVED" : "PENDING") : "",
               ]),
             )}
           />
@@ -817,6 +818,7 @@ export default async function ReportsPage({
                   <th className={ui.th}>{m.returnsReport.col.returned}</th>
                   <th className={ui.th}>{m.returnsReport.col.disposition}</th>
                   <th className={ui.th}>{m.returnsReport.col.reason}</th>
+                  <th className={ui.th}>{m.returnsReport.col.qualityApproval}</th>
                 </tr>
               </thead>
               <tbody>
@@ -836,10 +838,21 @@ export default async function ReportsPage({
                     <td className={`${ui.td} font-mono tabular`}>{r.returnedVolumeM3} m³</td>
                     <td className={ui.td}>{dict.status[r.disposition as keyof typeof dict.status] ?? r.disposition}</td>
                     <td className={ui.td}>{r.reasonCode ? (dict.returnReasons[r.reasonCode as keyof typeof dict.returnReasons] ?? r.reasonCode) : "—"}</td>
+                    <td className={ui.td}>
+                      {r.reasonCode === "QUALITY_REJECTED" ? (
+                        <span className={`${ui.chip} ${r.wasteMemo?.status === "APPROVED" ? "bg-good-soft text-good" : "bg-warn-soft text-warn"}`}>
+                          {r.wasteMemo?.status === "APPROVED" && r.wasteMemo.approvedBy
+                            ? dict.modules.production.detail.wasteMemoApproved(r.wasteMemo.approvedBy.name, new Date(r.wasteMemo.approvedAt!).toLocaleDateString())
+                            : dict.modules.production.detail.wasteMemoPending}
+                        </span>
+                      ) : (
+                        <span className="text-ink-faint">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
                 {returnsData.rows.length === 0 && (
-                  <tr><td className={ui.td} colSpan={11}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                  <tr><td className={ui.td} colSpan={12}><span className="text-ink-muted">{m.noRows}</span></td></tr>
                 )}
               </tbody>
             </table>

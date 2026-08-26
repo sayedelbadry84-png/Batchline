@@ -74,11 +74,19 @@ export async function getReturnsReport({ from, to, siteId, plantId }: ReportFilt
   const scope = tripPlantScopeWhere(siteId, plantId);
   const returns = await prisma.drumReturn.findMany({
     where: { trip: { dischargeEnd: { gte: from, lte: to }, ...scope } },
-    include: { trip: { include: { truck: true, driver: true, batchTicket: { include: { mix: true, reservation: { include: { project: true } } } } } } },
+    include: {
+      trip: { include: { truck: true, driver: true, batchTicket: { include: { mix: true, reservation: { include: { project: true } } } } } },
+      wasteMemo: { include: { approvedBy: true } },
+    },
     orderBy: { trip: { dischargeEnd: "asc" } },
   });
   const totalReturnedM3 = returns.reduce((sum, r) => sum + r.returnedVolumeM3, 0);
-  const wastedM3 = returns.filter((r) => r.disposition === "FULL_WASTE").reduce((sum, r) => sum + r.returnedVolumeM3, 0);
+  // Physically wasted (dumped) — the return's FATE, not its billing
+  // DISPOSITION. A quality-rejected load is always billed NO_CHARGE
+  // (see closeTripWithReturn) but still gets physically dumped just like
+  // a FULL_WASTE (drum-timer-exceeded) return; disposition alone missed
+  // that case entirely.
+  const wastedM3 = returns.filter((r) => r.fate === "DUMPED").reduce((sum, r) => sum + r.returnedVolumeM3, 0);
   const reclaimedM3 = returns.filter((r) => r.fate === "RECLAIMED").reduce((sum, r) => sum + r.returnedVolumeM3, 0);
 
   // "In the drums now" (RhinoMaster's framing) — a return logged as still
