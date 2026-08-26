@@ -1,6 +1,7 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
@@ -60,25 +61,42 @@ async function releaseTicketForReservation(reservationId: string, requestedVolum
   const volumeM3 = Math.min(requestedVolume, remaining);
   if (volumeM3 <= 0) return null;
 
-  const ticketCount = await prisma.batchTicket.count({ where: { plantId } });
-  const ticketNumber = `BT-${new Date().getFullYear()}-${String(ticketCount + 1).padStart(4, "0")}`;
-
-  const ticket = await prisma.batchTicket.create({
-    data: {
-      reservationId,
-      mixId: reservation.mixId,
-      plantId,
-      ticketNumber,
-      volumeM3,
-      status: "RELEASED",
-      components: {
-        create: reservation.mix.components.map((c) => ({
-          materialId: c.materialId,
-          targetMassKg: c.designMassKgPerM3 * volumeM3,
-        })),
-      },
-    },
-  });
+  // ticketNumber is globally unique (one company-wide sequence, not
+  // per-plant) — it used to be counted per plantId while the column
+  // itself has no per-plant scoping, so the FIRST ticket at any second
+  // plant always collided with "BT-<year>-0001" from the first one ever
+  // used. Counted globally now, with a short retry loop as a second line
+  // of defense against the inherent count-then-insert race (two releases
+  // landing in the same instant, anywhere) rather than just the
+  // guaranteed collision this specific bug caused.
+  const year = new Date().getFullYear();
+  let ticket = null;
+  for (let attempt = 0; attempt < 5 && !ticket; attempt++) {
+    const ticketCount = await prisma.batchTicket.count();
+    const ticketNumber = `BT-${year}-${String(ticketCount + 1 + attempt).padStart(4, "0")}`;
+    try {
+      ticket = await prisma.batchTicket.create({
+        data: {
+          reservationId,
+          mixId: reservation.mixId,
+          plantId,
+          ticketNumber,
+          volumeM3,
+          status: "RELEASED",
+          components: {
+            create: reservation.mix.components.map((c) => ({
+              materialId: c.materialId,
+              targetMassKg: c.designMassKgPerM3 * volumeM3,
+            })),
+          },
+        },
+      });
+    } catch (e) {
+      if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") throw e;
+      // Someone else just took this number — loop and try the next one.
+    }
+  }
+  if (!ticket) throw new Error("Could not allocate a unique ticket number after 5 attempts.");
 
   if (reservation.status !== "IN_PRODUCTION") {
     await prisma.reservation.update({ where: { id: reservationId }, data: { status: "IN_PRODUCTION" } });
@@ -87,7 +105,7 @@ async function releaseTicketForReservation(reservationId: string, requestedVolum
   await logAudit({
     module: "Production",
     recordId: ticket.id,
-    afterValue: `${ticketNumber} — ${volumeM3} m3`,
+    afterValue: `${ticket.ticketNumber} — ${volumeM3} m3`,
     reasonCode: "BATCH_RELEASED",
   });
 
