@@ -111,8 +111,18 @@ export async function closeTripWithReturn(formData: FormData) {
     disposition = "PARTIAL_CREDIT";
   }
 
+  // Delivered/billed volume is reduced ONLY when the return reason is a
+  // quality rejection — the plant's own failure to produce a load the
+  // customer could use. Every other reason (over-ordered, customer
+  // cancelled, site not ready, access blocked, traffic delay, other)
+  // still bills the FULL ticket volume regardless of disposition — even a
+  // FULL_WASTE return, since disposition tracks what happened to the
+  // returned concrete itself (dumped/reclaimed/no-charge/credited), not
+  // whether the customer owes for what left the plant. The customer is
+  // responsible for the load either way unless we're the ones who failed
+  // to deliver a usable one.
   const volumeDeliveredM3 =
-    disposition === "FULL_WASTE" ? 0 : Math.max(0, trip.batchTicket.volumeM3 - returnedVolumeM3);
+    reasonCode === "QUALITY_REJECTED" ? Math.max(0, trip.batchTicket.volumeM3 - returnedVolumeM3) : trip.batchTicket.volumeM3;
 
   await prisma.$transaction([
     prisma.trip.update({
