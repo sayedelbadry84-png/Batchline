@@ -91,21 +91,32 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
   // (a Trip exists) — matches when this document is meant to be issued.
   if (!ticket || !ticket.trip) notFound();
 
-  // "Total Qty" is a running cumulative total across every load released
-  // against this SAME reservation so far, in release order — not just
-  // this one truck's own volume — the same way a weighbridge ticket
-  // accumulates on a multi-load pour. Ordered deterministically (release
-  // time, then id as a tiebreaker) so a reprint always shows the same
-  // number for a given ticket regardless of when it's printed.
+  // "Total Qty" is a running cumulative total across every load against
+  // this SAME reservation so far — not just this one truck's own volume —
+  // the same way a weighbridge ticket accumulates on a multi-load pour.
+  // "QTY Delivered" is that same running total but BEFORE this load (0 on
+  // the first ticket, the prior tickets' sum on every one after) — what
+  // had already left the plant before this truck, not this truck's own
+  // discharge volume. Both are keyed off batchCompletedAt (when the truck
+  // actually finished being LOADED at the plant), not release time or
+  // delivery/discharge time — a ticket only joins the sequence once its
+  // own loading is done, and a still-loading later ticket must never
+  // count as "prior" to one that's already left. Excludes tickets that
+  // haven't finished loading yet for the same reason. Ordered
+  // deterministically (batch-completed time, then id as a tiebreaker) so
+  // a reprint always shows the same numbers for a given ticket regardless
+  // of when it's printed.
   const siblingTickets = await prisma.batchTicket.findMany({
-    where: { reservationId: ticket.reservationId, status: { not: "CANCELLED" } },
-    orderBy: [{ releasedAt: "asc" }, { id: "asc" }],
+    where: { reservationId: ticket.reservationId, status: { not: "CANCELLED" }, batchCompletedAt: { not: null } },
+    orderBy: [{ batchCompletedAt: "asc" }, { id: "asc" }],
     select: { id: true, volumeM3: true },
   });
   let cumulativeQtyM3 = 0;
+  let priorQtyM3 = 0;
   let loadNumber = 0;
   for (const t of siblingTickets) {
     loadNumber += 1;
+    priorQtyM3 = cumulativeQtyM3;
     cumulativeQtyM3 += t.volumeM3;
     if (t.id === ticket.id) break;
   }
@@ -195,7 +206,7 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
         </div>
 
         <div className="grid grid-cols-3">
-          <Cell label={L.qtyDelivered} value={(trip.volumeDeliveredM3 ?? 0).toFixed(2)} className="text-center" />
+          <Cell label={L.qtyDelivered} value={priorQtyM3.toFixed(2)} className="text-center" />
           <Cell label={L.qtyInMix} value={ticket.volumeM3.toFixed(2)} className="text-center" />
           <Cell label={L.totalQty} value={cumulativeQtyM3.toFixed(2)} className="text-center" />
         </div>
