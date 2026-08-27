@@ -1126,6 +1126,9 @@ const en: typeof ar = {
         leaderboardTitle: "Performance by Rep",
         leaderboardVolume: "Volume (won opportunities)",
         leaderboardCount: "Deal Count",
+        trendTitle: "Opportunity Trend — Last 6 Months",
+        sourceTitle: "Lead Source Effectiveness",
+        topCustomersTitle: "Top Customers (won volume)",
       },
       opportunities: {
         col: {

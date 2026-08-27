@@ -1119,6 +1119,9 @@ const ar = {
         leaderboardTitle: "الأداء حسب المندوب",
         leaderboardVolume: "الكمية (فرص تم الفوز بها)",
         leaderboardCount: "عدد الصفقات",
+        trendTitle: "اتجاه الفرص البيعية — آخر 6 أشهر",
+        sourceTitle: "فعالية مصدر الفرصة",
+        topCustomersTitle: "أفضل العملاء (كمية تم الفوز بها)",
       },
       opportunities: {
         col: {

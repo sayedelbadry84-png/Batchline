@@ -141,7 +141,7 @@ async function DashboardTab({
   siteScope: Record<string, unknown>;
 }) {
   const [opportunities, quotes, dueVisits] = await Promise.all([
-    prisma.opportunity.findMany({ where: siteScope, include: { owner: true } }),
+    prisma.opportunity.findMany({ where: siteScope, include: { owner: true, customer: true } }),
     prisma.quote.findMany({ where: siteScope }),
     prisma.fieldVisit.findMany({
       where: { followUpDate: { lte: new Date(), not: null } },
@@ -171,6 +171,42 @@ async function DashboardTab({
     leaderboardMap.set(key, entry);
   }
   const leaderboard = [...leaderboardMap.values()].sort((a, b) => b.volume - a.volume);
+
+  // Source effectiveness — win rate per lead source, among that source's
+  // own closed (WON or LOST) opportunities only, same denominator logic as
+  // the headline winRate above but sliced by source instead of company-wide.
+  const sourceStats = OPP_SOURCES.map((s) => {
+    const forSource = opportunities.filter((o) => o.source === s);
+    const won = forSource.filter((o) => o.status === "WON").length;
+    const lost = forSource.filter((o) => o.status === "LOST").length;
+    const closed = won + lost;
+    return { source: s, total: forSource.length, winRate: closed > 0 ? (won / closed) * 100 : null };
+  }).filter((s) => s.total > 0);
+
+  // Last 6 calendar months (oldest first), counting opportunities by when
+  // they were created — a simple lead-volume trend, not a forecast.
+  const monthBuckets: { label: string; start: Date; end: Date }[] = [];
+  for (let i = 5; i >= 0; i--) {
+    const start = new Date(new Date().getFullYear(), new Date().getMonth() - i, 1);
+    const end = new Date(start.getFullYear(), start.getMonth() + 1, 1);
+    monthBuckets.push({ label: start.toLocaleDateString("en-GB", { month: "short", year: "2-digit" }), start, end });
+  }
+  const monthlyTrend = monthBuckets.map((b) => ({
+    label: b.label,
+    count: opportunities.filter((o) => o.createdAt >= b.start && o.createdAt < b.end).length,
+  }));
+  const maxMonthlyCount = Math.max(1, ...monthlyTrend.map((b) => b.count));
+
+  // Top customers by won volume — real (non-prospect) customers only,
+  // since a prospect's volume isn't attributable to an account yet.
+  const topCustomersMap = new Map<string, { name: string; volume: number }>();
+  for (const o of wonOpportunities) {
+    if (!o.customer) continue;
+    const entry = topCustomersMap.get(o.customer.id) ?? { name: o.customer.legalName, volume: 0 };
+    entry.volume += o.estimatedVolumeM3 ?? 0;
+    topCustomersMap.set(o.customer.id, entry);
+  }
+  const topCustomers = [...topCustomersMap.values()].sort((a, b) => b.volume - a.volume).slice(0, 5);
 
   return (
     <div className="flex flex-col gap-6">
@@ -236,6 +272,72 @@ async function DashboardTab({
                 <tr>
                   <td className={ui.td} colSpan={3}><span className="text-ink-muted">—</span></td>
                 </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.dashboard.trendTitle}</h2>
+        <div className="flex items-end gap-3" style={{ height: "120px" }}>
+          {monthlyTrend.map((b) => (
+            <div key={b.label} className="flex flex-1 flex-col items-center gap-1">
+              <div className="font-mono text-xs text-ink-muted">{b.count}</div>
+              <div
+                className="w-full rounded-t bg-accent"
+                style={{ height: `${Math.max(4, (b.count / maxMonthlyCount) * 80)}px` }}
+              />
+              <div className="text-xs text-ink-muted">{b.label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-6">
+        <div className={ui.card}>
+          <h2 className="mb-3 font-display text-lg font-semibold">{m.dashboard.sourceTitle}</h2>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th className={ui.th}></th>
+                <th className={ui.th}>{m.dashboard.leaderboardCount}</th>
+                <th className={ui.th}>{m.dashboard.winRate}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sourceStats.map((s) => (
+                <tr key={s.source}>
+                  <td className={`${ui.td} font-medium`}>{m.sourceLabel[s.source]}</td>
+                  <td className={ui.td}>{s.total}</td>
+                  <td className={`${ui.td} font-mono`}>{s.winRate === null ? "—" : `${s.winRate.toFixed(0)}%`}</td>
+                </tr>
+              ))}
+              {sourceStats.length === 0 && (
+                <tr><td className={ui.td} colSpan={3}><span className="text-ink-muted">—</span></td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className={ui.card}>
+          <h2 className="mb-3 font-display text-lg font-semibold">{m.dashboard.topCustomersTitle}</h2>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th className={ui.th}></th>
+                <th className={ui.th}>{m.dashboard.leaderboardVolume}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {topCustomers.map((c) => (
+                <tr key={c.name}>
+                  <td className={`${ui.td} font-medium`}>{c.name}</td>
+                  <td className={`${ui.td} font-mono`}>{c.volume.toFixed(1)} m³</td>
+                </tr>
+              ))}
+              {topCustomers.length === 0 && (
+                <tr><td className={ui.td} colSpan={2}><span className="text-ink-muted">—</span></td></tr>
               )}
             </tbody>
           </table>
