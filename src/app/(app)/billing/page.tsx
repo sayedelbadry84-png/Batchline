@@ -65,11 +65,13 @@ export default async function BillingPage({
     mixGrade: string;
     siteLocation: string | null;
     volumeM3: number;
+    loadedAt: Date | null;
   };
   type ProjectGroup = {
     projectId: string;
     projectName: string;
     customerName: string;
+    customerCode: string | null;
     count: number;
     volumeM3: number;
     missingMixCodes: Set<string>;
@@ -83,6 +85,7 @@ export default async function BillingPage({
       projectId: project.id,
       projectName: project.name,
       customerName: project.customer.legalName,
+      customerCode: project.customer.code,
       count: 0,
       volumeM3: 0,
       missingMixCodes: new Set<string>(),
@@ -102,6 +105,7 @@ export default async function BillingPage({
       mixGrade: trip.batchTicket.mix.grade,
       siteLocation: reservation.siteLocation,
       volumeM3: deliveredM3,
+      loadedAt: trip.batchTicket.batchCompletedAt,
     });
     byProject.set(project.id, group);
   }
@@ -134,6 +138,7 @@ export default async function BillingPage({
               <th className={ui.th}>{m.col.reservation}</th>
               <th className={ui.th}>{m.col.mix}</th>
               <th className={ui.th}>{m.col.pourLocation}</th>
+              <th className={ui.th}>{m.col.loadTime}</th>
               <th className={ui.th}>{m.col.deliveries}</th>
               <th className={ui.th}>{m.col.volume}</th>
               <th className={ui.th}></th>
@@ -144,7 +149,11 @@ export default async function BillingPage({
               <Fragment key={g.projectId}>
                 <tr className="bg-surface-alt">
                   <td className={`${ui.td} font-medium`}>{g.projectName}</td>
-                  <td className={ui.td}>{g.customerName}</td>
+                  <td className={ui.td}>
+                    {g.customerName}
+                    {g.customerCode ? ` (${g.customerCode})` : ""}
+                  </td>
+                  <td className={ui.td}></td>
                   <td className={ui.td}></td>
                   <td className={ui.td}></td>
                   <td className={ui.td}></td>
@@ -175,6 +184,7 @@ export default async function BillingPage({
                       <div className="text-xs text-ink-muted">{t.mixGrade}</div>
                     </td>
                     <td className={`${ui.td} text-xs`}>{t.siteLocation ?? "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{t.loadedAt ? new Date(t.loadedAt).toLocaleString() : "—"}</td>
                     <td className={ui.td}></td>
                     <td className={`${ui.td} font-mono tabular`}>{t.volumeM3} m³</td>
                     <td className={ui.td}></td>
@@ -184,7 +194,7 @@ export default async function BillingPage({
             ))}
             {projectGroups.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={9}>
+                <td className={ui.td} colSpan={10}>
                   <span className="text-ink-muted">{m.empty}</span>
                 </td>
               </tr>

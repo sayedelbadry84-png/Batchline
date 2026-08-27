@@ -353,7 +353,10 @@ export default async function ProductionPage({
                     <td className={ui.td}></td>
                     <td className={`${ui.td} font-medium`}>
                       {reservation.project.name}
-                      <div className="text-xs font-normal text-ink-muted">{reservation.project.customer.legalName}</div>
+                      <div className="text-xs font-normal text-ink-muted">
+                        {reservation.project.customer.legalName}
+                        {reservation.project.customer.code ? ` (${reservation.project.customer.code})` : ""}
+                      </div>
                       <Link href={`/reservations?edit=${reservation.id}`} className="text-xs font-medium text-accent-strong hover:underline">
                         {dict.field.edit}
                       </Link>
@@ -374,7 +377,12 @@ export default async function ProductionPage({
                   </tr>
                   {tickets.map((t) => (
                     <tr key={t.id}>
-                      <td className={`${ui.td} font-mono text-xs tabular`}>{t.releasedAt ? (isRange ? fmtDateTime(t.releasedAt) : fmtTime(t.releasedAt)) : "—"}</td>
+                      <td className={`${ui.td} font-mono text-xs tabular`}>
+                        {t.releasedAt ? (isRange ? fmtDateTime(t.releasedAt) : fmtTime(t.releasedAt)) : "—"}
+                        {t.batchCompletedAt && (
+                          <div className="font-normal text-ink-muted">{m.loadTimeShort(isRange ? fmtDateTime(t.batchCompletedAt) : fmtTime(t.batchCompletedAt))}</div>
+                        )}
+                      </td>
                       <td className={`${ui.td} text-xs`}>{t.plant.name}</td>
                       <td className={ui.td}>
                         <span className="text-ink-faint">↳</span>{" "}

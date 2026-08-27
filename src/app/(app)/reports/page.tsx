@@ -592,10 +592,12 @@ export default async function ReportsPage({
             message={`${m.tabs.production} ${rangeFrom} → ${rangeTo}\n${m.production.totalVolume(production.totalVolumeM3.toFixed(1))}\n${m.production.ticketCount(production.ticketCount)} (${m.production.completedCount(production.completedCount)})`}
             csvFilename={`production-${rangeFrom}-${rangeTo}.csv`}
             csv={rowsToCsv(
-              ["Ticket", "Project", "Reservation", "Mix", "Grade", "Pour location", "Volume m3", "Status", "Released"],
+              ["Ticket", "Project", "Customer", "Customer code", "Reservation", "Mix", "Grade", "Pour location", "Volume m3", "Status", "Released", "Load time"],
               production.rows.map((t) => [
                 t.ticketNumber,
                 t.reservation.project.name,
+                t.reservation.project.customer.legalName,
+                t.reservation.project.customer.code ?? "",
                 t.reservation.reservationNumber,
                 t.mix.code,
                 t.mix.grade,
@@ -603,6 +605,7 @@ export default async function ReportsPage({
                 t.volumeM3,
                 t.status,
                 new Date(t.releasedAt).toISOString(),
+                t.batchCompletedAt ? new Date(t.batchCompletedAt).toISOString() : "",
               ]),
             )}
           />
@@ -628,13 +631,20 @@ export default async function ReportsPage({
                   <th className={ui.th}>{m.production.col.volume}</th>
                   <th className={ui.th}>{m.production.col.status}</th>
                   <th className={ui.th}>{m.production.col.released}</th>
+                  <th className={ui.th}>{m.production.col.loadTime}</th>
                 </tr>
               </thead>
               <tbody>
                 {production.rows.map((t) => (
                   <tr key={t.id}>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.ticketNumber}</td>
-                    <td className={ui.td}>{t.reservation.project.name}</td>
+                    <td className={ui.td}>
+                      {t.reservation.project.name}
+                      <div className="text-xs text-ink-muted">
+                        {t.reservation.project.customer.legalName}
+                        {t.reservation.project.customer.code ? ` (${t.reservation.project.customer.code})` : ""}
+                      </div>
+                    </td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.reservation.reservationNumber}</td>
                     <td className={ui.td}>
                       <span className="font-mono text-xs" dir="ltr">{t.mix.code}</span>
@@ -644,10 +654,13 @@ export default async function ReportsPage({
                     <td className={`${ui.td} font-mono tabular`}>{t.volumeM3} m³</td>
                     <td className={ui.td}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</td>
                     <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(t.releasedAt).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>
+                      {t.batchCompletedAt ? new Date(t.batchCompletedAt).toLocaleString() : "—"}
+                    </td>
                   </tr>
                 ))}
                 {production.rows.length === 0 && (
-                  <tr><td className={ui.td} colSpan={8}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                  <tr><td className={ui.td} colSpan={9}><span className="text-ink-muted">{m.noRows}</span></td></tr>
                 )}
               </tbody>
             </table>
@@ -779,12 +792,14 @@ export default async function ReportsPage({
             message={`${m.tabs.returns} ${rangeFrom} → ${rangeTo}\n${m.returnsReport.totalReturned(returnsData.totalReturnedM3.toFixed(1))}\n${m.returnsReport.wasted(returnsData.wastedM3.toFixed(1))}`}
             csvFilename={`returns-${rangeFrom}-${rangeTo}.csv`}
             csv={rowsToCsv(
-              ["Discharged", "Truck", "Driver", "Project", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Returned m3", "Disposition", "Reason", "Quality approval", "Quality finding"],
+              ["Discharged", "Truck", "Driver", "Project", "Customer", "Customer code", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Returned m3", "Disposition", "Reason", "Quality approval", "Quality finding"],
               returnsData.rows.map((r) => [
                 r.trip.dischargeEnd ? new Date(r.trip.dischargeEnd).toISOString() : "",
                 r.trip.truck.code,
                 r.trip.driver.name,
                 r.trip.batchTicket.reservation.project.name,
+                r.trip.batchTicket.reservation.project.customer.legalName,
+                r.trip.batchTicket.reservation.project.customer.code ?? "",
                 r.trip.batchTicket.ticketNumber,
                 r.trip.batchTicket.reservation.reservationNumber,
                 r.trip.batchTicket.mix.code,
@@ -840,7 +855,13 @@ export default async function ReportsPage({
                     <td className={`${ui.td} font-mono text-xs tabular`}>{r.trip.dischargeEnd ? new Date(r.trip.dischargeEnd).toLocaleDateString() : "—"}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.trip.truck.code}</td>
                     <td className={ui.td}>{r.trip.driver.name}</td>
-                    <td className={ui.td}>{r.trip.batchTicket.reservation.project.name}</td>
+                    <td className={ui.td}>
+                      {r.trip.batchTicket.reservation.project.name}
+                      <div className="text-xs text-ink-muted">
+                        {r.trip.batchTicket.reservation.project.customer.legalName}
+                        {r.trip.batchTicket.reservation.project.customer.code ? ` (${r.trip.batchTicket.reservation.project.customer.code})` : ""}
+                      </div>
+                    </td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.trip.batchTicket.ticketNumber}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.trip.batchTicket.reservation.reservationNumber}</td>
                     <td className={ui.td}>
@@ -870,7 +891,7 @@ export default async function ReportsPage({
                   </tr>
                 ))}
                 {returnsData.rows.length === 0 && (
-                  <tr><td className={ui.td} colSpan={12}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                  <tr><td className={ui.td} colSpan={13}><span className="text-ink-muted">{m.noRows}</span></td></tr>
                 )}
               </tbody>
             </table>
@@ -888,17 +909,20 @@ export default async function ReportsPage({
             message={`${m.tabs.trips} ${rangeFrom} → ${rangeTo}\n${m.tripsReport.totalDelivered(tripsData.totalDeliveredM3.toFixed(1))}\n${m.tripsReport.tripCount(tripsData.tripCount)}`}
             csvFilename={`trips-${rangeFrom}-${rangeTo}.csv`}
             csv={rowsToCsv(
-              ["Discharged", "Truck", "Driver", "Project", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Delivered m3"],
+              ["Discharged", "Truck", "Driver", "Project", "Customer", "Customer code", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Load time", "Delivered m3"],
               tripsData.rows.map((t) => [
                 t.dischargeEnd ? new Date(t.dischargeEnd).toISOString() : "",
                 t.truck.code,
                 t.driver.name,
                 t.batchTicket.reservation.project.name,
+                t.batchTicket.reservation.project.customer.legalName,
+                t.batchTicket.reservation.project.customer.code ?? "",
                 t.batchTicket.ticketNumber,
                 t.batchTicket.reservation.reservationNumber,
                 t.batchTicket.mix.code,
                 t.batchTicket.mix.grade,
                 t.batchTicket.reservation.siteLocation ?? "",
+                t.batchTicket.batchCompletedAt ? new Date(t.batchTicket.batchCompletedAt).toISOString() : "",
                 t.volumeDeliveredM3 ?? 0,
               ]),
             )}
@@ -925,6 +949,7 @@ export default async function ReportsPage({
                   <th className={ui.th}>{m.tripsReport.col.reservation}</th>
                   <th className={ui.th}>{m.tripsReport.col.mix}</th>
                   <th className={ui.th}>{m.tripsReport.col.pourLocation}</th>
+                  <th className={ui.th}>{m.tripsReport.col.loadTime}</th>
                   <th className={ui.th}>{m.tripsReport.col.delivered}</th>
                 </tr>
               </thead>
@@ -934,7 +959,13 @@ export default async function ReportsPage({
                     <td className={`${ui.td} font-mono text-xs tabular`}>{t.dischargeEnd ? new Date(t.dischargeEnd).toLocaleString() : "—"}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.truck.code}</td>
                     <td className={ui.td}>{t.driver.name}</td>
-                    <td className={ui.td}>{t.batchTicket.reservation.project.name}</td>
+                    <td className={ui.td}>
+                      {t.batchTicket.reservation.project.name}
+                      <div className="text-xs text-ink-muted">
+                        {t.batchTicket.reservation.project.customer.legalName}
+                        {t.batchTicket.reservation.project.customer.code ? ` (${t.batchTicket.reservation.project.customer.code})` : ""}
+                      </div>
+                    </td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.batchTicket.ticketNumber}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.batchTicket.reservation.reservationNumber}</td>
                     <td className={ui.td}>
@@ -942,11 +973,14 @@ export default async function ReportsPage({
                       <div className="text-xs text-ink-muted">{t.batchTicket.mix.grade}</div>
                     </td>
                     <td className={`${ui.td} text-xs`}>{t.batchTicket.reservation.siteLocation ?? "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>
+                      {t.batchTicket.batchCompletedAt ? new Date(t.batchTicket.batchCompletedAt).toLocaleString() : "—"}
+                    </td>
                     <td className={`${ui.td} font-mono tabular`}>{fmt(t.volumeDeliveredM3, 1, " m³")}</td>
                   </tr>
                 ))}
                 {tripsData.rows.length === 0 && (
-                  <tr><td className={ui.td} colSpan={9}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                  <tr><td className={ui.td} colSpan={10}><span className="text-ink-muted">{m.noRows}</span></td></tr>
                 )}
               </tbody>
             </table>

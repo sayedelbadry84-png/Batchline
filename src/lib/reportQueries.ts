@@ -75,7 +75,7 @@ export async function getReturnsReport({ from, to, siteId, plantId }: ReportFilt
   const returns = await prisma.drumReturn.findMany({
     where: { trip: { dischargeEnd: { gte: from, lte: to }, ...scope } },
     include: {
-      trip: { include: { truck: true, driver: true, batchTicket: { include: { mix: true, reservation: { include: { project: true } } } } } },
+      trip: { include: { truck: true, driver: true, batchTicket: { include: { mix: true, reservation: { include: { project: { include: { customer: true } } } } } } } },
       wasteMemo: { include: { approvedBy: true } },
     },
     orderBy: { trip: { dischargeEnd: "asc" } },
@@ -116,7 +116,7 @@ export async function getReturnsReport({ from, to, siteId, plantId }: ReportFilt
 export async function getTripsReport({ from, to, siteId, plantId }: ReportFilter) {
   const trips = await prisma.trip.findMany({
     where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripPlantScopeWhere(siteId, plantId) },
-    include: { truck: true, driver: true, pump: true, batchTicket: { include: { mix: true, reservation: { include: { project: true } } } } },
+    include: { truck: true, driver: true, pump: true, batchTicket: { include: { mix: true, reservation: { include: { project: { include: { customer: true } } } } } } },
     orderBy: { dischargeEnd: "asc" },
   });
   const totalDeliveredM3 = trips.reduce((sum, t) => sum + (t.volumeDeliveredM3 ?? 0), 0);

@@ -33,7 +33,7 @@ export default async function TripsPage() {
       include: {
         truck: true,
         driver: true,
-        batchTicket: { include: { plant: true, mix: true, reservation: { include: { project: true } } } },
+        batchTicket: { include: { plant: true, mix: true, reservation: { include: { project: { include: { customer: true } } } } } },
       },
       orderBy: { batchTime: "asc" },
     }),
@@ -43,7 +43,7 @@ export default async function TripsPage() {
         truck: true,
         driver: true,
         drumReturn: true,
-        batchTicket: { include: { mix: true, reservation: { include: { project: true } } } },
+        batchTicket: { include: { mix: true, reservation: { include: { project: { include: { customer: true } } } } } },
       },
       orderBy: { updatedAt: "desc" },
       take: 8,
@@ -67,6 +67,7 @@ export default async function TripsPage() {
               <th className={ui.th}>{m.col.reservation}</th>
               <th className={ui.th}>{m.col.mix}</th>
               <th className={ui.th}>{m.col.pourLocation}</th>
+              <th className={ui.th}>{m.col.loadTime}</th>
               <th className={ui.th}>{m.col.status}</th>
               <th className={ui.th}>{m.col.drumTimer}</th>
               <th className={ui.th}></th>
@@ -81,6 +82,10 @@ export default async function TripsPage() {
                 </td>
                 <td className={ui.td}>
                   {t.batchTicket.reservation.project.name}
+                  <div className="text-xs text-ink-muted">
+                    {t.batchTicket.reservation.project.customer.legalName}
+                    {t.batchTicket.reservation.project.customer.code ? ` (${t.batchTicket.reservation.project.customer.code})` : ""}
+                  </div>
                   <div className="font-mono text-xs text-ink-muted" dir="ltr">{t.batchTicket.ticketNumber}</div>
                 </td>
                 <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.batchTicket.reservation.reservationNumber}</td>
@@ -89,6 +94,9 @@ export default async function TripsPage() {
                   <div className="text-xs text-ink-muted">{t.batchTicket.mix.grade}</div>
                 </td>
                 <td className={`${ui.td} text-xs`}>{t.batchTicket.reservation.siteLocation ?? "—"}</td>
+                <td className={`${ui.td} font-mono text-xs tabular`}>
+                  {t.batchTicket.batchCompletedAt ? new Date(t.batchTicket.batchCompletedAt).toLocaleString() : "—"}
+                </td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${statusChip[t.status] ?? ""}`}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</span>
                 </td>
@@ -144,7 +152,7 @@ export default async function TripsPage() {
             ))}
             {openTrips.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={8}>
+                <td className={ui.td} colSpan={9}>
                   <span className="text-ink-muted">{m.empty}</span>
                 </td>
               </tr>
@@ -164,6 +172,7 @@ export default async function TripsPage() {
               <th className={ui.th}>{m.colClosed.reservation}</th>
               <th className={ui.th}>{m.colClosed.mix}</th>
               <th className={ui.th}>{m.colClosed.pourLocation}</th>
+              <th className={ui.th}>{m.colClosed.loadTime}</th>
               <th className={ui.th}>{m.colClosed.delivered}</th>
               <th className={ui.th}>{m.colClosed.returnCol}</th>
             </tr>
@@ -172,7 +181,13 @@ export default async function TripsPage() {
             {closedTrips.map((t) => (
               <tr key={t.id}>
                 <td className={`${ui.td} font-medium`} dir="ltr">{t.truck.code}</td>
-                <td className={ui.td}>{t.batchTicket.reservation.project.name}</td>
+                <td className={ui.td}>
+                  {t.batchTicket.reservation.project.name}
+                  <div className="text-xs text-ink-muted">
+                    {t.batchTicket.reservation.project.customer.legalName}
+                    {t.batchTicket.reservation.project.customer.code ? ` (${t.batchTicket.reservation.project.customer.code})` : ""}
+                  </div>
+                </td>
                 <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.batchTicket.ticketNumber}</td>
                 <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.batchTicket.reservation.reservationNumber}</td>
                 <td className={ui.td}>
@@ -180,6 +195,9 @@ export default async function TripsPage() {
                   <div className="text-xs text-ink-muted">{t.batchTicket.mix.grade}</div>
                 </td>
                 <td className={`${ui.td} text-xs`}>{t.batchTicket.reservation.siteLocation ?? "—"}</td>
+                <td className={`${ui.td} font-mono text-xs tabular`}>
+                  {t.batchTicket.batchCompletedAt ? new Date(t.batchTicket.batchCompletedAt).toLocaleString() : "—"}
+                </td>
                 <td className={`${ui.td} font-mono tabular`}>{t.volumeDeliveredM3?.toFixed(1) ?? "—"} m³</td>
                 <td className={ui.td}>
                   {t.drumReturn ? (
@@ -208,7 +226,7 @@ export default async function TripsPage() {
             ))}
             {closedTrips.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={8}>
+                <td className={ui.td} colSpan={9}>
                   <span className="text-ink-muted">{m.emptyClosed}</span>
                 </td>
               </tr>
