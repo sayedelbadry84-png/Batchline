@@ -17,7 +17,7 @@ import {
   generateTicketFromPlan,
 } from "./actions";
 
-const MAINTENANCE_TABS = ["tickets", "plans"] as const;
+const MAINTENANCE_TABS = ["tickets", "plans", "reports"] as const;
 type MaintenanceTab = (typeof MAINTENANCE_TABS)[number];
 const TICKET_TYPES = ["PREVENTIVE", "CORRECTIVE", "INSPECTION"] as const;
 const PRIORITIES = ["LOW", "NORMAL", "HIGH", "CRITICAL"] as const;
@@ -98,6 +98,8 @@ export default async function MaintenancePage({
       {tab === "plans" && (
         <PlansTab m={m} dict={dict} siteScope={siteScope} sites={sites} equipmentOptions={equipmentOptions} newPlanFlag={newPlanFlag} baseUrl={baseUrl} />
       )}
+
+      {tab === "reports" && <ReportsTab m={m} siteScope={siteScope} />}
     </div>
   );
 }
@@ -412,6 +414,88 @@ async function PlansTab({
           </form>
         </Modal>
       )}
+    </div>
+  );
+}
+
+async function ReportsTab({
+  m,
+  siteScope,
+}: {
+  m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["maintenance"];
+  siteScope: Record<string, unknown>;
+}) {
+  const completed = await prisma.maintenanceTicket.findMany({
+    where: { status: "COMPLETED", ...siteScope },
+    select: { equipmentLabel: true, type: true, laborCost: true, partsCost: true, downtimeHours: true, completedAt: true },
+  });
+
+  const totalLabor = completed.reduce((s, t) => s + (t.laborCost ?? 0), 0);
+  const totalParts = completed.reduce((s, t) => s + (t.partsCost ?? 0), 0);
+  const totalDowntime = completed.reduce((s, t) => s + (t.downtimeHours ?? 0), 0);
+  const preventiveCount = completed.filter((t) => t.type === "PREVENTIVE").length;
+  const correctiveCount = completed.filter((t) => t.type === "CORRECTIVE").length;
+  const preventiveShare = preventiveCount + correctiveCount > 0 ? (preventiveCount / (preventiveCount + correctiveCount)) * 100 : null;
+
+  // Cost + downtime rolled up per equipment — where the money and the
+  // lost production time actually went, not just the company-wide total.
+  const byEquipmentMap = new Map<string, { label: string; cost: number; downtime: number; count: number }>();
+  for (const t of completed) {
+    const entry = byEquipmentMap.get(t.equipmentLabel) ?? { label: t.equipmentLabel, cost: 0, downtime: 0, count: 0 };
+    entry.cost += (t.laborCost ?? 0) + (t.partsCost ?? 0);
+    entry.downtime += t.downtimeHours ?? 0;
+    entry.count += 1;
+    byEquipmentMap.set(t.equipmentLabel, entry);
+  }
+  const byEquipment = [...byEquipmentMap.values()].sort((a, b) => b.cost - a.cost);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <div className={ui.card}>
+          <div className="text-xs text-ink-muted">{m.reports.totalLabor}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold">{totalLabor.toFixed(0)}</div>
+        </div>
+        <div className={ui.card}>
+          <div className="text-xs text-ink-muted">{m.reports.totalParts}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold">{totalParts.toFixed(0)}</div>
+        </div>
+        <div className={ui.card}>
+          <div className="text-xs text-ink-muted">{m.reports.totalDowntime}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold">{totalDowntime.toFixed(1)}h</div>
+        </div>
+        <div className={ui.card}>
+          <div className="text-xs text-ink-muted">{m.reports.preventiveShare}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold">{preventiveShare === null ? "—" : `${preventiveShare.toFixed(0)}%`}</div>
+        </div>
+      </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.reports.byEquipmentTitle}</h2>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              <th className={ui.th}></th>
+              <th className={ui.th}>{m.reports.col.tickets}</th>
+              <th className={ui.th}>{m.reports.col.cost}</th>
+              <th className={ui.th}>{m.reports.col.downtime}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {byEquipment.map((e) => (
+              <tr key={e.label}>
+                <td className={`${ui.td} font-medium`}>{e.label}</td>
+                <td className={ui.td}>{e.count}</td>
+                <td className={`${ui.td} font-mono`}>{e.cost.toFixed(0)}</td>
+                <td className={`${ui.td} font-mono`}>{e.downtime.toFixed(1)}h</td>
+              </tr>
+            ))}
+            {byEquipment.length === 0 && (
+              <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.reports.empty}</span></td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

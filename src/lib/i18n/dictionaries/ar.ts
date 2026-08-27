@@ -1235,7 +1235,7 @@ const ar = {
       eyebrow: "الوحدة 17 — الصيانة",
       title: "الصيانة",
       intro: "جدولة صيانة وقائية وتذاكر أعطال/إصلاح لكل معدات الأسطول — الشاحنات، المضخات، الصوامع، الحاويات، البلكرات، وايتات المياه، والشيولات — مع تنبيهات فورية للحالات الحرجة.",
-      tabs: { tickets: "تذاكر الصيانة", plans: "خطط الصيانة الوقائية" },
+      tabs: { tickets: "تذاكر الصيانة", plans: "خطط الصيانة الوقائية", reports: "تقارير الصيانة" },
       stats: { open: "تذاكر مفتوحة", inProgress: "قيد التنفيذ", criticalOpen: "حرجة ومفتوحة" },
       typeLabel: { PREVENTIVE: "وقائية", CORRECTIVE: "إصلاح عطل", INSPECTION: "فحص" },
       priorityLabel: { LOW: "منخفضة", NORMAL: "عادية", HIGH: "عالية", CRITICAL: "حرجة" },
@@ -1270,6 +1270,13 @@ const ar = {
         empty: "لا توجد خطط صيانة وقائية نشطة.",
         everyDays: (n: number) => `كل ${n} يوم`,
         everyTrips: (n: number) => `كل ${n} رحلة`,
+      },
+      reports: {
+        totalLabor: "إجمالي تكلفة العمالة", totalParts: "إجمالي تكلفة القطع", totalDowntime: "إجمالي ساعات التوقف",
+        preventiveShare: "نسبة الصيانة الوقائية من الإجمالي",
+        byEquipmentTitle: "التكلفة والتوقف حسب المعدة",
+        col: { tickets: "عدد التذاكر", cost: "التكلفة", downtime: "ساعات التوقف" },
+        empty: "لا توجد تذاكر صيانة مكتملة بعد.",
       },
     },
     finance: {

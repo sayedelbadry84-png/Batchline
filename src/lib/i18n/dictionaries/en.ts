@@ -1242,7 +1242,7 @@ const en: typeof ar = {
       eyebrow: "Module 17 — Maintenance",
       title: "Maintenance",
       intro: "Preventive scheduling plus fault/repair tickets for the whole fleet — trucks, pumps, silos, hoppers, cement bulkers, water tankers, and loaders — with instant visibility into anything critical and open.",
-      tabs: { tickets: "Maintenance Tickets", plans: "Preventive Plans" },
+      tabs: { tickets: "Maintenance Tickets", plans: "Preventive Plans", reports: "Maintenance Reports" },
       stats: { open: "Open Tickets", inProgress: "In Progress", criticalOpen: "Critical & Open" },
       typeLabel: { PREVENTIVE: "Preventive", CORRECTIVE: "Fault Repair", INSPECTION: "Inspection" },
       priorityLabel: { LOW: "Low", NORMAL: "Normal", HIGH: "High", CRITICAL: "Critical" },
@@ -1277,6 +1277,13 @@ const en: typeof ar = {
         empty: "No active preventive plans.",
         everyDays: (n: number) => `Every ${n} day${n === 1 ? "" : "s"}`,
         everyTrips: (n: number) => `Every ${n} trip${n === 1 ? "" : "s"}`,
+      },
+      reports: {
+        totalLabor: "Total Labor Cost", totalParts: "Total Parts Cost", totalDowntime: "Total Downtime",
+        preventiveShare: "Preventive Share of All Work",
+        byEquipmentTitle: "Cost & Downtime by Equipment",
+        col: { tickets: "Tickets", cost: "Cost", downtime: "Downtime" },
+        empty: "No completed maintenance tickets yet.",
       },
     },
     finance: {
