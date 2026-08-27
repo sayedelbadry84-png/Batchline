@@ -32,7 +32,10 @@ export const MODULE_ROLES = {
   // sales/actions.ts. RESERVATIONS_OFFICER gets access too: converting an
   // accepted quote line into a real Reservation (convertQuoteLineToReservation)
   // is squarely their job, even though running the pipeline itself is not.
-  sales: ["SALES_REP", "SALES_MANAGER", "RESERVATIONS_OFFICER", "ADMIN"],
+  // PLANTS_MANAGER is here specifically for the second approval stage
+  // (see approvePlantsManagerStage) — they don't create sales records,
+  // only sign off on them.
+  sales: ["SALES_REP", "SALES_SUPERVISOR", "SALES_MANAGER", "RESERVATIONS_OFFICER", "PLANTS_MANAGER", "ADMIN"],
   // Purchase orders/contracts against Suppliers — same role set as the
   // existing "suppliers" module, broadened with the plant-management
   // roster (a plant/operations manager can requisition materials, not

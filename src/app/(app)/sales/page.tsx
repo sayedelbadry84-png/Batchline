@@ -15,6 +15,8 @@ import {
   createQuote,
   markQuoteSent,
   recordQuoteResponse,
+  approveSalesManagerStage,
+  approvePlantsManagerStage,
 } from "./actions";
 
 const SALES_TABS = ["dashboard", "opportunities", "visits", "quotes"] as const;
@@ -47,6 +49,54 @@ function fmtDate(d: Date | null): string {
   return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
+// Shared two-stage approval cell — Sales Manager, then Plants Manager —
+// used identically across Opportunities, Visits, and Quotes (see the
+// approveSalesManagerStage/approvePlantsManagerStage actions, which are
+// generic across all three record types for the same reason). Only the
+// role that can act on the CURRENT stage ever sees a button; everyone
+// else just sees the status.
+function ApprovalStatus({
+  recordType,
+  record,
+  userRole,
+  m,
+}: {
+  recordType: "opportunity" | "visit" | "quote";
+  record: { id: string; salesManagerApprovedAt: Date | null; plantsManagerApprovedAt: Date | null };
+  userRole: string;
+  m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["sales"];
+}) {
+  if (record.plantsManagerApprovedAt) {
+    return <span className={`${ui.chip} bg-good-soft text-good`}>{m.approval.fullyApproved}</span>;
+  }
+  if (record.salesManagerApprovedAt) {
+    return (
+      <div className="flex flex-col gap-1">
+        <span className={`${ui.chip} bg-accent-soft text-accent-strong`}>{m.approval.salesManagerApproved}</span>
+        {["PLANTS_MANAGER", "ADMIN"].includes(userRole) && (
+          <form action={approvePlantsManagerStage}>
+            <input type="hidden" name="recordType" value={recordType} />
+            <input type="hidden" name="id" value={record.id} />
+            <button className="text-xs font-medium text-accent-strong hover:underline">{m.approval.approvePlantsManager}</button>
+          </form>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <span className={`${ui.chip} bg-warn-soft text-warn`}>{m.approval.pending}</span>
+      {["SALES_MANAGER", "ADMIN"].includes(userRole) && (
+        <form action={approveSalesManagerStage}>
+          <input type="hidden" name="recordType" value={recordType} />
+          <input type="hidden" name="id" value={record.id} />
+          <button className="text-xs font-medium text-accent-strong hover:underline">{m.approval.approveSalesManager}</button>
+        </form>
+      )}
+    </div>
+  );
+}
+
 export default async function SalesPage({
   searchParams,
 }: {
@@ -65,7 +115,7 @@ export default async function SalesPage({
     prisma.project.findMany({ orderBy: { name: "asc" }, include: { customer: true } }),
     prisma.mixDesign.findMany({ where: { status: "APPROVED" }, orderBy: { code: "asc" } }),
     prisma.customer.findMany({ orderBy: { legalName: "asc" } }),
-    prisma.user.findMany({ where: { role: { in: ["SALES_REP", "SALES_MANAGER", "ADMIN"] } }, orderBy: { name: "asc" } }),
+    prisma.user.findMany({ where: { role: { in: ["SALES_REP", "SALES_SUPERVISOR", "SALES_MANAGER", "ADMIN"] } }, orderBy: { name: "asc" } }),
   ]);
   const priceEntries = await prisma.priceListEntry.findMany({ select: { customerId: true, mixId: true, pricePerM3: true } });
 
@@ -105,6 +155,7 @@ export default async function SalesPage({
           mixes={mixes}
           customers={customers}
           salesUsers={salesUsers}
+          userRole={user.role}
           editId={editId}
           newFlag={newFlag}
           baseUrl={baseUrl}
@@ -112,7 +163,7 @@ export default async function SalesPage({
       )}
 
       {tab === "visits" && (
-        <VisitsTab m={m} newVisitFlag={newVisitFlag} baseUrl={baseUrl} />
+        <VisitsTab m={m} userRole={user.role} newVisitFlag={newVisitFlag} baseUrl={baseUrl} />
       )}
 
       {tab === "quotes" && (
@@ -125,6 +176,7 @@ export default async function SalesPage({
           mixes={mixes}
           customers={customers}
           priceEntries={priceEntries}
+          userRole={user.role}
           newQuoteFlag={newQuoteFlag}
           baseUrl={baseUrl}
         />
@@ -356,6 +408,7 @@ async function OpportunitiesTab({
   mixes,
   customers,
   salesUsers,
+  userRole,
   editId,
   newFlag,
   baseUrl,
@@ -368,6 +421,7 @@ async function OpportunitiesTab({
   mixes: { id: string; code: string; grade: string }[];
   customers: { id: string; code: string | null; legalName: string }[];
   salesUsers: { id: string; name: string }[];
+  userRole: string;
   editId?: string;
   newFlag?: string;
   baseUrl: string;
@@ -396,6 +450,7 @@ async function OpportunitiesTab({
               <th className={ui.th}>{m.opportunities.col.status}</th>
               <th className={ui.th}>{m.opportunities.col.owner}</th>
               <th className={ui.th}>{m.opportunities.col.expectedClose}</th>
+              <th className={ui.th}>{m.approval.col}</th>
               <th className={ui.th}>{dict.field.actions}</th>
             </tr>
           </thead>
@@ -404,7 +459,7 @@ async function OpportunitiesTab({
               if (editId === o.id) {
                 return (
                   <tr key={o.id}>
-                    <td className={ui.td} colSpan={9}>
+                    <td className={ui.td} colSpan={10}>
                       <form action={updateOpportunity} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={o.id} />
                         {!o.customerId && (
@@ -494,6 +549,9 @@ async function OpportunitiesTab({
                   <td className={ui.td}>{o.owner?.name ?? "—"}</td>
                   <td className={ui.td}>{fmtDate(o.expectedCloseDate)}</td>
                   <td className={ui.td}>
+                    <ApprovalStatus recordType="opportunity" record={o} userRole={userRole} m={m} />
+                  </td>
+                  <td className={ui.td}>
                     <div className="flex flex-col gap-1">
                       <Link href={`${baseUrl}&edit=${o.id}`} className="text-xs font-medium text-accent-strong hover:underline">{dict.field.edit}</Link>
                       {!["WON", "LOST"].includes(o.status) && (
@@ -501,7 +559,11 @@ async function OpportunitiesTab({
                           <input type="hidden" name="id" value={o.id} />
                           <select name="status" defaultValue={o.status} className="rounded-md border border-border bg-surface px-1.5 py-1 text-xs">
                             {OPP_STATUSES.map((s) => (
-                              <option key={s} value={s}>{m.statusLabel[s]}</option>
+                              <option key={s} value={s} disabled={s === "WON" && !o.plantsManagerApprovedAt}>
+                                {s === "WON" && !o.plantsManagerApprovedAt
+                                  ? `${m.statusLabel[s]} (${o.salesManagerApprovedAt ? m.approval.awaitingPlantsManager : m.approval.pending})`
+                                  : m.statusLabel[s]}
+                              </option>
                             ))}
                           </select>
                           {/* Only consulted server-side when status=LOST is submitted (advanceOpportunityStage
@@ -528,7 +590,7 @@ async function OpportunitiesTab({
               );
             })}
             {opportunities.length === 0 && (
-              <tr><td className={ui.td} colSpan={9}><span className="text-ink-muted">{m.opportunities.empty}</span></td></tr>
+              <tr><td className={ui.td} colSpan={10}><span className="text-ink-muted">{m.opportunities.empty}</span></td></tr>
             )}
           </tbody>
         </table>
@@ -612,10 +674,12 @@ async function OpportunitiesTab({
 
 async function VisitsTab({
   m,
+  userRole,
   newVisitFlag,
   baseUrl,
 }: {
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["sales"];
+  userRole: string;
   newVisitFlag?: string;
   baseUrl: string;
 }) {
@@ -646,6 +710,7 @@ async function VisitsTab({
               <th className={ui.th}>{m.visits.col.purpose}</th>
               <th className={ui.th}>{m.visits.col.location}</th>
               <th className={ui.th}>{m.visits.col.followUp}</th>
+              <th className={ui.th}>{m.approval.col}</th>
             </tr>
           </thead>
           <tbody>
@@ -668,11 +733,14 @@ async function VisitsTab({
                       </span>
                     ) : "—"}
                   </td>
+                  <td className={ui.td}>
+                    <ApprovalStatus recordType="visit" record={v} userRole={userRole} m={m} />
+                  </td>
                 </tr>
               );
             })}
             {visits.length === 0 && (
-              <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.visits.empty}</span></td></tr>
+              <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.visits.empty}</span></td></tr>
             )}
           </tbody>
         </table>
@@ -751,6 +819,7 @@ async function QuotesTab({
   mixes,
   customers,
   priceEntries,
+  userRole,
   newQuoteFlag,
   baseUrl,
 }: {
@@ -762,13 +831,14 @@ async function QuotesTab({
   mixes: { id: string; code: string; grade: string }[];
   customers: { id: string; code: string | null; legalName: string }[];
   priceEntries: { customerId: string; mixId: string; pricePerM3: number }[];
+  userRole: string;
   newQuoteFlag?: string;
   baseUrl: string;
 }) {
   const quotes = await prisma.quote.findMany({
     where: siteScope,
     orderBy: { createdAt: "desc" },
-    include: { customer: true, project: true },
+    include: { customer: true, project: true, preparedBy: true },
   });
 
   return (
@@ -784,9 +854,11 @@ async function QuotesTab({
               <th className={ui.th}>{m.quotes.col.number}</th>
               <th className={ui.th}>{m.quotes.col.customer}</th>
               <th className={ui.th}>{m.quotes.col.project}</th>
+              <th className={ui.th}>{m.quotes.col.preparedBy}</th>
               <th className={ui.th}>{m.quotes.col.status}</th>
               <th className={ui.th}>{m.quotes.col.total}</th>
               <th className={ui.th}>{m.quotes.col.validUntil}</th>
+              <th className={ui.th}>{m.approval.col}</th>
               <th className={ui.th}>{dict.field.actions}</th>
             </tr>
           </thead>
@@ -796,19 +868,26 @@ async function QuotesTab({
                 <td className={`${ui.td} font-mono text-xs`}>{q.quoteNumber}</td>
                 <td className={ui.td}>{q.customer.legalName}</td>
                 <td className={ui.td}>{q.project?.name ?? "—"}</td>
+                <td className={ui.td}>{q.preparedBy.name}</td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${quoteStatusChip[q.status] ?? ""}`}>{m.quotes.statusLabel[q.status as keyof typeof m.quotes.statusLabel] ?? q.status}</span>
                 </td>
                 <td className={`${ui.td} font-mono`}>{q.total.toFixed(2)} {q.currency}</td>
                 <td className={ui.td}>{fmtDate(q.validUntil)}</td>
                 <td className={ui.td}>
+                  <ApprovalStatus recordType="quote" record={q} userRole={userRole} m={m} />
+                </td>
+                <td className={ui.td}>
                   <div className="flex flex-col gap-1">
                     <Link href={`/sales/quotes/${q.id}`} className="text-xs font-medium text-accent-strong hover:underline">{m.quotes.view}</Link>
-                    {q.status === "DRAFT" && (
+                    {q.status === "DRAFT" && q.plantsManagerApprovedAt && (
                       <form action={markQuoteSent}>
                         <input type="hidden" name="id" value={q.id} />
                         <button className="text-xs font-medium text-accent-strong hover:underline">{m.quotes.markSent}</button>
                       </form>
+                    )}
+                    {q.status === "DRAFT" && !q.plantsManagerApprovedAt && (
+                      <span className="text-xs text-ink-faint">{m.quotes.needsApprovalToSend}</span>
                     )}
                     {q.status === "SENT" && (
                       <>
@@ -829,7 +908,7 @@ async function QuotesTab({
               </tr>
             ))}
             {quotes.length === 0 && (
-              <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.quotes.empty}</span></td></tr>
+              <tr><td className={ui.td} colSpan={9}><span className="text-ink-muted">{m.quotes.empty}</span></td></tr>
             )}
           </tbody>
         </table>

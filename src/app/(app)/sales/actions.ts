@@ -7,7 +7,9 @@ import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/sit
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 
-const SALES_ROLES = ["SALES_REP", "SALES_MANAGER", "RESERVATIONS_OFFICER", "ADMIN"];
+const SALES_ROLES = ["SALES_REP", "SALES_SUPERVISOR", "SALES_MANAGER", "RESERVATIONS_OFFICER", "ADMIN"];
+const SALES_MANAGER_ROLES = ["SALES_MANAGER", "ADMIN"];
+const PLANTS_MANAGER_ROLES = ["PLANTS_MANAGER", "ADMIN"];
 
 export async function createOpportunity(formData: FormData) {
   const actor = await getCurrentUser();
@@ -115,6 +117,11 @@ export async function advanceOpportunityStage(formData: FormData) {
   const existing = await prisma.opportunity.findUnique({ where: { id } });
   if (!existing) return;
   if (!isSiteInScope(existing.siteId, effectiveSiteId(actor))) return;
+  // A deal only counts as WON once both the Sales Manager and the Plants
+  // Manager have signed off — see the model comment. Every other stage
+  // transition (including LOST) stays unblocked so the day-to-day pipeline
+  // never waits on approval.
+  if (status === "WON" && (!existing.salesManagerApprovedAt || !existing.plantsManagerApprovedAt)) return;
 
   await prisma.opportunity.update({
     where: { id },
@@ -300,6 +307,10 @@ export async function markQuoteSent(formData: FormData) {
 
   const quote = await prisma.quote.findUnique({ where: { id } });
   if (!quote || quote.status !== "DRAFT") return;
+  // A price offer never reaches the customer without both sign-offs on
+  // file — same reasoning as Reservation approval gating production
+  // release. See the model comment on Quote.
+  if (!quote.salesManagerApprovedAt || !quote.plantsManagerApprovedAt) return;
 
   await prisma.quote.update({ where: { id }, data: { status: "SENT", sentAt: new Date() } });
 
@@ -386,4 +397,73 @@ export async function convertQuoteLineToReservation(formData: FormData) {
   revalidatePath("/sales");
   revalidatePath(`/sales/quotes/${line.quoteId}`);
   revalidatePath("/reservations");
+}
+
+// --- Two-stage approval (Sales Manager, then Plants Manager) -------------
+// Shared across all three Sales record types (Opportunity, FieldVisit,
+// Quote) — one generic pair of actions rather than six near-identical
+// ones, mirroring how reconcileMovement in the Finance module handles
+// three money-movement kinds through one action. Each model's own field
+// names (salesManagerApprovedAt/By, plantsManagerApprovedAt/By) are
+// identical by design so this can stay generic.
+const APPROVABLE_RECORD_TYPES = ["opportunity", "visit", "quote"] as const;
+type ApprovableRecordType = (typeof APPROVABLE_RECORD_TYPES)[number];
+
+// Prisma's per-model delegates aren't polymorphically callable through a
+// single union-typed reference (each has its own where/data shape), so
+// this branches explicitly per type rather than trying to share one
+// generic delegate call — still one pair of exported actions, just an
+// internal switch instead of a shared client reference.
+async function findApprovable(recordType: ApprovableRecordType, id: string) {
+  if (recordType === "opportunity") return prisma.opportunity.findUnique({ where: { id } });
+  if (recordType === "visit") return prisma.fieldVisit.findUnique({ where: { id } });
+  return prisma.quote.findUnique({ where: { id } });
+}
+
+async function updateApprovable(recordType: ApprovableRecordType, id: string, data: { salesManagerApprovedAt?: Date; salesManagerApprovedById?: string; plantsManagerApprovedAt?: Date; plantsManagerApprovedById?: string }) {
+  if (recordType === "opportunity") return prisma.opportunity.update({ where: { id }, data });
+  if (recordType === "visit") return prisma.fieldVisit.update({ where: { id }, data });
+  return prisma.quote.update({ where: { id }, data });
+}
+
+// First stage — any Sales Manager (or Admin) may sign off, regardless of
+// who created the record; a manager approving their own team's work is
+// the point, not a conflict to guard against.
+export async function approveSalesManagerStage(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_MANAGER_ROLES);
+
+  const recordType = String(formData.get("recordType") ?? "");
+  const id = String(formData.get("id") ?? "");
+  if (!APPROVABLE_RECORD_TYPES.includes(recordType as ApprovableRecordType) || !id) return;
+  const type = recordType as ApprovableRecordType;
+
+  const existing = await findApprovable(type, id);
+  if (!existing || existing.salesManagerApprovedAt) return;
+
+  await updateApprovable(type, id, { salesManagerApprovedAt: new Date(), salesManagerApprovedById: actor!.id });
+
+  await logAudit({ module: "Sales", recordId: id, afterValue: `${type} sales-manager approved`, reasonCode: "SALES_MANAGER_APPROVED" });
+  revalidatePath("/sales");
+}
+
+// Second stage — only meaningful once the first is already on file, same
+// "final requires initial first" rule Reservation's own two-stage
+// approval uses (see approveReservationFinal in reservations/actions.ts).
+export async function approvePlantsManagerStage(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, PLANTS_MANAGER_ROLES);
+
+  const recordType = String(formData.get("recordType") ?? "");
+  const id = String(formData.get("id") ?? "");
+  if (!APPROVABLE_RECORD_TYPES.includes(recordType as ApprovableRecordType) || !id) return;
+  const type = recordType as ApprovableRecordType;
+
+  const existing = await findApprovable(type, id);
+  if (!existing || !existing.salesManagerApprovedAt || existing.plantsManagerApprovedAt) return;
+
+  await updateApprovable(type, id, { plantsManagerApprovedAt: new Date(), plantsManagerApprovedById: actor!.id });
+
+  await logAudit({ module: "Sales", recordId: id, afterValue: `${type} plants-manager approved`, reasonCode: "PLANTS_MANAGER_APPROVED" });
+  revalidatePath("/sales");
 }

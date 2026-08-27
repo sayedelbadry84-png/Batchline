@@ -73,6 +73,12 @@ model User {
   maintenanceTicketsReported  MaintenanceTicket[] @relation("MaintenanceReportedBy")
   maintenanceTicketsAssigned  MaintenanceTicket[] @relation("MaintenanceAssignedTo")
   cashTransactionsCreated     CashTransaction[]   @relation("CashTransactionCreatedBy")
+  opportunitySalesManagerApprovals  Opportunity[] @relation("OpportunitySalesManagerApproval")
+  opportunityPlantsManagerApprovals Opportunity[] @relation("OpportunityPlantsManagerApproval")
+  fieldVisitSalesManagerApprovals   FieldVisit[]  @relation("FieldVisitSalesManagerApproval")
+  fieldVisitPlantsManagerApprovals  FieldVisit[]  @relation("FieldVisitPlantsManagerApproval")
+  quoteSalesManagerApprovals        Quote[]       @relation("QuoteSalesManagerApproval")
+  quotePlantsManagerApprovals       Quote[]       @relation("QuotePlantsManagerApproval")
 }
 
 model Session {
@@ -1013,10 +1019,26 @@ model Opportunity {
   // same reasoning as Reservation.closeReasonCode.
   lostReasonCode    String?
   source            String? // REFERRAL, WEBSITE, COLD_CALL, REPEAT_CUSTOMER, OTHER
+  // Set to whoever created the record (Sales Rep, Sales Supervisor, or
+  // Sales Manager — see createOpportunity) and never reassigned away by
+  // this app's own actions, so it doubles as the creator-attribution field
+  // the two-stage approval chain below is scoped by. A later hand-off of
+  // day-to-day ownership is still just editing this field, same as before.
   ownerId           String?
   owner             User?       @relation("OpportunityOwner", fields: [ownerId], references: [id])
   expectedCloseDate DateTime?
   notes             String?
+  // Two-stage sign-off — Sales Manager, then Plants Manager, same shape as
+  // Reservation.initialApprovedAt/finalApprovedAt — required before
+  // advanceOpportunityStage will accept a move to WON (see that action);
+  // never required for any other stage, so the pipeline itself is never
+  // blocked while a deal is still being worked.
+  salesManagerApprovedAt     DateTime?
+  salesManagerApprovedById   String?
+  salesManagerApprovedBy     User?       @relation("OpportunitySalesManagerApproval", fields: [salesManagerApprovedById], references: [id])
+  plantsManagerApprovedAt    DateTime?
+  plantsManagerApprovedById  String?
+  plantsManagerApprovedBy    User?       @relation("OpportunityPlantsManagerApproval", fields: [plantsManagerApprovedById], references: [id])
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
@@ -1043,6 +1065,16 @@ model FieldVisit {
   // for a real blob store before production photo volume.
   photoDataUrl  String?
   followUpDate  DateTime?
+  // Two-stage sign-off — same shape as Opportunity's, see that model's
+  // comment. A field visit is a record of something that already
+  // happened, so this is a review/sign-off trail rather than a gate on
+  // any action here.
+  salesManagerApprovedAt    DateTime?
+  salesManagerApprovedById  String?
+  salesManagerApprovedBy    User?        @relation("FieldVisitSalesManagerApproval", fields: [salesManagerApprovedById], references: [id])
+  plantsManagerApprovedAt   DateTime?
+  plantsManagerApprovedById String?
+  plantsManagerApprovedBy   User?        @relation("FieldVisitPlantsManagerApproval", fields: [plantsManagerApprovedById], references: [id])
   createdAt     DateTime     @default(now())
 }
 
@@ -1073,6 +1105,17 @@ model Quote {
   notes         String?
   preparedById  String
   preparedBy    User         @relation("QuotePreparedBy", fields: [preparedById], references: [id])
+  // Two-stage sign-off — same shape as Opportunity's, see that model's
+  // comment. Required before markQuoteSent will let a quote actually go
+  // out to the customer — a price offer never reaches a customer without
+  // both sign-offs on file, same reasoning as Reservation approval gating
+  // production release.
+  salesManagerApprovedAt     DateTime?
+  salesManagerApprovedById   String?
+  salesManagerApprovedBy     User?        @relation("QuoteSalesManagerApproval", fields: [salesManagerApprovedById], references: [id])
+  plantsManagerApprovedAt    DateTime?
+  plantsManagerApprovedById  String?
+  plantsManagerApprovedBy    User?        @relation("QuotePlantsManagerApproval", fields: [plantsManagerApprovedById], references: [id])
   sentAt        DateTime?
   respondedAt   DateTime?
   createdAt     DateTime     @default(now())

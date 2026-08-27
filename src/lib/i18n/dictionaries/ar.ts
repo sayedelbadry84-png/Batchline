@@ -1159,7 +1159,7 @@ const ar = {
         none: "بلا ربط",
       },
       quotes: {
-        col: { number: "الرقم", customer: "العميل", project: "المشروع", status: "الحالة", total: "الإجمالي", validUntil: "صالح حتى", sentAt: "تاريخ الإرسال" },
+        col: { number: "الرقم", customer: "العميل", project: "المشروع", preparedBy: "أعده", status: "الحالة", total: "الإجمالي", validUntil: "صالح حتى", sentAt: "تاريخ الإرسال" },
         statusLabel: { DRAFT: "مسودة", SENT: "مُرسل", ACCEPTED: "مقبول", DECLINED: "مرفوض", EXPIRED: "منتهي الصلاحية" },
         newTitle: "عرض سعر جديد",
         f: {
@@ -1170,6 +1170,7 @@ const ar = {
         },
         add: "إنشاء عرض السعر",
         markSent: "تحديد كمُرسل",
+        needsApprovalToSend: "بانتظار اعتماد مدير المصانع قبل الإرسال",
         accept: "تسجيل قبول العميل",
         decline: "تسجيل رفض العميل",
         view: "عرض / طباعة",
@@ -1185,6 +1186,18 @@ const ar = {
         status: "الحالة", convertToReservation: "تحويل إلى حجز", alreadyConverted: "تم التحويل إلى حجز بالفعل",
         editableHint: "يمكنك تعديل أي حقل قبل الطباعة — التعديل هنا لا يغيّر بيانات النظام المحفوظة.",
         print: "طباعة",
+      },
+      // Two-stage sign-off shared across Opportunities/Visits/Quotes — see
+      // approveSalesManagerStage/approvePlantsManagerStage in
+      // sales/actions.ts and the ApprovalStatus component in sales/page.tsx.
+      approval: {
+        col: "الاعتماد",
+        pending: "بانتظار اعتماد مدير المبيعات",
+        awaitingPlantsManager: "بانتظار اعتماد مدير المصانع",
+        salesManagerApproved: "اعتمد مدير المبيعات",
+        fullyApproved: "معتمد بالكامل",
+        approveSalesManager: "اعتماد (مدير المبيعات)",
+        approvePlantsManager: "اعتماد (مدير المصانع)",
       },
     },
     purchasing: {

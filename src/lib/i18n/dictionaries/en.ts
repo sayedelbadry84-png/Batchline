@@ -1166,7 +1166,7 @@ const en: typeof ar = {
         none: "Unlinked",
       },
       quotes: {
-        col: { number: "Number", customer: "Customer", project: "Project", status: "Status", total: "Total", validUntil: "Valid Until", sentAt: "Sent" },
+        col: { number: "Number", customer: "Customer", project: "Project", preparedBy: "Prepared By", status: "Status", total: "Total", validUntil: "Valid Until", sentAt: "Sent" },
         statusLabel: { DRAFT: "Draft", SENT: "Sent", ACCEPTED: "Accepted", DECLINED: "Declined", EXPIRED: "Expired" },
         newTitle: "New quote",
         f: {
@@ -1177,6 +1177,7 @@ const en: typeof ar = {
         },
         add: "Create quote",
         markSent: "Mark as sent",
+        needsApprovalToSend: "Awaiting Plants Manager approval before it can be sent",
         accept: "Record customer acceptance",
         decline: "Record customer decline",
         view: "View / Print",
@@ -1192,6 +1193,15 @@ const en: typeof ar = {
         status: "Status", convertToReservation: "Convert to reservation", alreadyConverted: "Already converted to a reservation",
         editableHint: "Any field can be edited before printing — editing here never changes the system's own stored data.",
         print: "Print",
+      },
+      approval: {
+        col: "Approval",
+        pending: "Awaiting Sales Manager approval",
+        awaitingPlantsManager: "Awaiting Plants Manager approval",
+        salesManagerApproved: "Sales Manager approved",
+        fullyApproved: "Fully approved",
+        approveSalesManager: "Approve (Sales Manager)",
+        approvePlantsManager: "Approve (Plants Manager)",
       },
     },
     purchasing: {
