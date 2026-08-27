@@ -13,6 +13,12 @@ export async function createReceipt(formData: FormData) {
   const plantId = String(formData.get("plantId") ?? "");
   const supplierId = String(formData.get("supplierId") ?? "");
   const materialId = String(formData.get("materialId") ?? "");
+  // Optional link to a real Purchasing PurchaseOrderLine (see the
+  // "purchasingLineId" picker on this form when one or more open PO lines
+  // exist for the chosen supplier+material) — poNumber stays free-text
+  // either way, just auto-filled from the PO's own number when a line is
+  // picked, same as before this existed for an ad-hoc receipt.
+  const purchaseOrderLineId = String(formData.get("purchaseOrderLineId") ?? "") || null;
   const poNumber = String(formData.get("poNumber") ?? "").trim() || null;
   const orderedMassKg = Number(formData.get("orderedMassKg") ?? 0) || null;
   const grossWeightKg = Number(formData.get("grossWeightKg") ?? 0);
@@ -36,6 +42,7 @@ export async function createReceipt(formData: FormData) {
       supplierId,
       materialId,
       poNumber,
+      purchaseOrderLineId,
       orderedMassKg,
       grossWeightKg,
       tareWeightKg,
@@ -48,6 +55,8 @@ export async function createReceipt(formData: FormData) {
     },
   });
 
+  if (purchaseOrderLineId) await postReceiptToPurchaseOrderLine(purchaseOrderLineId, netWeightKg);
+
   await logAudit({
     module: "MaterialReceiving",
     recordId: receipt.id,
@@ -56,6 +65,30 @@ export async function createReceipt(formData: FormData) {
   });
 
   revalidatePath("/material-receiving");
+  revalidatePath("/purchasing");
+}
+
+// Bumps the PO line's running received total and, once every line on the
+// order is fully (or over-)received, flips the order itself to RECEIVED —
+// otherwise PARTIALLY_RECEIVED, the same "derive the parent's status from
+// its children" shape releaseTicketForReservation uses for a Reservation
+// once all its batch tickets are in. netWeightKg is added in kilograms;
+// PurchaseOrderLine.orderedMassKg/receivedMassKg are also kilograms, so no
+// unit conversion is needed here.
+async function postReceiptToPurchaseOrderLine(purchaseOrderLineId: string, netWeightKg: number) {
+  const line = await prisma.purchaseOrderLine.update({
+    where: { id: purchaseOrderLineId },
+    data: { receivedMassKg: { increment: netWeightKg } },
+    include: { purchaseOrder: { include: { lines: true } } },
+  });
+
+  const allReceived = line.purchaseOrder.lines.every(
+    (l) => (l.id === line.id ? line.receivedMassKg : l.receivedMassKg) >= l.orderedMassKg,
+  );
+  const newStatus = allReceived ? "RECEIVED" : "PARTIALLY_RECEIVED";
+  if (line.purchaseOrder.status !== newStatus) {
+    await prisma.purchaseOrder.update({ where: { id: line.purchaseOrder.id }, data: { status: newStatus } });
+  }
 }
 
 // Editable at any point, posted to inventory or not. A not-yet-posted

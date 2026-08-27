@@ -33,6 +33,17 @@ export const MODULE_ROLES = {
   // accepted quote line into a real Reservation (convertQuoteLineToReservation)
   // is squarely their job, even though running the pipeline itself is not.
   sales: ["SALES_REP", "SALES_MANAGER", "RESERVATIONS_OFFICER", "ADMIN"],
+  // Purchase orders/contracts against Suppliers — same role set as the
+  // existing "suppliers" module, broadened with the plant-management
+  // roster (a plant/operations manager can requisition materials, not
+  // just the accountant/operator who could before).
+  purchasing: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
+  // Fault tickets and preventive schedules for the equipment fleet — same
+  // role set as "equipment", since it's the same operational audience.
+  maintenance: ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
+  // Accounts payable, cash ledger, bank reconciliation — kept as tight as
+  // "billing" (financial data, not an operational screen).
+  finance: ["ACCOUNTANT", "ADMIN"],
 } as const satisfies Record<string, readonly string[] | null>;
 
 export type ModuleKey = keyof typeof MODULE_ROLES;
@@ -75,6 +86,9 @@ export const MODULE_NAV: { key: ModuleKey; href: string; num: string; labelKey: 
   { key: "incentives", href: "/incentives", num: "12", labelKey: "incentives" },
   { key: "stockLedger", href: "/stock-ledger", num: "13", labelKey: "stockLedger" },
   { key: "sales", href: "/sales", num: "14", labelKey: "sales" },
+  { key: "purchasing", href: "/purchasing", num: "15", labelKey: "purchasing" },
+  { key: "maintenance", href: "/maintenance", num: "16", labelKey: "maintenance" },
+  { key: "finance", href: "/finance", num: "17", labelKey: "finance" },
   // "users" is deliberately absent — like Permissions, it's hard-locked to
   // ADMIN in Sidebar.tsx and /users/page.tsx directly, never routed through
   // this database-editable system, so it can never be granted to another

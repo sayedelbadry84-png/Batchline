@@ -69,6 +69,10 @@ model User {
   salesOpportunitiesOwned     Opportunity[]       @relation("OpportunityOwner")
   fieldVisitsLogged           FieldVisit[]        @relation("FieldVisitVisitedBy")
   quotesPrepared              Quote[]             @relation("QuotePreparedBy")
+  purchaseOrdersCreated       PurchaseOrder[]     @relation("PurchaseOrderCreatedBy")
+  maintenanceTicketsReported  MaintenanceTicket[] @relation("MaintenanceReportedBy")
+  maintenanceTicketsAssigned  MaintenanceTicket[] @relation("MaintenanceAssignedTo")
+  cashTransactionsCreated     CashTransaction[]   @relation("CashTransactionCreatedBy")
 }
 
 model Session {
@@ -134,6 +138,11 @@ model Site {
   incentiveMethods      IncentiveMethod[]
   opportunities         Opportunity[]
   quotes                Quote[]
+  purchaseOrders        PurchaseOrder[]
+  maintenancePlans      MaintenancePlan[]
+  maintenanceTickets    MaintenanceTicket[]
+  supplierBills         SupplierBill[]
+  cashTransactions      CashTransaction[]
 }
 
 model Plant {
@@ -295,10 +304,12 @@ model Material {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  mixComponents MixComponent[]
-  batchActuals  BatchComponentActual[]
-  receipts      MaterialReceipt[]
-  chemicalTanks ChemicalTank[]
+  mixComponents      MixComponent[]
+  batchActuals       BatchComponentActual[]
+  receipts           MaterialReceipt[]
+  chemicalTanks      ChemicalTank[]
+  purchaseOrderLines PurchaseOrderLine[]
+  supplierContracts  SupplierContract[]
 }
 
 model MixComponent {
@@ -353,6 +364,9 @@ model Supplier {
 
   materials        Material[]
   materialReceipts MaterialReceipt[]
+  purchaseOrders   PurchaseOrder[]
+  contracts        SupplierContract[]
+  bills            SupplierBill[]
 }
 
 // A customer's job site — company-wide, not tied to any one plant/line.
@@ -540,7 +554,14 @@ model MaterialReceipt {
   supplier            Supplier  @relation(fields: [supplierId], references: [id])
   materialId          String
   material            Material  @relation(fields: [materialId], references: [id])
+  // Free-text, kept exactly as it always was — an ad-hoc buy with no
+  // formal PurchaseOrder on file still works. purchaseOrderLineId below
+  // is the NEW, optional link to a real order line (see receiveAgainst
+  // PurchaseOrder in purchasing/actions.ts); a receipt can have one, the
+  // other, both, or neither.
   poNumber            String?
+  purchaseOrderLineId String?
+  purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id])
   orderedMassKg       Float?
   grossWeightKg       Float
   tareWeightKg        Float
@@ -936,14 +957,19 @@ model InvoiceLine {
 }
 
 model Payment {
-  id        String   @id @default(cuid())
-  invoiceId String
-  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  amount    Float
-  paidAt    DateTime @default(now())
-  method    String? // CASH, BANK_TRANSFER, CHEQUE
-  reference String?
-  createdAt DateTime @default(now())
+  id           String    @id @default(cuid())
+  invoiceId    String
+  invoice      Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amount       Float
+  paidAt       DateTime  @default(now())
+  method       String? // CASH, BANK_TRANSFER, CHEQUE
+  reference    String?
+  // Manual bank reconciliation — see the Finance module's own section
+  // comment (near SupplierBill) for why this is a hand-matched flag
+  // rather than a real bank-feed import.
+  reconciled   Boolean   @default(false)
+  reconciledAt DateTime?
+  createdAt    DateTime  @default(now())
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,6 +1098,210 @@ model QuoteLine {
   lineTotal         Float
 
   reservation Reservation?
+}
+
+// ---------------------------------------------------------------------------
+// Purchasing — dynamic purchase orders against Suppliers, plus contracts.
+// MaterialReceipt keeps its existing free-text poNumber (ad-hoc buys still
+// work with no PO on file) and gains an optional purchaseOrderLineId so a
+// receipt CAN post against a real order line when one exists — the
+// existing Stock Ledger (derived from MaterialReceipt/BatchComponentActual,
+// see stock-ledger/page.tsx) then reflects it automatically, with no new
+// inventory-balance table needed.
+// ---------------------------------------------------------------------------
+
+model PurchaseOrder {
+  id           String   @id @default(cuid())
+  poNumber     String   @unique // PO-YYYY-NNNN, withSequentialNumber
+  supplierId   String
+  supplier     Supplier @relation(fields: [supplierId], references: [id])
+  siteId       String
+  site         Site     @relation(fields: [siteId], references: [id])
+  status       String   @default("DRAFT") // DRAFT, SENT, PARTIALLY_RECEIVED, RECEIVED, CANCELLED
+  orderDate    DateTime @default(now())
+  expectedDate DateTime?
+  currency     String
+  subtotal     Float
+  taxRatePct   Float    @default(0)
+  taxAmount    Float    @default(0)
+  total        Float
+  notes        String?
+  createdById  String
+  createdBy    User     @relation("PurchaseOrderCreatedBy", fields: [createdById], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  lines PurchaseOrderLine[]
+  bills SupplierBill[]
+}
+
+model PurchaseOrderLine {
+  id              String        @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  materialId      String
+  material        Material      @relation(fields: [materialId], references: [id])
+  orderedMassKg   Float
+  // Incremented as MaterialReceipt rows post against this line (see
+  // receiveAgainstPurchaseOrder in purchasing/actions.ts) — what
+  // PurchaseOrder.status's PARTIALLY_RECEIVED/RECEIVED derives from, and
+  // what the PO detail screen shows as "still open."
+  receivedMassKg  Float         @default(0)
+  unitPrice       Float
+  lineTotal       Float
+
+  receipts MaterialReceipt[]
+}
+
+// A standing price/term agreement with a supplier — informational (feeds
+// the PO creation screen's price suggestion the same way PriceListEntry
+// feeds Sales quotes) rather than an enforced constraint, since a real
+// buy sometimes has to happen off-contract.
+model SupplierContract {
+  id             String    @id @default(cuid())
+  contractNumber String    @unique // SC-YYYY-NNNN
+  supplierId     String
+  supplier       Supplier  @relation(fields: [supplierId], references: [id])
+  materialId     String?
+  material       Material? @relation(fields: [materialId], references: [id])
+  startDate      DateTime
+  endDate        DateTime?
+  pricePerUnit   Float?
+  paymentTerms   String?
+  status         String    @default("ACTIVE") // ACTIVE, EXPIRED, TERMINATED
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance — preventive scheduling plus fault/repair tickets for the
+// equipment fleet (trucks, pumps, silos, hoppers, support vehicles, bulkers,
+// water tankers, loaders). No FK to any one equipment table — a ticket can
+// be against any of them — equipmentType + equipmentId matches the relevant
+// table by convention, the same plain-string-no-FK shape as User.role (see
+// that field's comment). equipmentLabel snapshots the unit's own code/name
+// at creation time so history still reads even if the unit is later
+// renamed or removed. Complements, and eventually supersedes, the simpler
+// Truck.lastMaintenanceAt/Pump.lastMaintenanceAt trip-count flag in
+// src/lib/maintenance.ts — that flag stays as the dashboard's zero-setup
+// early-warning signal; a flagged unit gets a real MaintenanceTicket here.
+// ---------------------------------------------------------------------------
+
+model MaintenancePlan {
+  id              String    @id @default(cuid())
+  equipmentType   String
+  equipmentId     String
+  equipmentLabel  String
+  siteId          String
+  site            Site      @relation(fields: [siteId], references: [id])
+  intervalDays    Int?
+  intervalTrips   Int?
+  lastCompletedAt DateTime?
+  nextDueAt       DateTime?
+  active          Boolean   @default(true)
+  notes           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  tickets MaintenanceTicket[]
+}
+
+model MaintenanceTicket {
+  id               String           @id @default(cuid())
+  ticketNumber     String           @unique // MT-YYYY-NNNN
+  planId           String?
+  plan             MaintenancePlan? @relation(fields: [planId], references: [id])
+  equipmentType    String
+  equipmentId      String
+  equipmentLabel   String
+  siteId           String
+  site             Site             @relation(fields: [siteId], references: [id])
+  type             String           // PREVENTIVE, CORRECTIVE, INSPECTION
+  priority         String           @default("NORMAL") // LOW, NORMAL, HIGH, CRITICAL
+  status           String           @default("OPEN") // OPEN, IN_PROGRESS, COMPLETED, CANCELLED
+  faultDescription String?
+  reportedById     String?
+  reportedBy       User?            @relation("MaintenanceReportedBy", fields: [reportedById], references: [id])
+  assignedToId     String?
+  assignedTo       User?            @relation("MaintenanceAssignedTo", fields: [assignedToId], references: [id])
+  scheduledFor     DateTime?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  resolutionNotes  String?
+  laborCost        Float?
+  partsCost        Float?
+  downtimeHours    Float?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Finance — accounts payable (supplier bills/payments) and a lightweight
+// cash-transaction ledger for movements Billing's AR side doesn't cover
+// (payroll, utilities, fuel, misc income/expense), plus manual bank
+// reconciliation (a reconciled flag on every money-movement row, matched by
+// hand against a statement — see finance/actions.ts for why a real bank-feed
+// import is out of scope). Deliberately NOT a double-entry general ledger /
+// chart-of-accounts system — this plant has no such system today, and
+// building one honestly is a much larger, separate effort; this covers what
+// it actually needs: knowing what's owed, what's been paid, and what cash
+// moved when, reconciled against the bank by hand.
+// ---------------------------------------------------------------------------
+
+model SupplierBill {
+  id              String         @id @default(cuid())
+  billNumber      String         @unique // BILL-YYYY-NNNN
+  supplierId      String
+  supplier        Supplier       @relation(fields: [supplierId], references: [id])
+  purchaseOrderId String?
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  siteId          String
+  site            Site           @relation(fields: [siteId], references: [id])
+  status          String         @default("UNPAID") // UNPAID, PARTIALLY_PAID, PAID, CANCELLED
+  billDate        DateTime       @default(now())
+  dueDate         DateTime
+  subtotal        Float
+  taxAmount       Float          @default(0)
+  total           Float
+  currency        String
+  notes           String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  payments SupplierPayment[]
+}
+
+model SupplierPayment {
+  id             String       @id @default(cuid())
+  supplierBillId String
+  supplierBill   SupplierBill @relation(fields: [supplierBillId], references: [id], onDelete: Cascade)
+  amount         Float
+  paidAt         DateTime     @default(now())
+  method         String? // CASH, BANK_TRANSFER, CHEQUE
+  reference      String?
+  reconciled     Boolean      @default(false)
+  reconciledAt   DateTime?
+  createdAt      DateTime     @default(now())
+}
+
+model CashTransaction {
+  id           String    @id @default(cuid())
+  txnNumber    String    @unique // TXN-YYYY-NNNN
+  siteId       String
+  site         Site      @relation(fields: [siteId], references: [id])
+  direction    String // IN, OUT
+  category     String // OPERATING_EXPENSE, PAYROLL, UTILITIES, FUEL, MAINTENANCE, OTHER_INCOME, OWNER_CONTRIBUTION, OTHER
+  amount       Float
+  currency     String
+  occurredAt   DateTime  @default(now())
+  description  String
+  reference    String?
+  reconciled   Boolean   @default(false)
+  reconciledAt DateTime?
+  createdById  String
+  createdBy    User      @relation("CashTransactionCreatedBy", fields: [createdById], references: [id])
+  createdAt    DateTime  @default(now())
 }
 
 // ---------------------------------------------------------------------------

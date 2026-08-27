@@ -61,6 +61,16 @@ export default async function MaterialReceivingPage({
     prisma.employee.findMany({ where: { role: { in: ["BULKER_DRIVER", "WATER_TANKER_DRIVER"] }, ...plantScopeWhere(siteId) }, orderBy: { name: "asc" } }),
   ]);
 
+  // Optional picker for the intake form below — every PurchaseOrderLine
+  // still open (SENT or PARTIALLY_RECEIVED) across every supplier, so a
+  // receipt can post against a real Purchasing order (see purchaseOrderLineId
+  // on createReceipt) instead of only the free-text PO Number field.
+  const openPoLines = await prisma.purchaseOrderLine.findMany({
+    where: { purchaseOrder: { status: { in: ["SENT", "PARTIALLY_RECEIVED"] } } },
+    include: { purchaseOrder: { include: { supplier: true } }, material: true },
+    orderBy: { purchaseOrder: { orderDate: "desc" } },
+  });
+
   return (
     <div className="flex flex-col gap-8">
       <header>
@@ -320,6 +330,18 @@ export default async function MaterialReceivingPage({
         <div>
           <label className={ui.label}>{m.f.poNumber}</label>
           <input name="poNumber" className={ui.input} placeholder="PO-4471" dir="ltr" />
+        </div>
+        <div>
+          <label className={ui.label}>{m.f.purchaseOrderLine}</label>
+          <select name="purchaseOrderLineId" defaultValue="" className={ui.select}>
+            <option value="">{dict.field.none}</option>
+            {openPoLines.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.purchaseOrder.poNumber} — {l.material.name} ({l.receivedMassKg.toFixed(0)}/{l.orderedMassKg.toFixed(0)} kg) — {l.purchaseOrder.supplier.name}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-ink-muted">{m.purchaseOrderLineHint}</p>
         </div>
         <div>
           <label className={ui.label}>{m.f.orderedQty}</label>
