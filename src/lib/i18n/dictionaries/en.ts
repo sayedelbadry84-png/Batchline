@@ -1263,6 +1263,52 @@ const en: typeof ar = {
         everyTrips: (n: number) => `Every ${n} trip${n === 1 ? "" : "s"}`,
       },
     },
+    finance: {
+      eyebrow: "Module 18 — Finance",
+      title: "Finance",
+      intro: "Accounts payable for suppliers, a cash-movement journal, and manual bank reconciliation — the payable side that complements the receivable side (customer invoices) Billing already handles.",
+      tabs: { overview: "Overview", payable: "Accounts Payable", cash: "Cash Ledger", reconciliation: "Bank Reconciliation" },
+      overview: {
+        arOutstanding: "Owed by customers (AR)",
+        apOutstanding: "Owed to suppliers (AP)",
+        cashInMonth: "Cash in this month",
+        cashOutMonth: "Cash out this month",
+        netMonth: "Net this month",
+      },
+      payable: {
+        col: { number: "Number", supplier: "Supplier", status: "Status", total: "Total", paid: "Paid", dueDate: "Due Date" },
+        statusLabel: { UNPAID: "Unpaid", PARTIALLY_PAID: "Partially Paid", PAID: "Fully Paid", CANCELLED: "Cancelled" },
+        methodLabel: { CASH: "Cash", BANK_TRANSFER: "Bank Transfer", CHEQUE: "Cheque" },
+        newTitle: "New supplier bill",
+        f: {
+          supplierId: "Supplier", siteId: "Plant", dueDate: "Due date", subtotal: "Subtotal (before tax)",
+          taxAmount: "Tax amount", notes: "Notes", amount: "Amount", method: "Payment method", reference: "Reference",
+        },
+        add: "Create bill",
+        recordPayment: "Record payment",
+        confirmPayment: "Confirm payment",
+        cancel: "Cancel",
+        empty: "No supplier bills yet.",
+      },
+      cash: {
+        col: { number: "Number", date: "Date", direction: "Direction", category: "Category", amount: "Amount", description: "Description", by: "By" },
+        in: "In", out: "Out",
+        categoryLabel: {
+          OPERATING_EXPENSE: "Operating Expense", PAYROLL: "Payroll", UTILITIES: "Utilities", FUEL: "Fuel",
+          MAINTENANCE: "Maintenance", OTHER_INCOME: "Other Income", OWNER_CONTRIBUTION: "Owner Contribution", OTHER: "Other",
+        },
+        newTitle: "New cash transaction",
+        f: { siteId: "Plant", direction: "Direction", category: "Category", amount: "Amount", occurredAt: "Date", description: "Description", reference: "Reference" },
+        add: "Record transaction",
+        empty: "No cash transactions yet.",
+      },
+      reconciliation: {
+        intro: "Every money movement not yet matched against a bank statement — customer receipts, supplier payments, and manual cash entries. Mark a movement reconciled once you've matched it by hand against the statement.",
+        col: { date: "Date", direction: "Direction", description: "Description", amount: "Amount" },
+        markReconciled: "Mark reconciled",
+        empty: "Everything is reconciled — nothing waiting to be matched.",
+      },
+    },
   },
 };
 

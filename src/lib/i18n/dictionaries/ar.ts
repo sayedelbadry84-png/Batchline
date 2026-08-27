@@ -1256,6 +1256,52 @@ const ar = {
         everyTrips: (n: number) => `كل ${n} رحلة`,
       },
     },
+    finance: {
+      eyebrow: "الوحدة 18 — الشؤون المالية",
+      title: "الشؤون المالية",
+      intro: "ذمم دائنة للموردين، دفتر يومية للحركة النقدية، وتسويات بنكية يدوية — يكمّل الجانب المدين (فواتير العملاء) الذي تديره الفوترة بالفعل.",
+      tabs: { overview: "نظرة عامة", payable: "المستحقات للموردين", cash: "دفتر الحركة النقدية", reconciliation: "التسوية البنكية" },
+      overview: {
+        arOutstanding: "مستحق من العملاء (ذمم مدينة)",
+        apOutstanding: "مستحق للموردين (ذمم دائنة)",
+        cashInMonth: "نقدية داخلة هذا الشهر",
+        cashOutMonth: "نقدية خارجة هذا الشهر",
+        netMonth: "صافي هذا الشهر",
+      },
+      payable: {
+        col: { number: "الرقم", supplier: "المورد", status: "الحالة", total: "الإجمالي", paid: "المدفوع", dueDate: "تاريخ الاستحقاق" },
+        statusLabel: { UNPAID: "غير مدفوعة", PARTIALLY_PAID: "مدفوعة جزئيًا", PAID: "مدفوعة بالكامل", CANCELLED: "ملغاة" },
+        methodLabel: { CASH: "نقدًا", BANK_TRANSFER: "تحويل بنكي", CHEQUE: "شيك" },
+        newTitle: "فاتورة مورد جديدة",
+        f: {
+          supplierId: "المورد", siteId: "المصنع", dueDate: "تاريخ الاستحقاق", subtotal: "المبلغ قبل الضريبة",
+          taxAmount: "قيمة الضريبة", notes: "ملاحظات", amount: "المبلغ", method: "طريقة الدفع", reference: "المرجع",
+        },
+        add: "إنشاء الفاتورة",
+        recordPayment: "تسجيل دفعة",
+        confirmPayment: "تأكيد الدفعة",
+        cancel: "إلغاء",
+        empty: "لا توجد فواتير موردين بعد.",
+      },
+      cash: {
+        col: { number: "الرقم", date: "التاريخ", direction: "الاتجاه", category: "التصنيف", amount: "المبلغ", description: "الوصف", by: "بواسطة" },
+        in: "داخلة", out: "خارجة",
+        categoryLabel: {
+          OPERATING_EXPENSE: "مصاريف تشغيلية", PAYROLL: "رواتب", UTILITIES: "مرافق (كهرباء/مياه)", FUEL: "وقود",
+          MAINTENANCE: "صيانة", OTHER_INCOME: "إيراد آخر", OWNER_CONTRIBUTION: "ضخ رأس مال من الملاك", OTHER: "أخرى",
+        },
+        newTitle: "حركة نقدية جديدة",
+        f: { siteId: "المصنع", direction: "الاتجاه", category: "التصنيف", amount: "المبلغ", occurredAt: "التاريخ", description: "الوصف", reference: "المرجع" },
+        add: "تسجيل الحركة",
+        empty: "لا توجد حركات نقدية بعد.",
+      },
+      reconciliation: {
+        intro: "كل حركة أموال لم تُسوَّ بعد مقابل كشف الحساب البنكي — من متحصلات العملاء، مدفوعات الموردين، والحركة النقدية اليدوية. علّم كل حركة كمُسوّاة بعد مطابقتها يدويًا مع الكشف البنكي.",
+        col: { date: "التاريخ", direction: "الاتجاه", description: "الوصف", amount: "المبلغ" },
+        markReconciled: "تمت المطابقة",
+        empty: "كل الحركات مُسوّاة — لا يوجد ما ينتظر المطابقة.",
+      },
+    },
   },
 };
 
