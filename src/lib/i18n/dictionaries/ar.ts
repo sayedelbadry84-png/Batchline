@@ -86,6 +86,8 @@ const ar = {
     alertMaintenanceDue: (code: string, trips: number) => `${code} مستحقة الفحص — ${trips} رحلة منذ آخر صيانة`,
     alertTrackerStale: (code: string, hours: number) => `جهاز تتبع ${code} لم يُرسل إشارة منذ ${hours} س — تحقّق من الجهاز`,
     alertTrackerNeverReported: (code: string) => `جهاز تتبع ${code} لم يُرسل أي إشارة قط`,
+    alertMaintenanceCritical: (label: string) => `تذكرة صيانة حرجة مفتوحة — ${label}`,
+    alertMaintenancePlanOverdue: (label: string) => `صيانة وقائية متأخرة — ${label}`,
     kpiTitle: "نظرة على هذا الأسبوع",
     kpiProduction7d: "المنتَج، آخر 7 أيام",
     kpiArOutstanding: "الذمم المستحقة",

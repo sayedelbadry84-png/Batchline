@@ -88,6 +88,8 @@ const en: typeof ar = {
     alertMaintenanceDue: (code: string, trips: number) => `${code} is due for inspection — ${trips} trips since last service`,
     alertTrackerStale: (code: string, hours: number) => `${code}'s GPS tracker hasn't reported in ${hours}h — check the device`,
     alertTrackerNeverReported: (code: string) => `${code}'s GPS tracker has never reported`,
+    alertMaintenanceCritical: (label: string) => `Critical maintenance ticket open — ${label}`,
+    alertMaintenancePlanOverdue: (label: string) => `Preventive maintenance overdue — ${label}`,
     kpiTitle: "This week at a glance",
     kpiProduction7d: "Produced, last 7 days",
     kpiArOutstanding: "AR outstanding",

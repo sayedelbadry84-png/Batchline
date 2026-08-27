@@ -184,13 +184,31 @@ export default async function DashboardPage() {
   // --- AR / quality KPIs, only computed (and shown) for roles that can
   // actually act on those modules — a Plant Operator sees production and
   // fleet context, not a customer's outstanding balance. ---
-  const [canSeeBilling, canSeeQuality, canSeeReservations, canSeeProduction, canSeeEquipment] = await Promise.all([
+  const [canSeeBilling, canSeeQuality, canSeeReservations, canSeeProduction, canSeeEquipment, canSeeMaintenance] = await Promise.all([
     canAccessModule(user.role, "billing"),
     canAccessModule(user.role, "quality"),
     canAccessModule(user.role, "reservations"),
     canAccessModule(user.role, "production"),
     canAccessModule(user.role, "equipment"),
+    canAccessModule(user.role, "maintenance"),
   ]);
+
+  // Critical/overdue maintenance items feed the same unified alert list
+  // below — same "prove it with what the app already tracks" reasoning as
+  // the existing truck/pump trip-count flags, just sourced from real
+  // MaintenanceTicket/MaintenancePlan rows instead of a derived count.
+  const [criticalMaintenanceTickets, overdueMaintenancePlans] = canSeeMaintenance
+    ? await Promise.all([
+        prisma.maintenanceTicket.findMany({
+          where: { status: { in: ["OPEN", "IN_PROGRESS"] }, priority: "CRITICAL", ...(siteId ? { siteId } : {}) },
+          select: { id: true, equipmentLabel: true },
+        }),
+        prisma.maintenancePlan.findMany({
+          where: { active: true, nextDueAt: { lte: new Date(nowMs) }, ...(siteId ? { siteId } : {}) },
+          select: { id: true, equipmentLabel: true },
+        }),
+      ])
+    : [[], []];
 
   const arOutstanding = canSeeBilling
     ? sentInvoices.reduce((sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)), 0)
@@ -225,6 +243,14 @@ export default async function DashboardPage() {
         href: "/equipment?tab=mixers",
         label: t.hoursSincePing != null ? d.alertTrackerStale(t.code, t.hoursSincePing) : d.alertTrackerNeverReported(t.code),
       });
+    }
+  }
+  if (canSeeMaintenance) {
+    for (const t of criticalMaintenanceTickets) {
+      alerts.push({ key: `maint-ticket-${t.id}`, severity: "critical", href: "/maintenance", label: d.alertMaintenanceCritical(t.equipmentLabel) });
+    }
+    for (const p of overdueMaintenancePlans) {
+      alerts.push({ key: `maint-plan-${p.id}`, severity: "warn", href: "/maintenance?tab=plans", label: d.alertMaintenancePlanOverdue(p.equipmentLabel) });
     }
   }
   if (canSeeQuality) {
