@@ -6,11 +6,6 @@ import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createUser, updateUser, resetUserPassword } from "./actions";
 
-// The real login-capable roles — a superset like Employee.role (which also
-// has DISPATCHER for HR purposes) doesn't apply here, since every value
-// here has to be something MODULE_ROLES and requireRole actually check.
-const ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DRIVER", "ADMIN"] as const;
-
 export default async function UsersPage({
   searchParams,
 }: {
@@ -22,11 +17,11 @@ export default async function UsersPage({
   const user = await getCurrentUser();
   if (!user) redirect("/login");
   if (user.role !== "ADMIN") redirect("/access-denied?module=users");
-  const { dict } = await getDictionary();
+  const { dict, locale } = await getDictionary();
   const m = dict.modules.users;
   const { edit: editId, resetPassword: resetId } = await searchParams;
 
-  const [users, sitesForPicker, employees] = await Promise.all([
+  const [users, sitesForPicker, employees, roles] = await Promise.all([
     prisma.user.findMany({ orderBy: { createdAt: "asc" }, include: { plant: { include: { site: true } }, employee: true } }),
     // Registered by Plant code only, not a specific Station — same
     // reasoning as Employees/Equipment (see resolvePlantIdForSite in
@@ -34,7 +29,12 @@ export default async function UsersPage({
     // home plant) leaves plantId null — same "no plant" outcome as before.
     prisma.site.findMany({ where: { plants: { some: {} } }, orderBy: { code: "asc" }, select: { id: true, code: true, name: true } }),
     prisma.employee.findMany({ orderBy: { name: "asc" } }),
+    // Every role, DRIVER included — unlike the Permissions/getAllRoles
+    // list (which excludes DRIVER because drivers never see the module
+    // sidebar), an account still needs to be creatable as a Driver here.
+    prisma.role.findMany({ orderBy: { createdAt: "asc" } }),
   ]);
+  const roleLabel = (key: string) => roles.find((r) => r.key === key)?.[locale === "ar" ? "labelAr" : "labelEn"] ?? key;
 
   return (
     <div className="flex flex-col gap-8">
@@ -73,8 +73,8 @@ export default async function UsersPage({
                           <div>
                             <label className={ui.label}>{m.f.role}</label>
                             <select name="role" defaultValue={u.role} required className={`${ui.select} w-40`}>
-                              {ROLES.map((r) => (
-                                <option key={r} value={r}>{dict.roles[r]}</option>
+                              {roles.map((r) => (
+                                <option key={r.key} value={r.key}>{roleLabel(r.key)}</option>
                               ))}
                             </select>
                           </div>
@@ -142,7 +142,7 @@ export default async function UsersPage({
                   <tr key={u.id}>
                     <td className={`${ui.td} font-medium`}>{u.name}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{u.email}</td>
-                    <td className={`${ui.td} font-mono text-xs`}>{dict.roles[u.role as keyof typeof dict.roles] ?? u.role}</td>
+                    <td className={`${ui.td} font-mono text-xs`}>{roleLabel(u.role)}</td>
                     <td className={ui.td}>{u.plant ? `${u.plant.site.code} — ${u.plant.site.name}` : "—"}</td>
                     <td className={ui.td}>{u.employee?.name ?? "—"}</td>
                     <td className={ui.td}>
@@ -192,8 +192,8 @@ export default async function UsersPage({
           <div>
             <label className={ui.label}>{m.f.role}</label>
             <select name="role" required className={ui.select}>
-              {ROLES.map((r) => (
-                <option key={r} value={r}>{dict.roles[r]}</option>
+              {roles.map((r) => (
+                <option key={r.key} value={r.key}>{roleLabel(r.key)}</option>
               ))}
             </select>
           </div>

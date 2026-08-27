@@ -7,13 +7,13 @@ import type { Dictionary } from "@/lib/i18n";
 export const MODULE_ROLES = {
   dashboard: null,
   "mix-designs": ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
-  reservations: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
-  production: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
-  "material-receiving": ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
+  reservations: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN", "SALES_REP", "SALES_MANAGER", "RESERVATIONS_OFFICER"],
+  production: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
+  "material-receiving": ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
   // Replaces the old separate "fleet" and "pumps" modules — one screen,
   // tabbed by equipment type (pumps/mixers/bulkers/water tankers/loaders).
-  equipment: ["PLANT_OPERATOR", "ADMIN"],
-  silos: ["PLANT_OPERATOR", "ADMIN"],
+  equipment: ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
+  silos: ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
   stockLedger: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   // Projects live on this same screen now — a project has no plant/site
   // of its own (see the Project model comment), it's just a customer's
@@ -25,9 +25,14 @@ export const MODULE_ROLES = {
   incentives: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   plants: ["PLANT_OPERATOR", "ADMIN"],
   billing: ["ACCOUNTANT", "ADMIN"],
-  trips: ["PLANT_OPERATOR", "ADMIN"],
-  quality: ["QUALITY_SUPERVISOR", "PLANT_OPERATOR", "ADMIN"],
-  reports: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "ADMIN"],
+  trips: ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
+  quality: ["QUALITY_SUPERVISOR", "PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
+  reports: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
+  // The sales-pipeline module (opportunities/visits/quotes) — see
+  // sales/actions.ts. RESERVATIONS_OFFICER gets access too: converting an
+  // accepted quote line into a real Reservation (convertQuoteLineToReservation)
+  // is squarely their job, even though running the pipeline itself is not.
+  sales: ["SALES_REP", "SALES_MANAGER", "RESERVATIONS_OFFICER", "ADMIN"],
 } as const satisfies Record<string, readonly string[] | null>;
 
 export type ModuleKey = keyof typeof MODULE_ROLES;
@@ -38,6 +43,18 @@ export type ModuleKey = keyof typeof MODULE_ROLES;
 // and never see this sidebar, so there's nothing here to grant them.
 export const ASSIGNABLE_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "ADMIN"] as const;
 export type AssignableRole = (typeof ASSIGNABLE_ROLES)[number];
+
+// The real, dynamic role roster (see the Role model + /roles) — DRIVER
+// stays excluded here too, same reasoning as ASSIGNABLE_ROLES above.
+// ASSIGNABLE_ROLES itself is left as-is: it's still the compiled fallback
+// getEffectiveRoles/getEffectiveActionRoles fall back to for a module with
+// no MODULE_ROLES default and no saved RolePermission rows, and changing
+// what "everyone" resolves to for old modules isn't part of this change.
+// Screens that render a role *picker* (Users, Permissions) should call
+// this instead of reading ASSIGNABLE_ROLES directly.
+export async function getAllRoles() {
+  return prisma.role.findMany({ where: { key: { not: "DRIVER" } }, orderBy: { createdAt: "asc" } });
+}
 
 // One entry per module the sidebar/permissions screen knows about — the
 // single source both read from, so a module can't drift out of sync
@@ -57,6 +74,7 @@ export const MODULE_NAV: { key: ModuleKey; href: string; num: string; labelKey: 
   { key: "billing", href: "/billing", num: "11", labelKey: "billing" },
   { key: "incentives", href: "/incentives", num: "12", labelKey: "incentives" },
   { key: "stockLedger", href: "/stock-ledger", num: "13", labelKey: "stockLedger" },
+  { key: "sales", href: "/sales", num: "14", labelKey: "sales" },
   // "users" is deliberately absent — like Permissions, it's hard-locked to
   // ADMIN in Sidebar.tsx and /users/page.tsx directly, never routed through
   // this database-editable system, so it can never be granted to another

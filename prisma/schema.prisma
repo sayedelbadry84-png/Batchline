@@ -66,6 +66,9 @@ model User {
   reservationClosures         Reservation[] @relation("ReservationClosedBy")
   apiKeysCreated              ApiKey[]
   wasteMemoApprovals          WasteIncidentMemo[] @relation("WasteMemoApproval")
+  salesOpportunitiesOwned     Opportunity[]       @relation("OpportunityOwner")
+  fieldVisitsLogged           FieldVisit[]        @relation("FieldVisitVisitedBy")
+  quotesPrepared              Quote[]             @relation("QuotePreparedBy")
 }
 
 model Session {
@@ -129,6 +132,8 @@ model Site {
   incentivePolicies     DriverIncentivePolicy[]
   pumpIncentivePolicies PumpIncentivePolicy[]
   incentiveMethods      IncentiveMethod[]
+  opportunities         Opportunity[]
+  quotes                Quote[]
 }
 
 model Plant {
@@ -274,6 +279,8 @@ model MixDesign {
   batchTickets     BatchTicket[]
   certificates     ComplianceCertificate[]
   priceListEntries PriceListEntry[]
+  opportunities    Opportunity[]
+  quoteLines       QuoteLine[]
 }
 
 model Material {
@@ -330,6 +337,9 @@ model Customer {
   projects         Project[]
   priceListEntries PriceListEntry[]
   invoices         Invoice[]
+  opportunities    Opportunity[]
+  fieldVisits      FieldVisit[]
+  quotes           Quote[]
 }
 
 model Supplier {
@@ -360,8 +370,10 @@ model Project {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
-  reservations Reservation[]
-  invoices     Invoice[]
+  reservations  Reservation[]
+  invoices      Invoice[]
+  opportunities Opportunity[]
+  quotes        Quote[]
 }
 
 model Reservation {
@@ -458,6 +470,13 @@ model Reservation {
   // distinct from the structured pour-detail fields above, same role as
   // RhinoMaster's "Remarks" field on its own booking form.
   notes                 String?
+  // Set when this reservation was created by converting an accepted
+  // QuoteLine (see convertQuoteLineToReservation in sales/actions.ts) —
+  // traceability back to the price offer that led to the booking. Null for
+  // every reservation created the normal way (createReservation /
+  // createManualRelease).
+  quoteLineId           String?   @unique
+  quoteLine             QuoteLine? @relation(fields: [quoteLineId], references: [id])
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
@@ -928,6 +947,134 @@ model Payment {
 }
 
 // ---------------------------------------------------------------------------
+// Sales Management — the funnel that happens before a Reservation exists:
+// a prospect is contacted, a site is visited, a price offer goes out, and
+// only once it's accepted does a real Reservation get created (see
+// convertQuoteLineToReservation in sales/actions.ts, the same
+// "convert X into Y" shape releaseTicketForReservation already uses in
+// production/actions.ts).
+// ---------------------------------------------------------------------------
+
+model Opportunity {
+  id                String      @id @default(cuid())
+  // Human-facing code ("OPP-2026-0001") — same withSequentialNumber
+  // pattern as Reservation.reservationNumber / BatchTicket.ticketNumber.
+  opportunityNumber String      @unique
+  customerId        String?
+  customer          Customer?   @relation(fields: [customerId], references: [id])
+  // Used until/unless a real Customer exists — same optional-FK-plus-
+  // free-text-fallback shape as MaterialReceipt.driverId/driverName. See
+  // promoteProspectToCustomer, which creates the real Customer row and
+  // backfills customerId once the deal is real enough to be one.
+  prospectName      String?
+  prospectPhone     String?
+  prospectEmail     String?
+  projectId         String?
+  project           Project?    @relation(fields: [projectId], references: [id])
+  // Booked-at-the-factory level, same as Reservation.siteId — the specific
+  // station is still a production-time decision, not a sales one.
+  siteId            String
+  site              Site        @relation(fields: [siteId], references: [id])
+  mixId             String?
+  mix               MixDesign?  @relation(fields: [mixId], references: [id])
+  estimatedVolumeM3 Float?
+  // NEW, CONTACTED, SITE_VISIT, QUOTED, NEGOTIATION, WON, LOST — a plain
+  // linear pipeline, same status-as-string-plus-comment convention as
+  // BatchTicket.status/Trip.status. WON/LOST are terminal; nothing here
+  // enforces the order beyond what advanceOpportunityStage checks.
+  status            String      @default("NEW")
+  // Set only when status moves to LOST — accountable, not a silent drop,
+  // same reasoning as Reservation.closeReasonCode.
+  lostReasonCode    String?
+  source            String? // REFERRAL, WEBSITE, COLD_CALL, REPEAT_CUSTOMER, OTHER
+  ownerId           String?
+  owner             User?       @relation("OpportunityOwner", fields: [ownerId], references: [id])
+  expectedCloseDate DateTime?
+  notes             String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  visits FieldVisit[]
+  quotes Quote[]
+}
+
+model FieldVisit {
+  id            String       @id @default(cuid())
+  opportunityId String?
+  opportunity   Opportunity? @relation(fields: [opportunityId], references: [id])
+  customerId    String?
+  customer      Customer?    @relation(fields: [customerId], references: [id])
+  visitedById   String
+  visitedBy     User         @relation("FieldVisitVisitedBy", fields: [visitedById], references: [id])
+  visitDate     DateTime     @default(now())
+  purpose       String? // INTRO, FOLLOW_UP, SITE_SURVEY, COMPLAINT, OTHER
+  locationName  String?
+  // Maps link — same field shape as Reservation.siteLocationUrl. No device
+  // geolocation capture; see the plan's "explicitly out of scope" note.
+  locationUrl   String?
+  notes         String
+  // Same data-URL-in-column stopgap as Trip.deliveryPhotoDataUrl — swap
+  // for a real blob store before production photo volume.
+  photoDataUrl  String?
+  followUpDate  DateTime?
+  createdAt     DateTime     @default(now())
+}
+
+model Quote {
+  id            String       @id @default(cuid())
+  // "QT-2026-0001" — same sequential-code pattern as every other
+  // human-facing document number in this schema.
+  quoteNumber   String       @unique
+  opportunityId String?
+  opportunity   Opportunity? @relation(fields: [opportunityId], references: [id])
+  customerId    String
+  customer      Customer     @relation(fields: [customerId], references: [id])
+  projectId     String?
+  project       Project?     @relation(fields: [projectId], references: [id])
+  siteId        String
+  site          Site         @relation(fields: [siteId], references: [id])
+  status        String       @default("DRAFT") // DRAFT, SENT, ACCEPTED, DECLINED, EXPIRED
+  validUntil    DateTime?
+  // Snapshotted from the chosen site's own plant currency at creation time
+  // — same reasoning as Invoice.currency (a later currency change must
+  // never rewrite an already-issued document's own numbers).
+  currency      String
+  subtotal      Float
+  taxRatePct    Float        @default(0)
+  taxLabel      String       @default("VAT")
+  taxAmount     Float        @default(0)
+  total         Float
+  notes         String?
+  preparedById  String
+  preparedBy    User         @relation("QuotePreparedBy", fields: [preparedById], references: [id])
+  sentAt        DateTime?
+  respondedAt   DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  lines QuoteLine[]
+}
+
+model QuoteLine {
+  id                String      @id @default(cuid())
+  quoteId           String
+  quote             Quote       @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  mixId             String
+  mix               MixDesign   @relation(fields: [mixId], references: [id])
+  // What the customer is expected to order, not a hard commitment — the
+  // actual delivered volume is whatever the resulting Reservation's own
+  // batch tickets end up totaling once converted.
+  estimatedVolumeM3 Float
+  // Suggested from PriceListEntry (customer+mix flat rate, already used by
+  // Billing) when one exists at creation time, freely editable after —
+  // reuses the existing "umbrella pricing" data instead of a parallel table.
+  unitPrice         Float
+  lineTotal         Float
+
+  reservation Reservation?
+}
+
+// ---------------------------------------------------------------------------
 // Fleet — pump crew roster & driver incentives (from the RhinoMaster review)
 // ---------------------------------------------------------------------------
 
@@ -1017,6 +1164,27 @@ model AuditEvent {
   afterValue  String?
   reasonCode  String?
   createdAt   DateTime @default(now())
+}
+
+// The account-role roster itself — User.role stays a plain, unenforced
+// String (same as every other status/role field in this schema; see the
+// UI-terminology note on Site for the project's general "no FK where a
+// plain matching string already works" stance), so a Role row existing
+// here is what makes a `key` valid to assign, not a foreign key
+// constraint. RolePermission.role/ActionPermission.role already store
+// arbitrary role strings with no FK either — this table just gives those
+// strings a name, an Arabic/English label, and a place an Admin can add a
+// new one from (see /roles) without a code change. The 5 original roles
+// are seeded with isSystem true so /roles can refuse to delete or rename
+// the ones requireRole/MODULE_ROLES defaults still reference by name in
+// code.
+model Role {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  labelAr   String
+  labelEn   String
+  isSystem  Boolean  @default(false)
+  createdAt DateTime @default(now())
 }
 
 // Database-editable override of the compiled-in MODULE_ROLES map

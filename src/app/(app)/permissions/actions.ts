@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { ASSIGNABLE_ROLES, MODULE_KEYS, ACTION_LIST, type ModuleKey } from "@/lib/permissions";
+import { getAllRoles, MODULE_KEYS, ACTION_LIST, type ModuleKey } from "@/lib/permissions";
 import { revalidatePath } from "next/cache";
 
 // Full-replace, not a diff — a module's checkbox row always submits its
@@ -16,10 +16,11 @@ export async function saveModulePermissions(formData: FormData) {
   const moduleKey = String(formData.get("moduleKey") ?? "");
   if (!MODULE_KEYS.includes(moduleKey as ModuleKey)) return;
 
+  const validKeys = new Set((await getAllRoles()).map((r) => r.key));
   const roles = formData
     .getAll("roles")
     .map(String)
-    .filter((r): r is (typeof ASSIGNABLE_ROLES)[number] => (ASSIGNABLE_ROLES as readonly string[]).includes(r));
+    .filter((r) => validKeys.has(r));
 
   // Refused, not clamped to "at least ADMIN" — a silent substitution would
   // be more surprising than just not saving; the UI already warns before
@@ -55,10 +56,11 @@ export async function saveActionPermissions(formData: FormData) {
   const actionKey = String(formData.get("actionKey") ?? "");
   if (!ACTION_LIST.some((a) => a.moduleKey === moduleKey && a.actionKey === actionKey)) return;
 
+  const validKeys = new Set((await getAllRoles()).map((r) => r.key));
   const roles = formData
     .getAll("roles")
     .map(String)
-    .filter((r): r is (typeof ASSIGNABLE_ROLES)[number] => (ASSIGNABLE_ROLES as readonly string[]).includes(r));
+    .filter((r) => validKeys.has(r));
 
   if (roles.length === 0) return;
 

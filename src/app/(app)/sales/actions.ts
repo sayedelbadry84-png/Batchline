@@ -1,0 +1,389 @@
+"use server";
+
+import { prisma } from "@/lib/prisma";
+import { logAudit } from "@/lib/audit";
+import { getCurrentUser, requireRole } from "@/lib/session";
+import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
+import { withSequentialNumber } from "@/lib/sequence";
+import { revalidatePath } from "next/cache";
+
+const SALES_ROLES = ["SALES_REP", "SALES_MANAGER", "RESERVATIONS_OFFICER", "ADMIN"];
+
+export async function createOpportunity(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_ROLES);
+
+  const customerId = String(formData.get("customerId") ?? "") || null;
+  const prospectName = String(formData.get("prospectName") ?? "").trim() || null;
+  const prospectPhone = String(formData.get("prospectPhone") ?? "").trim() || null;
+  const prospectEmail = String(formData.get("prospectEmail") ?? "").trim() || null;
+  const projectId = String(formData.get("projectId") ?? "") || null;
+  const siteId = String(formData.get("siteId") ?? "");
+  const mixId = String(formData.get("mixId") ?? "") || null;
+  const estimatedVolumeM3 = Number(formData.get("estimatedVolumeM3") ?? 0) || null;
+  const source = String(formData.get("source") ?? "").trim() || null;
+  const expectedCloseDateRaw = String(formData.get("expectedCloseDate") ?? "");
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+
+  // Either a real Customer or at least a prospect name — something to call
+  // the lead once it's booked in.
+  if ((!customerId && !prospectName) || !siteId) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
+
+  const opportunity = await withSequentialNumber(
+    "OPP",
+    () => prisma.opportunity.count(),
+    (opportunityNumber) =>
+      prisma.opportunity.create({
+        data: {
+          opportunityNumber,
+          customerId,
+          prospectName,
+          prospectPhone,
+          prospectEmail,
+          projectId,
+          siteId,
+          mixId,
+          estimatedVolumeM3,
+          source,
+          expectedCloseDate: expectedCloseDateRaw ? new Date(expectedCloseDateRaw) : null,
+          notes,
+          ownerId: actor!.id,
+        },
+      }),
+  );
+
+  await logAudit({ module: "Sales", recordId: opportunity.id, afterValue: opportunity.opportunityNumber, reasonCode: "OPPORTUNITY_CREATED" });
+  revalidatePath("/sales");
+}
+
+export async function updateOpportunity(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  const prospectName = String(formData.get("prospectName") ?? "").trim() || null;
+  const prospectPhone = String(formData.get("prospectPhone") ?? "").trim() || null;
+  const prospectEmail = String(formData.get("prospectEmail") ?? "").trim() || null;
+  const projectId = String(formData.get("projectId") ?? "") || null;
+  const mixId = String(formData.get("mixId") ?? "") || null;
+  const estimatedVolumeM3 = Number(formData.get("estimatedVolumeM3") ?? 0) || null;
+  const source = String(formData.get("source") ?? "").trim() || null;
+  const expectedCloseDateRaw = String(formData.get("expectedCloseDate") ?? "");
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  const ownerId = String(formData.get("ownerId") ?? "") || null;
+
+  if (!id) return;
+  const existing = await prisma.opportunity.findUnique({ where: { id } });
+  if (!existing) return;
+  if (!isSiteInScope(existing.siteId, effectiveSiteId(actor))) return;
+
+  await prisma.opportunity.update({
+    where: { id },
+    data: {
+      prospectName,
+      prospectPhone,
+      prospectEmail,
+      projectId,
+      mixId,
+      estimatedVolumeM3,
+      source,
+      expectedCloseDate: expectedCloseDateRaw ? new Date(expectedCloseDateRaw) : null,
+      notes,
+      ownerId,
+    },
+  });
+
+  await logAudit({ module: "Sales", recordId: id, afterValue: "opportunity updated", reasonCode: "OPPORTUNITY_UPDATED" });
+  revalidatePath("/sales");
+}
+
+// NEW -> CONTACTED -> SITE_VISIT -> QUOTED -> NEGOTIATION -> WON/LOST — a
+// plain linear pipeline; nothing here enforces the order beyond requiring
+// a reason once a deal is marked LOST, so a stage can be skipped or
+// revisited freely as the real conversation with the customer requires.
+export async function advanceOpportunityStage(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  const status = String(formData.get("status") ?? "");
+  const lostReasonCode = String(formData.get("lostReasonCode") ?? "").trim() || null;
+  if (!id || !status) return;
+  if (status === "LOST" && !lostReasonCode) return;
+
+  const existing = await prisma.opportunity.findUnique({ where: { id } });
+  if (!existing) return;
+  if (!isSiteInScope(existing.siteId, effectiveSiteId(actor))) return;
+
+  await prisma.opportunity.update({
+    where: { id },
+    data: { status, lostReasonCode: status === "LOST" ? lostReasonCode : null },
+  });
+
+  await logAudit({ module: "Sales", recordId: id, afterValue: status, reasonCode: "OPPORTUNITY_STAGE_ADVANCED" });
+  revalidatePath("/sales");
+}
+
+// Direct parallel to releaseTicketForReservation's "convert X into Y"
+// shape in production/actions.ts — a prospect becomes a real Customer once
+// the deal is real enough to need one (a quote, an invoice), without
+// losing the opportunity's own history by re-creating it from scratch.
+export async function promoteProspectToCustomer(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const opportunity = await prisma.opportunity.findUnique({ where: { id } });
+  if (!opportunity || opportunity.customerId || !opportunity.prospectName) return;
+
+  const customer = await prisma.customer.create({
+    data: {
+      legalName: opportunity.prospectName,
+      contactEmail: opportunity.prospectEmail,
+      contactPhone: opportunity.prospectPhone,
+    },
+  });
+
+  await prisma.opportunity.update({ where: { id }, data: { customerId: customer.id } });
+
+  await logAudit({ module: "Sales", recordId: id, afterValue: `promoted to customer ${customer.id}`, reasonCode: "PROSPECT_PROMOTED" });
+  revalidatePath("/sales");
+  revalidatePath("/customers");
+}
+
+export async function logFieldVisit(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_ROLES);
+
+  const opportunityId = String(formData.get("opportunityId") ?? "") || null;
+  const customerId = String(formData.get("customerId") ?? "") || null;
+  const visitDateRaw = String(formData.get("visitDate") ?? "");
+  const purpose = String(formData.get("purpose") ?? "").trim() || null;
+  const locationName = String(formData.get("locationName") ?? "").trim() || null;
+  const locationUrl = String(formData.get("locationUrl") ?? "").trim() || null;
+  const notes = String(formData.get("notes") ?? "").trim();
+  const photoDataUrl = String(formData.get("photoDataUrl") ?? "").trim() || null;
+  const followUpDateRaw = String(formData.get("followUpDate") ?? "");
+
+  if (!notes) return;
+
+  const visit = await prisma.fieldVisit.create({
+    data: {
+      opportunityId,
+      customerId,
+      visitedById: actor!.id,
+      visitDate: visitDateRaw ? new Date(visitDateRaw) : new Date(),
+      purpose,
+      locationName,
+      locationUrl,
+      notes,
+      photoDataUrl,
+      followUpDate: followUpDateRaw ? new Date(followUpDateRaw) : null,
+    },
+  });
+
+  // A visit logged against an opportunity still sitting at NEW is a strong
+  // enough signal to move it forward on its own — same "the action IS the
+  // stage change" reasoning as approveReservationFinal clearing ON_HOLD.
+  if (opportunityId) {
+    const opp = await prisma.opportunity.findUnique({ where: { id: opportunityId } });
+    if (opp?.status === "NEW" || opp?.status === "CONTACTED") {
+      await prisma.opportunity.update({ where: { id: opportunityId }, data: { status: "SITE_VISIT" } });
+    }
+  }
+
+  await logAudit({ module: "Sales", recordId: visit.id, reasonCode: "FIELD_VISIT_LOGGED" });
+  revalidatePath("/sales");
+}
+
+export async function createQuote(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_ROLES);
+
+  const customerId = String(formData.get("customerId") ?? "");
+  const opportunityId = String(formData.get("opportunityId") ?? "") || null;
+  const projectId = String(formData.get("projectId") ?? "") || null;
+  const siteId = String(formData.get("siteId") ?? "");
+  const validUntilRaw = String(formData.get("validUntil") ?? "");
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+
+  const mixIds = formData.getAll("mixId").map(String);
+  const volumes = formData.getAll("estimatedVolumeM3").map(Number);
+  const unitPrices = formData.getAll("unitPrice").map(Number);
+  const lines = mixIds
+    .map((mixId, i) => ({ mixId, estimatedVolumeM3: volumes[i] || 0, unitPrice: unitPrices[i] || 0 }))
+    .filter((l) => l.mixId && l.estimatedVolumeM3 > 0 && l.unitPrice > 0)
+    .map((l) => ({ ...l, lineTotal: l.estimatedVolumeM3 * l.unitPrice }));
+
+  if (!customerId || !siteId || lines.length === 0) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
+
+  const plantId = await resolvePlantIdForSite(siteId);
+  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId } }) : null;
+  const currency = plant?.currency ?? "EGP";
+  const taxRatePct = plant?.taxRatePct ?? 0;
+  const taxLabel = plant?.taxLabel ?? "VAT";
+
+  const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0);
+  const taxAmount = subtotal * (taxRatePct / 100);
+  const total = subtotal + taxAmount;
+
+  const quote = await withSequentialNumber(
+    "QT",
+    () => prisma.quote.count(),
+    (quoteNumber) =>
+      prisma.quote.create({
+        data: {
+          quoteNumber,
+          opportunityId,
+          customerId,
+          projectId,
+          siteId,
+          validUntil: validUntilRaw ? new Date(validUntilRaw) : null,
+          currency,
+          subtotal,
+          taxRatePct,
+          taxLabel,
+          taxAmount,
+          total,
+          notes,
+          preparedById: actor!.id,
+          lines: { create: lines },
+        },
+      }),
+  );
+
+  // Same "the action IS the stage change" reasoning as logFieldVisit above
+  // — a quote going out is what "QUOTED" means.
+  if (opportunityId) {
+    await prisma.opportunity.update({ where: { id: opportunityId }, data: { status: "QUOTED" } }).catch(() => {});
+  }
+
+  await logAudit({ module: "Sales", recordId: quote.id, afterValue: `${quote.quoteNumber} — ${total} ${currency}`, reasonCode: "QUOTE_CREATED" });
+  revalidatePath("/sales");
+}
+
+// Header fields only, and only while still DRAFT — once a quote has gone
+// out (markQuoteSent) its numbers must stay exactly what the customer saw;
+// nothing here touches line items or totals.
+export async function updateQuote(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  const validUntilRaw = String(formData.get("validUntil") ?? "");
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (!id) return;
+
+  const quote = await prisma.quote.findUnique({ where: { id } });
+  if (!quote || quote.status !== "DRAFT") return;
+  if (!isSiteInScope(quote.siteId, effectiveSiteId(actor))) return;
+
+  await prisma.quote.update({
+    where: { id },
+    data: { validUntil: validUntilRaw ? new Date(validUntilRaw) : null, notes },
+  });
+
+  await logAudit({ module: "Sales", recordId: id, reasonCode: "QUOTE_UPDATED" });
+  revalidatePath("/sales");
+}
+
+export async function markQuoteSent(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const quote = await prisma.quote.findUnique({ where: { id } });
+  if (!quote || quote.status !== "DRAFT") return;
+
+  await prisma.quote.update({ where: { id }, data: { status: "SENT", sentAt: new Date() } });
+
+  await logAudit({ module: "Sales", recordId: id, afterValue: "SENT", reasonCode: "QUOTE_SENT" });
+  revalidatePath("/sales");
+  revalidatePath(`/sales/quotes/${id}`);
+}
+
+export async function recordQuoteResponse(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  const response = String(formData.get("response") ?? "");
+  if (!id || !["ACCEPTED", "DECLINED"].includes(response)) return;
+
+  const quote = await prisma.quote.findUnique({ where: { id } });
+  if (!quote || quote.status !== "SENT") return;
+
+  await prisma.quote.update({ where: { id }, data: { status: response, respondedAt: new Date() } });
+
+  if (response === "ACCEPTED" && quote.opportunityId) {
+    await prisma.opportunity.update({ where: { id: quote.opportunityId }, data: { status: "WON" } }).catch(() => {});
+  }
+
+  await logAudit({ module: "Sales", recordId: id, afterValue: response, reasonCode: "QUOTE_RESPONSE_RECORDED" });
+  revalidatePath("/sales");
+  revalidatePath(`/sales/quotes/${id}`);
+}
+
+// Second, simpler reservation-creation path alongside createReservation —
+// same relationship createManualRelease already has to createReservation
+// in production/actions.ts: not a shared helper, a self-approved booking
+// created directly from an already-accepted price offer rather than going
+// through the normal two-stage approval flow, since accepting the quote
+// already WAS the customer's and the sales side's sign-off.
+export async function convertQuoteLineToReservation(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, SALES_ROLES);
+
+  const quoteLineId = String(formData.get("quoteLineId") ?? "");
+  if (!quoteLineId) return;
+
+  const line = await prisma.quoteLine.findUnique({
+    where: { id: quoteLineId },
+    include: { quote: true, reservation: true },
+  });
+  if (!line || line.reservation) return; // already converted
+  if (line.quote.status !== "ACCEPTED") return;
+  if (!line.quote.projectId) return; // Reservation.projectId is required
+  if (!isSiteInScope(line.quote.siteId, effectiveSiteId(actor))) return;
+
+  const now = new Date();
+  const reservation = await withSequentialNumber(
+    "RES",
+    () => prisma.reservation.count(),
+    (reservationNumber) =>
+      prisma.reservation.create({
+        data: {
+          reservationNumber,
+          projectId: line.quote.projectId!,
+          siteId: line.quote.siteId,
+          mixId: line.mixId,
+          requestedVolumeM3: line.estimatedVolumeM3,
+          originalVolumeM3: line.estimatedVolumeM3,
+          pourWindowStart: now,
+          status: "CONFIRMED",
+          initialApprovedAt: now,
+          initialApprovedById: actor!.id,
+          finalApprovedAt: now,
+          finalApprovedById: actor!.id,
+          quoteLineId: line.id,
+        },
+      }),
+  );
+
+  await logAudit({
+    module: "Reservations",
+    recordId: reservation.id,
+    afterValue: `${line.estimatedVolumeM3} m3 (from ${line.quote.quoteNumber})`,
+    reasonCode: "RESERVATION_CREATED_FROM_QUOTE",
+  });
+
+  revalidatePath("/sales");
+  revalidatePath(`/sales/quotes/${line.quoteId}`);
+  revalidatePath("/reservations");
+}

@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { MODULE_NAV, VIEW_NAV, ASSIGNABLE_ROLES, ACTION_LIST, getEffectiveRoles, getEffectiveActionRoles } from "@/lib/permissions";
+import { MODULE_NAV, VIEW_NAV, getAllRoles, ACTION_LIST, getEffectiveRoles, getEffectiveActionRoles } from "@/lib/permissions";
 import { saveModulePermissions, saveActionPermissions } from "./actions";
 import { PermissionRow } from "./PermissionRow";
 
@@ -16,7 +16,7 @@ export default async function PermissionsPage() {
   // reach this one specific page to undo it.
   if (user.role !== "ADMIN") redirect("/access-denied?module=permissions");
 
-  const { dict } = await getDictionary();
+  const { dict, locale } = await getDictionary();
   const m = dict.modules.permissions;
 
   const allModules = [...MODULE_NAV, ...VIEW_NAV];
@@ -31,7 +31,9 @@ export default async function PermissionsPage() {
     })),
   );
 
-  const roleLabels = Object.fromEntries(ASSIGNABLE_ROLES.map((r) => [r, dict.roles[r]]));
+  const allRoles = await getAllRoles();
+  const roleKeys = allRoles.map((r) => r.key);
+  const roleLabels = Object.fromEntries(allRoles.map((r) => [r.key, locale === "ar" ? r.labelAr : r.labelEn]));
 
   const existingActionRows = await prisma.actionPermission.findMany();
   const customizedActionKeys = new Set(existingActionRows.map((r) => `${r.moduleKey}:${r.actionKey}`));
@@ -56,9 +58,9 @@ export default async function PermissionsPage() {
           <thead>
             <tr>
               <th className={ui.th}>{m.col.module}</th>
-              {ASSIGNABLE_ROLES.map((r) => (
+              {roleKeys.map((r) => (
                 <th key={r} className={`${ui.th} text-center`}>
-                  {dict.roles[r]}
+                  {roleLabels[r]}
                 </th>
               ))}
               <th className={ui.th}></th>
@@ -78,7 +80,7 @@ export default async function PermissionsPage() {
                   </td>
                   <PermissionRow
                     formId={formId}
-                    roles={ASSIGNABLE_ROLES}
+                    roles={roleKeys}
                     roleLabels={roleLabels}
                     initialChecked={roles as string[]}
                     saveLabel={m.save}
@@ -101,9 +103,9 @@ export default async function PermissionsPage() {
           <thead>
             <tr>
               <th className={ui.th}>{m.col.module}</th>
-              {ASSIGNABLE_ROLES.map((r) => (
+              {roleKeys.map((r) => (
                 <th key={r} className={`${ui.th} text-center`}>
-                  {dict.roles[r]}
+                  {roleLabels[r]}
                 </th>
               ))}
               <th className={ui.th}></th>
@@ -125,7 +127,7 @@ export default async function PermissionsPage() {
                   </td>
                   <PermissionRow
                     formId={formId}
-                    roles={ASSIGNABLE_ROLES}
+                    roles={roleKeys}
                     roleLabels={roleLabels}
                     initialChecked={roles as string[]}
                     saveLabel={m.save}
