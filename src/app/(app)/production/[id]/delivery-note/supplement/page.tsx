@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
@@ -38,7 +37,29 @@ const L = {
 
 const cellBorder = { border: "1px solid #000" };
 
-function Cell({ label, value, className = "" }: { label: string; value: ReactNode; className?: string }) {
+// Editable, like the main delivery note (production/[id]/delivery-note/
+// page.tsx) — same reasoning: what prints is whatever's currently in the
+// field, nothing here writes back to stored data. The two Quality fields
+// below deliberately stay read-only (ReadOnlyCell) — this document exists
+// specifically to carry the real Quality sign-off, so letting that one
+// field be typed over would defeat the point of it.
+function Cell({ label, value, className = "" }: { label: string; value: string | number | null; className?: string }) {
+  return (
+    <div style={cellBorder} className="px-2 py-1.5">
+      <div style={{ fontSize: "10px" }} className="font-semibold leading-tight">{label}</div>
+      <input
+        type="text"
+        defaultValue={value ?? ""}
+        placeholder="—"
+        dir="ltr"
+        style={{ fontSize: "13px", color: "#000" }}
+        className={`mt-0.5 w-full border-0 bg-transparent p-0 outline-none focus:bg-yellow-50 ${className}`}
+      />
+    </div>
+  );
+}
+
+function ReadOnlyCell({ label, value, className = "" }: { label: string; value: string | number | null; className?: string }) {
   return (
     <div style={cellBorder} className={`px-2 py-1.5 ${className}`}>
       <div style={{ fontSize: "10px" }} className="font-semibold leading-tight">{label}</div>
@@ -75,7 +96,8 @@ export default async function DeliveryNoteSupplementPage({ params }: { params: P
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
-      <div className="no-print flex justify-end">
+      <div className="no-print flex items-center justify-between gap-3">
+        <p className="text-xs text-ink-muted">{dict.modules.production.detail.deliveryNoteEditableHint}</p>
         <PrintButton label={dict.modules.production.detail.printSupplement} />
       </div>
 
@@ -117,7 +139,7 @@ export default async function DeliveryNoteSupplementPage({ params }: { params: P
 
         <div className="grid grid-cols-2">
           <Cell label={L.rejectionReason} value={REASON_LABEL[drumReturn.reasonCode ?? ""] ?? drumReturn.reasonCode} />
-          <Cell
+          <ReadOnlyCell
             label={L.qualitySignoff}
             value={
               wasteMemo?.status === "APPROVED" && wasteMemo.approvedBy
@@ -130,7 +152,7 @@ export default async function DeliveryNoteSupplementPage({ params }: { params: P
 
         {wasteMemo?.approvalNote && (
           <div className="grid grid-cols-1">
-            <Cell label={L.qualityFinding} value={wasteMemo.approvalNote} />
+            <ReadOnlyCell label={L.qualityFinding} value={wasteMemo.approvalNote} />
           </div>
         )}
 

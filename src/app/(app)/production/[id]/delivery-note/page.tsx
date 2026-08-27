@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
@@ -59,11 +58,24 @@ const L = {
 // are arguably the more honest tool anyway for a fixed print layout.
 const cellBorder = { border: "1px solid #000" };
 
-function Cell({ label, value, className = "" }: { label: string; value: ReactNode; className?: string }) {
+// Editable, not just displayed — this document gets handed to a driver or
+// customer, and a field is sometimes wrong or missing (an unrecorded max
+// aggregate size, a hand-noted discount) with no reason to make that block
+// printing. The input's current value is what actually prints — plain
+// browser behavior, no submit/save step, and nothing here writes back to
+// the ticket's own stored data; it only changes what's on THIS printed copy.
+function Cell({ label, value, className = "" }: { label: string; value: string | number | null; className?: string }) {
   return (
-    <div style={cellBorder} className={`px-2 py-1.5 ${className}`}>
+    <div style={cellBorder} className="px-2 py-1.5">
       <div style={{ fontSize: "10px" }} className="font-semibold leading-tight">{label}</div>
-      <div style={{ fontSize: "13px" }} className="mt-0.5" dir="ltr">{value ?? "—"}</div>
+      <input
+        type="text"
+        defaultValue={value ?? ""}
+        placeholder="—"
+        dir="ltr"
+        style={{ fontSize: "13px", color: "#000" }}
+        className={`mt-0.5 w-full border-0 bg-transparent p-0 outline-none focus:bg-yellow-50 ${className}`}
+      />
     </div>
   );
 }
@@ -133,7 +145,8 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
-      <div className="no-print flex justify-end">
+      <div className="no-print flex items-center justify-between gap-3">
+        <p className="text-xs text-ink-muted">{dict.modules.production.detail.deliveryNoteEditableHint}</p>
         <PrintButton label={dict.modules.production.detail.printTicket} />
       </div>
 
@@ -157,8 +170,14 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
                 <span className="ms-2 font-mono">{plant.site.code}</span>
               </div>
             </div>
-            <div className="p-2 text-end text-sm font-semibold">
-              {new Date(trip.batchTime).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" })}
+            <div className="p-2 text-end">
+              <input
+                type="text"
+                defaultValue={new Date(trip.batchTime).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" })}
+                dir="ltr"
+                style={{ color: "#000" }}
+                className="w-full border-0 bg-transparent p-0 text-end text-sm font-semibold outline-none focus:bg-yellow-50"
+              />
             </div>
           </div>
         </div>

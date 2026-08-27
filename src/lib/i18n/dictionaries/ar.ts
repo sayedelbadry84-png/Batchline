@@ -470,6 +470,7 @@ const ar = {
         stageDischarging: "التفريغ",
         stageClosed: "مغلقة",
         printTicket: "طباعة تذكرة توريد",
+        deliveryNoteEditableHint: "معاينة قابلة للتعديل — انقر أي حقل لتصحيحه قبل الطباعة؛ التعديل هنا لا يغيّر بيانات التذكرة الأصلية.",
         wasteNote: (n: number) => `⚠ تم اهدار ${n} م³ من هذه التذكرة بسبب رفض الجودة`,
         wasteMemoPending: "بانتظار اعتماد الجودة",
         wasteMemoApproved: (name: string, date: string) => `اعتمدته الجودة — ${name} بتاريخ ${date}`,

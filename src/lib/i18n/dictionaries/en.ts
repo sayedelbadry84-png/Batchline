@@ -471,6 +471,7 @@ const en: typeof ar = {
         stageDischarging: "Discharging",
         stageClosed: "Closed",
         printTicket: "Print delivery note",
+        deliveryNoteEditableHint: "Editable preview — click any field to correct it before printing; edits here don't change the ticket's own stored data.",
         wasteNote: (n: number) => `⚠ ${n} m³ of this ticket was wasted due to quality rejection`,
         wasteMemoPending: "Pending Quality approval",
         wasteMemoApproved: (name: string, date: string) => `Approved by Quality — ${name} on ${date}`,
