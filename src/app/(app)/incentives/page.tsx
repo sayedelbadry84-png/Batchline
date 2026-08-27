@@ -33,6 +33,11 @@ function ResultCard({
   role: string;
   results: ReturnType<typeof aggregateIncentiveResults>;
 }) {
+  // Pump crew is priced by volume poured, not trip count (see
+  // isReachBasedRole / DEFAULT_INCENTIVE_METHOD in src/lib/incentives.ts)
+  // — trip count in their own column read as if it were what they're paid
+  // on, so it's replaced with how many sites they actually worked instead.
+  const volumeBased = isReachBasedRole(role);
   return (
     <div className="flex flex-col gap-3 border-s-2 border-border ps-4">
       <h3 className="font-display text-sm font-semibold text-ink-muted">{m.roleLabel[role as keyof typeof m.roleLabel]}</h3>
@@ -41,7 +46,7 @@ function ResultCard({
           <thead>
             <tr>
               <th className={ui.th}>{m.col.driver}</th>
-              <th className={ui.th}>{m.col.trips}</th>
+              <th className={ui.th}>{volumeBased ? m.col.sites : m.col.trips}</th>
               <th className={ui.th}>{m.col.volume}</th>
               <th className={ui.th}>{m.col.plants}</th>
               <th className={ui.th}>{m.col.payout}</th>
@@ -51,7 +56,7 @@ function ResultCard({
             {results.map((r) => (
               <tr key={r.id}>
                 <td className={`${ui.td} font-medium`}>{r.name}</td>
-                <td className={`${ui.td} font-mono tabular`}>{r.tripCount}</td>
+                <td className={`${ui.td} font-mono tabular`}>{volumeBased ? r.siteNames.length : r.tripCount}</td>
                 <td className={`${ui.td} font-mono tabular`}>{r.volumeM3.toFixed(1)}</td>
                 <td className={`${ui.td} text-xs text-ink-muted`}>{r.siteNames.join(", ")}</td>
                 <td className={`${ui.td} font-mono tabular`} dir="ltr">

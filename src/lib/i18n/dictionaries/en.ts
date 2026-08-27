@@ -849,7 +849,7 @@ const en: typeof ar = {
       tier3Threshold: "Tier 3 up to trip #",
       tier3Rate: (currency: string) => `Tier 3 rate (${currency}/trip)`,
       beyondRate: (currency: string) => `Beyond tier 3 (${currency}/trip)`,
-      col: { driver: "Name", trips: "Trips this month", volume: "Volume (m³)", plants: "Plants", payout: "Payout" },
+      col: { driver: "Name", trips: "Trips this month", sites: "Sites worked", volume: "Volume (m³)", plants: "Plants", payout: "Payout" },
       empty: "No closed trips or deliveries this month yet.",
       roleLabel: {
         MIXER_DRIVER: "Mixer truck drivers",

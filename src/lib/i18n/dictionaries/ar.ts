@@ -842,7 +842,7 @@ const ar = {
       tier3Threshold: "المستوى الثالث حتى الرحلة رقم",
       tier3Rate: (currency: string) => `سعر المستوى الثالث (${currency}/رحلة)`,
       beyondRate: (currency: string) => `بعد المستوى الثالث (${currency}/رحلة)`,
-      col: { driver: "الاسم", trips: "رحلات هذا الشهر", volume: "الكمية (م³)", plants: "المصانع", payout: "الحافز" },
+      col: { driver: "الاسم", trips: "رحلات هذا الشهر", sites: "عدد المواقع", volume: "الكمية (م³)", plants: "المصانع", payout: "الحافز" },
       empty: "لا توجد رحلات أو توريدات مغلقة هذا الشهر بعد.",
       roleLabel: {
         MIXER_DRIVER: "سائقو الخلاطات",
