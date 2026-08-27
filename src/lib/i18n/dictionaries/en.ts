@@ -1178,7 +1178,7 @@ const en: typeof ar = {
         empty: "No opportunities yet.",
       },
       visits: {
-        col: { date: "Date", linkedTo: "Linked to", visitedBy: "By", purpose: "Purpose", location: "Location", followUp: "Follow up on" },
+        col: { number: "Number", date: "Date", linkedTo: "Linked to", visitedBy: "By", purpose: "Purpose", location: "Location", followUp: "Follow up on" },
         purposeLabel: { INTRO: "Intro", FOLLOW_UP: "Follow-up", SITE_SURVEY: "Site Survey", COMPLAINT: "Complaint", OTHER: "Other" },
         newTitle: "Log a field visit",
         f: {
@@ -1196,7 +1196,8 @@ const en: typeof ar = {
         statusLabel: { DRAFT: "Draft", SENT: "Sent", ACCEPTED: "Accepted", DECLINED: "Declined", EXPIRED: "Expired" },
         newTitle: "New quote",
         f: {
-          customer: "Customer", customerPlaceholder: "Select customer…", opportunityId: "Opportunity (optional)",
+          opportunityId: "Opportunity", opportunityPlaceholder: "Select an opportunity…",
+          noQuotableOpportunities: "No opportunity linked to a customer yet — promote it to a customer first on the Opportunities tab.",
           projectId: "Project (optional)", siteId: "Plant", validUntil: "Valid until", notes: "Notes",
           mixPlaceholder: "Select mix…", volume: "Volume (m³)", unitPrice: "Unit price", addAnother: "Add another line",
           remove: "Remove", noPriceOnFile: "No price on file for this customer/mix yet — enter the rate manually.",
@@ -1222,12 +1223,26 @@ const en: typeof ar = {
       },
       approval: {
         col: "Approval",
-        pending: "Awaiting Sales Manager approval",
-        awaitingPlantsManager: "Awaiting Plants Manager approval",
-        salesManagerApproved: "Sales Manager approved",
         fullyApproved: "Fully approved",
-        approveSalesManager: "Approve (Sales Manager)",
-        approvePlantsManager: "Approve (Plants Manager)",
+        // Opportunity/FieldVisit: initial from Sales Supervisor, final from
+        // Sales Manager — a direct Sales Manager approval covers the
+        // supervisor stage too (see approveFinalStage).
+        oppVisit: {
+          pending: "Awaiting Sales Supervisor approval",
+          awaitingFinal: "Awaiting Sales Manager approval",
+          initialApproved: "Sales Supervisor approved",
+          approveInitial: "Approve (Sales Supervisor)",
+          approveFinal: "Approve (Sales Manager)",
+        },
+        // Quote: initial from Sales Manager, final from Plants Manager — a
+        // direct Plants Manager approval covers the Sales Manager stage too.
+        quote: {
+          pending: "Awaiting Sales Manager approval",
+          awaitingFinal: "Awaiting Plants Manager approval",
+          initialApproved: "Sales Manager approved",
+          approveInitial: "Approve (Sales Manager)",
+          approveFinal: "Approve (Plants Manager)",
+        },
       },
     },
     purchasing: {

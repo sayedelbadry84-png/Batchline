@@ -15,8 +15,8 @@ import {
   createQuote,
   markQuoteSent,
   recordQuoteResponse,
-  approveSalesManagerStage,
-  approvePlantsManagerStage,
+  approveInitialStage,
+  approveFinalStage,
 } from "./actions";
 
 const SALES_TABS = ["dashboard", "opportunities", "visits", "quotes"] as const;
@@ -49,12 +49,20 @@ function fmtDate(d: Date | null): string {
   return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
-// Shared two-stage approval cell — Sales Manager, then Plants Manager —
-// used identically across Opportunities, Visits, and Quotes (see the
-// approveSalesManagerStage/approvePlantsManagerStage actions, which are
-// generic across all three record types for the same reason). Only the
-// role that can act on the CURRENT stage ever sees a button; everyone
-// else just sees the status.
+// Shared two-stage approval cell — role pair depends on record type (see
+// APPROVAL_CONFIG in sales/actions.ts): Sales Supervisor -> Sales Manager
+// for Opportunity/FieldVisit, Sales Manager -> Plants Manager for Quote.
+// Only the role that can act on the CURRENT stage ever sees a button;
+// everyone else just sees the status. A senior approving directly (final
+// with no initial on file) shows as fully approved either way — the
+// backend already backfilled initial in that case, so there's no
+// separate "skipped" state to render.
+const APPROVAL_ROLES: Record<"opportunity" | "visit" | "quote", { initialRoles: string[]; finalRoles: string[] }> = {
+  opportunity: { initialRoles: ["SALES_SUPERVISOR", "ADMIN"], finalRoles: ["SALES_MANAGER", "ADMIN"] },
+  visit: { initialRoles: ["SALES_SUPERVISOR", "ADMIN"], finalRoles: ["SALES_MANAGER", "ADMIN"] },
+  quote: { initialRoles: ["SALES_MANAGER", "ADMIN"], finalRoles: ["PLANTS_MANAGER", "ADMIN"] },
+};
+
 function ApprovalStatus({
   recordType,
   record,
@@ -62,22 +70,25 @@ function ApprovalStatus({
   m,
 }: {
   recordType: "opportunity" | "visit" | "quote";
-  record: { id: string; salesManagerApprovedAt: Date | null; plantsManagerApprovedAt: Date | null };
+  record: { id: string; initialApprovedAt: Date | null; finalApprovedAt: Date | null };
   userRole: string;
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["sales"];
 }) {
-  if (record.plantsManagerApprovedAt) {
+  const labels = recordType === "quote" ? m.approval.quote : m.approval.oppVisit;
+  const { initialRoles, finalRoles } = APPROVAL_ROLES[recordType];
+
+  if (record.finalApprovedAt) {
     return <span className={`${ui.chip} bg-good-soft text-good`}>{m.approval.fullyApproved}</span>;
   }
-  if (record.salesManagerApprovedAt) {
+  if (record.initialApprovedAt) {
     return (
       <div className="flex flex-col gap-1">
-        <span className={`${ui.chip} bg-accent-soft text-accent-strong`}>{m.approval.salesManagerApproved}</span>
-        {["PLANTS_MANAGER", "ADMIN"].includes(userRole) && (
-          <form action={approvePlantsManagerStage}>
+        <span className={`${ui.chip} bg-accent-soft text-accent-strong`}>{labels.initialApproved}</span>
+        {finalRoles.includes(userRole) && (
+          <form action={approveFinalStage}>
             <input type="hidden" name="recordType" value={recordType} />
             <input type="hidden" name="id" value={record.id} />
-            <button className="text-xs font-medium text-accent-strong hover:underline">{m.approval.approvePlantsManager}</button>
+            <button className="text-xs font-medium text-accent-strong hover:underline">{labels.approveFinal}</button>
           </form>
         )}
       </div>
@@ -85,12 +96,23 @@ function ApprovalStatus({
   }
   return (
     <div className="flex flex-col gap-1">
-      <span className={`${ui.chip} bg-warn-soft text-warn`}>{m.approval.pending}</span>
-      {["SALES_MANAGER", "ADMIN"].includes(userRole) && (
-        <form action={approveSalesManagerStage}>
+      <span className={`${ui.chip} bg-warn-soft text-warn`}>{labels.pending}</span>
+      {initialRoles.includes(userRole) && (
+        <form action={approveInitialStage}>
           <input type="hidden" name="recordType" value={recordType} />
           <input type="hidden" name="id" value={record.id} />
-          <button className="text-xs font-medium text-accent-strong hover:underline">{m.approval.approveSalesManager}</button>
+          <button className="text-xs font-medium text-accent-strong hover:underline">{labels.approveInitial}</button>
+        </form>
+      )}
+      {/* The senior (final-stage) role can also approve directly from here,
+          skipping the junior stage entirely — see approveFinalStage's
+          backfill. Shown alongside the initial button for ADMIN, who holds
+          both. */}
+      {finalRoles.includes(userRole) && (
+        <form action={approveFinalStage}>
+          <input type="hidden" name="recordType" value={recordType} />
+          <input type="hidden" name="id" value={record.id} />
+          <button className="text-xs font-medium text-accent-strong hover:underline">{labels.approveFinal}</button>
         </form>
       )}
     </div>
@@ -174,7 +196,6 @@ export default async function SalesPage({
           sites={sites}
           projects={projects}
           mixes={mixes}
-          customers={customers}
           priceEntries={priceEntries}
           userRole={user.role}
           newQuoteFlag={newQuoteFlag}
@@ -559,9 +580,9 @@ async function OpportunitiesTab({
                           <input type="hidden" name="id" value={o.id} />
                           <select name="status" defaultValue={o.status} className="rounded-md border border-border bg-surface px-1.5 py-1 text-xs">
                             {OPP_STATUSES.map((s) => (
-                              <option key={s} value={s} disabled={s === "WON" && !o.plantsManagerApprovedAt}>
-                                {s === "WON" && !o.plantsManagerApprovedAt
-                                  ? `${m.statusLabel[s]} (${o.salesManagerApprovedAt ? m.approval.awaitingPlantsManager : m.approval.pending})`
+                              <option key={s} value={s} disabled={s === "WON" && !o.finalApprovedAt}>
+                                {s === "WON" && !o.finalApprovedAt
+                                  ? `${m.statusLabel[s]} (${o.initialApprovedAt ? m.approval.oppVisit.awaitingFinal : m.approval.oppVisit.pending})`
                                   : m.statusLabel[s]}
                               </option>
                             ))}
@@ -704,6 +725,7 @@ async function VisitsTab({
         <table className={ui.table}>
           <thead>
             <tr>
+              <th className={ui.th}>{m.visits.col.number}</th>
               <th className={ui.th}>{m.visits.col.date}</th>
               <th className={ui.th}>{m.visits.col.linkedTo}</th>
               <th className={ui.th}>{m.visits.col.visitedBy}</th>
@@ -718,6 +740,7 @@ async function VisitsTab({
               const overdue = v.followUpDate && v.followUpDate <= now;
               return (
                 <tr key={v.id}>
+                  <td className={`${ui.td} font-mono text-xs`}>{v.visitNumber}</td>
                   <td className={ui.td}>{fmtDate(v.visitDate)}</td>
                   <td className={ui.td}>{v.opportunity?.opportunityNumber ?? v.customer?.legalName ?? m.visits.none}</td>
                   <td className={ui.td}>{v.visitedBy.name}</td>
@@ -740,7 +763,7 @@ async function VisitsTab({
               );
             })}
             {visits.length === 0 && (
-              <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.visits.empty}</span></td></tr>
+              <tr><td className={ui.td} colSpan={8}><span className="text-ink-muted">{m.visits.empty}</span></td></tr>
             )}
           </tbody>
         </table>
@@ -817,7 +840,6 @@ async function QuotesTab({
   sites,
   projects,
   mixes,
-  customers,
   priceEntries,
   userRole,
   newQuoteFlag,
@@ -829,17 +851,27 @@ async function QuotesTab({
   sites: { id: string; code: string; name: string }[];
   projects: { id: string; name: string; customer: { legalName: string } }[];
   mixes: { id: string; code: string; grade: string }[];
-  customers: { id: string; code: string | null; legalName: string }[];
   priceEntries: { customerId: string; mixId: string; pricePerM3: number }[];
   userRole: string;
   newQuoteFlag?: string;
   baseUrl: string;
 }) {
-  const quotes = await prisma.quote.findMany({
-    where: siteScope,
-    orderBy: { createdAt: "desc" },
-    include: { customer: true, project: true, preparedBy: true },
-  });
+  const [quotes, quotableOpportunities] = await Promise.all([
+    prisma.quote.findMany({
+      where: siteScope,
+      orderBy: { createdAt: "desc" },
+      include: { customer: true, project: true, preparedBy: true },
+    }),
+    // Only opportunities already promoted to a real Customer — a quote's
+    // own customerId is derived from this at creation time (see
+    // createQuote), so a still-a-prospect opportunity has nowhere for
+    // that to point until promoteProspectToCustomer runs.
+    prisma.opportunity.findMany({
+      where: { customerId: { not: null }, ...siteScope },
+      orderBy: { createdAt: "desc" },
+      include: { customer: true },
+    }),
+  ]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -880,13 +912,13 @@ async function QuotesTab({
                 <td className={ui.td}>
                   <div className="flex flex-col gap-1">
                     <Link href={`/sales/quotes/${q.id}`} className="text-xs font-medium text-accent-strong hover:underline">{m.quotes.view}</Link>
-                    {q.status === "DRAFT" && q.plantsManagerApprovedAt && (
+                    {q.status === "DRAFT" && q.finalApprovedAt && (
                       <form action={markQuoteSent}>
                         <input type="hidden" name="id" value={q.id} />
                         <button className="text-xs font-medium text-accent-strong hover:underline">{m.quotes.markSent}</button>
                       </form>
                     )}
-                    {q.status === "DRAFT" && !q.plantsManagerApprovedAt && (
+                    {q.status === "DRAFT" && !q.finalApprovedAt && (
                       <span className="text-xs text-ink-faint">{m.quotes.needsApprovalToSend}</span>
                     )}
                     {q.status === "SENT" && (
@@ -941,12 +973,17 @@ async function QuotesTab({
               <input name="validUntil" type="date" className={`${ui.input} w-48`} />
             </div>
             <QuoteLineRows
-              customers={customers}
+              opportunities={quotableOpportunities.map((o) => ({
+                id: o.id,
+                label: `${o.opportunityNumber} — ${o.customer!.legalName}`,
+                customerId: o.customerId!,
+              }))}
               mixes={mixes}
               priceEntries={priceEntries}
               labels={{
-                customer: m.quotes.f.customer,
-                customerPlaceholder: m.quotes.f.customerPlaceholder,
+                opportunity: m.quotes.f.opportunityId,
+                opportunityPlaceholder: m.quotes.f.opportunityPlaceholder,
+                noQuotableOpportunities: m.quotes.f.noQuotableOpportunities,
                 mixPlaceholder: m.quotes.f.mixPlaceholder,
                 volume: m.quotes.f.volume,
                 unitPrice: m.quotes.f.unitPrice,

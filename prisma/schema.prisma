@@ -73,12 +73,12 @@ model User {
   maintenanceTicketsReported  MaintenanceTicket[] @relation("MaintenanceReportedBy")
   maintenanceTicketsAssigned  MaintenanceTicket[] @relation("MaintenanceAssignedTo")
   cashTransactionsCreated     CashTransaction[]   @relation("CashTransactionCreatedBy")
-  opportunitySalesManagerApprovals  Opportunity[] @relation("OpportunitySalesManagerApproval")
-  opportunityPlantsManagerApprovals Opportunity[] @relation("OpportunityPlantsManagerApproval")
-  fieldVisitSalesManagerApprovals   FieldVisit[]  @relation("FieldVisitSalesManagerApproval")
-  fieldVisitPlantsManagerApprovals  FieldVisit[]  @relation("FieldVisitPlantsManagerApproval")
-  quoteSalesManagerApprovals        Quote[]       @relation("QuoteSalesManagerApproval")
-  quotePlantsManagerApprovals       Quote[]       @relation("QuotePlantsManagerApproval")
+  opportunityInitialApprovals       Opportunity[] @relation("OpportunityInitialApproval")
+  opportunityFinalApprovals         Opportunity[] @relation("OpportunityFinalApproval")
+  fieldVisitInitialApprovals        FieldVisit[]  @relation("FieldVisitInitialApproval")
+  fieldVisitFinalApprovals          FieldVisit[]  @relation("FieldVisitFinalApproval")
+  quoteInitialApprovals             Quote[]       @relation("QuoteInitialApproval")
+  quoteFinalApprovals               Quote[]       @relation("QuoteFinalApproval")
   attendanceRecordsRecorded         AttendanceRecord[] @relation("AttendanceRecordedBy")
   leaveRequestsRequested            LeaveRequest[]      @relation("LeaveRequestedBy")
   leaveRequestsApproved             LeaveRequest[]      @relation("LeaveApprovedBy")
@@ -1095,17 +1095,22 @@ model Opportunity {
   owner             User?       @relation("OpportunityOwner", fields: [ownerId], references: [id])
   expectedCloseDate DateTime?
   notes             String?
-  // Two-stage sign-off — Sales Manager, then Plants Manager, same shape as
-  // Reservation.initialApprovedAt/finalApprovedAt — required before
-  // advanceOpportunityStage will accept a move to WON (see that action);
-  // never required for any other stage, so the pipeline itself is never
-  // blocked while a deal is still being worked.
-  salesManagerApprovedAt     DateTime?
-  salesManagerApprovedById   String?
-  salesManagerApprovedBy     User?       @relation("OpportunitySalesManagerApproval", fields: [salesManagerApprovedById], references: [id])
-  plantsManagerApprovedAt    DateTime?
-  plantsManagerApprovedById  String?
-  plantsManagerApprovedBy    User?       @relation("OpportunityPlantsManagerApproval", fields: [plantsManagerApprovedById], references: [id])
+  // Two-stage sign-off, same field shape (and name) as Reservation's own
+  // initialApprovedAt/finalApprovedAt — initial from the Sales Supervisor,
+  // final from the Sales Manager (see approveInitialStage/approveFinalStage
+  // in sales/actions.ts). Required before advanceOpportunityStage will
+  // accept a move to WON; never required for any other stage, so the
+  // pipeline itself is never blocked while a deal is still being worked.
+  // If the Sales Manager approves directly while initial is still empty,
+  // approveFinalStage backfills initial as the same manager/timestamp —
+  // a senior role's direct approval covers the junior stage, it doesn't
+  // require it first.
+  initialApprovedAt   DateTime?
+  initialApprovedById String?
+  initialApprovedBy   User?       @relation("OpportunityInitialApproval", fields: [initialApprovedById], references: [id])
+  finalApprovedAt     DateTime?
+  finalApprovedById   String?
+  finalApprovedBy     User?       @relation("OpportunityFinalApproval", fields: [finalApprovedById], references: [id])
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
@@ -1115,6 +1120,9 @@ model Opportunity {
 
 model FieldVisit {
   id            String       @id @default(cuid())
+  // Human-facing code ("FV-2026-0001") — same withSequentialNumber pattern
+  // as every other document number in this schema.
+  visitNumber   String       @unique
   opportunityId String?
   opportunity   Opportunity? @relation(fields: [opportunityId], references: [id])
   customerId    String?
@@ -1132,16 +1140,16 @@ model FieldVisit {
   // for a real blob store before production photo volume.
   photoDataUrl  String?
   followUpDate  DateTime?
-  // Two-stage sign-off — same shape as Opportunity's, see that model's
-  // comment. A field visit is a record of something that already
-  // happened, so this is a review/sign-off trail rather than a gate on
-  // any action here.
-  salesManagerApprovedAt    DateTime?
-  salesManagerApprovedById  String?
-  salesManagerApprovedBy    User?        @relation("FieldVisitSalesManagerApproval", fields: [salesManagerApprovedById], references: [id])
-  plantsManagerApprovedAt   DateTime?
-  plantsManagerApprovedById String?
-  plantsManagerApprovedBy   User?        @relation("FieldVisitPlantsManagerApproval", fields: [plantsManagerApprovedById], references: [id])
+  // Two-stage sign-off — same shape and skip rule as Opportunity's, see
+  // that model's comment. A field visit is a record of something that
+  // already happened, so this is a review/sign-off trail rather than a
+  // gate on any action here.
+  initialApprovedAt   DateTime?
+  initialApprovedById String?
+  initialApprovedBy   User?        @relation("FieldVisitInitialApproval", fields: [initialApprovedById], references: [id])
+  finalApprovedAt     DateTime?
+  finalApprovedById   String?
+  finalApprovedBy     User?        @relation("FieldVisitFinalApproval", fields: [finalApprovedById], references: [id])
   createdAt     DateTime     @default(now())
 }
 
@@ -1150,8 +1158,15 @@ model Quote {
   // "QT-2026-0001" — same sequential-code pattern as every other
   // human-facing document number in this schema.
   quoteNumber   String       @unique
-  opportunityId String?
-  opportunity   Opportunity? @relation(fields: [opportunityId], references: [id])
+  // Required — a quote can only exist as the next step of a real
+  // opportunity, never created standalone (see createQuote). customerId
+  // below is derived from opportunity.customer at creation time, which is
+  // itself why an opportunity has to have been promoted to a real
+  // Customer (see promoteProspectToCustomer) before a quote can be built
+  // for it — a prospect alone has nowhere for the quote's own customerId
+  // to point.
+  opportunityId String
+  opportunity   Opportunity  @relation(fields: [opportunityId], references: [id])
   customerId    String
   customer      Customer     @relation(fields: [customerId], references: [id])
   projectId     String?
@@ -1172,17 +1187,18 @@ model Quote {
   notes         String?
   preparedById  String
   preparedBy    User         @relation("QuotePreparedBy", fields: [preparedById], references: [id])
-  // Two-stage sign-off — same shape as Opportunity's, see that model's
-  // comment. Required before markQuoteSent will let a quote actually go
-  // out to the customer — a price offer never reaches a customer without
-  // both sign-offs on file, same reasoning as Reservation approval gating
-  // production release.
-  salesManagerApprovedAt     DateTime?
-  salesManagerApprovedById   String?
-  salesManagerApprovedBy     User?        @relation("QuoteSalesManagerApproval", fields: [salesManagerApprovedById], references: [id])
-  plantsManagerApprovedAt    DateTime?
-  plantsManagerApprovedById  String?
-  plantsManagerApprovedBy    User?        @relation("QuotePlantsManagerApproval", fields: [plantsManagerApprovedById], references: [id])
+  // Two-stage sign-off — same shape and skip rule as Opportunity's, but a
+  // different role pair: initial from the Sales Manager, final from the
+  // Plants Manager (see APPROVAL_CONFIG in sales/actions.ts). Required
+  // before markQuoteSent will let a quote actually go out to the customer
+  // — a price offer never reaches a customer without final sign-off on
+  // file, same reasoning as Reservation approval gating production release.
+  initialApprovedAt   DateTime?
+  initialApprovedById String?
+  initialApprovedBy   User?        @relation("QuoteInitialApproval", fields: [initialApprovedById], references: [id])
+  finalApprovedAt     DateTime?
+  finalApprovedById   String?
+  finalApprovedBy     User?        @relation("QuoteFinalApproval", fields: [finalApprovedById], references: [id])
   sentAt        DateTime?
   respondedAt   DateTime?
   createdAt     DateTime     @default(now())

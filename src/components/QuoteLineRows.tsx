@@ -2,33 +2,35 @@
 
 import { useState } from "react";
 
-type CustomerOption = { id: string; code: string | null; legalName: string };
+type OpportunityOption = { id: string; label: string; customerId: string };
 type MixOption = { id: string; code: string; grade: string };
 type PriceEntry = { customerId: string; mixId: string; pricePerM3: number };
 
-// Owns the customer picker AND the repeatable mix/volume/price rows as one
+// Owns the opportunity picker AND the repeatable mix/volume/price rows as one
 // self-contained interactive unit within the larger New Quote form — same
 // shape as PumpBookingRows owning pumpId+crew while Reservation's other
 // fields (project, site, dates) stay plain server-rendered inputs in the
 // surrounding form. Each row posts mixId[]/estimatedVolumeM3[]/unitPrice[]
 // under repeated field names, read back server-side via formData.getAll()
-// as parallel arrays (see createQuote). Picking a customer or a mix re-keys
-// the price input (the same "remount to refresh defaultValue" trick
-// PumpBookingRows' operator/assistant selects use) so it defaults to that
-// customer+mix's PriceListEntry rate when one exists — freely editable
-// after, never locked.
+// as parallel arrays (see createQuote). The opportunity's customerId (never
+// submitted itself — createQuote derives it server-side from opportunityId)
+// is only used here to re-key the price input (the same "remount to refresh
+// defaultValue" trick PumpBookingRows' operator/assistant selects use) so it
+// defaults to that customer+mix's PriceListEntry rate when one exists —
+// freely editable after, never locked.
 export function QuoteLineRows({
-  customers,
+  opportunities,
   mixes,
   priceEntries,
   labels,
 }: {
-  customers: CustomerOption[];
+  opportunities: OpportunityOption[];
   mixes: MixOption[];
   priceEntries: PriceEntry[];
   labels: {
-    customer: string;
-    customerPlaceholder: string;
+    opportunity: string;
+    opportunityPlaceholder: string;
+    noQuotableOpportunities: string;
     mixPlaceholder: string;
     volume: string;
     unitPrice: string;
@@ -37,10 +39,12 @@ export function QuoteLineRows({
     noPriceOnFile: string;
   };
 }) {
-  const [customerId, setCustomerId] = useState("");
+  const [opportunityId, setOpportunityId] = useState("");
   const [rows, setRows] = useState<number[]>([0]);
   const [nextId, setNextId] = useState(1);
   const [selectedMix, setSelectedMix] = useState<Record<number, string>>({});
+
+  const customerId = opportunities.find((o) => o.id === opportunityId)?.customerId ?? "";
 
   function addRow() {
     setRows((r) => [...r, nextId]);
@@ -57,21 +61,20 @@ export function QuoteLineRows({
   return (
     <div className="flex flex-col gap-3">
       <div>
-        <label className={"block text-xs font-medium text-ink-muted mb-1"}>{labels.customer}</label>
+        <label className={"block text-xs font-medium text-ink-muted mb-1"}>{labels.opportunity}</label>
         <select
-          name="customerId"
+          name="opportunityId"
           required
-          value={customerId}
-          onChange={(e) => setCustomerId(e.target.value)}
+          value={opportunityId}
+          onChange={(e) => setOpportunityId(e.target.value)}
           className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-accent"
         >
-          <option value="" disabled>{labels.customerPlaceholder}</option>
-          {customers.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.code ? `${c.code} — ${c.legalName}` : c.legalName}
-            </option>
+          <option value="" disabled>{labels.opportunityPlaceholder}</option>
+          {opportunities.map((o) => (
+            <option key={o.id} value={o.id}>{o.label}</option>
           ))}
         </select>
+        {opportunities.length === 0 && <p className="mt-1 text-xs text-warn">{labels.noQuotableOpportunities}</p>}
       </div>
 
       {rows.map((id) => {

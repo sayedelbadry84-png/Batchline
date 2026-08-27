@@ -1171,7 +1171,7 @@ const ar = {
         empty: "لا توجد فرص بيعية بعد.",
       },
       visits: {
-        col: { date: "التاريخ", linkedTo: "مرتبطة بـ", visitedBy: "بواسطة", purpose: "الغرض", location: "الموقع", followUp: "متابعة بتاريخ" },
+        col: { number: "الرقم", date: "التاريخ", linkedTo: "مرتبطة بـ", visitedBy: "بواسطة", purpose: "الغرض", location: "الموقع", followUp: "متابعة بتاريخ" },
         purposeLabel: { INTRO: "تعارف", FOLLOW_UP: "متابعة", SITE_SURVEY: "معاينة موقع", COMPLAINT: "شكوى", OTHER: "أخرى" },
         newTitle: "تسجيل زيارة ميدانية",
         f: {
@@ -1189,7 +1189,8 @@ const ar = {
         statusLabel: { DRAFT: "مسودة", SENT: "مُرسل", ACCEPTED: "مقبول", DECLINED: "مرفوض", EXPIRED: "منتهي الصلاحية" },
         newTitle: "عرض سعر جديد",
         f: {
-          customer: "العميل", customerPlaceholder: "اختر العميل…", opportunityId: "الفرصة البيعية (اختياري)",
+          opportunityId: "الفرصة البيعية", opportunityPlaceholder: "اختر فرصة بيعية…",
+          noQuotableOpportunities: "لا توجد فرصة بيعية مرتبطة بعميل بعد — يجب ترقية الفرصة إلى عميل أولاً من تبويب الفرص.",
           projectId: "المشروع (اختياري)", siteId: "المصنع", validUntil: "صالح حتى", notes: "ملاحظات",
           mixPlaceholder: "اختر خلطة…", volume: "الكمية (م³)", unitPrice: "سعر الوحدة", addAnother: "إضافة بند آخر",
           remove: "حذف", noPriceOnFile: "لا يوجد سعر متفق عليه مسبقًا لهذا العميل مع هذه الخلطة — أُدخل السعر يدويًا.",
@@ -1218,12 +1219,26 @@ const ar = {
       // sales/actions.ts and the ApprovalStatus component in sales/page.tsx.
       approval: {
         col: "الاعتماد",
-        pending: "بانتظار اعتماد مدير المبيعات",
-        awaitingPlantsManager: "بانتظار اعتماد مدير المصانع",
-        salesManagerApproved: "اعتمد مدير المبيعات",
         fullyApproved: "معتمد بالكامل",
-        approveSalesManager: "اعتماد (مدير المبيعات)",
-        approvePlantsManager: "اعتماد (مدير المصانع)",
+        // الفرصة البيعية والزيارة الميدانية: اعتماد أولي من مشرف المبيعات،
+        // ثم اعتماد نهائي من مدير المبيعات — واعتماد مدير المبيعات مباشرة
+        // يغني عن اعتماد المشرف (انظر approveFinalStage).
+        oppVisit: {
+          pending: "بانتظار اعتماد مشرف المبيعات",
+          awaitingFinal: "بانتظار اعتماد مدير المبيعات",
+          initialApproved: "اعتمد مشرف المبيعات",
+          approveInitial: "اعتماد أولي (مشرف المبيعات)",
+          approveFinal: "اعتماد نهائي (مدير المبيعات)",
+        },
+        // عرض السعر: اعتماد أولي من مدير المبيعات، ثم اعتماد نهائي من مدير
+        // المصانع — واعتماد مدير المصانع مباشرة يغني عن اعتماد مدير المبيعات.
+        quote: {
+          pending: "بانتظار اعتماد مدير المبيعات",
+          awaitingFinal: "بانتظار اعتماد مدير المصانع",
+          initialApproved: "اعتمد مدير المبيعات",
+          approveInitial: "اعتماد أولي (مدير المبيعات)",
+          approveFinal: "اعتماد نهائي (مدير المصانع)",
+        },
       },
     },
     purchasing: {
