@@ -25,6 +25,7 @@ import {
   activityForRole,
   getIncentiveSiteData,
   buildSitePricingMap,
+  isReachBasedRole,
   INCENTIVE_ROLE_KEYS,
 } from "@/lib/incentives";
 import { markDrumReturnFate } from "../trips/actions";
@@ -313,26 +314,34 @@ export default async function ReportsPage({
           // Equipment tab above — not scoped to the site/plant filter,
           // since a person can work more than one plant in the same
           // period (see aggregateIncentiveResults' own comment).
+          //
+          // Kept grouped by role, one table per job, rather than flattened
+          // into one mixed list — a pump operator/assistant is priced by
+          // volume poured (see isReachBasedRole / DEFAULT_INCENTIVE_METHOD
+          // in src/lib/incentives.ts), so showing them next to a mixer
+          // driver's trip count in the same "count" column read as if
+          // everyone were priced the same way.
           const siteData = await getIncentiveSiteData();
-          const rows = (
-            await Promise.all(
-              INCENTIVE_ROLE_KEYS.map(async (role) => {
-                const entries = await activityForRole(role, rangeStart, rangeEnd);
-                const sitePricing = buildSitePricingMap(siteData, role);
-                const results = aggregateIncentiveResults(entries, sitePricing);
-                return results.map((r) => ({
+          const byRole = await Promise.all(
+            INCENTIVE_ROLE_KEYS.map(async (role) => {
+              const entries = await activityForRole(role, rangeStart, rangeEnd);
+              const sitePricing = buildSitePricingMap(siteData, role);
+              const results = aggregateIncentiveResults(entries, sitePricing);
+              const rows = results
+                .map((r) => ({
                   key: `${role}:${r.id}`,
                   name: r.name,
-                  role,
-                  count: r.tripCount,
+                  tripCount: r.tripCount,
+                  volumeM3: r.volumeM3,
+                  siteCount: r.siteNames.length,
                   payout: r.payoutByCurrency.reduce((sum, p) => sum + p.amount, 0),
-                }));
-              }),
-            )
-          )
-            .flat()
-            .sort((a, b) => b.payout - a.payout);
-          return { rows, totalPayout: rows.reduce((sum, r) => sum + r.payout, 0) };
+                }))
+                .sort((a, b) => b.payout - a.payout);
+              return { role, volumeBased: isReachBasedRole(role), rows };
+            }),
+          );
+          const totalPayout = byRole.reduce((sum, g) => sum + g.rows.reduce((s, r) => s + r.payout, 0), 0);
+          return { byRole, totalPayout };
         })()
       : null;
 
@@ -1022,11 +1031,11 @@ export default async function ReportsPage({
             tab={tab}
             from={rangeFrom}
             to={rangeTo}
-            message={`${m.tabs.workers} ${rangeFrom} → ${rangeTo}\n${workersData.rows.map((r) => `${r.name} (${dict.roles[r.role as keyof typeof dict.roles] ?? r.role}): ${r.count}`).join("\n")}`}
+            message={`${m.tabs.workers} ${rangeFrom} → ${rangeTo}\n${workersData.rows.map((r) => `${r.name} (${dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role}): ${r.count}`).join("\n")}`}
             csvFilename={`workers-${rangeFrom}-${rangeTo}.csv`}
             csv={rowsToCsv(
               ["Name", "Role", "Count", "Volume"],
-              workersData.rows.map((r) => [r.name, dict.roles[r.role as keyof typeof dict.roles] ?? r.role, r.count, r.volumeM3]),
+              workersData.rows.map((r) => [r.name, dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role, r.count, r.volumeM3]),
             )}
           />
           <div className={ui.card}>
@@ -1043,7 +1052,7 @@ export default async function ReportsPage({
                 {workersData.rows.map((r) => (
                   <tr key={r.key}>
                     <td className={`${ui.td} font-medium`}>{r.name}</td>
-                    <td className={`${ui.td} font-mono text-xs`}>{dict.roles[r.role as keyof typeof dict.roles] ?? r.role}</td>
+                    <td className={`${ui.td} font-mono text-xs`}>{dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role}</td>
                     <td className={`${ui.td} font-mono tabular`}>{r.count}</td>
                     <td className={`${ui.td} font-mono tabular`}>
                       {r.volumeM3.toFixed(1)} {r.role === "BULKER_DRIVER" || r.role === "WATER_TANKER_DRIVER" ? "t" : "m³"}
@@ -1066,11 +1075,15 @@ export default async function ReportsPage({
             tab={tab}
             from={rangeFrom}
             to={rangeTo}
-            message={`${m.tabs.incentives} ${rangeFrom} → ${rangeTo}\n${incentivesData.rows.map((r) => `${r.name}: ${r.payout.toFixed(0)}`).join("\n")}`}
+            message={`${m.tabs.incentives} ${rangeFrom} → ${rangeTo}\n${incentivesData.byRole
+              .flatMap((g) => g.rows.map((r) => `${r.name} (${dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role}): ${r.payout.toFixed(0)}`))
+              .join("\n")}`}
             csvFilename={`incentives-${rangeFrom}-${rangeTo}.csv`}
             csv={rowsToCsv(
-              ["Name", "Role", "Count", "Payout"],
-              incentivesData.rows.map((r) => [r.name, dict.roles[r.role as keyof typeof dict.roles] ?? r.role, r.count, r.payout]),
+              ["Name", "Role", "Trips", "Volume m3", "Sites", "Payout"],
+              incentivesData.byRole.flatMap((g) =>
+                g.rows.map((r) => [r.name, dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role, r.tripCount, r.volumeM3, r.siteCount, r.payout]),
+              ),
             )}
           />
           <p className="text-sm text-ink-muted">{m.incentivesReport.intro}</p>
@@ -1078,31 +1091,47 @@ export default async function ReportsPage({
             <div className="font-mono text-2xl tabular" dir="ltr">{incentivesData.totalPayout.toLocaleString()}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.incentivesReport.col.payout}</div>
           </div>
-          <div className={ui.card}>
-            <table className={ui.table}>
-              <thead>
-                <tr>
-                  <th className={ui.th}>{m.incentivesReport.col.name}</th>
-                  <th className={ui.th}>{m.incentivesReport.col.role}</th>
-                  <th className={ui.th}>{m.incentivesReport.col.trips}</th>
-                  <th className={ui.th}>{m.incentivesReport.col.payout}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {incentivesData.rows.map((r) => (
-                  <tr key={r.key}>
-                    <td className={`${ui.td} font-medium`}>{r.name}</td>
-                    <td className={`${ui.td} font-mono text-xs`}>{dict.roles[r.role as keyof typeof dict.roles] ?? r.role}</td>
-                    <td className={`${ui.td} font-mono tabular`}>{r.count}</td>
-                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.payout.toLocaleString()}</td>
+          {incentivesData.byRole.map((group) => (
+            <div key={group.role} className={ui.card}>
+              <h2 className="mb-1 font-display text-base font-semibold">{dict.modules.incentives.roleLabel[group.role as keyof typeof dict.modules.incentives.roleLabel] ?? group.role}</h2>
+              {group.volumeBased && <p className="mb-3 text-xs text-ink-muted">{m.incentivesReport.volumeBasedNote}</p>}
+              <table className={ui.table}>
+                <thead>
+                  <tr>
+                    <th className={ui.th}>{m.incentivesReport.col.name}</th>
+                    {group.volumeBased ? (
+                      <>
+                        <th className={ui.th}>{m.incentivesReport.col.volume}</th>
+                        <th className={ui.th}>{m.incentivesReport.col.sites}</th>
+                      </>
+                    ) : (
+                      <th className={ui.th}>{m.incentivesReport.col.trips}</th>
+                    )}
+                    <th className={ui.th}>{m.incentivesReport.col.payout}</th>
                   </tr>
-                ))}
-                {incentivesData.rows.length === 0 && (
-                  <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.noRows}</span></td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {group.rows.map((r) => (
+                    <tr key={r.key}>
+                      <td className={`${ui.td} font-medium`}>{r.name}</td>
+                      {group.volumeBased ? (
+                        <>
+                          <td className={`${ui.td} font-mono tabular`}>{r.volumeM3.toFixed(1)} m³</td>
+                          <td className={`${ui.td} font-mono tabular`}>{r.siteCount}</td>
+                        </>
+                      ) : (
+                        <td className={`${ui.td} font-mono tabular`}>{r.tripCount}</td>
+                      )}
+                      <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.payout.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                  {group.rows.length === 0 && (
+                    <tr><td className={ui.td} colSpan={group.volumeBased ? 4 : 3}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ))}
         </div>
       )}
     </div>

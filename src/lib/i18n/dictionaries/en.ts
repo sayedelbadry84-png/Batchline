@@ -1075,8 +1075,9 @@ const en: typeof ar = {
         col: { name: "Name", role: "Role", count: "Trips / deliveries", volume: "Volume" },
       },
       incentivesReport: {
-        intro: "Payout by person for the selected range — see the Incentives module to change tier policies.",
-        col: { name: "Name", role: "Role", trips: "Trips", payout: "Payout" },
+        intro: "Payout by person for the selected range, split by job — see the Incentives module to change tier policies.",
+        col: { name: "Name", role: "Role", trips: "Trips", volume: "Volume poured", sites: "Sites worked", payout: "Payout" },
+        volumeBasedNote: "Priced by volume poured (m³), not trip or site count.",
       },
     },
   },
