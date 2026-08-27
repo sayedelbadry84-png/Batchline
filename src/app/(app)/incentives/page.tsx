@@ -94,6 +94,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
         <div className={ui.eyebrow}>{m.eyebrow}</div>
         <h1 className={ui.h1}>{m.title}</h1>
         <p className={ui.intro}>{m.intro}</p>
+        <p className="mt-1 text-xs text-ink-muted">{dict.nav.activePlantNote}</p>
       </header>
 
       <div className="flex gap-1 border-b border-border">

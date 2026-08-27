@@ -5,7 +5,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { buildStockLedger } from "@/lib/stock-ledger";
-import { effectiveSiteId } from "@/lib/siteScope";
+import { getActiveSiteId } from "@/lib/siteScope";
 
 export default async function StockLedgerDetailPage({
   params,
@@ -25,7 +25,7 @@ export default async function StockLedgerDetailPage({
   // page always links here with it already set (per its own material+plant
   // row); reaching this page without it falls back to every plant blended
   // together, same as before this page understood plants at all.
-  const restrictedSiteId = effectiveSiteId(user);
+  const restrictedSiteId = await getActiveSiteId(user);
   const filterSiteId = restrictedSiteId ?? (siteParam || null);
 
   const material = await prisma.material.findUnique({ where: { id } });

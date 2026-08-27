@@ -5,7 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createTestBatch, addLabResult, createCertificate, updateCertificate, approveWasteMemo, recordWasteMemoNote } from "./actions";
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
-import { effectiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
 function daysUntil(date: Date) {
   return Math.ceil((date.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
@@ -45,7 +45,7 @@ export default async function QualityPage({
   const { dict } = await getDictionary();
   const m = dict.modules.quality;
   const { editCert: editCertId } = await searchParams;
-  const siteId = effectiveSiteId(user);
+  const siteId = await getActiveSiteId(user);
 
   const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos, unfinishedWasteMemos] = await Promise.all([
     prisma.testBatch.findMany({

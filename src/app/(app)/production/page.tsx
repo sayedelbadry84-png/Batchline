@@ -6,7 +6,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { releaseBatchTicket, createManualRelease } from "./actions";
 import { closeReservation } from "../reservations/actions";
-import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { SitePlantSelect } from "@/components/SitePlantSelect";
 import { Modal } from "@/components/Modal";
@@ -53,7 +53,7 @@ export default async function ProductionPage({
   const { dict } = await getDictionary();
   const m = dict.modules.production;
   const { manualBooking, date: dateRaw, dateTo: dateToRaw } = await searchParams;
-  const siteId = effectiveSiteId(user);
+  const siteId = await getActiveSiteId(user);
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
   const selectedDate = isDateParam(dateRaw) ? dateRaw : toDateParam(new Date());
   // Optional end date — when set and later than selectedDate, the delivery

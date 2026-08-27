@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 
 export default async function StockLedgerPage({
   searchParams,
@@ -14,7 +14,7 @@ export default async function StockLedgerPage({
   const { dict } = await getDictionary();
   const m = dict.modules.stockLedger;
   const { site: siteParam } = await searchParams;
-  const restrictedSiteId = effectiveSiteId(user);
+  const restrictedSiteId = await getActiveSiteId(user);
 
   // Restricted to the caller's own plant (never more than one row per
   // material for them); every plant for ADMIN, since a physical

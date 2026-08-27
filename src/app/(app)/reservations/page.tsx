@@ -4,7 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal, closeReservation } from "./actions";
-import { effectiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { canPerformAction } from "@/lib/permissions";
 import { Modal } from "@/components/Modal";
@@ -52,7 +52,7 @@ export default async function ReservationsPage({
   const { dict } = await getDictionary();
   const m = dict.modules.reservations;
   const { edit: editId, date: dateRaw, dateTo: dateToRaw, new: newFlag } = await searchParams;
-  const siteId = effectiveSiteId(user);
+  const siteId = await getActiveSiteId(user);
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
   const selectedDate = isDateParam(dateRaw) ? dateRaw : toDateParam(new Date());
   // A plain single date input defaulting to "today" plus an optional

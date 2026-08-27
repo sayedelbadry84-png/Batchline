@@ -5,7 +5,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { markInvoiceSent, recordPayment, cancelInvoice } from "../actions";
-import { effectiveSiteId } from "@/lib/siteScope";
+import { getActiveSiteId } from "@/lib/siteScope";
 
 const statusChip: Record<string, string> = {
   DRAFT: "bg-surface-alt text-ink-muted",
@@ -36,7 +36,7 @@ export default async function InvoiceDetailPage({
     },
   });
   if (!invoice) notFound();
-  const siteId = effectiveSiteId(user);
+  const siteId = await getActiveSiteId(user);
   if (siteId !== null && invoice.plant?.siteId !== siteId) notFound();
 
   const paid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);

@@ -9,7 +9,7 @@ import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
 import { flagMaintenanceDue } from "@/lib/maintenance";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { DrumTimer } from "@/components/DrumTimer";
-import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 
 const SEVEN_DAYS = 7;
@@ -30,7 +30,7 @@ export default async function DashboardPage() {
   const { dict } = await getDictionary();
   const d = dict.dashboard;
   const r = dict.modules.reports;
-  const siteId = effectiveSiteId(user);
+  const siteId = await getActiveSiteId(user);
 
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();

@@ -4,7 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createSilo, updateSilo, updateSiloLevel, setSiloSharing, createHopper, updateHopperLevel, setHopperSharing, createChemicalTank, updateChemicalTankLevel } from "./actions";
-import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { SitePlantSelect } from "@/components/SitePlantSelect";
 
 function levelColor(pct: number, minPct: number) {
@@ -22,7 +22,7 @@ export default async function SilosPage({
   const { dict } = await getDictionary();
   const m = dict.modules.silos;
   const { edit: editId } = await searchParams;
-  const siteId = effectiveSiteId(user);
+  const siteId = await getActiveSiteId(user);
 
   const [silos, sitesForPicker, hoppers, chemicalTanks, admixtureMaterials] = await Promise.all([
     prisma.silo.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true }, orderBy: { createdAt: "asc" } }),

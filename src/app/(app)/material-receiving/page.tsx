@@ -5,7 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createReceipt, updateReceipt, deleteReceipt, returnReceiptToSupplier, setQcStatus } from "./actions";
 import { createSupplier } from "../suppliers/actions";
-import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { SitePlantSelect } from "@/components/SitePlantSelect";
 
 const qcChip: Record<string, string> = {
@@ -25,7 +25,7 @@ export default async function MaterialReceivingPage({
   const { dict } = await getDictionary();
   const m = dict.modules.materialReceiving;
   const { edit: editId, newSupplier } = await searchParams;
-  const siteId = effectiveSiteId(user);
+  const siteId = await getActiveSiteId(user);
 
   const [receipts, sitesForPicker, suppliers, materials, silos, hoppers, deliveryDrivers] = await Promise.all([
     prisma.materialReceipt.findMany({

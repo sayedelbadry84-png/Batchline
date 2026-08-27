@@ -5,7 +5,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { generateInvoiceForProject, savePriceListEntry } from "./actions";
-import { effectiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
 const statusChip: Record<string, string> = {
   DRAFT: "bg-surface-alt text-ink-muted",
@@ -25,7 +25,7 @@ export default async function BillingPage({
   const { editPrice: editPriceId } = await searchParams;
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
-  const siteId = effectiveSiteId(user);
+  const siteId = await getActiveSiteId(user);
 
   const [uninvoicedTrips, invoicesRaw, customers, mixes, priceEntries] = await Promise.all([
     prisma.trip.findMany({

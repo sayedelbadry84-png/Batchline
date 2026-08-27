@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { logout } from "@/app/login/actions";
 import { setLocale } from "@/app/locale-actions";
+import { setActiveSite } from "@/app/site-actions";
 import { MODULE_NAV, VIEW_NAV, type ModuleKey } from "@/lib/permissions";
 import type { Dictionary } from "@/lib/i18n";
 import type { Locale } from "@/lib/i18n/config";
@@ -14,6 +15,8 @@ export function Sidebar({
   nav,
   common,
   locale,
+  sites,
+  activeSiteId,
 }: {
   user: { name: string; role: string };
   // Computed server-side (permissions are database-backed — see
@@ -27,6 +30,11 @@ export function Sidebar({
   nav: Dictionary["nav"];
   common: Dictionary["common"];
   locale: Locale;
+  // Only ever populated for ADMIN (see (app)/layout.tsx) — every other
+  // role has no plant to pick, since effectiveSiteId already pins them to
+  // their one site.
+  sites?: { id: string; name: string }[];
+  activeSiteId?: string | null;
 }) {
   const pathname = usePathname();
   const canSee = (key: ModuleKey) => allowedModules.includes(key);
@@ -38,6 +46,26 @@ export function Sidebar({
           Batchline
         </span>
       </div>
+
+      {sites && sites.length > 0 && (
+        <div className="mb-4">
+          <form action={setActiveSite}>
+            <select
+              name="siteId"
+              defaultValue={activeSiteId ?? ""}
+              onChange={(e) => e.currentTarget.form?.requestSubmit()}
+              className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+            >
+              <option value="">{nav.allPlants}</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </form>
+          {activeSiteId && <p className="mt-1.5 px-0.5 text-[0.68rem] text-ink-faint">{nav.activePlantNote}</p>}
+        </div>
+      )}
+
       <div className="mb-6 font-mono text-[0.65rem] tracking-widest text-ink-faint uppercase">
         {nav.section}
       </div>

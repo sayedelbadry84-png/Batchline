@@ -4,6 +4,8 @@ const ar = {
     switchLocale: "English",
   },
   nav: {
+    allPlants: "كل المصانع",
+    activePlantNote: "إنتاجية المعدات والحوافز تبقى دائماً على مستوى الشركة بالكامل، بصرف النظر عن المصنع المحدد هنا.",
     section: "عمليات المصنع",
     dashboard: "لوحة التحكم",
     mixDesigns: "تصميم الخلطة",

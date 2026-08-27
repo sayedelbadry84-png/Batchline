@@ -18,7 +18,7 @@ import {
   createSupportVehicle,
   updateSupportVehicle,
 } from "./actions";
-import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
 
 const TAB_KEYS = ["pumps", "mixers", "bulkers", "water", "loaders"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
@@ -60,7 +60,7 @@ export default async function EquipmentPage({
   const m = dict.modules.equipment;
   const { tab: tabRaw, edit: editId } = await searchParams;
   const tab: TabKey = (TAB_KEYS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as TabKey) : "pumps";
-  const siteId = effectiveSiteId(user);
+  const siteId = await getActiveSiteId(user);
 
   // Registered by Plant code only — no specific Station is chosen here (see
   // createTruck/createPump/createSupportVehicle in actions.ts); a truck or

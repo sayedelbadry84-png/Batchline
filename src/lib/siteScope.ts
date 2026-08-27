@@ -1,4 +1,5 @@
 import "server-only";
+import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import type { CurrentUser } from "@/lib/session";
 
@@ -25,6 +26,26 @@ export function effectiveSiteId(user: CurrentUser | null): string | null {
   if (!user) return NO_SITE_SENTINEL;
   if (user.role === "ADMIN") return null;
   return user.plant?.siteId ?? NO_SITE_SENTINEL;
+}
+
+// The admin-only "which plant am I currently looking at" preference — a
+// display-scope choice, never a permission. Deliberately NOT folded into
+// effectiveSiteId itself: every write-action's isPlantInScope/
+// isSiteInScope check must keep using effectiveSiteId as-is, since an
+// admin's ability to ACT on a site must never shrink just because they
+// happen to be VIEWING a different one right now. Every non-admin has no
+// choice to make (effectiveSiteId already pins them to their one site), so
+// this only ever reads the cookie for ADMIN. A stale cookie (a since-
+// deleted site) just yields empty results everywhere it's used — fails
+// safe, and self-corrects the moment the admin picks a valid site or
+// clears it — so this doesn't round-trip to the database to validate it.
+export const ACTIVE_SITE_COOKIE = "batchline_active_site";
+
+export async function getActiveSiteId(user: CurrentUser | null): Promise<string | null> {
+  const restricted = effectiveSiteId(user);
+  if (restricted !== null) return restricted;
+  const store = await cookies();
+  return store.get(ACTIVE_SITE_COOKIE)?.value || null;
 }
 
 // For models with their own plantId scalar, i.e. tied to a specific

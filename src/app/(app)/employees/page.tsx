@@ -4,7 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createEmployee, updateEmployee, createPumpCrewMember, updatePumpCrewMember, createJobTitle } from "./actions";
-import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { RoleSelect } from "@/components/RoleSelect";
 
 const ADMIN_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DISPATCHER", "ADMIN"] as const;
@@ -58,7 +58,7 @@ export default async function EmployeesPage({
   const tab: TabKey = (TAB_KEYS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as TabKey) : "mixerDriver";
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
-  const siteId = effectiveSiteId(user);
+  const siteId = await getActiveSiteId(user);
 
   const isCrewTab = tab === "pumpOperator" || tab === "pumpAssistant";
   const fixedRole = EMPLOYEE_TAB_ROLE[tab];

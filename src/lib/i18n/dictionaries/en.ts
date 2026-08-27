@@ -6,6 +6,8 @@ const en: typeof ar = {
     switchLocale: "العربية",
   },
   nav: {
+    allPlants: "All plants",
+    activePlantNote: "Equipment productivity and incentives always stay company-wide, regardless of the plant selected here.",
     section: "Plant Operations",
     dashboard: "Dashboard",
     mixDesigns: "Mix Design",

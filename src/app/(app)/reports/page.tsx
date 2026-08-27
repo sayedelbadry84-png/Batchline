@@ -28,7 +28,7 @@ import {
   INCENTIVE_ROLE_KEYS,
 } from "@/lib/incentives";
 import { markDrumReturnFate } from "../trips/actions";
-import { effectiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
+import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -95,13 +95,15 @@ export default async function ReportsPage({
   const { tab: tabRaw, from: fromRaw, to: toRaw, site: siteIdRaw, plant: plantIdRaw } = await searchParams;
   const tab: ReportTab = (REPORT_TABS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as ReportTab) : "overview";
 
-  // Full restriction: every role sees only its own site, except ADMIN
-  // (restrictedSiteId === null means unrestricted). Non-admins can't
-  // override this via the ?site= query param — the site dropdown is
-  // locked to their own site below; only the line (plant) sub-filter
-  // within it stays a free choice. Site rolls up every line at that site
-  // combined; a specific line narrows further to just its own numbers.
-  const restrictedSiteId = effectiveSiteId(user);
+  // Every role sees only its own site, except ADMIN (restrictedSiteId ===
+  // null means unrestricted) — and for ADMIN, "its own site" now means
+  // whatever they've picked in the sidebar's global plant selector (see
+  // getActiveSiteId in src/lib/siteScope.ts), same as every other screen.
+  // Non-admins can't override this via the ?site= query param — the site
+  // dropdown is locked below; only the line (plant) sub-filter within it
+  // stays a free choice. Site rolls up every line at that site combined;
+  // a specific line narrows further to just its own numbers.
+  const restrictedSiteId = await getActiveSiteId(user);
   const sites = await prisma.site.findMany({
     where: restrictedSiteId ? { id: restrictedSiteId } : {},
     orderBy: { name: "asc" },
