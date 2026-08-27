@@ -1212,6 +1212,7 @@ const en: typeof ar = {
         markSent: "Send to supplier",
         cancel: "Cancel order",
         viewLines: "View lines",
+        print: "View / Print",
         empty: "No purchase orders yet.",
       },
       contracts: {
@@ -1225,6 +1226,16 @@ const en: typeof ar = {
         add: "Create contract",
         terminate: "Terminate contract",
         empty: "No supplier contracts yet.",
+      },
+      orderDoc: {
+        docTitleAr: "أمر شراء",
+        docTitleEn: "Purchase Order",
+        poNumber: "PO No.", date: "Date", expectedDate: "Expected Date", supplier: "Supplier",
+        col: { material: "Material", ordered: "Quantity", unitPrice: "Unit Price", lineTotal: "Total" },
+        subtotal: "Subtotal", tax: "Tax", total: "Total (incl. tax)", notes: "Notes", preparedBy: "Prepared By",
+        status: "Status",
+        editableHint: "Any field can be edited before printing — editing here never changes the system's own stored data.",
+        print: "Print",
       },
     },
     maintenance: {
@@ -1272,7 +1283,7 @@ const en: typeof ar = {
       eyebrow: "Module 18 — Finance",
       title: "Finance",
       intro: "Accounts payable for suppliers, a cash-movement journal, and manual bank reconciliation — the payable side that complements the receivable side (customer invoices) Billing already handles.",
-      tabs: { overview: "Overview", payable: "Accounts Payable", cash: "Cash Ledger", reconciliation: "Bank Reconciliation" },
+      tabs: { overview: "Overview", payable: "Accounts Payable", cash: "Cash Ledger", aging: "Aging", reconciliation: "Bank Reconciliation" },
       overview: {
         arOutstanding: "Owed by customers (AR)",
         apOutstanding: "Owed to suppliers (AP)",
@@ -1306,6 +1317,12 @@ const en: typeof ar = {
         f: { siteId: "Plant", direction: "Direction", category: "Category", amount: "Amount", occurredAt: "Date", description: "Description", reference: "Reference" },
         add: "Record transaction",
         empty: "No cash transactions yet.",
+      },
+      aging: {
+        arTitle: "AR Aging (owed by customers)",
+        apTitle: "AP Aging (owed to suppliers)",
+        bucketLabel: { current: "Not yet due", d30: "1-30 days", d60: "31-60 days", d90: "61-90 days", over90: "Over 90 days" },
+        col: { item: "Item", bucket: "Bucket", outstanding: "Outstanding" },
       },
       reconciliation: {
         intro: "Every money movement not yet matched against a bank statement — customer receipts, supplier payments, and manual cash entries. Mark a movement reconciled once you've matched it by hand against the statement.",

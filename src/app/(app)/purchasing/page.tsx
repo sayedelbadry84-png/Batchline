@@ -190,6 +190,7 @@ async function OrdersTab({
                 <td className={ui.td}>
                   <div className="flex flex-col gap-1">
                     <Link href={`${baseUrl}&viewPO=${o.id}`} className="text-xs font-medium text-accent-strong hover:underline">{m.orders.viewLines}</Link>
+                    <Link href={`/purchasing/orders/${o.id}`} className="text-xs font-medium text-accent-strong hover:underline">{m.orders.print}</Link>
                     {o.status === "DRAFT" && (
                       <form action={markPurchaseOrderSent}>
                         <input type="hidden" name="id" value={o.id} />

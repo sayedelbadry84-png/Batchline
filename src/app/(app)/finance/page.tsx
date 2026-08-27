@@ -13,7 +13,27 @@ import {
   reconcileMovement,
 } from "./actions";
 
-const FINANCE_TABS = ["overview", "payable", "cash", "reconciliation"] as const;
+const FINANCE_TABS = ["overview", "payable", "cash", "aging", "reconciliation"] as const;
+const AGING_BUCKETS = [
+  { key: "current", max: 0 },
+  { key: "d30", max: 30 },
+  { key: "d60", max: 60 },
+  { key: "d90", max: 90 },
+  { key: "over90", max: Infinity },
+] as const;
+
+// Which bucket a balance falls into, by days past its due date — not due
+// yet (or due today) is "current"; everything else buckets by how many
+// days overdue, same boundaries every AR/AP aging report in the industry
+// uses (30/60/90).
+function agingBucket(dueDate: Date, now: Date): (typeof AGING_BUCKETS)[number]["key"] {
+  const daysOverdue = Math.floor((now.getTime() - dueDate.getTime()) / 86400000);
+  if (daysOverdue <= 0) return "current";
+  if (daysOverdue <= 30) return "d30";
+  if (daysOverdue <= 60) return "d60";
+  if (daysOverdue <= 90) return "d90";
+  return "over90";
+}
 type FinanceTab = (typeof FINANCE_TABS)[number];
 const CASH_CATEGORIES = ["OPERATING_EXPENSE", "PAYROLL", "UTILITIES", "FUEL", "MAINTENANCE", "OTHER_INCOME", "OWNER_CONTRIBUTION", "OTHER"] as const;
 
@@ -76,6 +96,8 @@ export default async function FinancePage({
       )}
 
       {tab === "cash" && <CashTab m={m} siteScope={siteScope} sites={sites} newCashFlag={newCashFlag} baseUrl={baseUrl} />}
+
+      {tab === "aging" && <AgingTab m={m} siteScope={siteScope} />}
 
       {tab === "reconciliation" && <ReconciliationTab m={m} dict={dict} siteScope={siteScope} />}
     </div>
@@ -399,6 +421,146 @@ async function CashTab({
           </form>
         </Modal>
       )}
+    </div>
+  );
+}
+
+async function AgingTab({
+  m,
+  siteScope,
+}: {
+  m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["finance"];
+  siteScope: Record<string, unknown>;
+}) {
+  const now = new Date();
+
+  const [invoices, bills] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { status: { notIn: ["DRAFT", "CANCELLED"] }, ...(siteScope.siteId ? { plant: { siteId: (siteScope as { siteId: string }).siteId } } : {}) },
+      include: { customer: true, payments: true },
+    }),
+    prisma.supplierBill.findMany({
+      where: { status: { notIn: ["CANCELLED"] }, ...siteScope },
+      include: { supplier: true, payments: true },
+    }),
+  ]);
+
+  // Same shape for both sides: one row per still-open invoice/bill, bucketed
+  // by how many days past its own due date it now is — a paid-off row
+  // (outstanding <= 0) never appears, same as an aging report anywhere else.
+  const arRows = invoices
+    .map((inv) => ({
+      label: `${inv.invoiceNumber} — ${inv.customer.legalName}`,
+      outstanding: inv.total - inv.payments.reduce((s, p) => s + p.amount, 0),
+      currency: inv.currency,
+      bucket: agingBucket(inv.dueDate, now),
+    }))
+    .filter((r) => r.outstanding > 0.01);
+
+  const apRows = bills
+    .map((b) => ({
+      label: `${b.billNumber} — ${b.supplier.name}`,
+      outstanding: b.total - b.payments.reduce((s, p) => s + p.amount, 0),
+      currency: b.currency,
+      bucket: agingBucket(b.dueDate, now),
+    }))
+    .filter((r) => r.outstanding > 0.01);
+
+  function bucketTotals(rows: { outstanding: number; bucket: string }[]) {
+    return Object.fromEntries(AGING_BUCKETS.map((b) => [b.key, rows.filter((r) => r.bucket === b.key).reduce((s, r) => s + r.outstanding, 0)]));
+  }
+  const arTotals = bucketTotals(arRows);
+  const apTotals = bucketTotals(apRows);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className={ui.card}>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.aging.arTitle}</h2>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              {AGING_BUCKETS.map((b) => (
+                <th key={b.key} className={`${ui.th} text-center`}>{m.aging.bucketLabel[b.key]}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              {AGING_BUCKETS.map((b) => (
+                <td key={b.key} className={`${ui.td} text-center font-mono ${b.key !== "current" && arTotals[b.key] > 0 ? "text-critical font-semibold" : ""}`}>
+                  {arTotals[b.key].toFixed(0)}
+                </td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+        {arRows.length > 0 && (
+          <table className={`${ui.table} mt-4`}>
+            <thead>
+              <tr>
+                <th className={ui.th}>{m.aging.col.item}</th>
+                <th className={ui.th}>{m.aging.col.bucket}</th>
+                <th className={ui.th}>{m.aging.col.outstanding}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {arRows.map((r) => (
+                <tr key={r.label}>
+                  <td className={ui.td}>{r.label}</td>
+                  <td className={ui.td}>
+                    <span className={`${ui.chip} ${r.bucket === "current" ? "bg-surface-alt text-ink-muted" : "bg-critical-soft text-critical"}`}>{m.aging.bucketLabel[r.bucket]}</span>
+                  </td>
+                  <td className={`${ui.td} font-mono`}>{r.outstanding.toFixed(2)} {r.currency}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-3 font-display text-lg font-semibold">{m.aging.apTitle}</h2>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              {AGING_BUCKETS.map((b) => (
+                <th key={b.key} className={`${ui.th} text-center`}>{m.aging.bucketLabel[b.key]}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              {AGING_BUCKETS.map((b) => (
+                <td key={b.key} className={`${ui.td} text-center font-mono ${b.key !== "current" && apTotals[b.key] > 0 ? "text-critical font-semibold" : ""}`}>
+                  {apTotals[b.key].toFixed(0)}
+                </td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+        {apRows.length > 0 && (
+          <table className={`${ui.table} mt-4`}>
+            <thead>
+              <tr>
+                <th className={ui.th}>{m.aging.col.item}</th>
+                <th className={ui.th}>{m.aging.col.bucket}</th>
+                <th className={ui.th}>{m.aging.col.outstanding}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {apRows.map((r) => (
+                <tr key={r.label}>
+                  <td className={ui.td}>{r.label}</td>
+                  <td className={ui.td}>
+                    <span className={`${ui.chip} ${r.bucket === "current" ? "bg-surface-alt text-ink-muted" : "bg-critical-soft text-critical"}`}>{m.aging.bucketLabel[r.bucket]}</span>
+                  </td>
+                  <td className={`${ui.td} font-mono`}>{r.outstanding.toFixed(2)} {r.currency}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
