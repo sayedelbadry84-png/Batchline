@@ -30,8 +30,11 @@ export function effectiveSiteId(user: CurrentUser | null): string | null {
 // For models with their own plantId scalar, i.e. tied to a specific
 // station (Employee, Truck, Pump, MaterialReceipt, Silo, Hopper, Invoice,
 // ...) — NOT Reservation, which is booked at the Plant/Site level; see
-// reservationSiteScopeWhere below for that one.
-export function plantScopeWhere(siteId: string | null) {
+// reservationSiteScopeWhere below for that one. plantId, when given,
+// narrows straight to that one line and wins over siteId (a specific
+// station is always inside its own site, so there's nothing to combine).
+export function plantScopeWhere(siteId: string | null | undefined, plantId?: string) {
+  if (plantId) return { plantId };
   return siteId ? { plant: { siteId } } : {};
 }
 
@@ -39,14 +42,16 @@ export function plantScopeWhere(siteId: string | null) {
 // booked against a factory (Site), not a specific station (Plant); which
 // station actually produces it is chosen later, at batch-ticket release
 // time (see the Reservation model comment).
-export function reservationSiteScopeWhere(siteId: string | null) {
+export function reservationSiteScopeWhere(siteId: string | null | undefined) {
   return siteId ? { siteId } : {};
 }
 
 // For Trip and anything hanging off it (DrumReturn, TestBatch), which has
 // no plantId of its own — its site is whichever plant released the batch
-// ticket it's fulfilling.
-export function tripPlantScopeWhere(siteId: string | null) {
+// ticket it's fulfilling. Same plantId-wins-over-siteId rule as
+// plantScopeWhere above.
+export function tripPlantScopeWhere(siteId: string | null | undefined, plantId?: string) {
+  if (plantId) return { batchTicket: { plantId } };
   return siteId ? { batchTicket: { plant: { siteId } } } : {};
 }
 

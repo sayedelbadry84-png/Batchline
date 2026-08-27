@@ -966,7 +966,7 @@ const en: typeof ar = {
       scopeNote: "Scoped to the selected plant/station.",
       equipmentScopeNote: "Equipment productivity is always company-wide, by equipment code — the plant/station filter above doesn't affect it.",
       incentivesScopeNote: "Incentives are always company-wide per person — the plant/station filter above doesn't affect them, since a person can work more than one plant in the same period.",
-      overviewScopeNote: "Overview always covers every site — pick a specific site or line on any other tab.",
+      overviewScopeNote: "Showing every site combined — pick a plant or station above to narrow this.",
       productionTitle: "Production",
       producedToday: "Produced today",
       produced7d: "Produced, last 7 days",

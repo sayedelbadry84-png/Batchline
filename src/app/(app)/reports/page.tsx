@@ -128,27 +128,28 @@ export default async function ReportsPage({
   const nowMs = Date.now();
   const since = new Date(nowMs - SEVEN_DAYS_MS);
 
-  // Overview always reflects the caller's mandatory site restriction (null
-  // only for ADMIN) — never the optional site/line drilldown above, so a
-  // non-admin's Overview always reads as "my whole site," same as before
-  // restriction existed except now actually capped for everyone else.
+  // Overview now respects the same site/line drilldown as every other tab
+  // (siteId/plantId above, already capped to the caller's own site for a
+  // non-admin) — it used to ignore that filter entirely and always show
+  // every site combined, which read as a bug the moment someone actually
+  // picked a specific plant here and saw company-wide numbers anyway.
   const [completedTickets, closedTrips, labResults, testBatches, silos, invoices] = await Promise.all([
     prisma.batchTicket.findMany({
-      where: { status: "COMPLETE", ...plantScopeWhere(restrictedSiteId) },
+      where: { status: "COMPLETE", ...plantScopeWhere(siteId, plantId) },
       include: { components: { include: { material: true } } },
     }),
     prisma.trip.findMany({
-      where: { status: "CLOSED", ...tripPlantScopeWhere(restrictedSiteId) },
+      where: { status: "CLOSED", ...tripPlantScopeWhere(siteId, plantId) },
       include: { drumReturn: true, batchTicket: true },
     }),
-    prisma.labResult.findMany({ where: { ...(restrictedSiteId ? { testBatch: { trip: tripPlantScopeWhere(restrictedSiteId) } } : {}) } }),
+    prisma.labResult.findMany({ where: { ...(siteId ? { testBatch: { trip: tripPlantScopeWhere(siteId, plantId) } } : {}) } }),
     prisma.testBatch.findMany({
-      where: { ...(restrictedSiteId ? { trip: tripPlantScopeWhere(restrictedSiteId) } : {}) },
+      where: { ...(siteId ? { trip: tripPlantScopeWhere(siteId, plantId) } : {}) },
       include: { trip: { include: { batchTicket: { include: { mix: true } } } } },
     }),
-    prisma.silo.findMany({ where: { ...plantScopeWhere(restrictedSiteId) } }),
+    prisma.silo.findMany({ where: { ...plantScopeWhere(siteId, plantId) } }),
     prisma.invoice.findMany({
-      where: { status: { not: "CANCELLED" }, ...plantScopeWhere(restrictedSiteId) },
+      where: { status: { not: "CANCELLED" }, ...plantScopeWhere(siteId, plantId) },
       include: { payments: true },
     }),
   ]);
@@ -168,7 +169,7 @@ export default async function ReportsPage({
     where: {
       status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] },
       pourWindowStart: { gte: todayStart, lt: outlookEnd },
-      ...reservationSiteScopeWhere(restrictedSiteId),
+      ...reservationSiteScopeWhere(siteId),
     },
     include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true, trip: { select: { volumeDeliveredM3: true } } } } },
   });
@@ -393,11 +394,11 @@ export default async function ReportsPage({
           </div>
         )}
         <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">{m.applyScope}</button>
-        {tab !== "overview" && tab !== "equipment" && tab !== "incentives" && (siteId || plantId) && <p className="text-xs text-ink-muted">{m.scopeNote}</p>}
+        {tab !== "equipment" && tab !== "incentives" && (siteId || plantId) && <p className="text-xs text-ink-muted">{m.scopeNote}</p>}
         {tab === "equipment" && <p className="text-xs text-ink-muted">{m.equipmentScopeNote}</p>}
         {tab === "incentives" && <p className="text-xs text-ink-muted">{m.incentivesScopeNote}</p>}
       </form>
-      {tab === "overview" && <p className="no-print text-xs text-ink-muted">{m.overviewScopeNote}</p>}
+      {tab === "overview" && !siteId && <p className="no-print text-xs text-ink-muted">{m.overviewScopeNote}</p>}
 
       <div className="no-print flex flex-wrap gap-1 border-b border-border">
         {REPORT_TABS.map((t) => (
