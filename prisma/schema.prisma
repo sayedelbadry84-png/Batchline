@@ -79,6 +79,9 @@ model User {
   fieldVisitPlantsManagerApprovals  FieldVisit[]  @relation("FieldVisitPlantsManagerApproval")
   quoteSalesManagerApprovals        Quote[]       @relation("QuoteSalesManagerApproval")
   quotePlantsManagerApprovals       Quote[]       @relation("QuotePlantsManagerApproval")
+  attendanceRecordsRecorded         AttendanceRecord[] @relation("AttendanceRecordedBy")
+  leaveRequestsRequested            LeaveRequest[]      @relation("LeaveRequestedBy")
+  leaveRequestsApproved             LeaveRequest[]      @relation("LeaveApprovedBy")
 }
 
 model Session {
@@ -524,6 +527,12 @@ model Employee {
   // "Transfer to another plant" is just editing plantId above, not a
   // separate status value.
   status        String    @default("ACTIVE")
+  // Days per calendar year — HR's own default (21, a common regional
+  // labor-law minimum), overridable per employee. Purely informational
+  // context shown next to a new leave request (see leave/actions.ts);
+  // nothing here hard-blocks a request that would exceed it, since real
+  // policies sometimes allow unpaid overflow.
+  annualLeaveEntitlementDays Int @default(21)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -533,6 +542,64 @@ model Employee {
   defaultForTrucks          Truck[]
   defaultForSupportVehicles SupportVehicle[]
   user                      User?
+  attendanceRecords         AttendanceRecord[]
+  leaveRequests             LeaveRequest[]
+}
+
+// ---------------------------------------------------------------------------
+// HR — daily attendance and leave requests, both keyed to the same Employee
+// roster the rest of the app already uses (no separate HR-only person
+// table). Recorded by whoever has Employees access (an admin/plant admin),
+// same as the roster itself — this app has no employee self-service portal
+// anywhere, so "who requested/recorded" is always a staff member acting on
+// the employee's behalf, tracked via recordedById/requestedById.
+// ---------------------------------------------------------------------------
+
+model AttendanceRecord {
+  id           String   @id @default(cuid())
+  employeeId   String
+  employee     Employee @relation(fields: [employeeId], references: [id])
+  // Day-level, not a timestamp — checkInAt/checkOutAt below carry the
+  // actual times when known. One row per employee per calendar day (see
+  // the unique constraint), so re-recording the same day is always an
+  // update, never a duplicate.
+  date         DateTime
+  checkInAt    DateTime?
+  checkOutAt   DateTime?
+  status       String   @default("PRESENT") // PRESENT, ABSENT, LATE, HALF_DAY, ON_LEAVE, HOLIDAY
+  notes        String?
+  recordedById String
+  recordedBy   User     @relation("AttendanceRecordedBy", fields: [recordedById], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([employeeId, date])
+}
+
+model LeaveRequest {
+  id            String    @id @default(cuid())
+  requestNumber String    @unique // LV-YYYY-NNNN
+  employeeId    String
+  employee      Employee  @relation(fields: [employeeId], references: [id])
+  type          String // ANNUAL, SICK, UNPAID, EMERGENCY, OTHER
+  startDate     DateTime
+  endDate       DateTime
+  // Inclusive day count, computed once at creation from startDate/endDate
+  // — snapshotted rather than always recomputed so an edit to how "days"
+  // gets calculated later never silently rewrites an already-decided
+  // request's own numbers, same reasoning as Invoice/Quote snapshotting
+  // their tax rate at generation time.
+  daysCount     Float
+  reason        String?
+  status        String    @default("PENDING") // PENDING, APPROVED, REJECTED, CANCELLED
+  approvedById  String?
+  approvedBy    User?     @relation("LeaveApprovedBy", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+  rejectionNote String?
+  requestedById String
+  requestedBy   User      @relation("LeaveRequestedBy", fields: [requestedById], references: [id])
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 }
 
 // Admin-managed job-title catalog — supplements the hardcoded role list on

@@ -6,7 +6,10 @@ import { getCurrentUser, requireRole } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { logTransferIfChanged } from "@/lib/transferAudit";
 import { OTHER_ROLE_SENTINEL } from "@/lib/employeeRole";
+import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
+
+const HR_ROLES = ["ADMIN", "PLANT_ADMIN"];
 
 // Picking "Other" in the admin-tab role select submits this sentinel plus
 // a typed newRoleName instead of a catalog value — resolve it down to a
@@ -161,5 +164,141 @@ export async function updatePumpCrewMember(formData: FormData) {
   await logTransferIfChanged("Employees", id, existingMember.plantId, plantId);
 
   await logAudit({ module: "Employees", recordId: id, afterValue: name, reasonCode: "PUMP_CREW_UPDATED" });
+  revalidatePath("/employees");
+}
+
+// --- HR: attendance & leave ------------------------------------------------
+
+// One row per employee per day, upserted — re-recording the same day (a
+// correction, or filling in a check-out time later) is always an update,
+// never a duplicate, thanks to the @@unique([employeeId, date]) constraint.
+export async function recordAttendance(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, HR_ROLES);
+
+  const employeeId = String(formData.get("employeeId") ?? "");
+  const dateRaw = String(formData.get("date") ?? "");
+  const checkInRaw = String(formData.get("checkInAt") ?? "");
+  const checkOutRaw = String(formData.get("checkOutAt") ?? "");
+  const status = String(formData.get("status") ?? "PRESENT");
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+
+  if (!employeeId || !dateRaw) return;
+  const date = new Date(`${dateRaw}T00:00:00`);
+
+  await prisma.attendanceRecord.upsert({
+    where: { employeeId_date: { employeeId, date } },
+    create: {
+      employeeId,
+      date,
+      status,
+      notes,
+      checkInAt: checkInRaw ? new Date(`${dateRaw}T${checkInRaw}`) : null,
+      checkOutAt: checkOutRaw ? new Date(`${dateRaw}T${checkOutRaw}`) : null,
+      recordedById: user!.id,
+    },
+    update: {
+      status,
+      notes,
+      checkInAt: checkInRaw ? new Date(`${dateRaw}T${checkInRaw}`) : null,
+      checkOutAt: checkOutRaw ? new Date(`${dateRaw}T${checkOutRaw}`) : null,
+      recordedById: user!.id,
+    },
+  });
+
+  await logAudit({ module: "Employees", recordId: employeeId, afterValue: `${dateRaw} — ${status}`, reasonCode: "ATTENDANCE_RECORDED" });
+  revalidatePath("/employees");
+}
+
+export async function createLeaveRequest(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, HR_ROLES);
+
+  const employeeId = String(formData.get("employeeId") ?? "");
+  const type = String(formData.get("type") ?? "");
+  const startDateRaw = String(formData.get("startDate") ?? "");
+  const endDateRaw = String(formData.get("endDate") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim() || null;
+
+  if (!employeeId || !type || !startDateRaw || !endDateRaw) return;
+  const startDate = new Date(`${startDateRaw}T00:00:00`);
+  const endDate = new Date(`${endDateRaw}T00:00:00`);
+  if (endDate < startDate) return;
+  const daysCount = Math.round((endDate.getTime() - startDate.getTime()) / 86400000) + 1;
+
+  const leave = await withSequentialNumber(
+    "LV",
+    () => prisma.leaveRequest.count(),
+    (requestNumber) =>
+      prisma.leaveRequest.create({
+        data: { requestNumber, employeeId, type, startDate, endDate, daysCount, reason, requestedById: user!.id },
+      }),
+  );
+
+  await logAudit({ module: "Employees", recordId: leave.id, afterValue: `${leave.requestNumber} — ${type}, ${daysCount}d`, reasonCode: "LEAVE_REQUESTED" });
+  revalidatePath("/employees");
+}
+
+// Approving IS what puts the employee "on leave" on the attendance record —
+// same "the action is the effect" shape as logFieldVisit auto-advancing an
+// Opportunity's stage in the Sales module. One AttendanceRecord per day in
+// the range, upserted so it overwrites whatever (if anything) was already
+// recorded for those days.
+export async function approveLeaveRequest(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, HR_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const leave = await prisma.leaveRequest.findUnique({ where: { id } });
+  if (!leave || leave.status !== "PENDING") return;
+
+  await prisma.leaveRequest.update({ where: { id }, data: { status: "APPROVED", approvedAt: new Date(), approvedById: user!.id } });
+
+  const days: Date[] = [];
+  for (let d = new Date(leave.startDate); d <= leave.endDate; d.setDate(d.getDate() + 1)) days.push(new Date(d));
+  for (const date of days) {
+    await prisma.attendanceRecord.upsert({
+      where: { employeeId_date: { employeeId: leave.employeeId, date } },
+      create: { employeeId: leave.employeeId, date, status: "ON_LEAVE", recordedById: user!.id },
+      update: { status: "ON_LEAVE", recordedById: user!.id },
+    });
+  }
+
+  await logAudit({ module: "Employees", recordId: id, afterValue: "APPROVED", reasonCode: "LEAVE_APPROVED" });
+  revalidatePath("/employees");
+}
+
+export async function rejectLeaveRequest(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, HR_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  const rejectionNote = String(formData.get("rejectionNote") ?? "").trim();
+  if (!id || !rejectionNote) return;
+
+  const leave = await prisma.leaveRequest.findUnique({ where: { id } });
+  if (!leave || leave.status !== "PENDING") return;
+
+  await prisma.leaveRequest.update({ where: { id }, data: { status: "REJECTED", approvedAt: new Date(), approvedById: user!.id, rejectionNote } });
+
+  await logAudit({ module: "Employees", recordId: id, afterValue: `REJECTED — ${rejectionNote}`, reasonCode: "LEAVE_REJECTED" });
+  revalidatePath("/employees");
+}
+
+export async function cancelLeaveRequest(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, HR_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const leave = await prisma.leaveRequest.findUnique({ where: { id } });
+  if (!leave || leave.status !== "PENDING") return;
+
+  await prisma.leaveRequest.update({ where: { id }, data: { status: "CANCELLED" } });
+
+  await logAudit({ module: "Employees", recordId: id, afterValue: "CANCELLED", reasonCode: "LEAVE_CANCELLED" });
   revalidatePath("/employees");
 }

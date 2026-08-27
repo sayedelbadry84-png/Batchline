@@ -21,7 +21,10 @@ export const MODULE_ROLES = {
   // "customers" once the two screens merged.
   customers: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
   suppliers: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
-  employees: ["ADMIN"],
+  // PLANT_ADMIN joins ADMIN here specifically for the HR side (attendance/
+  // leave, added alongside the roster) — administrative plant-level work
+  // is exactly what that role exists for.
+  employees: ["ADMIN", "PLANT_ADMIN"],
   incentives: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   plants: ["PLANT_OPERATOR", "ADMIN"],
   billing: ["ACCOUNTANT", "ADMIN"],

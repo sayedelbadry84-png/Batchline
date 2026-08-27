@@ -3,19 +3,34 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createEmployee, updateEmployee, createPumpCrewMember, updatePumpCrewMember, createJobTitle } from "./actions";
+import {
+  createEmployee,
+  updateEmployee,
+  createPumpCrewMember,
+  updatePumpCrewMember,
+  createJobTitle,
+  recordAttendance,
+  createLeaveRequest,
+  approveLeaveRequest,
+  rejectLeaveRequest,
+  cancelLeaveRequest,
+} from "./actions";
 import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { RoleSelect } from "@/components/RoleSelect";
 
 const ADMIN_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DISPATCHER", "ADMIN"] as const;
 const EMPLOYEE_STATUSES = ["ACTIVE", "FROZEN", "REMOVED"] as const;
+const ATTENDANCE_STATUSES = ["PRESENT", "ABSENT", "LATE", "HALF_DAY", "ON_LEAVE", "HOLIDAY"] as const;
+const LEAVE_TYPES = ["ANNUAL", "SICK", "UNPAID", "EMERGENCY", "OTHER"] as const;
 
 // One entry per tab: which model backs it, how its rows are filtered, and
 // (for the employee-backed tabs) whether the role is fixed by the tab
 // itself or picked from a list — a person only shows up in the tab their
 // role already puts them in, so a fixed-role tab's create/edit form never
-// asks for a role at all.
-const TAB_KEYS = ["mixerDriver", "pumpOperator", "pumpAssistant", "bulkerDriver", "waterDriver", "loaderDriver", "admin"] as const;
+// asks for a role at all. "attendance"/"leave" are cross-role — every
+// active employee regardless of which other tab they'd show up in — so
+// they're rendered by their own branch below, same as isCrewTab already is.
+const TAB_KEYS = ["mixerDriver", "pumpOperator", "pumpAssistant", "bulkerDriver", "waterDriver", "loaderDriver", "admin", "attendance", "leave"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
 
 const EMPLOYEE_TAB_ROLE: Partial<Record<TabKey, string>> = {
@@ -49,19 +64,24 @@ const statusChip: Record<string, string> = {
 export default async function EmployeesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; edit?: string }>;
+  searchParams: Promise<{ tab?: string; edit?: string; date?: string; reject?: string }>;
 }) {
   const user = await requirePageAccess("employees");
   const { dict } = await getDictionary();
   const m = dict.modules.employees;
-  const { tab: tabRaw, edit: editId } = await searchParams;
+  const { tab: tabRaw, edit: editId, date: dateRaw, reject: rejectId } = await searchParams;
   const tab: TabKey = (TAB_KEYS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as TabKey) : "mixerDriver";
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
   const siteId = await getActiveSiteId(user);
 
   const isCrewTab = tab === "pumpOperator" || tab === "pumpAssistant";
+  const isAttendanceTab = tab === "attendance";
+  const isLeaveTab = tab === "leave";
+  const isHrTab = isAttendanceTab || isLeaveTab;
   const fixedRole = EMPLOYEE_TAB_ROLE[tab];
+  const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const selectedDate = isDateParam(dateRaw) ? dateRaw : new Date().toISOString().slice(0, 10);
 
   // Registration picks a Site by its code, not a specific production line —
   // a person can work either line at a site interchangeably (both share
@@ -87,7 +107,7 @@ export default async function EmployeesPage({
   // ADMIN_ROLES list. A custom job title (built-in or picked via "Other"
   // on this same tab) belongs here too, or it would vanish from every
   // tab's listing the moment it's saved.
-  const employees = !isCrewTab
+  const employees = !isCrewTab && !isHrTab
     ? await prisma.employee.findMany({
         where: {
           role: fixedRole ?? { notIn: Object.values(EMPLOYEE_TAB_ROLE) },
@@ -106,6 +126,37 @@ export default async function EmployeesPage({
       })
     : [];
 
+  // Attendance/Leave are cross-role — every active employee at the caller's
+  // scope, not just one tab's own role slice.
+  const allActiveEmployees = isHrTab
+    ? await prisma.employee.findMany({ where: { status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" } })
+    : [];
+
+  const attendanceForDate = isAttendanceTab
+    ? await prisma.attendanceRecord.findMany({ where: { date: new Date(`${selectedDate}T00:00:00`), employeeId: { in: allActiveEmployees.map((e) => e.id) } } })
+    : [];
+  const attendanceByEmployee = new Map(attendanceForDate.map((a) => [a.employeeId, a]));
+
+  const yearStart = new Date(new Date().getFullYear(), 0, 1);
+  const [leaveRequests, approvedAnnualThisYear] = isLeaveTab
+    ? await Promise.all([
+        prisma.leaveRequest.findMany({
+          where: { employeeId: { in: allActiveEmployees.map((e) => e.id) } },
+          orderBy: { createdAt: "desc" },
+          take: 100,
+          include: { employee: true, requestedBy: true, approvedBy: true },
+        }),
+        prisma.leaveRequest.findMany({
+          where: { employeeId: { in: allActiveEmployees.map((e) => e.id) }, type: "ANNUAL", status: "APPROVED", startDate: { gte: yearStart } },
+          select: { employeeId: true, daysCount: true },
+        }),
+      ])
+    : [[], []];
+  const usedAnnualByEmployee = new Map<string, number>();
+  for (const l of approvedAnnualThisYear) {
+    usedAnnualByEmployee.set(l.employeeId, (usedAnnualByEmployee.get(l.employeeId) ?? 0) + l.daysCount);
+  }
+
   const tabs: { key: TabKey; label: string }[] = [
     { key: "mixerDriver", label: m.tabs.mixerDriver },
     { key: "pumpOperator", label: m.tabs.pumpOperator },
@@ -114,6 +165,8 @@ export default async function EmployeesPage({
     { key: "waterDriver", label: m.tabs.waterDriver },
     { key: "loaderDriver", label: m.tabs.loaderDriver },
     { key: "admin", label: m.tabs.admin },
+    { key: "attendance", label: m.tabs.attendance },
+    { key: "leave", label: m.tabs.leave },
   ];
 
   return (
@@ -255,6 +308,210 @@ export default async function EmployeesPage({
               {m.add}
             </button>
           </form>
+        </div>
+      ) : isAttendanceTab ? (
+        <div className="flex flex-col gap-4">
+          <form action="/employees" className="flex flex-wrap items-end gap-3">
+            <input type="hidden" name="tab" value="attendance" />
+            <div>
+              <label className={ui.label}>{m.attendance.date}</label>
+              <input type="date" name="date" defaultValue={selectedDate} className={`${ui.input} w-40`} />
+            </div>
+            <button className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">{m.attendance.applyDate}</button>
+          </form>
+
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.col.name}</th>
+                  <th className={ui.th}>{m.col.role}</th>
+                  <th className={ui.th}>{m.attendance.col.status}</th>
+                  <th className={ui.th}>{m.attendance.col.checkIn}</th>
+                  <th className={ui.th}>{m.attendance.col.checkOut}</th>
+                  <th className={ui.th}>{m.attendance.col.notes}</th>
+                  <th className={ui.th}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {allActiveEmployees.map((e) => {
+                  const record = attendanceByEmployee.get(e.id);
+                  return (
+                    <tr key={e.id}>
+                      <td className={`${ui.td} font-medium`}>{e.name}</td>
+                      <td className={`${ui.td} font-mono text-xs`}>{dict.roles[e.role as keyof typeof dict.roles] ?? e.role}</td>
+                      <td className={ui.td} colSpan={5}>
+                        <form action={recordAttendance} className="flex flex-wrap items-center gap-2">
+                          <input type="hidden" name="employeeId" value={e.id} />
+                          <input type="hidden" name="date" value={selectedDate} />
+                          <select name="status" defaultValue={record?.status ?? "PRESENT"} className="rounded-md border border-border bg-surface px-2 py-1 text-xs">
+                            {ATTENDANCE_STATUSES.map((s) => (
+                              <option key={s} value={s}>{m.attendance.statusLabel[s]}</option>
+                            ))}
+                          </select>
+                          <input
+                            type="time"
+                            name="checkInAt"
+                            defaultValue={record?.checkInAt ? new Date(record.checkInAt).toTimeString().slice(0, 5) : ""}
+                            className="rounded-md border border-border bg-surface px-2 py-1 text-xs"
+                          />
+                          <input
+                            type="time"
+                            name="checkOutAt"
+                            defaultValue={record?.checkOutAt ? new Date(record.checkOutAt).toTimeString().slice(0, 5) : ""}
+                            className="rounded-md border border-border bg-surface px-2 py-1 text-xs"
+                          />
+                          <input name="notes" defaultValue={record?.notes ?? ""} placeholder={m.attendance.col.notes} className="w-32 rounded-md border border-border bg-surface px-2 py-1 text-xs" />
+                          <button className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt">{dict.field.save}</button>
+                        </form>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {allActiveEmployees.length === 0 && (
+                  <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.attendance.empty}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : isLeaveTab ? (
+        <div className="grid grid-cols-[1fr_320px] gap-6">
+          <div className="flex flex-col gap-6">
+            <div className={ui.card}>
+              <h2 className="mb-3 font-display text-lg font-semibold">{m.leave.balanceTitle}</h2>
+              <table className={ui.table}>
+                <thead>
+                  <tr>
+                    <th className={ui.th}>{m.col.name}</th>
+                    <th className={ui.th}>{m.leave.col.entitlement}</th>
+                    <th className={ui.th}>{m.leave.col.used}</th>
+                    <th className={ui.th}>{m.leave.col.remaining}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {allActiveEmployees.map((e) => {
+                    const used = usedAnnualByEmployee.get(e.id) ?? 0;
+                    return (
+                      <tr key={e.id}>
+                        <td className={`${ui.td} font-medium`}>{e.name}</td>
+                        <td className={`${ui.td} font-mono`}>{e.annualLeaveEntitlementDays}</td>
+                        <td className={`${ui.td} font-mono`}>{used}</td>
+                        <td className={`${ui.td} font-mono`}>{e.annualLeaveEntitlementDays - used}</td>
+                      </tr>
+                    );
+                  })}
+                  {allActiveEmployees.length === 0 && (
+                    <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.attendance.empty}</span></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className={ui.card}>
+              <table className={ui.table}>
+                <thead>
+                  <tr>
+                    <th className={ui.th}>{m.leave.col.number}</th>
+                    <th className={ui.th}>{m.col.name}</th>
+                    <th className={ui.th}>{m.leave.col.type}</th>
+                    <th className={ui.th}>{m.leave.col.dates}</th>
+                    <th className={ui.th}>{m.leave.col.days}</th>
+                    <th className={ui.th}>{m.leave.col.status}</th>
+                    <th className={ui.th}>{dict.field.actions}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {leaveRequests.map((l) => (
+                    <tr key={l.id}>
+                      <td className={`${ui.td} font-mono text-xs`}>{l.requestNumber}</td>
+                      <td className={ui.td}>{l.employee.name}</td>
+                      <td className={ui.td}>{m.leave.typeLabel[l.type as keyof typeof m.leave.typeLabel] ?? l.type}</td>
+                      <td className={ui.td}>{new Date(l.startDate).toLocaleDateString("en-GB")} — {new Date(l.endDate).toLocaleDateString("en-GB")}</td>
+                      <td className={`${ui.td} font-mono`}>{l.daysCount}</td>
+                      <td className={ui.td}>
+                        <span className={`${ui.chip} ${l.status === "APPROVED" ? "bg-good-soft text-good" : l.status === "REJECTED" || l.status === "CANCELLED" ? "bg-critical-soft text-critical" : "bg-warn-soft text-warn"}`}>
+                          {m.leave.statusLabel[l.status as keyof typeof m.leave.statusLabel] ?? l.status}
+                        </span>
+                        {l.rejectionNote && <div className="mt-1 text-xs text-ink-muted">{l.rejectionNote}</div>}
+                      </td>
+                      <td className={ui.td}>
+                        {l.status === "PENDING" && (
+                          <div className="flex flex-col gap-1">
+                            <form action={approveLeaveRequest}>
+                              <input type="hidden" name="id" value={l.id} />
+                              <button className="text-xs font-medium text-good hover:underline">{m.leave.approve}</button>
+                            </form>
+                            <Link href={`/employees?tab=leave&reject=${l.id}`} className="text-xs font-medium text-critical hover:underline">{m.leave.reject}</Link>
+                            <form action={cancelLeaveRequest}>
+                              <input type="hidden" name="id" value={l.id} />
+                              <button className="text-xs font-medium text-ink-muted hover:underline">{m.leave.cancel}</button>
+                            </form>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {leaveRequests.length === 0 && (
+                    <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.leave.empty}</span></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-4">
+            <form action={createLeaveRequest} className={`${ui.card} flex flex-col gap-3`}>
+              <h2 className="font-display text-lg font-semibold">{m.leave.newTitle}</h2>
+              <div>
+                <label className={ui.label}>{m.leave.f.employeeId}</label>
+                <select name="employeeId" required className={ui.select}>
+                  <option value="" disabled>{m.leave.f.employeePlaceholder}</option>
+                  {allActiveEmployees.map((e) => (
+                    <option key={e.id} value={e.id}>{e.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={ui.label}>{m.leave.f.type}</label>
+                <select name="type" required className={ui.select}>
+                  {LEAVE_TYPES.map((t) => (
+                    <option key={t} value={t}>{m.leave.typeLabel[t]}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className={ui.label}>{m.leave.f.startDate}</label>
+                  <input name="startDate" type="date" required className={ui.input} />
+                </div>
+                <div>
+                  <label className={ui.label}>{m.leave.f.endDate}</label>
+                  <input name="endDate" type="date" required className={ui.input} />
+                </div>
+              </div>
+              <div>
+                <label className={ui.label}>{m.leave.f.reason}</label>
+                <input name="reason" className={ui.input} />
+              </div>
+              <button type="submit" className={`${ui.button} mt-2`}>{m.leave.add}</button>
+            </form>
+
+            {rejectId && (
+              <form action={rejectLeaveRequest} className={`${ui.card} flex flex-col gap-3`}>
+                <h2 className="font-display text-lg font-semibold">{m.leave.rejectTitle}</h2>
+                <input type="hidden" name="id" value={rejectId} />
+                <div>
+                  <label className={ui.label}>{m.leave.f.rejectionNote}</label>
+                  <textarea name="rejectionNote" required rows={3} className={ui.input} />
+                </div>
+                <div className="flex gap-2">
+                  <button type="submit" className={ui.button}>{m.leave.confirmReject}</button>
+                  <Link href="/employees?tab=leave" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">{dict.field.cancel}</Link>
+                </div>
+              </form>
+            )}
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-[1fr_320px] gap-6">
