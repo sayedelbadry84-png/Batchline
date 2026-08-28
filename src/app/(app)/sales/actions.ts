@@ -331,7 +331,7 @@ export async function markQuoteSent(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  const quote = await prisma.quote.findUnique({ where: { id } });
+  const quote = await prisma.quote.findUnique({ where: { id }, include: { lines: true } });
   if (!quote || quote.status !== "DRAFT") return;
   // A price offer never reaches the customer without final (Plants
   // Manager) sign-off on file — same reasoning as Reservation approval
@@ -340,9 +340,25 @@ export async function markQuoteSent(formData: FormData) {
 
   await prisma.quote.update({ where: { id }, data: { status: "SENT", sentAt: new Date() } });
 
+  // The moment a fully-approved quote goes out is exactly "last quote
+  // submitted to the customer, approved, and still valid" — so this is
+  // where it becomes the customer's standing per-m3 price for billing and
+  // for suggesting future quote lines (see QuoteLineRows' suggestedPrice),
+  // until a later quote's own send supersedes it the same way.
+  if (!quote.validUntil || quote.validUntil >= new Date()) {
+    for (const line of quote.lines) {
+      await prisma.priceListEntry.upsert({
+        where: { customerId_mixId: { customerId: quote.customerId, mixId: line.mixId } },
+        create: { customerId: quote.customerId, mixId: line.mixId, pricePerM3: line.unitPrice },
+        update: { pricePerM3: line.unitPrice },
+      });
+    }
+  }
+
   await logAudit({ module: "Sales", recordId: id, afterValue: "SENT", reasonCode: "QUOTE_SENT" });
   revalidatePath("/sales");
   revalidatePath(`/sales/quotes/${id}`);
+  revalidatePath("/billing");
 }
 
 export async function recordQuoteResponse(formData: FormData) {
