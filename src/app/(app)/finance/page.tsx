@@ -13,7 +13,7 @@ import {
   createCashTransaction,
   reconcileMovement,
 } from "./actions";
-import { generateInvoiceForProject, savePriceListEntry } from "../billing/actions";
+import { generateInvoiceForProject } from "../billing/actions";
 
 const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation"] as const;
 const AGING_BUCKETS = [
@@ -61,12 +61,12 @@ function fmtDate(d: Date | null): string {
 export default async function FinancePage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; newBill?: string; pay?: string; newCash?: string; editPrice?: string }>;
+  searchParams: Promise<{ tab?: string; newBill?: string; pay?: string; newCash?: string }>;
 }) {
   const user = await requirePageAccess("finance");
   const { dict } = await getDictionary();
   const m = dict.modules.finance;
-  const { tab: tabRaw, newBill: newBillFlag, pay: payId, newCash: newCashFlag, editPrice: editPriceId } = await searchParams;
+  const { tab: tabRaw, newBill: newBillFlag, pay: payId, newCash: newCashFlag } = await searchParams;
   const tab: FinanceTab = FINANCE_TABS.includes(tabRaw as FinanceTab) ? (tabRaw as FinanceTab) : "overview";
   const siteId = await getActiveSiteId(user);
   const siteScope = reservationSiteScopeWhere(siteId);
@@ -100,7 +100,7 @@ export default async function FinancePage({
 
       {tab === "overview" && <OverviewTab m={m} siteScope={siteScope} />}
 
-      {tab === "billing" && <BillingTab dict={dict} siteId={siteId} editPriceId={editPriceId} baseUrl={baseUrl} />}
+      {tab === "billing" && <BillingTab dict={dict} siteId={siteId} />}
 
       {tab === "payable" && (
         <PayableTab m={m} dict={dict} siteScope={siteScope} sites={sites} suppliers={suppliers} newBillFlag={newBillFlag} payId={payId} baseUrl={baseUrl} />
@@ -651,19 +651,15 @@ async function ReconciliationTab({
 async function BillingTab({
   dict,
   siteId,
-  editPriceId,
-  baseUrl,
 }: {
   dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
   siteId: string | null;
-  editPriceId?: string;
-  baseUrl: string;
 }) {
   const bm = dict.modules.billing;
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
 
-  const [uninvoicedTrips, invoicesRaw, customers, mixes, priceEntries] = await Promise.all([
+  const [uninvoicedTrips, invoicesRaw, priceEntries] = await Promise.all([
     prisma.trip.findMany({
       where: { status: "CLOSED", invoiceLine: null, ...tripPlantScopeWhere(siteId) },
       include: {
@@ -681,8 +677,6 @@ async function BillingTab({
       include: { customer: true, project: true, payments: true },
       take: 30,
     }),
-    prisma.customer.findMany({ orderBy: { legalName: "asc" } }),
-    prisma.mixDesign.findMany({ where: { status: "APPROVED" }, orderBy: { code: "asc" } }),
     prisma.priceListEntry.findMany({ include: { customer: true, mix: true }, orderBy: { createdAt: "asc" } }),
   ]);
 
@@ -874,91 +868,34 @@ async function BillingTab({
         </table>
       </div>
 
-      <div className="grid grid-cols-[1fr_320px] gap-6">
-        <div className={ui.card}>
-          <h2 className="mb-3 font-display text-lg font-semibold">{bm.pricingTitle}</h2>
-          <table className={ui.table}>
-            <thead>
-              <tr>
-                <th className={ui.th}>{bm.colPrice.customer}</th>
-                <th className={ui.th}>{bm.colPrice.mix}</th>
-                <th className={ui.th}>{bm.colPrice.price}</th>
-                <th className={ui.th}>{dict.field.actions}</th>
+      <div className={ui.card}>
+        <h2 className="mb-1 font-display text-lg font-semibold">{bm.pricingTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{bm.pricingSourceHint}</p>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              <th className={ui.th}>{bm.colPrice.customer}</th>
+              <th className={ui.th}>{bm.colPrice.mix}</th>
+              <th className={ui.th}>{bm.colPrice.price}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {priceEntries.map((p) => (
+              <tr key={p.id}>
+                <td className={ui.td}>{p.customer.legalName}</td>
+                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{p.mix.code}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{p.pricePerM3.toLocaleString()}</td>
               </tr>
-            </thead>
-            <tbody>
-              {priceEntries.map((p) =>
-                editPriceId === p.id ? (
-                  <tr key={p.id}>
-                    <td className={ui.td} colSpan={4}>
-                      <form action={savePriceListEntry} className="flex flex-wrap items-end gap-2">
-                        <input type="hidden" name="id" value={p.id} />
-                        <div className="text-sm">
-                          {p.customer.legalName} <span className="text-ink-muted">·</span> <span dir="ltr">{p.mix.code}</span>
-                        </div>
-                        <div>
-                          <label className={ui.label}>{bm.fPrice.price}</label>
-                          <input name="pricePerM3" type="number" step="0.01" defaultValue={p.pricePerM3} required className={`${ui.input} w-28`} />
-                        </div>
-                        <button className={ui.button}>{dict.field.save}</button>
-                        <Link href={baseUrl} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
-                          {dict.field.cancel}
-                        </Link>
-                      </form>
-                    </td>
-                  </tr>
-                ) : (
-                  <tr key={p.id}>
-                    <td className={ui.td}>{p.customer.legalName}</td>
-                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{p.mix.code}</td>
-                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{p.pricePerM3.toLocaleString()}</td>
-                    <td className={ui.td}>
-                      <Link href={`${baseUrl}&editPrice=${p.id}`} className="text-xs font-medium text-accent-strong hover:underline">
-                        {dict.field.edit}
-                      </Link>
-                    </td>
-                  </tr>
-                )
-              )}
-              {priceEntries.length === 0 && (
-                <tr>
-                  <td className={ui.td} colSpan={4}>
-                    <span className="text-ink-muted">{bm.emptyPricing}</span>
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        <form action={savePriceListEntry} className={`${ui.card} flex flex-col gap-3`}>
-          <h2 className="font-display text-lg font-semibold">{bm.newPriceTitle}</h2>
-          <div>
-            <label className={ui.label}>{bm.fPrice.customer}</label>
-            <select name="customerId" required className={ui.select}>
-              <option value="">{dict.field.selectCustomer}</option>
-              {customers.map((c) => (
-                <option key={c.id} value={c.id}>{c.legalName}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={ui.label}>{bm.fPrice.mix}</label>
-            <select name="mixId" required className={ui.select}>
-              <option value="">{dict.field.selectMix}</option>
-              {mixes.map((mx) => (
-                <option key={mx.id} value={mx.id}>{mx.code} — {mx.grade}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={ui.label}>{bm.fPrice.price}</label>
-            <input name="pricePerM3" type="number" step="0.01" required className={ui.input} />
-          </div>
-          <button type="submit" className={`${ui.button} mt-2`}>
-            {bm.savePrice}
-          </button>
-        </form>
+            ))}
+            {priceEntries.length === 0 && (
+              <tr>
+                <td className={ui.td} colSpan={3}>
+                  <span className="text-ink-muted">{bm.emptyPricing}</span>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );

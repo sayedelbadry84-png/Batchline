@@ -387,7 +387,7 @@ const en: typeof ar = {
       mapLink: "map",
       labTechnicianBadge: "Lab technician required",
       noApprovedMix: "No mix is marked APPROVED yet — approve one in Mix Design first.",
-      noPricedMixForCustomer: "No mix has a valid price on file for this customer — send them an approved quote from Sales first, or set a price manually in Billing.",
+      noPricedMixForCustomer: "No mix has a valid price on file for this customer — send them an approved quote from Sales first; the price updates automatically once it's sent.",
       create: "Create reservation",
       // Two-stage sign-off gate — a reservation can't be released in
       // Production until both are set (see the Production module).
@@ -856,11 +856,9 @@ const en: typeof ar = {
       emptyInvoices: "No invoices yet.",
       overdue: (days: number) => `${days}d overdue`,
       pricingTitle: "Customer price lists",
+      pricingSourceHint: "Each customer/mix price is sourced from the last valid, approved quote sent to them by Sales — it updates automatically when a new quote is sent, no manual entry.",
       colPrice: { customer: "Customer", mix: "Mix", price: "Price / m³" },
       emptyPricing: "No prices set yet — a project can't be invoiced until its customer has a price for the mix it ordered.",
-      newPriceTitle: "Set a price",
-      fPrice: { customer: "Customer", mix: "Mix design", price: "Price per m³" },
-      savePrice: "Save price",
       detail: {
         eyebrow: "Invoice",
         billTo: "Bill to",

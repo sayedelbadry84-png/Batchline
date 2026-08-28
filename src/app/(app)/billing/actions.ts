@@ -19,36 +19,6 @@ async function invoiceInScope(invoiceId: string, siteId: string | null): Promise
   return isPlantInScope(invoice.plantId, siteId);
 }
 
-// Create is an upsert (same customer+mix re-submitted just updates the
-// price, matching how MixDesign's addComponent behaves) — edit passes an
-// id and updates that row directly.
-export async function savePriceListEntry(formData: FormData) {
-  const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
-
-  const id = String(formData.get("id") ?? "");
-  const pricePerM3 = Number(formData.get("pricePerM3") ?? 0);
-  if (!pricePerM3 || pricePerM3 <= 0) return;
-
-  if (id) {
-    await prisma.priceListEntry.update({ where: { id }, data: { pricePerM3 } });
-    await logAudit({ module: "Billing", recordId: id, afterValue: `${pricePerM3}/m3`, reasonCode: "PRICE_UPDATED" });
-  } else {
-    const customerId = String(formData.get("customerId") ?? "");
-    const mixId = String(formData.get("mixId") ?? "");
-    if (!customerId || !mixId) return;
-
-    const entry = await prisma.priceListEntry.upsert({
-      where: { customerId_mixId: { customerId, mixId } },
-      create: { customerId, mixId, pricePerM3 },
-      update: { pricePerM3 },
-    });
-    await logAudit({ module: "Billing", recordId: entry.id, afterValue: `${pricePerM3}/m3`, reasonCode: "PRICE_CREATED" });
-  }
-
-  revalidatePath("/finance");
-}
-
 // The delivery ticket (a closed Trip) is the billing unit — a split
 // reservation dispatched as several trucks bills as several lines. Every
 // currently-unbilled closed trip for the project goes into an invoice;
