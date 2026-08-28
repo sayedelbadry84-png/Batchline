@@ -257,7 +257,7 @@ export default async function MixDesignDetailPage({
           </button>
           <p className="text-xs text-ink-muted">
             {d.noMaterialHint}{" "}
-            <a href="/suppliers" className="text-accent-strong hover:underline">
+            <a href="/purchasing?tab=suppliers" className="text-accent-strong hover:underline">
               {d.addInSuppliers}
             </a>
             .

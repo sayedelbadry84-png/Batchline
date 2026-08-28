@@ -20,7 +20,6 @@ export const MODULE_ROLES = {
   // job site, so it never needed a separate module permission from
   // "customers" once the two screens merged.
   customers: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
-  suppliers: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
   // PLANT_ADMIN joins ADMIN here specifically for the HR side (attendance/
   // leave, added alongside the roster) — administrative plant-level work
   // is exactly what that role exists for.
@@ -39,10 +38,12 @@ export const MODULE_ROLES = {
   // (see approvePlantsManagerStage) — they don't create sales records,
   // only sign off on them.
   sales: ["SALES_REP", "SALES_SUPERVISOR", "SALES_MANAGER", "RESERVATIONS_OFFICER", "PLANTS_MANAGER", "ADMIN"],
-  // Purchase orders/contracts against Suppliers — same role set as the
-  // existing "suppliers" module, broadened with the plant-management
-  // roster (a plant/operations manager can requisition materials, not
-  // just the accountant/operator who could before).
+  // Purchase orders/contracts against Suppliers, plus the supplier roster
+  // and material catalog themselves (the old standalone "suppliers"
+  // module — merged in here as a third tab since they're the same buying
+  // workflow), broadened with the plant-management roster (a plant/
+  // operations manager can requisition materials, not just the
+  // accountant/operator who could before).
   purchasing: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
   // Fault tickets and preventive schedules for the equipment fleet — same
   // role set as "equipment", since it's the same operational audience.
@@ -85,7 +86,6 @@ export const MODULE_NAV: { key: ModuleKey; href: string; num: string; labelKey: 
   { key: "equipment", href: "/equipment", num: "05", labelKey: "equipment" },
   { key: "silos", href: "/silos", num: "06", labelKey: "silos" },
   { key: "customers", href: "/customers", num: "07", labelKey: "customers" },
-  { key: "suppliers", href: "/suppliers", num: "08", labelKey: "suppliers" },
   { key: "employees", href: "/employees", num: "09", labelKey: "employees" },
   { key: "plants", href: "/plants", num: "10", labelKey: "plants" },
   { key: "billing", href: "/billing", num: "11", labelKey: "billing" },

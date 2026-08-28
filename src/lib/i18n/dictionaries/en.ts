@@ -1250,7 +1250,7 @@ const en: typeof ar = {
       eyebrow: "Module 16 — Purchasing",
       title: "Purchasing",
       intro: "Dynamic purchase orders against suppliers — receipts post against them directly from Material Receiving — plus standing supplier contracts that feed the suggested price automatically.",
-      tabs: { orders: "Purchase Orders", contracts: "Supplier Contracts" },
+      tabs: { orders: "Purchase Orders", contracts: "Supplier Contracts", suppliers: "Suppliers & Material Catalog" },
       orders: {
         col: { number: "Number", supplier: "Supplier", status: "Status", total: "Total", expected: "Expected Date", material: "Material", ordered: "Ordered", received: "Received", unitPrice: "Unit Price", lineTotal: "Total" },
         statusLabel: { DRAFT: "Draft", SENT: "Sent to supplier", PARTIALLY_RECEIVED: "Partially received", RECEIVED: "Fully received", CANCELLED: "Cancelled" },

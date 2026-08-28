@@ -19,7 +19,7 @@ export async function createSupplier(formData: FormData) {
   });
 
   await logAudit({ module: "Suppliers", recordId: supplier.id, afterValue: name, reasonCode: "SUPPLIER_CREATED" });
-  revalidatePath("/suppliers");
+  revalidatePath("/purchasing");
   // Also reachable from Material Receiving's own intake form (an inline
   // "+ add supplier" so a weighbridge operator never has to leave that
   // screen) — revalidated here too so the new supplier shows up in its
@@ -44,7 +44,7 @@ export async function createMaterial(formData: FormData) {
   });
 
   await logAudit({ module: "Suppliers", recordId: material.id, afterValue: name, reasonCode: "MATERIAL_CREATED" });
-  revalidatePath("/suppliers");
+  revalidatePath("/purchasing");
 }
 
 export async function updateSupplier(formData: FormData) {
@@ -60,7 +60,7 @@ export async function updateSupplier(formData: FormData) {
   await prisma.supplier.update({ where: { id }, data: { name, materialCatalog, leadTimeDays } });
 
   await logAudit({ module: "Suppliers", recordId: id, afterValue: name, reasonCode: "SUPPLIER_UPDATED" });
-  revalidatePath("/suppliers");
+  revalidatePath("/purchasing");
 }
 
 export async function updateMaterial(formData: FormData) {
@@ -82,5 +82,5 @@ export async function updateMaterial(formData: FormData) {
   });
 
   await logAudit({ module: "Suppliers", recordId: id, afterValue: name, reasonCode: "MATERIAL_UPDATED" });
-  revalidatePath("/suppliers");
+  revalidatePath("/purchasing");
 }

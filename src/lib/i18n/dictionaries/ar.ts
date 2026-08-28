@@ -1246,7 +1246,7 @@ const ar = {
       eyebrow: "الوحدة 16 — المشتريات",
       title: "المشتريات",
       intro: "أوامر شراء ديناميكية للموردين، تُستلم الشحنات مقابلها مباشرة من استلام المواد، مع عقود توريد قائمة تغذي الأسعار المقترحة تلقائيًا.",
-      tabs: { orders: "أوامر الشراء", contracts: "عقود الموردين" },
+      tabs: { orders: "أوامر الشراء", contracts: "عقود الموردين", suppliers: "الموردون وكتالوج المواد" },
       orders: {
         col: { number: "الرقم", supplier: "المورد", status: "الحالة", total: "الإجمالي", expected: "تاريخ التوريد المتوقع", material: "المادة", ordered: "المطلوب", received: "المستلم", unitPrice: "سعر الوحدة", lineTotal: "الإجمالي" },
         statusLabel: { DRAFT: "مسودة", SENT: "مُرسل للمورد", PARTIALLY_RECEIVED: "استلام جزئي", RECEIVED: "تم الاستلام بالكامل", CANCELLED: "ملغى" },

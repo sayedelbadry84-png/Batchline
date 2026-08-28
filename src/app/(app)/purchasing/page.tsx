@@ -14,8 +14,9 @@ import {
   terminateSupplierContract,
   renewSupplierContract,
 } from "./actions";
+import { createSupplier, createMaterial, updateSupplier, updateMaterial } from "../suppliers/actions";
 
-const PURCHASING_TABS = ["orders", "contracts"] as const;
+const PURCHASING_TABS = ["orders", "contracts", "suppliers"] as const;
 type PurchasingTab = (typeof PURCHASING_TABS)[number];
 
 const poStatusChip: Record<string, string> = {
@@ -34,12 +35,28 @@ function fmtDate(d: Date | null): string {
 export default async function PurchasingPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; new?: string; newContract?: string; viewPO?: string; renew?: string }>;
+  searchParams: Promise<{
+    tab?: string;
+    new?: string;
+    newContract?: string;
+    viewPO?: string;
+    renew?: string;
+    editSupplier?: string;
+    editMaterial?: string;
+  }>;
 }) {
   const user = await requirePageAccess("purchasing");
   const { dict } = await getDictionary();
   const m = dict.modules.purchasing;
-  const { tab: tabRaw, new: newFlag, newContract: newContractFlag, viewPO, renew: renewId } = await searchParams;
+  const {
+    tab: tabRaw,
+    new: newFlag,
+    newContract: newContractFlag,
+    viewPO,
+    renew: renewId,
+    editSupplier: editSupplierId,
+    editMaterial: editMaterialId,
+  } = await searchParams;
   const tab: PurchasingTab = PURCHASING_TABS.includes(tabRaw as PurchasingTab) ? (tabRaw as PurchasingTab) : "orders";
   const siteId = await getActiveSiteId(user);
   const siteScope = reservationSiteScopeWhere(siteId);
@@ -94,6 +111,10 @@ export default async function PurchasingPage({
 
       {tab === "contracts" && (
         <ContractsTab m={m} dict={dict} suppliers={suppliers} materials={materials} newContractFlag={newContractFlag} renewId={renewId} baseUrl={baseUrl} />
+      )}
+
+      {tab === "suppliers" && (
+        <SuppliersTab dict={dict} editSupplierId={editSupplierId} editMaterialId={editMaterialId} baseUrl={baseUrl} />
       )}
     </div>
   );
@@ -402,6 +423,257 @@ async function ContractsTab({
           </form>
         </Modal>
       )}
+    </div>
+  );
+}
+
+// Merged from the old standalone /suppliers module — same supplier
+// roster + material catalog, now a third tab here since sourcing
+// suppliers and materials is part of the same buying workflow as
+// purchase orders and contracts. Fetches its own richer supplier/
+// material shape (materialCatalog, leadTimeDays, brand, etc.) since the
+// lightweight {id, name} lists PurchasingPage already fetches for the
+// Orders/Contracts pickers don't carry those fields.
+async function SuppliersTab({
+  dict,
+  editSupplierId,
+  editMaterialId,
+  baseUrl,
+}: {
+  dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
+  editSupplierId?: string;
+  editMaterialId?: string;
+  baseUrl: string;
+}) {
+  const sm = dict.modules.suppliers;
+
+  const [suppliers, materials] = await Promise.all([
+    prisma.supplier.findMany({ orderBy: { createdAt: "asc" }, include: { _count: { select: { materials: true } } } }),
+    prisma.material.findMany({ orderBy: { createdAt: "asc" }, include: { supplier: true } }),
+  ]);
+
+  return (
+    <div className="flex flex-col gap-8">
+      <div className="grid grid-cols-[1fr_320px] gap-6">
+        <div className={ui.card}>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th className={ui.th}>{sm.col.supplier}</th>
+                <th className={ui.th}>{sm.col.catalog}</th>
+                <th className={ui.th}>{sm.col.leadTime}</th>
+                <th className={ui.th}>{sm.col.materials}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {suppliers.map((s) =>
+                editSupplierId === s.id ? (
+                  <tr key={s.id}>
+                    <td className={ui.td} colSpan={5}>
+                      <form action={updateSupplier} className="flex flex-wrap items-end gap-2">
+                        <input type="hidden" name="id" value={s.id} />
+                        <div>
+                          <label className={ui.label}>{sm.f.name}</label>
+                          <input name="name" defaultValue={s.name} required className={`${ui.input} w-44`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{sm.f.catalog}</label>
+                          <input name="materialCatalog" defaultValue={s.materialCatalog ?? ""} className={`${ui.input} w-44`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{sm.f.leadTime}</label>
+                          <input name="leadTimeDays" type="number" defaultValue={s.leadTimeDays ?? undefined} className={`${ui.input} w-24`} />
+                        </div>
+                        <button className={ui.button}>{dict.field.save}</button>
+                        <Link href={baseUrl} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                          {dict.field.cancel}
+                        </Link>
+                      </form>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={s.id}>
+                    <td className={`${ui.td} font-medium`}>{s.name}</td>
+                    <td className={ui.td}>{s.materialCatalog || "—"}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{s.leadTimeDays ? `${s.leadTimeDays}d` : "—"}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{s._count.materials}</td>
+                    <td className={ui.td}>
+                      <Link href={`${baseUrl}&editSupplier=${s.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {dict.field.edit}
+                      </Link>
+                    </td>
+                  </tr>
+                )
+              )}
+              {suppliers.length === 0 && (
+                <tr>
+                  <td className={ui.td} colSpan={5}>
+                    <span className="text-ink-muted">{sm.empty}</span>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <form action={createSupplier} className={`${ui.card} flex flex-col gap-3`}>
+          <h2 className="font-display text-lg font-semibold">{sm.newTitle}</h2>
+          <div>
+            <label className={ui.label}>{sm.f.name}</label>
+            <input name="name" required className={ui.input} placeholder="Suez Aggregates Co." />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.f.catalog}</label>
+            <input name="materialCatalog" className={ui.input} placeholder="Coarse aggregate, sand" />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.f.leadTime}</label>
+            <input name="leadTimeDays" type="number" className={ui.input} />
+          </div>
+          <button type="submit" className={`${ui.button} mt-2`}>
+            {sm.add}
+          </button>
+        </form>
+      </div>
+
+      <div className="grid grid-cols-[1fr_320px] gap-6">
+        <div className={ui.card}>
+          <h2 className="mb-3 font-display text-lg font-semibold">{sm.catalogTitle}</h2>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th className={ui.th}>{sm.colMaterials.material}</th>
+                <th className={ui.th}>{sm.colMaterials.type}</th>
+                <th className={ui.th}>{sm.colMaterials.brand}</th>
+                <th className={ui.th}>{sm.colMaterials.supplier}</th>
+                <th className={ui.th}>{sm.colMaterials.sg}</th>
+                <th className={ui.th}>{sm.colMaterials.absorption}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {materials.map((mt) =>
+                editMaterialId === mt.id ? (
+                  <tr key={mt.id}>
+                    <td className={ui.td} colSpan={7}>
+                      <form action={updateMaterial} className="flex flex-wrap items-end gap-2">
+                        <input type="hidden" name="id" value={mt.id} />
+                        <div>
+                          <label className={ui.label}>{sm.fMaterial.supplier}</label>
+                          <select name="supplierId" defaultValue={mt.supplierId ?? ""} className={`${ui.select} w-40`}>
+                            <option value="">{dict.field.unassigned}</option>
+                            {suppliers.map((s) => (
+                              <option key={s.id} value={s.id}>{s.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <label className={ui.label}>{sm.fMaterial.name}</label>
+                          <input name="name" defaultValue={mt.name} required className={`${ui.input} w-44`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{sm.fMaterial.type}</label>
+                          <select name="type" defaultValue={mt.type} required className={`${ui.select} w-40`}>
+                            <option value="CEMENT">{dict.materialTypes.CEMENT}</option>
+                            <option value="FLY_ASH">{dict.materialTypes.FLY_ASH}</option>
+                            <option value="SAND">{dict.materialTypes.SAND}</option>
+                            <option value="COARSE_AGGREGATE">{dict.materialTypes.COARSE_AGGREGATE}</option>
+                            <option value="ADMIXTURE">{dict.materialTypes.ADMIXTURE}</option>
+                            <option value="WATER">{dict.materialTypes.WATER}</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className={ui.label}>{sm.fMaterial.brand}</label>
+                          <input name="brand" defaultValue={mt.brand ?? ""} className={`${ui.input} w-28`} dir="ltr" />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{sm.fMaterial.sg}</label>
+                          <input name="specificGravity" type="number" step="0.01" defaultValue={mt.specificGravity ?? undefined} className={`${ui.input} w-24`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{sm.fMaterial.absorption}</label>
+                          <input name="absorptionPct" type="number" step="0.1" defaultValue={mt.absorptionPct ?? undefined} className={`${ui.input} w-24`} />
+                        </div>
+                        <button className={ui.button}>{dict.field.save}</button>
+                        <Link href={baseUrl} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                          {dict.field.cancel}
+                        </Link>
+                      </form>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr key={mt.id}>
+                    <td className={`${ui.td} font-medium`}>{mt.name}</td>
+                    <td className={`${ui.td} font-mono text-xs`}>{dict.materialTypes[mt.type as keyof typeof dict.materialTypes] ?? mt.type}</td>
+                    <td className={ui.td} dir="ltr">{mt.brand || "—"}</td>
+                    <td className={ui.td}>{mt.supplier?.name ?? "—"}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{mt.specificGravity ?? "—"}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{mt.absorptionPct ?? "—"}</td>
+                    <td className={ui.td}>
+                      <Link href={`${baseUrl}&editMaterial=${mt.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {dict.field.edit}
+                      </Link>
+                    </td>
+                  </tr>
+                )
+              )}
+              {materials.length === 0 && (
+                <tr>
+                  <td className={ui.td} colSpan={7}>
+                    <span className="text-ink-muted">{sm.emptyMaterials}</span>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <form action={createMaterial} className={`${ui.card} flex flex-col gap-3`}>
+          <h2 className="font-display text-lg font-semibold">{sm.newMaterialTitle}</h2>
+          <div>
+            <label className={ui.label}>{sm.fMaterial.supplier}</label>
+            <select name="supplierId" className={ui.select}>
+              <option value="">{dict.field.unassigned}</option>
+              {suppliers.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{sm.fMaterial.name}</label>
+            <input name="name" required className={ui.input} placeholder="Coarse aggregate 20mm" />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.fMaterial.type}</label>
+            <select name="type" required className={ui.select}>
+              <option value="CEMENT">{dict.materialTypes.CEMENT}</option>
+              <option value="FLY_ASH">{dict.materialTypes.FLY_ASH}</option>
+              <option value="SAND">{dict.materialTypes.SAND}</option>
+              <option value="COARSE_AGGREGATE">{dict.materialTypes.COARSE_AGGREGATE}</option>
+              <option value="ADMIXTURE">{dict.materialTypes.ADMIXTURE}</option>
+              <option value="WATER">{dict.materialTypes.WATER}</option>
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{sm.fMaterial.brand}</label>
+            <input name="brand" className={ui.input} dir="ltr" placeholder="BASIF, DCP…" />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.fMaterial.sg}</label>
+            <input name="specificGravity" type="number" step="0.01" className={ui.input} placeholder="2.65" />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.fMaterial.absorption}</label>
+            <input name="absorptionPct" type="number" step="0.1" className={ui.input} placeholder="1.2" />
+          </div>
+          <button type="submit" className={`${ui.button} mt-2`}>
+            {sm.addMaterial}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }
