@@ -12,6 +12,7 @@ import {
   cancelPurchaseOrder,
   createSupplierContract,
   terminateSupplierContract,
+  renewSupplierContract,
 } from "./actions";
 
 const PURCHASING_TABS = ["orders", "contracts"] as const;
@@ -33,12 +34,12 @@ function fmtDate(d: Date | null): string {
 export default async function PurchasingPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; new?: string; newContract?: string; viewPO?: string }>;
+  searchParams: Promise<{ tab?: string; new?: string; newContract?: string; viewPO?: string; renew?: string }>;
 }) {
   const user = await requirePageAccess("purchasing");
   const { dict } = await getDictionary();
   const m = dict.modules.purchasing;
-  const { tab: tabRaw, new: newFlag, newContract: newContractFlag, viewPO } = await searchParams;
+  const { tab: tabRaw, new: newFlag, newContract: newContractFlag, viewPO, renew: renewId } = await searchParams;
   const tab: PurchasingTab = PURCHASING_TABS.includes(tabRaw as PurchasingTab) ? (tabRaw as PurchasingTab) : "orders";
   const siteId = await getActiveSiteId(user);
   const siteScope = reservationSiteScopeWhere(siteId);
@@ -92,7 +93,7 @@ export default async function PurchasingPage({
       )}
 
       {tab === "contracts" && (
-        <ContractsTab m={m} dict={dict} suppliers={suppliers} materials={materials} newContractFlag={newContractFlag} baseUrl={baseUrl} />
+        <ContractsTab m={m} dict={dict} suppliers={suppliers} materials={materials} newContractFlag={newContractFlag} renewId={renewId} baseUrl={baseUrl} />
       )}
     </div>
   );
@@ -262,6 +263,7 @@ async function ContractsTab({
   suppliers,
   materials,
   newContractFlag,
+  renewId,
   baseUrl,
 }: {
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["purchasing"];
@@ -269,6 +271,7 @@ async function ContractsTab({
   suppliers: { id: string; name: string }[];
   materials: { id: string; name: string; type: string }[];
   newContractFlag?: string;
+  renewId?: string;
   baseUrl: string;
 }) {
   const contracts = await prisma.supplierContract.findMany({
@@ -309,11 +312,36 @@ async function ContractsTab({
                   </span>
                 </td>
                 <td className={ui.td}>
-                  {c.status === "ACTIVE" && (
-                    <form action={terminateSupplierContract}>
+                  {c.status === "ACTIVE" && renewId === c.id ? (
+                    <form action={renewSupplierContract} className="flex items-center gap-1">
                       <input type="hidden" name="id" value={c.id} />
-                      <button className="text-xs font-medium text-critical hover:underline">{m.contracts.terminate}</button>
+                      <input
+                        name="pricePerUnit"
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        required
+                        autoFocus
+                        defaultValue={c.pricePerUnit ?? ""}
+                        className="w-24 rounded-md border border-border bg-surface px-2 py-1 text-sm"
+                      />
+                      <button className="text-xs font-medium text-good hover:underline">{dict.field.save}</button>
+                      <Link href={baseUrl} className="text-xs text-ink-muted hover:underline">{dict.field.cancel}</Link>
                     </form>
+                  ) : (
+                    <div className="flex flex-col gap-1">
+                      {c.status === "ACTIVE" && (
+                        <>
+                          <Link href={`${baseUrl}&renew=${c.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                            {m.contracts.renew}
+                          </Link>
+                          <form action={terminateSupplierContract}>
+                            <input type="hidden" name="id" value={c.id} />
+                            <button className="text-xs font-medium text-critical hover:underline">{m.contracts.terminate}</button>
+                          </form>
+                        </>
+                      )}
+                    </div>
                   )}
                 </td>
               </tr>

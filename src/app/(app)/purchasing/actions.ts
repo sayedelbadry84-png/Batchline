@@ -172,3 +172,54 @@ export async function terminateSupplierContract(formData: FormData) {
   await logAudit({ module: "Purchasing", recordId: id, afterValue: "TERMINATED", reasonCode: "SUPPLIER_CONTRACT_TERMINATED" });
   revalidatePath("/purchasing");
 }
+
+// A market price move against a live contract is a new negotiated term,
+// not a silent edit to the old one — so this closes the current contract
+// today and opens a fresh one at the new price starting today, same
+// supplier/material/payment terms carried over. One click covers both
+// steps a manual terminate-then-recreate would otherwise take, while
+// still keeping the old contract's own price and dates on record for
+// cost history — same reasoning as Quote/Opportunity keeping their prior
+// approval stamps instead of being overwritten in place.
+export async function renewSupplierContract(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, PURCHASING_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  const pricePerUnit = Number(formData.get("pricePerUnit") ?? 0);
+  if (!id || !pricePerUnit || pricePerUnit <= 0) return;
+
+  const old = await prisma.supplierContract.findUnique({ where: { id } });
+  if (!old || old.status !== "ACTIVE") return;
+
+  const today = new Date();
+  const contract = await withSequentialNumber(
+    "SC",
+    () => prisma.supplierContract.count(),
+    (contractNumber) =>
+      prisma.$transaction(async (tx) => {
+        await tx.supplierContract.update({ where: { id }, data: { status: "TERMINATED", endDate: today } });
+        return tx.supplierContract.create({
+          data: {
+            contractNumber,
+            supplierId: old.supplierId,
+            materialId: old.materialId,
+            startDate: today,
+            endDate: null,
+            pricePerUnit,
+            paymentTerms: old.paymentTerms,
+            notes: old.notes,
+          },
+        });
+      }),
+  );
+
+  await logAudit({
+    module: "Purchasing",
+    recordId: contract.id,
+    beforeValue: `${old.contractNumber} — ${old.pricePerUnit ?? "—"}`,
+    afterValue: `${contract.contractNumber} — ${pricePerUnit}`,
+    reasonCode: "SUPPLIER_CONTRACT_RENEWED",
+  });
+  revalidatePath("/purchasing");
+}

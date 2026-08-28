@@ -1277,6 +1277,7 @@ const en: typeof ar = {
         },
         add: "Create contract",
         terminate: "Terminate contract",
+        renew: "Renew at new price",
         empty: "No supplier contracts yet.",
       },
       orderDoc: {
