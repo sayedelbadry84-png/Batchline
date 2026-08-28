@@ -358,7 +358,7 @@ export async function markQuoteSent(formData: FormData) {
   await logAudit({ module: "Sales", recordId: id, afterValue: "SENT", reasonCode: "QUOTE_SENT" });
   revalidatePath("/sales");
   revalidatePath(`/sales/quotes/${id}`);
-  revalidatePath("/billing");
+  revalidatePath("/finance");
 }
 
 export async function recordQuoteResponse(formData: FormData) {

@@ -46,7 +46,7 @@ export async function savePriceListEntry(formData: FormData) {
     await logAudit({ module: "Billing", recordId: entry.id, afterValue: `${pricePerM3}/m3`, reasonCode: "PRICE_CREATED" });
   }
 
-  revalidatePath("/billing");
+  revalidatePath("/finance");
 }
 
 // The delivery ticket (a closed Trip) is the billing unit — a split
@@ -155,8 +155,8 @@ export async function generateInvoiceForProject(formData: FormData) {
 
   if (!firstInvoiceId) return;
 
-  revalidatePath("/billing");
-  redirect(`/billing/${firstInvoiceId}`);
+  revalidatePath("/finance");
+  redirect(`/finance/invoices/${firstInvoiceId}`);
 }
 
 export async function markInvoiceSent(formData: FormData) {
@@ -173,8 +173,8 @@ export async function markInvoiceSent(formData: FormData) {
   await prisma.invoice.update({ where: { id }, data: { status: "SENT" } });
   await logAudit({ module: "Billing", recordId: id, field: "status", afterValue: "SENT", reasonCode: "INVOICE_SENT" });
 
-  revalidatePath(`/billing/${id}`);
-  revalidatePath("/billing");
+  revalidatePath(`/finance/invoices/${id}`);
+  revalidatePath("/finance");
 }
 
 // Voids an invoice rather than deleting it — the header (number, total,
@@ -210,8 +210,8 @@ export async function cancelInvoice(formData: FormData) {
     reasonCode: "INVOICE_CANCELLED",
   });
 
-  revalidatePath(`/billing/${id}`);
-  revalidatePath("/billing");
+  revalidatePath(`/finance/invoices/${id}`);
+  revalidatePath("/finance");
 }
 
 export async function recordPayment(formData: FormData) {
@@ -242,6 +242,6 @@ export async function recordPayment(formData: FormData) {
     reasonCode: "PAYMENT_RECORDED",
   });
 
-  revalidatePath(`/billing/${invoiceId}`);
-  revalidatePath("/billing");
+  revalidatePath(`/finance/invoices/${invoiceId}`);
+  revalidatePath("/finance");
 }

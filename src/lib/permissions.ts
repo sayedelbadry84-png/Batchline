@@ -26,7 +26,6 @@ export const MODULE_ROLES = {
   employees: ["ADMIN", "PLANT_ADMIN"],
   incentives: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   plants: ["PLANT_OPERATOR", "ADMIN"],
-  billing: ["ACCOUNTANT", "ADMIN"],
   trips: ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
   quality: ["QUALITY_SUPERVISOR", "PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
   reports: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
@@ -48,8 +47,11 @@ export const MODULE_ROLES = {
   // Fault tickets and preventive schedules for the equipment fleet — same
   // role set as "equipment", since it's the same operational audience.
   maintenance: ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
-  // Accounts payable, cash ledger, bank reconciliation — kept as tight as
-  // "billing" (financial data, not an operational screen).
+  // Accounts payable/receivable (invoicing customers, paying suppliers —
+  // the old standalone "billing" module merged in here as a tab, same
+  // role set so nothing widens or narrows), cash ledger, bank
+  // reconciliation — kept tight, financial data rather than an
+  // operational screen.
   finance: ["ACCOUNTANT", "ADMIN"],
 } as const satisfies Record<string, readonly string[] | null>;
 
@@ -88,7 +90,6 @@ export const MODULE_NAV: { key: ModuleKey; href: string; num: string; labelKey: 
   { key: "customers", href: "/customers", num: "07", labelKey: "customers" },
   { key: "employees", href: "/employees", num: "09", labelKey: "employees" },
   { key: "plants", href: "/plants", num: "10", labelKey: "plants" },
-  { key: "billing", href: "/billing", num: "11", labelKey: "billing" },
   { key: "incentives", href: "/incentives", num: "12", labelKey: "incentives" },
   { key: "stockLedger", href: "/stock-ledger", num: "13", labelKey: "stockLedger" },
   { key: "sales", href: "/sales", num: "14", labelKey: "sales" },

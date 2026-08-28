@@ -1343,7 +1343,7 @@ const en: typeof ar = {
       eyebrow: "Module 18 — Finance",
       title: "Finance",
       intro: "Accounts payable for suppliers, a cash-movement journal, and manual bank reconciliation — the payable side that complements the receivable side (customer invoices) Billing already handles.",
-      tabs: { overview: "Overview", payable: "Accounts Payable", cash: "Cash Ledger", aging: "Aging", reconciliation: "Bank Reconciliation" },
+      tabs: { overview: "Overview", billing: "Billing", payable: "Accounts Payable", cash: "Cash Ledger", aging: "Aging", reconciliation: "Bank Reconciliation" },
       overview: {
         arOutstanding: "Owed by customers (AR)",
         apOutstanding: "Owed to suppliers (AP)",

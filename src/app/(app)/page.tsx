@@ -185,7 +185,7 @@ export default async function DashboardPage() {
   // actually act on those modules — a Plant Operator sees production and
   // fleet context, not a customer's outstanding balance. ---
   const [canSeeBilling, canSeeQuality, canSeeReservations, canSeeProduction, canSeeEquipment, canSeeMaintenance] = await Promise.all([
-    canAccessModule(user.role, "billing"),
+    canAccessModule(user.role, "finance"),
     canAccessModule(user.role, "quality"),
     canAccessModule(user.role, "reservations"),
     canAccessModule(user.role, "production"),
@@ -273,7 +273,7 @@ export default async function DashboardPage() {
     for (const inv of sentInvoices) {
       const overdueDays = Math.floor((nowMs - inv.dueDate.getTime()) / 86400000);
       if (overdueDays > 0 && inv.total - inv.payments.reduce((s, p) => s + p.amount, 0) > 0.01) {
-        alerts.push({ key: `invoice-${inv.id}`, severity: "critical", href: `/billing/${inv.id}`, label: d.alertOverdueInvoice(inv.invoiceNumber, overdueDays) });
+        alerts.push({ key: `invoice-${inv.id}`, severity: "critical", href: `/finance/invoices/${inv.id}`, label: d.alertOverdueInvoice(inv.invoiceNumber, overdueDays) });
       }
     }
   }
@@ -345,7 +345,7 @@ export default async function DashboardPage() {
             </div>
           </Link>
           {canSeeBilling && (
-            <Link href="/billing" className={`${ui.card} block transition-shadow hover:shadow-md`}>
+            <Link href="/finance?tab=billing" className={`${ui.card} block transition-shadow hover:shadow-md`}>
               <div className="font-mono text-2xl tabular" dir="ltr">{arOutstanding.toLocaleString()}</div>
               <div className="mt-1 text-sm text-ink-muted">{d.kpiArOutstanding}</div>
               {overdueInvoiceCount > 0 && <div className="mt-1 text-xs text-critical">{r.arOverdue}: {overdueInvoiceCount}</div>}
