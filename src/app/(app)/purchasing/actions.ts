@@ -223,3 +223,78 @@ export async function renewSupplierContract(formData: FormData) {
   });
   revalidatePath("/purchasing");
 }
+
+// The Maintenance-to-Procurement loop's last hop before receiving: bundles
+// one or more APPROVED SparePartsRequisition rows (see Warehouses' Spare
+// Parts tab) into a single new PO, one line per requisition, and stamps
+// each requisition ORDERED + its new line's id so the chain stays
+// traceable end to end. A requisition with no price entered here (left at
+// 0) is simply left out — same "0 or blank means skip this row" filtering
+// createPurchaseOrder's own material-line rows already use.
+export async function createPurchaseOrderFromRequisitions(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, PURCHASING_ROLES);
+
+  const supplierId = String(formData.get("supplierId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
+  if (!supplierId || !siteId) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
+
+  const requisitionIds = formData.getAll("requisitionId").map(String);
+  const unitPrices = formData.getAll("unitPrice").map(Number);
+  const picks = requisitionIds
+    .map((id, i) => ({ id, unitPrice: unitPrices[i] || 0 }))
+    .filter((p) => p.id && p.unitPrice > 0);
+  if (picks.length === 0) return;
+
+  const requisitions = await prisma.sparePartsRequisition.findMany({
+    where: { id: { in: picks.map((p) => p.id) }, status: "APPROVED" },
+  });
+  if (requisitions.length === 0) return;
+
+  const plantId = await resolvePlantIdForSite(siteId);
+  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId } }) : null;
+  const currency = plant?.currency ?? "EGP";
+  const taxRatePct = plant?.taxRatePct ?? 0;
+
+  const lines = requisitions.map((r) => {
+    const unitPrice = picks.find((p) => p.id === r.id)!.unitPrice;
+    return { requisition: r, unitPrice, lineTotal: r.quantityNeeded * unitPrice };
+  });
+  const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0);
+  const taxAmount = subtotal * (taxRatePct / 100);
+  const total = subtotal + taxAmount;
+
+  const po = await withSequentialNumber(
+    "PO",
+    () => prisma.purchaseOrder.count(),
+    (poNumber) =>
+      prisma.$transaction(async (tx) => {
+        const created = await tx.purchaseOrder.create({
+          data: { poNumber, supplierId, siteId, currency, subtotal, taxRatePct, taxAmount, total, createdById: actor!.id },
+        });
+        for (const l of lines) {
+          const line = await tx.purchaseOrderLine.create({
+            data: {
+              purchaseOrderId: created.id,
+              sparePartId: l.requisition.sparePartId,
+              orderedQty: l.requisition.quantityNeeded,
+              receivedQty: 0,
+              unitPrice: l.unitPrice,
+              lineTotal: l.lineTotal,
+            },
+          });
+          await tx.sparePartsRequisition.update({
+            where: { id: l.requisition.id },
+            data: { status: "ORDERED", purchaseOrderLineId: line.id },
+          });
+        }
+        return created;
+      }),
+  );
+
+  await logAudit({ module: "Purchasing", recordId: po.id, afterValue: `${po.poNumber} — ${total} ${currency} (${lines.length} spare-part lines)`, reasonCode: "PO_CREATED_FROM_REQUISITIONS" });
+  revalidatePath("/purchasing");
+  revalidatePath("/warehouses");
+  revalidatePath("/maintenance");
+}

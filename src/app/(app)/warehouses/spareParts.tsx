@@ -57,6 +57,16 @@ export async function SparePartsTab({
     }),
   ]);
 
+  // Optional picker for the receiving form below — every spare-part
+  // PurchaseOrderLine still open (SENT or PARTIALLY_RECEIVED), same shape
+  // as Material Receiving's own purchaseOrderLineId picker.
+  const openPoLinesRaw = await prisma.purchaseOrderLine.findMany({
+    where: { purchaseOrder: { status: { in: ["SENT", "PARTIALLY_RECEIVED"] } }, sparePartId: { not: null } },
+    include: { purchaseOrder: { include: { supplier: true } }, sparePart: true },
+    orderBy: { purchaseOrder: { orderDate: "desc" } },
+  });
+  const openPoLines = openPoLinesRaw as (typeof openPoLinesRaw[number] & { sparePart: NonNullable<typeof openPoLinesRaw[number]["sparePart"]>; orderedQty: number; receivedQty: number })[];
+
   // Derived balance — receipts minus issuances, same convention as the
   // Raw Materials Stock Ledger tab.
   const inQty = new Map<string, number>();
@@ -245,6 +255,18 @@ export async function SparePartsTab({
           <div>
             <label className={ui.label}>{m.f2.unitCost}</label>
             <input name="unitCost" type="number" step="0.01" min="0.01" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f2.purchaseOrderLine}</label>
+            <select name="purchaseOrderLineId" defaultValue="" className={ui.select}>
+              <option value="">{dict.field.none}</option>
+              {openPoLines.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.purchaseOrder.poNumber} — {l.sparePart.name} ({l.receivedQty.toFixed(0)}/{l.orderedQty.toFixed(0)}) — {l.purchaseOrder.supplier.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-ink-muted">{m.purchaseOrderLineHint}</p>
           </div>
           <div>
             <label className={ui.label}>{m.f2.supplierId}</label>

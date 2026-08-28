@@ -1262,6 +1262,12 @@ const ar = {
         print: "معاينة / طباعة",
         empty: "لا توجد أوامر شراء بعد.",
       },
+      spareRequisitions: {
+        newTitle: "أمر شراء من طلبات قطع الغيار",
+        priceHint: "أدخل سعر الوحدة للبنود اللي عايز تضمّها في أمر الشراء — أي بند يترك سعره فارغًا لا يُضاف.",
+        col: { number: "الرقم", part: "القطعة", quantity: "الكمية المطلوبة", unitPrice: "سعر الوحدة" },
+        create: "إنشاء أمر الشراء",
+      },
       contracts: {
         col: { number: "الرقم", supplier: "المورد", material: "المادة", price: "السعر", period: "الفترة", status: "الحالة" },
         statusLabel: { ACTIVE: "ساري", EXPIRED: "منتهي", TERMINATED: "مُنهى" },
@@ -1442,7 +1448,8 @@ const ar = {
         colBalance: { part: "القطعة", plant: "المصنع", onHand: "الرصيد الحالي" },
         emptyBalance: "لا توجد أي حركة مخزون بعد.",
         receiveTitle: "استلام قطع غيار",
-        f2: { sparePartId: "قطعة الغيار", siteId: "المصنع", quantity: "الكمية", unitCost: "سعر الوحدة", supplierId: "المورد (اختياري)", serialNumbers: "الأرقام التسلسلية (اختياري)" },
+        f2: { sparePartId: "قطعة الغيار", siteId: "المصنع", quantity: "الكمية", unitCost: "سعر الوحدة", purchaseOrderLine: "بند أمر شراء (اختياري)", supplierId: "المورد (اختياري)", serialNumbers: "الأرقام التسلسلية (اختياري)" },
+        purchaseOrderLineHint: "اختياري — إذا اخترت بندًا هنا، سيُسجَّل هذا الاستلام مقابل أمر الشراء تلقائيًا في وحدة المشتريات.",
         receive: "تسجيل الاستلام",
         receiptsTitle: "آخر عمليات الاستلام",
         colReceipt: { number: "الرقم", part: "القطعة", plant: "المصنع", quantity: "الكمية", unitCost: "سعر الوحدة", receivedBy: "استلمها", date: "التاريخ" },

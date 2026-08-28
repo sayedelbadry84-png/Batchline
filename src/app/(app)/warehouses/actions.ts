@@ -39,6 +39,27 @@ export async function createSparePart(formData: FormData) {
   revalidatePath("/warehouses");
 }
 
+// Mirrors postReceiptToPurchaseOrderLine in material-receiving/actions.ts
+// exactly, just against orderedQty/receivedQty (the spare-part-line
+// fields) instead of orderedMassKg/receivedMassKg.
+async function postReceiptToSparePartLine(purchaseOrderLineId: string, quantity: number) {
+  const line = await prisma.purchaseOrderLine.update({
+    where: { id: purchaseOrderLineId },
+    data: { receivedQty: { increment: quantity } },
+    include: { purchaseOrder: { include: { lines: true } } },
+  });
+
+  const allReceived = line.purchaseOrder.lines.every((l) => {
+    if (l.orderedQty == null) return true; // a material line — not this function's concern
+    const received = l.id === line.id ? line.receivedQty : l.receivedQty;
+    return (received ?? 0) >= l.orderedQty;
+  });
+  const newStatus = allReceived ? "RECEIVED" : "PARTIALLY_RECEIVED";
+  if (line.purchaseOrder.status !== newStatus) {
+    await prisma.purchaseOrder.update({ where: { id: line.purchaseOrder.id }, data: { status: newStatus } });
+  }
+}
+
 export async function receiveSparePart(formData: FormData) {
   const actor = await getCurrentUser();
   requireRole(actor, WAREHOUSE_ROLES);
@@ -49,6 +70,9 @@ export async function receiveSparePart(formData: FormData) {
   const unitCost = Number(formData.get("unitCost") ?? 0);
   const supplierId = String(formData.get("supplierId") ?? "") || null;
   const serialNumbers = String(formData.get("serialNumbers") ?? "").trim() || null;
+  // Optional link to a real Purchasing PurchaseOrderLine — same shape as
+  // Material Receiving's own purchaseOrderLineId picker.
+  const purchaseOrderLineId = String(formData.get("purchaseOrderLineId") ?? "") || null;
   if (!sparePartId || !siteId || !quantity || quantity <= 0 || !unitCost || unitCost <= 0) return;
   if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
 
@@ -57,9 +81,11 @@ export async function receiveSparePart(formData: FormData) {
     () => prisma.sparePartReceipt.count(),
     (receiptNumber) =>
       prisma.sparePartReceipt.create({
-        data: { receiptNumber, sparePartId, siteId, quantity, unitCost, supplierId, serialNumbers, receivedById: actor!.id },
+        data: { receiptNumber, sparePartId, siteId, quantity, unitCost, supplierId, serialNumbers, purchaseOrderLineId, receivedById: actor!.id },
       }),
   );
+
+  if (purchaseOrderLineId) await postReceiptToSparePartLine(purchaseOrderLineId, quantity);
 
   // Keeps the catalog's "last cost" current for future price suggestions —
   // same reasoning as SupplierContract.pricePerUnit feeding Purchasing's PO
@@ -69,6 +95,7 @@ export async function receiveSparePart(formData: FormData) {
   await logAudit({ module: "Warehouses", recordId: receipt.id, afterValue: `${receipt.receiptNumber} — ${quantity} @ ${unitCost}`, reasonCode: "SPARE_PART_RECEIVED" });
   revalidatePath("/warehouses");
   revalidatePath("/maintenance");
+  revalidatePath("/purchasing");
 }
 
 export async function approveSparePartsRequisition(formData: FormData) {

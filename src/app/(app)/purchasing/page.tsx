@@ -13,6 +13,7 @@ import {
   createSupplierContract,
   terminateSupplierContract,
   renewSupplierContract,
+  createPurchaseOrderFromRequisitions,
 } from "./actions";
 import { createSupplier, createMaterial, updateSupplier, updateMaterial } from "../suppliers/actions";
 
@@ -43,6 +44,7 @@ export default async function PurchasingPage({
     renew?: string;
     editSupplier?: string;
     editMaterial?: string;
+    newFromReq?: string;
   }>;
 }) {
   const user = await requirePageAccess("purchasing");
@@ -56,6 +58,7 @@ export default async function PurchasingPage({
     renew: renewId,
     editSupplier: editSupplierId,
     editMaterial: editMaterialId,
+    newFromReq: newFromReqFlag,
   } = await searchParams;
   const tab: PurchasingTab = PURCHASING_TABS.includes(tabRaw as PurchasingTab) ? (tabRaw as PurchasingTab) : "orders";
   const siteId = await getActiveSiteId(user);
@@ -105,6 +108,7 @@ export default async function PurchasingPage({
           contracts={contracts}
           newFlag={newFlag}
           viewPO={viewPO}
+          newFromReqFlag={newFromReqFlag}
           baseUrl={baseUrl}
         />
       )}
@@ -130,6 +134,7 @@ async function OrdersTab({
   contracts,
   newFlag,
   viewPO,
+  newFromReqFlag,
   baseUrl,
 }: {
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["purchasing"];
@@ -141,6 +146,7 @@ async function OrdersTab({
   contracts: { supplierId: string; materialId: string; pricePerUnit: number | null }[];
   newFlag?: string;
   viewPO?: string;
+  newFromReqFlag?: string;
   baseUrl: string;
 }) {
   const orders = await prisma.purchaseOrder.findMany({
@@ -150,9 +156,23 @@ async function OrdersTab({
   });
   const viewedOrder = viewPO ? orders.find((o) => o.id === viewPO) : null;
 
+  // Requisitions approved in Warehouses' Spare Parts tab, not yet turned
+  // into a PO line — see createPurchaseOrderFromRequisitions.
+  const pendingRequisitions = await prisma.sparePartsRequisition.findMany({
+    where: { status: "APPROVED", ...siteScope },
+    include: { sparePart: true, site: true },
+    orderBy: { approvedAt: "asc" },
+  });
+  const sp = m.spareRequisitions;
+
   return (
     <div className="flex flex-col gap-4">
-      <div className="no-print flex justify-end">
+      <div className="no-print flex flex-wrap justify-end gap-2">
+        {pendingRequisitions.length > 0 && (
+          <Link href={`${baseUrl}&newFromReq=1`} className="rounded-md border border-accent px-4 py-2 text-sm font-medium text-accent-strong hover:bg-accent-soft">
+            {sp.newTitle} ({pendingRequisitions.length})
+          </Link>
+        )}
         <Link href={`${baseUrl}&new=1`} className={ui.button}>+ {m.orders.newTitle}</Link>
       </div>
 
@@ -271,6 +291,57 @@ async function OrdersTab({
               <input name="notes" className={ui.input} />
             </div>
             <button type="submit" className={`${ui.button} mt-2`}>{m.orders.add}</button>
+          </form>
+        </Modal>
+      )}
+
+      {newFromReqFlag === "1" && (
+        <Modal title={sp.newTitle} closeHref={baseUrl}>
+          <form action={createPurchaseOrderFromRequisitions} className="flex flex-col gap-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className={ui.label}>{m.orders.f.supplier}</label>
+                <select name="supplierId" required className={ui.select}>
+                  <option value="" disabled>{m.orders.f.supplierPlaceholder}</option>
+                  {suppliers.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={ui.label}>{m.orders.f.siteId}</label>
+                <select name="siteId" required className={ui.select}>
+                  {sites.map((s) => (
+                    <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <p className="text-xs text-ink-muted">{sp.priceHint}</p>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{sp.col.number}</th>
+                  <th className={ui.th}>{sp.col.part}</th>
+                  <th className={ui.th}>{sp.col.quantity}</th>
+                  <th className={ui.th}>{sp.col.unitPrice}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingRequisitions.map((r) => (
+                  <tr key={r.id}>
+                    <td className={`${ui.td} font-mono text-xs`}>{r.requisitionNumber}</td>
+                    <td className={ui.td}>{r.sparePart.name}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.quantityNeeded}</td>
+                    <td className={ui.td}>
+                      <input type="hidden" name="requisitionId" value={r.id} />
+                      <input name="unitPrice" type="number" step="0.01" min="0" className={`${ui.input} w-28`} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <button type="submit" className={`${ui.button} mt-2`}>{sp.create}</button>
           </form>
         </Modal>
       )}

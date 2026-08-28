@@ -1266,6 +1266,12 @@ const en: typeof ar = {
         print: "View / Print",
         empty: "No purchase orders yet.",
       },
+      spareRequisitions: {
+        newTitle: "PO from spare-parts requisitions",
+        priceHint: "Enter a unit price for the lines you want to include in this PO — any line left with no price is skipped.",
+        col: { number: "Number", part: "Part", quantity: "Quantity Needed", unitPrice: "Unit Price" },
+        create: "Create purchase order",
+      },
       contracts: {
         col: { number: "Number", supplier: "Supplier", material: "Material", price: "Price", period: "Period", status: "Status" },
         statusLabel: { ACTIVE: "Active", EXPIRED: "Expired", TERMINATED: "Terminated" },
@@ -1446,7 +1452,8 @@ const en: typeof ar = {
         colBalance: { part: "Part", plant: "Plant", onHand: "On Hand" },
         emptyBalance: "No stock movement yet.",
         receiveTitle: "Receive spare parts",
-        f2: { sparePartId: "Spare part", siteId: "Plant", quantity: "Quantity", unitCost: "Unit cost", supplierId: "Supplier (optional)", serialNumbers: "Serial numbers (optional)" },
+        f2: { sparePartId: "Spare part", siteId: "Plant", quantity: "Quantity", unitCost: "Unit cost", purchaseOrderLine: "Purchase order line (optional)", supplierId: "Supplier (optional)", serialNumbers: "Serial numbers (optional)" },
+        purchaseOrderLineHint: "Optional — pick a line here and this receipt posts against that purchase order automatically in Purchasing.",
         receive: "Record receipt",
         receiptsTitle: "Recent Receipts",
         colReceipt: { number: "Number", part: "Part", plant: "Plant", quantity: "Quantity", unitCost: "Unit Cost", receivedBy: "Received By", date: "Date" },
