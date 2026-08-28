@@ -29,6 +29,16 @@ function readPourDetails(formData: FormData) {
   };
 }
 
+// A reservation can only be opened for a customer+mix pair that already
+// has a price on file — PriceListEntry now tracks the customer's last
+// approved, still-valid quote automatically (see markQuoteSent in the
+// Sales module), so its mere existence *is* "present in the customer's
+// valid price offer"; there's no separate expiry to check here.
+async function hasPriceOnFile(customerId: string, mixId: string): Promise<boolean> {
+  const entry = await prisma.priceListEntry.findUnique({ where: { customerId_mixId: { customerId, mixId } } });
+  return !!entry;
+}
+
 // A reservation is booked against a Plant (factory — see the model
 // comment in schema.prisma), never a specific Station: which station
 // actually produces it is decided later, at batch-ticket release time in
@@ -55,6 +65,7 @@ export async function createReservation(formData: FormData) {
   // cancel-pending state seen in the Dynamics comparison data.
   const project = await prisma.project.findUnique({ where: { id: projectId }, include: { customer: true } });
   if (!project) return;
+  if (!(await hasPriceOnFile(project.customer.id, mixId))) return;
   const outstandingBalance = await getCustomerOutstandingBalance(project.customer.id);
   const overCreditLimit = outstandingBalance >= project.customer.creditLimit;
 
@@ -135,6 +146,17 @@ export async function updateReservation(formData: FormData) {
   if (reservation.status === "CANCELLED") return;
   const effSiteId = effectiveSiteId(user);
   if (!isSiteInScope(reservation.siteId, effSiteId) || !isSiteInScope(siteId, effSiteId)) return;
+
+  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { customerId: true } });
+  if (!project) return;
+  // Grandfather in a reservation's existing customer+mix pair (it may
+  // predate the price-on-file rule, or its PriceListEntry may since have
+  // been removed) — only a pair actually being changed to has to clear
+  // the gate; editing volume/status/dates on an old booking must never
+  // get silently blocked by a rule that didn't exist when it was made.
+  const currentProject = reservation.projectId === projectId ? project : await prisma.project.findUnique({ where: { id: reservation.projectId }, select: { customerId: true } });
+  const isSamePair = reservation.mixId === mixId && currentProject?.customerId === project.customerId;
+  if (!isSamePair && !(await hasPriceOnFile(project.customerId, mixId))) return;
 
   const released = await getReleasedVolumeM3(id);
   if (requestedVolumeM3 < released) return; // can't shrink below what's already gone out

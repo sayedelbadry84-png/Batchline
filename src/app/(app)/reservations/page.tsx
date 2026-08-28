@@ -12,6 +12,7 @@ import { SegmentedControl } from "@/components/SegmentedControl";
 import { DeliveryPumpSection } from "@/components/DeliveryPumpSection";
 import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
+import { ReservationMixSelect } from "@/components/ReservationMixSelect";
 
 const statusChip: Record<string, string> = {
   REQUESTED: "bg-surface-alt text-ink-muted",
@@ -120,6 +121,12 @@ export default async function ReservationsPage({
     prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } }),
   ]);
 
+  // Which customer+mix pairs currently have a price on file — drives the
+  // mix picker's filtering in both the new-booking and edit-row forms
+  // (see ReservationMixSelect); createReservation/updateReservation
+  // enforce the same rule server-side.
+  const pricedPairs = await prisma.priceListEntry.findMany({ select: { customerId: true, mixId: true } });
+
   const reservations = reservationsRaw.map((r) => ({
     ...r,
     released: sumAcceptedVolumeM3(r.batchTickets),
@@ -139,8 +146,15 @@ export default async function ReservationsPage({
     delivered: reservations.reduce((sum, r) => sum + r.released, 0),
   };
 
-  const projectOptions = projects.map((p) => ({ value: p.id, label: `${p.name} — ${p.customer.legalName}` }));
-  const mixOptions = mixes.map((mx) => ({ value: mx.id, label: `${mx.code} — ${mx.grade}` }));
+  const projectsWithCustomer = projects.map((p) => ({ id: p.id, label: `${p.name} — ${p.customer.legalName}`, customerId: p.customerId }));
+  const mixesForPicker = mixes.map((mx) => ({ id: mx.id, label: `${mx.code} — ${mx.grade}` }));
+  const mixPickerLabels = {
+    project: m.f.project,
+    projectPlaceholder: dict.field.selectProject,
+    mix: m.f.mix,
+    mixPlaceholder: dict.field.selectMix,
+    noPricedMix: m.noPricedMixForCustomer,
+  };
   const operators = crew.filter((c) => c.role === "OPERATOR").map((c) => ({ id: c.id, name: c.name }));
   const assistants = crew.filter((c) => c.role === "HELPER").map((c) => ({ id: c.id, name: c.name }));
 
@@ -214,28 +228,20 @@ export default async function ReservationsPage({
                     <td className={ui.td} colSpan={10}>
                       <form action={updateReservation} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={r.id} />
-                        <div>
-                          <label className={ui.label}>{m.f.project}</label>
-                          <select name="projectId" defaultValue={r.projectId} required className={`${ui.select} w-44`}>
-                            {projects.map((p) => (
-                              <option key={p.id} value={p.id}>{p.name} — {p.customer.legalName}</option>
-                            ))}
-                          </select>
-                        </div>
+                        <ReservationMixSelect
+                          projects={projectsWithCustomer}
+                          mixes={mixesForPicker}
+                          pricedPairs={pricedPairs}
+                          defaultProjectId={r.projectId}
+                          defaultMixId={r.mixId}
+                          labels={mixPickerLabels}
+                        />
                         <div>
                           <label className={ui.label}>{dict.field.siteCode}</label>
                           <select name="siteId" defaultValue={r.siteId} required className={`${ui.select} w-36`}>
                             <option value="">{dict.field.selectSite}</option>
                             {sitesForPicker.map((s) => (
                               <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div>
-                          <label className={ui.label}>{m.f.mix}</label>
-                          <select name="mixId" defaultValue={r.mixId} required className={`${ui.select} w-36`}>
-                            {mixes.map((mx) => (
-                              <option key={mx.id} value={mx.id}>{mx.code} — {mx.grade}</option>
                             ))}
                           </select>
                         </div>
@@ -474,15 +480,11 @@ export default async function ReservationsPage({
       {newFlag === "1" && (
         <Modal title={m.newTitle} closeHref={baseUrl}>
           <form action={createReservation} className="flex flex-col gap-3">
-            <div>
-              <label className={ui.label}>{m.f.project}</label>
-              <select name="projectId" required defaultValue="" className={ui.select}>
-                <option value="" disabled>{dict.field.selectProject}</option>
-                {projectOptions.map((p) => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
-                ))}
-              </select>
-            </div>
+            {mixes.length === 0 ? (
+              <p className="text-xs text-warn">{m.noApprovedMix}</p>
+            ) : (
+              <ReservationMixSelect projects={projectsWithCustomer} mixes={mixesForPicker} pricedPairs={pricedPairs} labels={mixPickerLabels} />
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className={ui.label}>{m.f.siteLocation}</label>
@@ -515,16 +517,6 @@ export default async function ReservationsPage({
                   <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
                 ))}
               </select>
-            </div>
-            <div>
-              <label className={ui.label}>{m.f.mix}</label>
-              <select name="mixId" required defaultValue="" className={ui.select}>
-                <option value="" disabled>{dict.field.selectMix}</option>
-                {mixOptions.map((mx) => (
-                  <option key={mx.value} value={mx.value}>{mx.label}</option>
-                ))}
-              </select>
-              {mixes.length === 0 && <p className="mt-1 text-xs text-warn">{m.noApprovedMix}</p>}
             </div>
             <div>
               <label className={ui.label}>{m.f.cementType}</label>

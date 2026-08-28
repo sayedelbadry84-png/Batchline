@@ -387,6 +387,7 @@ const en: typeof ar = {
       mapLink: "map",
       labTechnicianBadge: "Lab technician required",
       noApprovedMix: "No mix is marked APPROVED yet — approve one in Mix Design first.",
+      noPricedMixForCustomer: "No mix has a valid price on file for this customer — send them an approved quote from Sales first, or set a price manually in Billing.",
       create: "Create reservation",
       // Two-stage sign-off gate — a reservation can't be released in
       // Production until both are set (see the Production module).
