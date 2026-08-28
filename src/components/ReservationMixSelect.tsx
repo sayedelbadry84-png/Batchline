@@ -43,7 +43,13 @@ export function ReservationMixSelect({
   // selectable even when it has no price on file (predates the rule, or
   // its price was since removed) — only switching to a *different*
   // unpriced mix is refused, never silently hiding what's already there.
-  const grandfathered = defaultMixId && !priced.some((mx) => mx.id === defaultMixId) ? mixes.find((mx) => mx.id === defaultMixId) : undefined;
+  // But that grandfathering only holds while the project (and therefore
+  // customer) is still the one the reservation already had — the moment
+  // the project is changed to something else, the old mix is just as
+  // unpriced-for-this-new-customer as any other, so it must not linger
+  // as a pre-selected option.
+  const stillOnOriginalProject = projectId === (defaultProjectId ?? "");
+  const grandfathered = stillOnOriginalProject && defaultMixId && !priced.some((mx) => mx.id === defaultMixId) ? mixes.find((mx) => mx.id === defaultMixId) : undefined;
   const availableMixes = grandfathered ? [...priced, grandfathered] : priced;
 
   return (
@@ -69,7 +75,7 @@ export function ReservationMixSelect({
           key={customerId}
           name="mixId"
           required
-          defaultValue={defaultMixId ?? ""}
+          defaultValue={stillOnOriginalProject ? (defaultMixId ?? "") : ""}
           className={`${ui.select} w-36`}
         >
           <option value="" disabled>{labels.mixPlaceholder}</option>
