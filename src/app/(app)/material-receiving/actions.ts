@@ -82,9 +82,14 @@ async function postReceiptToPurchaseOrderLine(purchaseOrderLineId: string, netWe
     include: { purchaseOrder: { include: { lines: true } } },
   });
 
-  const allReceived = line.purchaseOrder.lines.every(
-    (l) => (l.id === line.id ? line.receivedMassKg : l.receivedMassKg) >= l.orderedMassKg,
-  );
+  // Spare-part lines (orderedMassKg null) aren't this function's concern —
+  // their own received-quantity tracking lives in the Spare Parts warehouse
+  // instead, so they're treated as already-satisfied here.
+  const allReceived = line.purchaseOrder.lines.every((l) => {
+    if (l.orderedMassKg == null) return true;
+    const received = l.id === line.id ? line.receivedMassKg : l.receivedMassKg;
+    return (received ?? 0) >= l.orderedMassKg;
+  });
   const newStatus = allReceived ? "RECEIVED" : "PARTIALLY_RECEIVED";
   if (line.purchaseOrder.status !== newStatus) {
     await prisma.purchaseOrder.update({ where: { id: line.purchaseOrder.id }, data: { status: newStatus } });

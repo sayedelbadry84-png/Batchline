@@ -65,11 +65,14 @@ export default async function MaterialReceivingPage({
   // still open (SENT or PARTIALLY_RECEIVED) across every supplier, so a
   // receipt can post against a real Purchasing order (see purchaseOrderLineId
   // on createReceipt) instead of only the free-text PO Number field.
-  const openPoLines = await prisma.purchaseOrderLine.findMany({
-    where: { purchaseOrder: { status: { in: ["SENT", "PARTIALLY_RECEIVED"] } } },
+  // materialId: { not: null } excludes spare-part lines — those receive
+  // into the Spare Parts warehouse instead, not here.
+  const openPoLinesRaw = await prisma.purchaseOrderLine.findMany({
+    where: { purchaseOrder: { status: { in: ["SENT", "PARTIALLY_RECEIVED"] } }, materialId: { not: null } },
     include: { purchaseOrder: { include: { supplier: true } }, material: true },
     orderBy: { purchaseOrder: { orderDate: "desc" } },
   });
+  const openPoLines = openPoLinesRaw as (typeof openPoLinesRaw[number] & { material: NonNullable<typeof openPoLinesRaw[number]["material"]>; orderedMassKg: number; receivedMassKg: number })[];
 
   return (
     <div className="flex flex-col gap-8">

@@ -146,7 +146,7 @@ async function OrdersTab({
   const orders = await prisma.purchaseOrder.findMany({
     where: siteScope,
     orderBy: { createdAt: "desc" },
-    include: { supplier: true, lines: { include: { material: true } } },
+    include: { supplier: true, lines: { include: { material: true, sparePart: true } } },
   });
   const viewedOrder = viewPO ? orders.find((o) => o.id === viewPO) : null;
 
@@ -175,9 +175,9 @@ async function OrdersTab({
             <tbody>
               {viewedOrder.lines.map((l) => (
                 <tr key={l.id}>
-                  <td className={ui.td}>{l.material.name}</td>
-                  <td className={`${ui.td} font-mono`}>{l.orderedMassKg.toFixed(0)} kg</td>
-                  <td className={`${ui.td} font-mono`}>{l.receivedMassKg.toFixed(0)} kg</td>
+                  <td className={ui.td}>{l.material?.name ?? l.sparePart?.name ?? "—"}</td>
+                  <td className={`${ui.td} font-mono`}>{l.material ? `${(l.orderedMassKg ?? 0).toFixed(0)} kg` : (l.orderedQty ?? 0).toFixed(0)}</td>
+                  <td className={`${ui.td} font-mono`}>{l.material ? `${(l.receivedMassKg ?? 0).toFixed(0)} kg` : (l.receivedQty ?? 0).toFixed(0)}</td>
                   <td className={`${ui.td} font-mono`}>{l.unitPrice.toFixed(2)}</td>
                   <td className={`${ui.td} font-mono`}>{l.lineTotal.toFixed(2)}</td>
                 </tr>

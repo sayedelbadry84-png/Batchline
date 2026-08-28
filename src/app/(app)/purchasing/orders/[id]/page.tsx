@@ -40,7 +40,7 @@ export default async function PurchaseOrderDetailPage({ params }: { params: Prom
       supplier: true,
       site: true,
       createdBy: true,
-      lines: { include: { material: true } },
+      lines: { include: { material: true, sparePart: true } },
     },
   });
   if (!po) notFound();
@@ -87,8 +87,10 @@ export default async function PurchaseOrderDetailPage({ params }: { params: Prom
             <tbody>
               {po.lines.map((l) => (
                 <tr key={l.id}>
-                  <td className="px-2 py-1.5 text-sm">{l.material.name}</td>
-                  <td className="px-2 py-1.5 text-center font-mono text-sm">{l.orderedMassKg.toFixed(0)} kg</td>
+                  <td className="px-2 py-1.5 text-sm">{l.material?.name ?? l.sparePart?.name ?? "—"}</td>
+                  <td className="px-2 py-1.5 text-center font-mono text-sm">
+                    {l.material ? `${(l.orderedMassKg ?? 0).toFixed(0)} kg` : (l.orderedQty ?? 0).toFixed(0)}
+                  </td>
                   <td className="px-2 py-1.5 text-center font-mono text-sm">{l.unitPrice.toFixed(2)}</td>
                   <td className="px-2 py-1.5 text-end font-mono text-sm">{l.lineTotal.toFixed(2)}</td>
                 </tr>

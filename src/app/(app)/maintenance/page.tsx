@@ -15,9 +15,10 @@ import {
   createMaintenancePlan,
   deactivateMaintenancePlan,
   generateTicketFromPlan,
+  convertTicketToOrder,
 } from "./actions";
 
-const MAINTENANCE_TABS = ["tickets", "plans", "reports"] as const;
+const MAINTENANCE_TABS = ["tickets", "orders", "plans", "reports"] as const;
 type MaintenanceTab = (typeof MAINTENANCE_TABS)[number];
 const TICKET_TYPES = ["PREVENTIVE", "CORRECTIVE", "INSPECTION"] as const;
 const PRIORITIES = ["LOW", "NORMAL", "HIGH", "CRITICAL"] as const;
@@ -95,6 +96,8 @@ export default async function MaintenancePage({
         />
       )}
 
+      {tab === "orders" && <OrdersTab m={m} dict={dict} siteScope={siteScope} />}
+
       {tab === "plans" && (
         <PlansTab m={m} dict={dict} siteScope={siteScope} sites={sites} equipmentOptions={equipmentOptions} newPlanFlag={newPlanFlag} baseUrl={baseUrl} />
       )}
@@ -128,7 +131,7 @@ async function TicketsTab({
   const tickets = await prisma.maintenanceTicket.findMany({
     where: siteScope,
     orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
-    include: { assignedTo: true, reportedBy: true },
+    include: { assignedTo: true, reportedBy: true, order: { select: { id: true, orderNumber: true } } },
   });
 
   const openCount = tickets.filter((t) => t.status === "OPEN").length;
@@ -186,20 +189,34 @@ async function TicketsTab({
                 <td className={ui.td}>{t.assignedTo?.name ?? "—"}</td>
                 <td className={ui.td}>
                   <div className="flex flex-col gap-1">
-                    {t.status === "OPEN" && (
-                      <form action={startMaintenanceTicket}>
-                        <input type="hidden" name="id" value={t.id} />
-                        <button className="text-xs font-medium text-accent-strong hover:underline">{m.tickets.start}</button>
-                      </form>
-                    )}
-                    {["OPEN", "IN_PROGRESS"].includes(t.status) && (
-                      <Link href={`${baseUrl}&complete=${t.id}`} className="text-xs font-medium text-good hover:underline">{m.tickets.complete}</Link>
-                    )}
-                    {["OPEN", "IN_PROGRESS"].includes(t.status) && (
-                      <form action={cancelMaintenanceTicket}>
-                        <input type="hidden" name="id" value={t.id} />
-                        <button className="text-xs font-medium text-critical hover:underline">{m.tickets.cancel}</button>
-                      </form>
+                    {t.order ? (
+                      <Link href={`/maintenance/orders/${t.order.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {m.tickets.viewOrder} ({t.order.orderNumber})
+                      </Link>
+                    ) : (
+                      <>
+                        {t.status === "OPEN" && (
+                          <form action={startMaintenanceTicket}>
+                            <input type="hidden" name="id" value={t.id} />
+                            <button className="text-xs font-medium text-accent-strong hover:underline">{m.tickets.start}</button>
+                          </form>
+                        )}
+                        {["OPEN", "IN_PROGRESS"].includes(t.status) && (
+                          <form action={convertTicketToOrder}>
+                            <input type="hidden" name="ticketId" value={t.id} />
+                            <button className="text-xs font-medium text-accent-strong hover:underline">{m.tickets.convertToOrder}</button>
+                          </form>
+                        )}
+                        {["OPEN", "IN_PROGRESS"].includes(t.status) && (
+                          <Link href={`${baseUrl}&complete=${t.id}`} className="text-xs font-medium text-good hover:underline">{m.tickets.complete}</Link>
+                        )}
+                        {["OPEN", "IN_PROGRESS"].includes(t.status) && (
+                          <form action={cancelMaintenanceTicket}>
+                            <input type="hidden" name="id" value={t.id} />
+                            <button className="text-xs font-medium text-critical hover:underline">{m.tickets.cancel}</button>
+                          </form>
+                        )}
+                      </>
                     )}
                   </div>
                 </td>
@@ -296,6 +313,65 @@ async function TicketsTab({
           </form>
         </Modal>
       )}
+    </div>
+  );
+}
+
+async function OrdersTab({
+  m,
+  dict,
+  siteScope,
+}: {
+  m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["maintenance"];
+  dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
+  siteScope: Record<string, unknown>;
+}) {
+  const orders = await prisma.maintenanceOrder.findMany({
+    where: { ticket: siteScope },
+    orderBy: { createdAt: "desc" },
+    include: { ticket: true, technicians: true, parts: true },
+  });
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className={ui.card}>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              <th className={ui.th}>{m.orders.col.number}</th>
+              <th className={ui.th}>{m.orders.col.equipment}</th>
+              <th className={ui.th}>{m.orders.col.status}</th>
+              <th className={ui.th}>{m.orders.col.technicians}</th>
+              <th className={ui.th}>{m.orders.col.partsCost}</th>
+              <th className={ui.th}>{m.orders.col.created}</th>
+              <th className={ui.th}>{dict.field.actions}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.map((o) => {
+              const partsCost = o.parts.reduce((sum, p) => sum + p.lineTotal, 0);
+              return (
+                <tr key={o.id}>
+                  <td className={`${ui.td} font-mono text-xs`}>{o.orderNumber}</td>
+                  <td className={ui.td}>{o.ticket.equipmentLabel}</td>
+                  <td className={ui.td}>
+                    <span className={`${ui.chip} ${statusChip[o.status] ?? ""}`}>{m.statusLabel[o.status as keyof typeof m.statusLabel] ?? o.status}</span>
+                  </td>
+                  <td className={`${ui.td} font-mono tabular`}>{o.technicians.length}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{partsCost.toFixed(2)}</td>
+                  <td className={ui.td}>{fmtDate(o.createdAt)}</td>
+                  <td className={ui.td}>
+                    <Link href={`/maintenance/orders/${o.id}`} className="text-xs font-medium text-accent-strong hover:underline">{m.orders.view}</Link>
+                  </td>
+                </tr>
+              );
+            })}
+            {orders.length === 0 && (
+              <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.orders.empty}</span></td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
