@@ -33,7 +33,7 @@ export async function createSilo(formData: FormData) {
     reasonCode: "SILO_CREATED",
   });
 
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
 }
 
 export async function updateSilo(formData: FormData) {
@@ -64,7 +64,7 @@ export async function updateSilo(formData: FormData) {
     reasonCode: "SILO_UPDATED",
   });
 
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
 }
 
 // Toggled independently of the level reading — sharing is a
@@ -90,7 +90,7 @@ export async function setSiloSharing(formData: FormData) {
     reasonCode: "SILO_SHARING_CHANGED",
   });
 
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
 }
 
 export async function updateSiloLevel(formData: FormData) {
@@ -114,7 +114,7 @@ export async function updateSiloLevel(formData: FormData) {
     reasonCode: "MANUAL_LEVEL_READING",
   });
 
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
 }
 
 // --- Hoppers (aggregate heaps — SAND, COARSE_AGGREGATE, and now WATER;
@@ -148,7 +148,7 @@ export async function createHopper(formData: FormData) {
   });
 
   await logAudit({ module: "Silos", recordId: hopper.id, afterValue: `${name} / ${aggregateType}`, reasonCode: "HOPPER_CREATED" });
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
 }
 
 // Toggled independently of the level reading — sharing is a
@@ -174,7 +174,7 @@ export async function setHopperSharing(formData: FormData) {
     reasonCode: "HOPPER_SHARING_CHANGED",
   });
 
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
 }
 
 export async function updateHopperLevel(formData: FormData) {
@@ -198,7 +198,7 @@ export async function updateHopperLevel(formData: FormData) {
     reasonCode: "MANUAL_LEVEL_READING",
   });
 
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
 }
 
 // --- Chemical tanks (liquid admixtures — see completeBatch in
@@ -224,7 +224,7 @@ export async function createChemicalTank(formData: FormData) {
   });
 
   await logAudit({ module: "Silos", recordId: tank.id, afterValue: name, reasonCode: "CHEMICAL_TANK_CREATED" });
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
 }
 
 export async function updateChemicalTankLevel(formData: FormData) {
@@ -248,5 +248,5 @@ export async function updateChemicalTankLevel(formData: FormData) {
     reasonCode: "MANUAL_TANK_READING",
   });
 
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
 }

@@ -381,7 +381,7 @@ export async function completeBatch(formData: FormData) {
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);
   revalidatePath("/operator");
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
   revalidatePath("/");
 }
 
@@ -696,7 +696,7 @@ export async function deleteBatchTicket(formData: FormData) {
 
   revalidatePath("/production");
   revalidatePath("/reservations");
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
   revalidatePath("/");
   redirect("/production");
 }

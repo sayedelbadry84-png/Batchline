@@ -9,12 +9,9 @@ export const MODULE_ROLES = {
   "mix-designs": ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
   reservations: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN", "SALES_REP", "SALES_MANAGER", "RESERVATIONS_OFFICER"],
   production: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
-  "material-receiving": ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
   // Replaces the old separate "fleet" and "pumps" modules — one screen,
   // tabbed by equipment type (pumps/mixers/bulkers/water tankers/loaders).
   equipment: ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
-  silos: ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
-  stockLedger: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
   // Projects live on this same screen now — a project has no plant/site
   // of its own (see the Project model comment), it's just a customer's
   // job site, so it never needed a separate module permission from
@@ -44,9 +41,17 @@ export const MODULE_ROLES = {
   // operations manager can requisition materials, not just the
   // accountant/operator who could before).
   purchasing: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
-  // Fault tickets and preventive schedules for the equipment fleet — same
-  // role set as "equipment", since it's the same operational audience.
+  // Fault tickets, preventive schedules, and the Maintenance Order pipeline
+  // (technicians, spare-parts issuance/requisitions) for the equipment
+  // fleet — same role set as "equipment", since it's the same operational
+  // audience.
   maintenance: ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
+  // Raw Materials (the old standalone "silos" and "material-receiving"
+  // modules, plus the "stockLedger" report — merged in as three tabs since
+  // they're all facets of the same physical stockpile), Spare Parts, and
+  // Finished Goods — the union of all three old modules' role lists, same
+  // broadening-not-narrowing reasoning as every merge this session.
+  warehouses: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"],
   // Accounts payable/receivable (invoicing customers, paying suppliers —
   // the old standalone "billing" module merged in here as a tab, same
   // role set so nothing widens or narrows), cash ledger, bank
@@ -84,18 +89,16 @@ export const MODULE_NAV: { key: ModuleKey; href: string; num: string; labelKey: 
   { key: "mix-designs", href: "/mix-designs", num: "01", labelKey: "mixDesigns" },
   { key: "reservations", href: "/reservations", num: "02", labelKey: "reservations" },
   { key: "production", href: "/production", num: "03", labelKey: "production" },
-  { key: "material-receiving", href: "/material-receiving", num: "04", labelKey: "materialReceiving" },
   { key: "equipment", href: "/equipment", num: "05", labelKey: "equipment" },
-  { key: "silos", href: "/silos", num: "06", labelKey: "silos" },
   { key: "customers", href: "/customers", num: "07", labelKey: "customers" },
   { key: "employees", href: "/employees", num: "09", labelKey: "employees" },
   { key: "plants", href: "/plants", num: "10", labelKey: "plants" },
   { key: "incentives", href: "/incentives", num: "12", labelKey: "incentives" },
-  { key: "stockLedger", href: "/stock-ledger", num: "13", labelKey: "stockLedger" },
   { key: "sales", href: "/sales", num: "14", labelKey: "sales" },
   { key: "purchasing", href: "/purchasing", num: "15", labelKey: "purchasing" },
   { key: "maintenance", href: "/maintenance", num: "16", labelKey: "maintenance" },
   { key: "finance", href: "/finance", num: "17", labelKey: "finance" },
+  { key: "warehouses", href: "/warehouses", num: "18", labelKey: "warehouses" },
   // "users" is deliberately absent — like Permissions, it's hard-locked to
   // ADMIN in Sidebar.tsx and /users/page.tsx directly, never routed through
   // this database-editable system, so it can never be granted to another

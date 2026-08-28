@@ -224,7 +224,7 @@ export default async function DashboardPage() {
   // the single-pane-of-glass this dashboard exists to be. ---
   const alerts: AlertRow[] = [];
   for (const s of siloAlerts) {
-    alerts.push({ key: `silo-${s.id}`, severity: "warn", href: "/silos", label: `${s.name} ${d.siloAlertRest(s.plant.name, s.pct.toFixed(0), s.minThresholdPct)}` });
+    alerts.push({ key: `silo-${s.id}`, severity: "warn", href: "/warehouses?tab=rawMaterials&sub=silos", label: `${s.name} ${d.siloAlertRest(s.plant.name, s.pct.toFixed(0), s.minThresholdPct)}` });
   }
   for (const t of drumAlerts) {
     alerts.push({ key: `drum-${t.id}`, severity: "critical", href: "/trips", label: `${t.truck.code} ${d.drumAlertRest(t.elapsedMin, t.batchTicket.plant.drumTimerLimitMinutes)}` });
@@ -281,7 +281,7 @@ export default async function DashboardPage() {
 
   const stats = [
     { label: d.stats.plants, value: plants.length, href: "/plants" },
-    { label: d.stats.silos, value: siloCount, href: "/silos" },
+    { label: d.stats.silos, value: siloCount, href: "/warehouses?tab=rawMaterials&sub=silos" },
     { label: d.stats.mixDesigns, value: mixCount, href: "/mix-designs" },
     { label: d.stats.trucks, value: truckCount, href: "/equipment?tab=mixers" },
     { label: d.stats.customers, value: customerCount, href: "/customers" },

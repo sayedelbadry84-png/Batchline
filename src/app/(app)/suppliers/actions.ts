@@ -24,7 +24,7 @@ export async function createSupplier(formData: FormData) {
   // "+ add supplier" so a weighbridge operator never has to leave that
   // screen) — revalidated here too so the new supplier shows up in its
   // picker without a separate save.
-  revalidatePath("/material-receiving");
+  revalidatePath("/warehouses");
 }
 
 export async function createMaterial(formData: FormData) {

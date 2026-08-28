@@ -64,7 +64,7 @@ export async function createReceipt(formData: FormData) {
     reasonCode: "RECEIPT_CAPTURED",
   });
 
-  revalidatePath("/material-receiving");
+  revalidatePath("/warehouses");
   revalidatePath("/purchasing");
 }
 
@@ -177,8 +177,8 @@ export async function updateReceipt(formData: FormData) {
     reasonCode: receipt.postedToInventory ? "RECEIPT_UPDATED_INVENTORY_ADJUSTED" : "RECEIPT_UPDATED",
   });
 
-  revalidatePath("/material-receiving");
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
+  revalidatePath("/warehouses");
   revalidatePath("/");
 }
 
@@ -221,8 +221,8 @@ export async function deleteReceipt(formData: FormData) {
     reasonCode: receipt.postedToInventory ? "RECEIPT_DELETED_INVENTORY_REVERSED" : "RECEIPT_DELETED",
   });
 
-  revalidatePath("/material-receiving");
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
+  revalidatePath("/warehouses");
   revalidatePath("/");
 }
 
@@ -268,8 +268,8 @@ export async function returnReceiptToSupplier(formData: FormData) {
     reasonCode: "RECEIPT_RETURNED_TO_SUPPLIER",
   });
 
-  revalidatePath("/material-receiving");
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
+  revalidatePath("/warehouses");
   revalidatePath("/");
 }
 
@@ -324,7 +324,7 @@ export async function setQcStatus(formData: FormData) {
     reasonCode: shouldPost ? "QC_PASSED_POSTED_TO_INVENTORY" : "QC_STATUS_UPDATED",
   });
 
-  revalidatePath("/material-receiving");
-  revalidatePath("/silos");
+  revalidatePath("/warehouses");
+  revalidatePath("/warehouses");
   revalidatePath("/");
 }
