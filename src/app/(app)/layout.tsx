@@ -4,6 +4,7 @@ import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { getAccessibleModules } from "@/lib/permissions";
 import { getActiveSiteId } from "@/lib/siteScope";
+import { getTheme } from "@/lib/theme";
 import { Sidebar } from "@/components/Sidebar";
 
 export default async function AppLayout({ children }: LayoutProps<"/">) {
@@ -13,6 +14,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
   if (user.role === "DRIVER") redirect("/driver");
 
   const { locale, dict } = await getDictionary();
+  const theme = await getTheme();
   // Computed here, not inside Sidebar — permissions are database-backed
   // now (see src/lib/permissions.ts), and Sidebar is a Client Component
   // that can't reach the database itself.
@@ -33,6 +35,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
         nav={dict.nav}
         common={dict.common}
         locale={locale}
+        theme={theme}
         sites={sites}
         activeSiteId={activeSiteId}
       />

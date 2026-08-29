@@ -2,6 +2,9 @@ const ar = {
   common: {
     tagline: "منصة عمليات مصنع الخرسانة",
     switchLocale: "English",
+    toggleTheme: "تبديل المظهر الفاتح/الداكن",
+    themeDark: "داكن",
+    themeLight: "فاتح",
   },
   nav: {
     allPlants: "كل المصانع",

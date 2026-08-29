@@ -4,6 +4,9 @@ const en: typeof ar = {
   common: {
     tagline: "Ready-mix concrete plant operations platform",
     switchLocale: "العربية",
+    toggleTheme: "Toggle light/dark theme",
+    themeDark: "Dark",
+    themeLight: "Light",
   },
   nav: {
     allPlants: "All plants",

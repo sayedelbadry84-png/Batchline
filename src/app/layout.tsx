@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Oswald, IBM_Plex_Sans, IBM_Plex_Sans_Arabic, IBM_Plex_Mono } from "next/font/google";
 import { getLocale } from "@/lib/i18n";
 import { dirFor } from "@/lib/i18n/config";
+import { getTheme } from "@/lib/theme";
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
 import "./globals.css";
 
@@ -45,11 +46,18 @@ export const viewport = {
 // root sets up fonts, locale direction, and the HTML shell.
 export default async function RootLayout({ children }: LayoutProps<"/">) {
   const locale = await getLocale();
+  // Read server-side, same as locale — data-theme is correct from the
+  // very first byte, so there's no client-side script and no flash of
+  // the wrong theme to work around. null (no explicit choice yet) omits
+  // the attribute entirely, leaving @media (prefers-color-scheme: dark)
+  // in globals.css to decide.
+  const theme = await getTheme();
 
   return (
     <html
       lang={locale}
       dir={dirFor(locale)}
+      data-theme={theme ?? undefined}
       className={`${oswald.variable} ${plexSans.variable} ${plexSansArabic.variable} ${plexMono.variable} h-full`}
     >
       <body className="min-h-full font-sans antialiased">

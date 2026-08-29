@@ -17,6 +17,87 @@
   --warn-soft: #fbedd3;
   --critical: #b33b26;
   --critical-soft: #fadbd3;
+  /* Glass/depth layer — panel-level surfaces only (see .glass-surface
+     below); tables, inputs, and the sidebar chrome stay flat/opaque on
+     purpose (legibility for dense data, and many stacked blur layers is
+     genuinely slow). */
+  --glass: rgba(255, 255, 255, 0.55);
+  --glass-strong: rgba(255, 255, 255, 0.82);
+  --glass-border: rgba(23, 26, 20, 0.09);
+  --glow-1: rgba(217, 118, 30, 0.14);
+  --glow-2: rgba(14, 147, 161, 0.12);
+  --shadow-ambient: rgba(48, 42, 30, 0.14);
+  --shadow-lift: rgba(48, 42, 30, 0.2);
+  --sheen: rgba(255, 255, 255, 0.9);
+  --accent-glow: rgba(217, 118, 30, 0.32);
+  --on-accent: #2a1608;
+}
+
+/* System-default dark mode — only applies when the user hasn't made an
+   explicit choice via the toggle (ThemeToggle.tsx / [data-theme] below).
+   Guarded with :not([data-theme="light"]) so an explicit light choice
+   always beats a dark OS setting. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0a0c0f;
+    --surface: #12161b;
+    --surface-alt: #171c22;
+    --border: #262c33;
+    --ink: #eef1f3;
+    --ink-muted: #9aa3ab;
+    --ink-faint: #5d656d;
+    --accent: #e2842a;
+    --accent-strong: #ffab5c;
+    --accent-soft: rgba(226, 132, 42, 0.18);
+    --good: #35c98d;
+    --good-soft: rgba(53, 201, 141, 0.16);
+    --warn: #f0b93d;
+    --warn-soft: rgba(240, 185, 61, 0.16);
+    --critical: #f0665f;
+    --critical-soft: rgba(240, 102, 95, 0.16);
+    --glass: rgba(255, 255, 255, 0.045);
+    --glass-strong: rgba(255, 255, 255, 0.07);
+    --glass-border: rgba(255, 255, 255, 0.09);
+    --glow-1: #3a2410;
+    --glow-2: #0d2b30;
+    --shadow-ambient: rgba(0, 0, 0, 0.55);
+    --shadow-lift: rgba(0, 0, 0, 0.65);
+    --sheen: rgba(255, 255, 255, 0.06);
+    --accent-glow: rgba(226, 132, 42, 0.75);
+    --on-accent: #241203;
+  }
+}
+
+/* Explicit toggle — wins over both the OS setting and the bare :root
+   default in either direction (see the light block's own selector,
+   which only kicks in when this one hasn't already). */
+:root[data-theme="dark"] {
+  --bg: #0a0c0f;
+  --surface: #12161b;
+  --surface-alt: #171c22;
+  --border: #262c33;
+  --ink: #eef1f3;
+  --ink-muted: #9aa3ab;
+  --ink-faint: #5d656d;
+  --accent: #e2842a;
+  --accent-strong: #ffab5c;
+  --accent-soft: rgba(226, 132, 42, 0.18);
+  --good: #35c98d;
+  --good-soft: rgba(53, 201, 141, 0.16);
+  --warn: #f0b93d;
+  --warn-soft: rgba(240, 185, 61, 0.16);
+  --critical: #f0665f;
+  --critical-soft: rgba(240, 102, 95, 0.16);
+  --glass: rgba(255, 255, 255, 0.045);
+  --glass-strong: rgba(255, 255, 255, 0.07);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glow-1: #3a2410;
+  --glow-2: #0d2b30;
+  --shadow-ambient: rgba(0, 0, 0, 0.55);
+  --shadow-lift: rgba(0, 0, 0, 0.65);
+  --sheen: rgba(255, 255, 255, 0.06);
+  --accent-glow: rgba(226, 132, 42, 0.75);
+  --on-accent: #241203;
 }
 
 @theme inline {
@@ -36,6 +117,9 @@
   --color-warn-soft: var(--warn-soft);
   --color-critical: var(--critical);
   --color-critical-soft: var(--critical-soft);
+  --color-glass: var(--glass);
+  --color-glass-strong: var(--glass-strong);
+  --color-glass-border: var(--glass-border);
   --font-display: var(--font-oswald);
   /* Latin glyphs render in IBM Plex Sans, Arabic glyphs fall back to its
      Arabic companion automatically — mixed-script text (e.g. Arabic labels
@@ -46,12 +130,28 @@
 }
 
 body {
-  background: var(--bg);
+  background:
+    radial-gradient(900px 500px at 92% -10%, var(--glow-1), transparent 60%),
+    radial-gradient(700px 600px at -8% 25%, var(--glow-2), transparent 55%),
+    var(--bg);
   color: var(--ink);
 }
 
 .tabular {
   font-variant-numeric: tabular-nums;
+}
+
+/* The one composite effect Tailwind utilities can't express cleanly —
+   layered translucent fill + blur + two-part shadow. Reserved for
+   panel-level containers (see ui.card in src/lib/ui.ts); never applied to
+   table cells, inputs, or the sidebar. */
+.glass-surface {
+  background: linear-gradient(155deg, var(--glass-strong), var(--glass) 65%);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow:
+    0 1px 0 var(--sheen) inset,
+    0 20px 40px -26px var(--shadow-ambient);
 }
 
 /* Report export: "Print / Save as PDF" just uses the browser's native
@@ -67,6 +167,12 @@ body {
   body {
     background: #fff;
     color: #000;
+  }
+  .glass-surface {
+    background: #fff !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    box-shadow: none !important;
   }
   .print-break {
     break-before: page;

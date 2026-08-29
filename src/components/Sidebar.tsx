@@ -8,6 +8,8 @@ import { setActiveSite } from "@/app/site-actions";
 import { MODULE_NAV, VIEW_NAV, type ModuleKey } from "@/lib/permissions";
 import type { Dictionary } from "@/lib/i18n";
 import type { Locale } from "@/lib/i18n/config";
+import type { Theme } from "@/lib/theme";
+import { setTheme } from "@/app/theme-actions";
 
 export function Sidebar({
   user,
@@ -15,6 +17,7 @@ export function Sidebar({
   nav,
   common,
   locale,
+  theme,
   sites,
   activeSiteId,
 }: {
@@ -30,6 +33,10 @@ export function Sidebar({
   nav: Dictionary["nav"];
   common: Dictionary["common"];
   locale: Locale;
+  // null means no explicit choice yet (following the OS setting) — the
+  // button always offers "dark" as the first press in that case, same as
+  // if the current choice were "light".
+  theme: Theme | null;
   // Only ever populated for ADMIN (see (app)/layout.tsx) — every other
   // role has no plant to pick, since effectiveSiteId already pins them to
   // their one site.
@@ -197,6 +204,16 @@ export function Sidebar({
             <input type="hidden" name="locale" value={locale === "ar" ? "en" : "ar"} />
             <button className="rounded-md border border-border px-3 py-1.5 font-mono text-xs text-ink-muted hover:bg-surface-alt hover:text-ink">
               {common.switchLocale}
+            </button>
+          </form>
+          <form action={setTheme}>
+            <input type="hidden" name="theme" value={theme === "dark" ? "light" : "dark"} />
+            <button
+              aria-label={common.toggleTheme}
+              title={common.toggleTheme}
+              className="rounded-md border border-border px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-alt hover:text-ink"
+            >
+              {theme === "dark" ? common.themeLight : common.themeDark}
             </button>
           </form>
         </div>
