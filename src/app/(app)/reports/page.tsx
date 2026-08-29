@@ -19,6 +19,7 @@ import {
   getTripsReport,
   getEquipmentProductivityReport,
   getWorkerProductivityReport,
+  getProfitabilityReport,
 } from "@/lib/reportQueries";
 import {
   aggregateIncentiveResults,
@@ -38,7 +39,7 @@ const OUTLOOK_DAYS = 7;
 const WEEKS_BACK_FOR_WEEKDAY_AVG = 8;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
 const SILO_MATERIAL_TYPES = new Set(["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"]);
-const REPORT_TABS = ["overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers"] as const;
+const REPORT_TABS = ["overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers", "profitability"] as const;
 type ReportTab = (typeof REPORT_TABS)[number];
 
 function fmt(n: number | null, digits = 1, suffix = "") {
@@ -298,6 +299,7 @@ export default async function ReportsPage({
   // see the comment on getEquipmentProductivityReport itself.
   const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport({ from: rangeStart, to: rangeEnd }) : null;
   const workersData = tab === "workers" ? await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const profitability = tab === "profitability" ? await getProfitabilityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
 
   const incentivesData =
     tab === "incentives"
@@ -353,6 +355,7 @@ export default async function ReportsPage({
     trips: m.tabs.trips,
     equipment: m.tabs.equipment,
     workers: m.tabs.workers,
+    profitability: m.tabs.profitability,
   };
 
   return (
@@ -757,6 +760,120 @@ export default async function ReportsPage({
               </tbody>
             </table>
             <p className="mt-2 text-xs text-ink-muted">{m.consumption.ticketCount(consumption.ticketCount)}</p>
+          </div>
+        </div>
+      )}
+
+      {tab === "profitability" && profitability && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.profitability} ${rangeFrom} → ${rangeTo}\n${m.profitability.revenue}: ${profitability.revenue.toLocaleString()}\n${m.profitability.totalCost}: ${profitability.totalCost.toLocaleString()}\n${m.profitability.margin}: ${profitability.margin.toLocaleString()}`}
+            csvFilename={`profitability-${rangeFrom}-${rangeTo}.csv`}
+            csv={rowsToCsv(
+              ["Metric", "Amount"],
+              [
+                [m.profitability.revenue, profitability.revenue],
+                [m.profitability.materialCost, profitability.materialCost],
+                [m.profitability.laborCost, profitability.laborCost],
+                [m.profitability.maintenanceCost, profitability.maintenanceCost],
+                [m.profitability.fuelCost, profitability.fuelCost],
+                [m.profitability.utilitiesCost, profitability.utilitiesCost],
+                [m.profitability.otherCost, profitability.otherCost],
+                [m.profitability.totalCost, profitability.totalCost],
+                [m.profitability.margin, profitability.margin],
+              ],
+            )}
+          />
+
+          {profitability.unpricedComponents > 0 && (
+            <div className={`${ui.card} border-warn/40`}>
+              <p className="text-sm text-warn">{m.profitability.unpricedNote(profitability.unpricedComponents)}</p>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div className={ui.card}>
+              <div className="text-xs text-ink-muted">{m.profitability.revenue}</div>
+              <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{profitability.revenue.toLocaleString()}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="text-xs text-ink-muted">{m.profitability.totalCost}</div>
+              <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{profitability.totalCost.toLocaleString()}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="text-xs text-ink-muted">{m.profitability.margin}</div>
+              <div className={`mt-1 font-mono text-2xl font-semibold ${profitability.margin >= 0 ? "text-good" : "text-critical"}`} dir="ltr">
+                {profitability.margin.toLocaleString()}
+              </div>
+            </div>
+            <div className={ui.card}>
+              <div className="text-xs text-ink-muted">{m.profitability.marginPct}</div>
+              <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{fmt(profitability.marginPct, 1, "%")}</div>
+            </div>
+          </div>
+
+          <div className={ui.card}>
+            <h2 className="mb-3 font-display text-base font-semibold">{m.profitability.costBreakdown}</h2>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.profitability.category}</th>
+                  <th className={ui.th}>{m.profitability.amount}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td className={ui.td}>{m.profitability.materialCost}</td>
+                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{profitability.materialCost.toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td className={ui.td}>{m.profitability.laborCost}</td>
+                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{profitability.laborCost.toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td className={ui.td}>{m.profitability.maintenanceCost}</td>
+                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{profitability.maintenanceCost.toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td className={ui.td}>{m.profitability.fuelCost}</td>
+                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{profitability.fuelCost.toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td className={ui.td}>{m.profitability.utilitiesCost}</td>
+                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{profitability.utilitiesCost.toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td className={ui.td}>{m.profitability.otherCost}</td>
+                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{profitability.otherCost.toLocaleString()}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div className={ui.card}>
+            <h2 className="mb-3 font-display text-base font-semibold">{m.profitability.perM3}</h2>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.profitability.volume}</th>
+                  <th className={ui.th}>{m.profitability.revenuePerM3}</th>
+                  <th className={ui.th}>{m.profitability.costPerM3}</th>
+                  <th className={ui.th}>{m.profitability.marginPerM3}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td className={`${ui.td} font-mono tabular`}>{profitability.totalVolumeM3.toFixed(1)} m³</td>
+                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{fmt(profitability.revenuePerM3, 2)}</td>
+                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{fmt(profitability.costPerM3, 2)}</td>
+                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{fmt(profitability.marginPerM3, 2)}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       )}

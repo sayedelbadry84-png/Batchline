@@ -37,10 +37,11 @@ export async function createMaterial(formData: FormData) {
   const brand = String(formData.get("brand") ?? "").trim() || null;
   const specificGravity = Number(formData.get("specificGravity") ?? 0) || null;
   const absorptionPct = Number(formData.get("absorptionPct") ?? 0) || null;
+  const lastUnitCost = Number(formData.get("lastUnitCost") ?? 0) || null;
   if (!name || !type) return;
 
   const material = await prisma.material.create({
-    data: { supplierId, name, type, brand, specificGravity, absorptionPct },
+    data: { supplierId, name, type, brand, specificGravity, absorptionPct, lastUnitCost },
   });
 
   await logAudit({ module: "Suppliers", recordId: material.id, afterValue: name, reasonCode: "MATERIAL_CREATED" });
@@ -74,11 +75,12 @@ export async function updateMaterial(formData: FormData) {
   const brand = String(formData.get("brand") ?? "").trim() || null;
   const specificGravity = Number(formData.get("specificGravity") ?? 0) || null;
   const absorptionPct = Number(formData.get("absorptionPct") ?? 0) || null;
+  const lastUnitCost = Number(formData.get("lastUnitCost") ?? 0) || null;
   if (!id || !name || !type) return;
 
   await prisma.material.update({
     where: { id },
-    data: { supplierId, name, type, brand, specificGravity, absorptionPct },
+    data: { supplierId, name, type, brand, specificGravity, absorptionPct, lastUnitCost },
   });
 
   await logAudit({ module: "Suppliers", recordId: id, afterValue: name, reasonCode: "MATERIAL_UPDATED" });

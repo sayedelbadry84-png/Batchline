@@ -680,6 +680,21 @@ export default async function EmployeesPage({
                               <label className={ui.label}>{m.f.wageRate}</label>
                               <input name="wageRate" type="number" step="0.01" defaultValue={e.wageRate ?? ""} className={`${ui.input} w-28`} dir="ltr" />
                             </div>
+                            <div>
+                              <label className={ui.label}>{m.f.isSaudiNational}</label>
+                              <select name="isSaudiNational" defaultValue={String(e.isSaudiNational)} className={`${ui.select} w-28`}>
+                                <option value="true">{m.f.saudiYes}</option>
+                                <option value="false">{m.f.saudiNo}</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className={ui.label}>{m.f.employeeGosiRatePct}</label>
+                              <input name="employeeGosiRatePct" type="number" step="0.01" defaultValue={e.employeeGosiRatePct ?? ""} className={`${ui.input} w-24`} dir="ltr" placeholder={m.f.gosiDefaultPlaceholder} />
+                            </div>
+                            <div>
+                              <label className={ui.label}>{m.f.employerGosiRatePct}</label>
+                              <input name="employerGosiRatePct" type="number" step="0.01" defaultValue={e.employerGosiRatePct ?? ""} className={`${ui.input} w-24`} dir="ltr" placeholder={m.f.gosiDefaultPlaceholder} />
+                            </div>
                             <button className={ui.button}>{dict.field.save}</button>
                             <Link href={`/employees?tab=${tab}`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
                               {dict.field.cancel}
@@ -780,6 +795,22 @@ export default async function EmployeesPage({
             <div>
               <label className={ui.label}>{m.f.wageRate}</label>
               <input name="wageRate" type="number" step="0.01" className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.isSaudiNational}</label>
+              <select name="isSaudiNational" defaultValue="true" className={ui.select}>
+                <option value="true">{m.f.saudiYes}</option>
+                <option value="false">{m.f.saudiNo}</option>
+              </select>
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.employeeGosiRatePct}</label>
+              <input name="employeeGosiRatePct" type="number" step="0.01" className={ui.input} dir="ltr" placeholder={m.f.gosiDefaultPlaceholder} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.employerGosiRatePct}</label>
+              <input name="employerGosiRatePct" type="number" step="0.01" className={ui.input} dir="ltr" placeholder={m.f.gosiDefaultPlaceholder} />
+              <p className="mt-1 text-xs text-ink-muted">{m.f.gosiHint}</p>
             </div>
             <button type="submit" className={`${ui.button} mt-2`}>
               {m.add}

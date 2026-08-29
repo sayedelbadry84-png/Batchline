@@ -322,6 +322,12 @@ model Material {
   absorptionPct   Float?
   supplierId      String?
   supplier        Supplier? @relation(fields: [supplierId], references: [id])
+  // Manually-maintained standard cost (currency per kg) — not derived from
+  // any actual receipt (MaterialReceipt carries no cost field; a receipt
+  // can exist with or without a real PO behind it). Used by
+  // getProfitabilityReport to price consumed mass; null means "no cost
+  // data for this material yet", surfaced there rather than treated as 0.
+  lastUnitCost    Float?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
@@ -552,6 +558,15 @@ model Employee {
   // break. wageRate is per-month when wageType is MONTHLY, per-day when DAILY.
   wageType                   String?
   wageRate                   Float?
+  // GOSI (Saudi social insurance) eligibility and rate overrides — Saudi
+  // nationals contribute to the annuities branch, non-Saudis don't (see
+  // GOSI_DEFAULTS in payroll/actions.ts). The two rate fields are null by
+  // default (use the nationality-based default); set them only to record
+  // an actual different rate for one employee, same override shape as
+  // annualLeaveEntitlementDays above.
+  isSaudiNational            Boolean   @default(true)
+  employeeGosiRatePct        Float?
+  employerGosiRatePct        Float?
   createdAt                  DateTime  @default(now())
   updatedAt                  DateTime  @updatedAt
 
@@ -601,6 +616,13 @@ model PayrollLine {
   // period — see generatePayrollRun for the exact query.
   unpaidDays   Float
   grossPay     Float
+  // GOSI computed off grossPay at generation time, at whatever rate was
+  // effective for the employee then (see generatePayrollRun). employeeGosi
+  // is deducted into netPay below; employerGosi is the company's own
+  // additional cost — never deducted from the employee, but real cash cost
+  // (see markPayrollRunPaid, which folds both into the posted transaction).
+  employeeGosi Float      @default(0)
+  employerGosi Float      @default(0)
   // Manual +/- (bonus or extra deduction), editable only while the run is
   // DRAFT.
   adjustment   Float      @default(0)

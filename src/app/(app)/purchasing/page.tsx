@@ -620,6 +620,7 @@ async function SuppliersTab({
                 <th className={ui.th}>{sm.colMaterials.supplier}</th>
                 <th className={ui.th}>{sm.colMaterials.sg}</th>
                 <th className={ui.th}>{sm.colMaterials.absorption}</th>
+                <th className={ui.th}>{sm.colMaterials.lastUnitCost}</th>
                 <th className={ui.th}>{dict.field.actions}</th>
               </tr>
             </thead>
@@ -627,7 +628,7 @@ async function SuppliersTab({
               {materials.map((mt) =>
                 editMaterialId === mt.id ? (
                   <tr key={mt.id}>
-                    <td className={ui.td} colSpan={7}>
+                    <td className={ui.td} colSpan={8}>
                       <form action={updateMaterial} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={mt.id} />
                         <div>
@@ -666,6 +667,10 @@ async function SuppliersTab({
                           <label className={ui.label}>{sm.fMaterial.absorption}</label>
                           <input name="absorptionPct" type="number" step="0.1" defaultValue={mt.absorptionPct ?? undefined} className={`${ui.input} w-24`} />
                         </div>
+                        <div>
+                          <label className={ui.label}>{sm.fMaterial.lastUnitCost}</label>
+                          <input name="lastUnitCost" type="number" step="0.0001" defaultValue={mt.lastUnitCost ?? undefined} className={`${ui.input} w-24`} dir="ltr" />
+                        </div>
                         <button className={ui.button}>{dict.field.save}</button>
                         <Link href={baseUrl} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
                           {dict.field.cancel}
@@ -681,6 +686,7 @@ async function SuppliersTab({
                     <td className={ui.td}>{mt.supplier?.name ?? "—"}</td>
                     <td className={`${ui.td} font-mono tabular`}>{mt.specificGravity ?? "—"}</td>
                     <td className={`${ui.td} font-mono tabular`}>{mt.absorptionPct ?? "—"}</td>
+                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{mt.lastUnitCost ?? "—"}</td>
                     <td className={ui.td}>
                       <Link href={`${baseUrl}&editMaterial=${mt.id}`} className="text-xs font-medium text-accent-strong hover:underline">
                         {dict.field.edit}
@@ -691,7 +697,7 @@ async function SuppliersTab({
               )}
               {materials.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={7}>
+                  <td className={ui.td} colSpan={8}>
                     <span className="text-ink-muted">{sm.emptyMaterials}</span>
                   </td>
                 </tr>
@@ -739,6 +745,11 @@ async function SuppliersTab({
           <div>
             <label className={ui.label}>{sm.fMaterial.absorption}</label>
             <input name="absorptionPct" type="number" step="0.1" className={ui.input} placeholder="1.2" />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.fMaterial.lastUnitCost}</label>
+            <input name="lastUnitCost" type="number" step="0.0001" className={ui.input} dir="ltr" />
+            <p className="mt-1 text-xs text-ink-muted">{sm.lastUnitCostHint}</p>
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
             {sm.addMaterial}

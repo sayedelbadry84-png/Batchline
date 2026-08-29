@@ -12,6 +12,17 @@ import { revalidatePath } from "next/cache";
 // tab from non-admins, but this is the real boundary, independent of that.
 const PAYROLL_ROLES = ["ADMIN"];
 
+// Illustrative Saudi GOSI rates, not a compliance guarantee — verify
+// against the current official rate before relying on this for real
+// payroll. Saudi nationals contribute to the annuities branch (employee +
+// employer); non-Saudis only carry the employer-paid occupational-hazards
+// branch. An employee's own employeeGosiRatePct/employerGosiRatePct
+// override these when set (see Employee in schema.prisma).
+const GOSI_DEFAULTS = {
+  SAUDI: { employeePct: 9.75, employerPct: 11.75 },
+  NON_SAUDI: { employeePct: 0, employerPct: 2 },
+};
+
 function daysInclusive(start: Date, end: Date): number {
   return Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
 }
@@ -83,7 +94,14 @@ export async function generatePayrollRun(formData: FormData) {
       grossPay = wageRate * workedDays;
       deduction = 0;
     }
-    const netPay = grossPay - deduction;
+
+    const gosiDefault = employee.isSaudiNational ? GOSI_DEFAULTS.SAUDI : GOSI_DEFAULTS.NON_SAUDI;
+    const employeeGosiPct = employee.employeeGosiRatePct ?? gosiDefault.employeePct;
+    const employerGosiPct = employee.employerGosiRatePct ?? gosiDefault.employerPct;
+    const employeeGosi = (grossPay * employeeGosiPct) / 100;
+    const employerGosi = (grossPay * employerGosiPct) / 100;
+
+    const netPay = grossPay - deduction - employeeGosi;
 
     await prisma.payrollLine.create({
       data: {
@@ -94,6 +112,8 @@ export async function generatePayrollRun(formData: FormData) {
         periodDays,
         unpaidDays,
         grossPay,
+        employeeGosi,
+        employerGosi,
         adjustment: 0,
         netPay,
       },
@@ -116,7 +136,7 @@ export async function updatePayrollLine(formData: FormData) {
   const line = await prisma.payrollLine.findUnique({ where: { id }, include: { payrollRun: true } });
   if (!line || line.payrollRun.status !== "DRAFT") return;
 
-  const netPay = line.grossPay - (line.wageType === "MONTHLY" ? (line.wageRate / 30) * line.unpaidDays : 0) + adjustment;
+  const netPay = line.grossPay - (line.wageType === "MONTHLY" ? (line.wageRate / 30) * line.unpaidDays : 0) - line.employeeGosi + adjustment;
 
   await prisma.payrollLine.update({ where: { id }, data: { adjustment, notes, netPay } });
 
@@ -158,14 +178,19 @@ export async function markPayrollRunPaid(formData: FormData) {
   });
   if (!run || run.status !== "APPROVED") return;
 
+  // The posted amount is the true total cash cost of this period's payroll
+  // — net wages actually disbursed PLUS both sides of GOSI (the employee's
+  // share was already withheld from their pay, but it still leaves the
+  // company's cash alongside the employer's own share, headed to GOSI).
   const bySite = new Map<string, { siteId: string; currency: string; total: number }>();
   for (const line of run.lines) {
     const plant = line.employee.plant;
+    const lineCost = line.netPay + line.employeeGosi + line.employerGosi;
     const existing = bySite.get(plant.siteId);
     if (existing) {
-      existing.total += line.netPay;
+      existing.total += lineCost;
     } else {
-      bySite.set(plant.siteId, { siteId: plant.siteId, currency: plant.currency, total: line.netPay });
+      bySite.set(plant.siteId, { siteId: plant.siteId, currency: plant.currency, total: lineCost });
     }
   }
 

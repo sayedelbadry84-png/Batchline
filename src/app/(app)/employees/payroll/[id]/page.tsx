@@ -26,6 +26,9 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
   const totalGross = run.lines.reduce((sum, l) => sum + l.grossPay, 0);
   const totalAdjustment = run.lines.reduce((sum, l) => sum + l.adjustment, 0);
   const totalNet = run.lines.reduce((sum, l) => sum + l.netPay, 0);
+  const totalEmployeeGosi = run.lines.reduce((sum, l) => sum + l.employeeGosi, 0);
+  const totalEmployerGosi = run.lines.reduce((sum, l) => sum + l.employerGosi, 0);
+  const totalEmployerCost = totalNet + totalEmployeeGosi + totalEmployerGosi;
   const isDraft = run.status === "DRAFT";
 
   const statusChip: Record<string, string> = {
@@ -91,6 +94,18 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
           <div className="text-xs text-ink-muted">{p.totalNet}</div>
           <div className="mt-1 font-mono text-2xl font-semibold text-good" dir="ltr">{totalNet.toLocaleString()}</div>
         </div>
+        <div className={ui.card}>
+          <div className="text-xs text-ink-muted">{p.totalEmployeeGosi}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{totalEmployeeGosi.toLocaleString()}</div>
+        </div>
+        <div className={ui.card}>
+          <div className="text-xs text-ink-muted">{p.totalEmployerGosi}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{totalEmployerGosi.toLocaleString()}</div>
+        </div>
+        <div className={ui.card}>
+          <div className="text-xs text-ink-muted">{p.totalEmployerCost}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold text-critical" dir="ltr">{totalEmployerCost.toLocaleString()}</div>
+        </div>
       </div>
 
       <div className={ui.card}>
@@ -102,6 +117,8 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
               <th className={ui.th}>{p.col.wageRate}</th>
               <th className={ui.th}>{p.col.unpaidDays}</th>
               <th className={ui.th}>{p.col.grossPay}</th>
+              <th className={ui.th}>{p.col.employeeGosi}</th>
+              <th className={ui.th}>{p.col.employerGosi}</th>
               <th className={ui.th}>{p.col.adjustment}</th>
               <th className={ui.th}>{p.col.netPay}</th>
               {isDraft && <th className={ui.th}></th>}
@@ -115,6 +132,8 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
                 <td className={`${ui.td} font-mono tabular`} dir="ltr">{l.wageRate.toLocaleString()}</td>
                 <td className={`${ui.td} font-mono tabular`} dir="ltr">{l.unpaidDays}</td>
                 <td className={`${ui.td} font-mono tabular`} dir="ltr">{l.grossPay.toLocaleString()}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{l.employeeGosi.toLocaleString()}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{l.employerGosi.toLocaleString()}</td>
                 <td className={ui.td}>
                   {isDraft ? (
                     <form action={updatePayrollLine} className="flex items-center gap-1">
@@ -131,7 +150,7 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
             ))}
             {run.lines.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={isDraft ? 8 : 7}>
+                <td className={ui.td} colSpan={isDraft ? 10 : 9}>
                   <span className="text-ink-muted">{p.emptyLines}</span>
                 </td>
               </tr>

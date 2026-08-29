@@ -38,6 +38,11 @@ export async function createEmployee(formData: FormData) {
   const wageType = String(formData.get("wageType") ?? "").trim() || null;
   const wageRateRaw = String(formData.get("wageRate") ?? "").trim();
   const wageRate = wageType && wageRateRaw ? Number(wageRateRaw) : null;
+  const isSaudiNational = String(formData.get("isSaudiNational") ?? "true") === "true";
+  const employeeGosiRateRaw = String(formData.get("employeeGosiRatePct") ?? "").trim();
+  const employeeGosiRatePct = employeeGosiRateRaw ? Number(employeeGosiRateRaw) : null;
+  const employerGosiRateRaw = String(formData.get("employerGosiRatePct") ?? "").trim();
+  const employerGosiRatePct = employerGosiRateRaw ? Number(employerGosiRateRaw) : null;
 
   if (!siteId || !name || !role) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
@@ -54,6 +59,9 @@ export async function createEmployee(formData: FormData) {
       licenseExpiry: licenseExpiryRaw ? new Date(licenseExpiryRaw) : null,
       wageType,
       wageRate,
+      isSaudiNational,
+      employeeGosiRatePct,
+      employerGosiRatePct,
     },
   });
 
@@ -80,6 +88,11 @@ export async function updateEmployee(formData: FormData) {
   const wageType = String(formData.get("wageType") ?? "").trim() || null;
   const wageRateRaw = String(formData.get("wageRate") ?? "").trim();
   const wageRate = wageType && wageRateRaw ? Number(wageRateRaw) : null;
+  const isSaudiNational = String(formData.get("isSaudiNational") ?? "true") === "true";
+  const employeeGosiRateRaw = String(formData.get("employeeGosiRatePct") ?? "").trim();
+  const employeeGosiRatePct = employeeGosiRateRaw ? Number(employeeGosiRateRaw) : null;
+  const employerGosiRateRaw = String(formData.get("employerGosiRatePct") ?? "").trim();
+  const employerGosiRatePct = employerGosiRateRaw ? Number(employerGosiRateRaw) : null;
 
   if (!id || !siteId || !name || !role) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
@@ -100,6 +113,9 @@ export async function updateEmployee(formData: FormData) {
       status,
       wageType,
       wageRate,
+      isSaudiNational,
+      employeeGosiRatePct,
+      employerGosiRatePct,
     },
   });
   await logTransferIfChanged("Employees", id, existingEmployee.plantId, plantId);

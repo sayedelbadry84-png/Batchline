@@ -70,6 +70,100 @@ export async function getConsumptionReport({ from, to, siteId, plantId }: Report
   return { rows, ticketCount: tickets.length };
 }
 
+// Period-level cost vs. revenue, not a per-ticket costing engine (see the
+// Profitability report's "explicitly out of scope" note). Material cost
+// uses Material.lastUnitCost — a manually-maintained standard cost, not
+// tied to any specific receipt — so this prices historical volume at
+// today's standard cost, not what was actually paid at the time.
+export async function getProfitabilityReport({ from, to, siteId, plantId }: ReportFilter) {
+  const tickets = await prisma.batchTicket.findMany({
+    where: { status: "COMPLETE", batchCompletedAt: { gte: from, lte: to }, ...plantScopeWhere(siteId, plantId) },
+    include: { components: { include: { material: true } } },
+  });
+  const totalVolumeM3 = tickets.reduce((sum, t) => sum + t.volumeM3, 0);
+
+  let materialCost = 0;
+  let pricedComponents = 0;
+  let unpricedComponents = 0;
+  for (const t of tickets) {
+    for (const c of t.components) {
+      const massKg = c.actualMassKg ?? c.targetMassKg;
+      if (c.material.lastUnitCost != null) {
+        materialCost += massKg * c.material.lastUnitCost;
+        pricedComponents += 1;
+      } else {
+        unpricedComponents += 1;
+      }
+    }
+  }
+
+  // Revenue — real issued invoices in the period, same filter shape as the
+  // Overview tab's invoicedThisMonth (reports/page.tsx).
+  const invoices = await prisma.invoice.findMany({
+    where: {
+      issueDate: { gte: from, lte: to },
+      status: { notIn: ["DRAFT", "CANCELLED"] },
+      ...(plantId ? { plantId } : siteId ? { plant: { siteId } } : {}),
+    },
+  });
+  const revenue = invoices.reduce((sum, inv) => sum + inv.total, 0);
+
+  // CashTransaction has no plantId of its own (it's a site-level ledger) —
+  // a plantId filter still resolves up to that plant's own site, since a
+  // single production line's own cash movements aren't tracked separately
+  // from the rest of its site.
+  let cashSiteId = siteId;
+  if (plantId && !cashSiteId) {
+    const plant = await prisma.plant.findUnique({ where: { id: plantId }, select: { siteId: true } });
+    cashSiteId = plant?.siteId;
+  }
+  const cashWhere = (category: string) => ({
+    direction: "OUT",
+    category,
+    occurredAt: { gte: from, lte: to },
+    ...(cashSiteId ? { siteId: cashSiteId } : {}),
+  });
+  const [laborTxns, maintenanceTxns, fuelTxns, utilitiesTxns, operatingTxns, otherTxns] = await Promise.all([
+    prisma.cashTransaction.findMany({ where: cashWhere("PAYROLL") }),
+    prisma.cashTransaction.findMany({ where: cashWhere("MAINTENANCE") }),
+    prisma.cashTransaction.findMany({ where: cashWhere("FUEL") }),
+    prisma.cashTransaction.findMany({ where: cashWhere("UTILITIES") }),
+    prisma.cashTransaction.findMany({ where: cashWhere("OPERATING_EXPENSE") }),
+    prisma.cashTransaction.findMany({ where: cashWhere("OTHER") }),
+  ]);
+  const sumAmount = (rows: { amount: number }[]) => rows.reduce((sum, r) => sum + r.amount, 0);
+  const laborCost = sumAmount(laborTxns);
+  const maintenanceCost = sumAmount(maintenanceTxns);
+  const fuelCost = sumAmount(fuelTxns);
+  const utilitiesCost = sumAmount(utilitiesTxns);
+  const otherCost = sumAmount(operatingTxns) + sumAmount(otherTxns);
+
+  const totalCost = materialCost + laborCost + maintenanceCost + fuelCost + utilitiesCost + otherCost;
+  const margin = revenue - totalCost;
+  const marginPct = revenue > 0 ? (margin / revenue) * 100 : null;
+
+  const perM3 = (n: number) => (totalVolumeM3 > 0 ? n / totalVolumeM3 : null);
+
+  return {
+    totalVolumeM3,
+    revenue,
+    materialCost,
+    laborCost,
+    maintenanceCost,
+    fuelCost,
+    utilitiesCost,
+    otherCost,
+    totalCost,
+    margin,
+    marginPct,
+    revenuePerM3: perM3(revenue),
+    costPerM3: perM3(totalCost),
+    marginPerM3: perM3(margin),
+    pricedComponents,
+    unpricedComponents,
+  };
+}
+
 export async function getReturnsReport({ from, to, siteId, plantId }: ReportFilter) {
   const scope = tripPlantScopeWhere(siteId, plantId);
   const returns = await prisma.drumReturn.findMany({
