@@ -331,24 +331,23 @@ export default async function DashboardPage() {
         )}
       </header>
 
-      <div>
-        <h2 className="mb-3 font-display text-lg font-semibold">{d.alertsTitle}</h2>
-        <div className="flex flex-col gap-2">
-          {alerts.map((a) => (
+      <div className={ui.card}>
+        <h2 className="mb-1 font-display text-lg font-semibold">{d.alertsTitle}</h2>
+        <div className="flex flex-col">
+          {alerts.map((a, i) => (
             <Link
               key={a.key}
               href={a.href}
-              className={`flex items-center gap-3 rounded-lg border px-4 py-2.5 text-sm transition-colors ${
-                a.severity === "critical"
-                  ? "border-critical/30 bg-critical-soft text-critical hover:bg-critical-soft/70"
-                  : "border-warn/30 bg-warn-soft text-warn hover:bg-warn-soft/70"
-              }`}
+              className={`flex items-center gap-3 py-2.5 text-sm text-ink transition-colors hover:text-accent-strong ${i > 0 ? "border-t border-border" : ""}`}
             >
-              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${a.severity === "critical" ? "bg-critical" : "bg-warn"}`} />
+              <span
+                className={`h-2 w-2 shrink-0 rounded-full ${a.severity === "critical" ? "bg-critical" : "bg-warn"}`}
+                style={{ boxShadow: `0 0 8px var(--${a.severity === "critical" ? "critical" : "warn"})` }}
+              />
               {a.label}
             </Link>
           ))}
-          {alerts.length === 0 && <div className={`${ui.card} text-sm text-good`}>{d.emptyAlerts}</div>}
+          {alerts.length === 0 && <div className="py-2 text-sm text-good">{d.emptyAlerts}</div>}
         </div>
       </div>
 
