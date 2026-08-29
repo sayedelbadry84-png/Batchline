@@ -542,6 +542,11 @@ const en: typeof ar = {
       save: "Save",
       shared: {
         code: "Code", plant: "Plant", year: "Year", chassisNumber: "Chassis number", plateNumber: "Plate number", status: "Status", actions: "Actions",
+        licenseValidFrom: "License valid from",
+        periodicInspectionDueAt: "Periodic inspection due",
+        operatingCardExpiry: "Operating card expiry",
+        expired: "Expired",
+        daysLeft: (n: number) => `${n}d left`,
       },
       mixers: {
         col: { truck: "Truck", drumCapacity: "Drum capacity", maxRpm: "Max RPM", gpsDevice: "GPS device", defaultDriver: "Default driver", maintenance: "Maintenance" },

@@ -763,6 +763,14 @@ model Truck {
   year              Int?
   chassisNumber     String?
   plateNumber       String?
+  // Regulatory compliance dates — same optional/informational role as the
+  // registration fields above. licenseValidFrom is purely informational
+  // (when the vehicle license became valid); the other two are real
+  // deadlines the equipment list flags as they approach/pass, same
+  // pattern as Employee.licenseExpiry.
+  licenseValidFrom        DateTime?
+  periodicInspectionDueAt DateTime?
+  operatingCardExpiry     DateTime?
   // Pre-fills the driver field when this truck is picked to start a trip
   // (see startTrip/updateTripAssignment) — still just a default, not a
   // lock: the operator can always pick someone else for that specific trip.
@@ -1001,6 +1009,10 @@ model Pump {
   year               Int?
   chassisNumber      String?
   plateNumber        String?
+  // Regulatory compliance dates — same shape as Truck's own.
+  licenseValidFrom        DateTime?
+  periodicInspectionDueAt DateTime?
+  operatingCardExpiry     DateTime?
   // Pre-fill the operator/assistant fields when this pump is picked to
   // start a pump-delivery trip — still just defaults, always overridable
   // for that specific trip (see startTrip/updateTripAssignment).
@@ -1957,6 +1969,10 @@ model SupportVehicle {
   year            Int?
   chassisNumber   String?
   plateNumber     String?
+  // Regulatory compliance dates — same shape as Truck/Pump's own.
+  licenseValidFrom        DateTime?
+  periodicInspectionDueAt DateTime?
+  operatingCardExpiry     DateTime?
   defaultDriverId String?
   defaultDriver   Employee? @relation(fields: [defaultDriverId], references: [id])
   status          String    @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE

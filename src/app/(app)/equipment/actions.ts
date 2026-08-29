@@ -30,6 +30,9 @@ export async function createTruck(formData: FormData) {
   const year = Number(formData.get("year") ?? 0) || null;
   const chassisNumber = String(formData.get("chassisNumber") ?? "").trim() || null;
   const plateNumber = String(formData.get("plateNumber") ?? "").trim() || null;
+  const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
+  const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
+  const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
 
   if (!siteId || !code || !drumCapacityM3) return;
@@ -38,7 +41,20 @@ export async function createTruck(formData: FormData) {
   if (!plantId) return;
 
   const truck = await prisma.truck.create({
-    data: { plantId, code, drumCapacityM3, maxAgitationRpm, gpsDeviceId, year, chassisNumber, plateNumber, defaultDriverId },
+    data: {
+      plantId,
+      code,
+      drumCapacityM3,
+      maxAgitationRpm,
+      gpsDeviceId,
+      year,
+      chassisNumber,
+      plateNumber,
+      licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
+      periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
+      operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      defaultDriverId,
+    },
   });
 
   await logAudit({ module: "Equipment", recordId: truck.id, afterValue: code, reasonCode: "TRUCK_CREATED" });
@@ -58,6 +74,9 @@ export async function updateTruck(formData: FormData) {
   const year = Number(formData.get("year") ?? 0) || null;
   const chassisNumber = String(formData.get("chassisNumber") ?? "").trim() || null;
   const plateNumber = String(formData.get("plateNumber") ?? "").trim() || null;
+  const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
+  const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
+  const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
   // status change (active/idle/maintenance/out-of-service) and plant
   // transfer both go through this same edit form — a plant transfer is
@@ -74,7 +93,21 @@ export async function updateTruck(formData: FormData) {
 
   await prisma.truck.update({
     where: { id },
-    data: { plantId, code, drumCapacityM3, maxAgitationRpm, gpsDeviceId, year, chassisNumber, plateNumber, defaultDriverId, status },
+    data: {
+      plantId,
+      code,
+      drumCapacityM3,
+      maxAgitationRpm,
+      gpsDeviceId,
+      year,
+      chassisNumber,
+      plateNumber,
+      licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
+      periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
+      operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      defaultDriverId,
+      status,
+    },
   });
   await logTransferIfChanged("Equipment", id, existing.plantId, plantId);
 
@@ -118,6 +151,9 @@ export async function createPump(formData: FormData) {
   const year = Number(formData.get("year") ?? 0) || null;
   const chassisNumber = String(formData.get("chassisNumber") ?? "").trim() || null;
   const plateNumber = String(formData.get("plateNumber") ?? "").trim() || null;
+  const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
+  const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
+  const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
   const defaultOperatorId = String(formData.get("defaultOperatorId") ?? "") || null;
   const defaultAssistantId = String(formData.get("defaultAssistantId") ?? "") || null;
 
@@ -127,7 +163,22 @@ export async function createPump(formData: FormData) {
   if (!plantId) return;
 
   const pump = await prisma.pump.create({
-    data: { plantId, code, pumpType, reachM, hourlyRate, standbyRate, year, chassisNumber, plateNumber, defaultOperatorId, defaultAssistantId },
+    data: {
+      plantId,
+      code,
+      pumpType,
+      reachM,
+      hourlyRate,
+      standbyRate,
+      year,
+      chassisNumber,
+      plateNumber,
+      licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
+      periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
+      operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      defaultOperatorId,
+      defaultAssistantId,
+    },
   });
 
   await logAudit({ module: "Equipment", recordId: pump.id, afterValue: code, reasonCode: "PUMP_CREATED" });
@@ -148,6 +199,9 @@ export async function updatePump(formData: FormData) {
   const year = Number(formData.get("year") ?? 0) || null;
   const chassisNumber = String(formData.get("chassisNumber") ?? "").trim() || null;
   const plateNumber = String(formData.get("plateNumber") ?? "").trim() || null;
+  const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
+  const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
+  const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
   const defaultOperatorId = String(formData.get("defaultOperatorId") ?? "") || null;
   const defaultAssistantId = String(formData.get("defaultAssistantId") ?? "") || null;
   const status = String(formData.get("status") ?? "ACTIVE");
@@ -162,7 +216,23 @@ export async function updatePump(formData: FormData) {
 
   await prisma.pump.update({
     where: { id },
-    data: { plantId, code, pumpType, reachM, hourlyRate, standbyRate, year, chassisNumber, plateNumber, defaultOperatorId, defaultAssistantId, status },
+    data: {
+      plantId,
+      code,
+      pumpType,
+      reachM,
+      hourlyRate,
+      standbyRate,
+      year,
+      chassisNumber,
+      plateNumber,
+      licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
+      periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
+      operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      defaultOperatorId,
+      defaultAssistantId,
+      status,
+    },
   });
   await logTransferIfChanged("Equipment", id, existingPump.plantId, plantId);
 
@@ -253,6 +323,9 @@ export async function createSupportVehicle(formData: FormData) {
   const year = Number(formData.get("year") ?? 0) || null;
   const chassisNumber = String(formData.get("chassisNumber") ?? "").trim() || null;
   const plateNumber = String(formData.get("plateNumber") ?? "").trim() || null;
+  const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
+  const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
+  const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
 
   if (!siteId || !type || !code) return;
@@ -262,7 +335,18 @@ export async function createSupportVehicle(formData: FormData) {
   if (!plantId) return;
 
   const vehicle = await prisma.supportVehicle.create({
-    data: { plantId, type, code, year, chassisNumber, plateNumber, defaultDriverId },
+    data: {
+      plantId,
+      type,
+      code,
+      year,
+      chassisNumber,
+      plateNumber,
+      licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
+      periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
+      operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      defaultDriverId,
+    },
   });
 
   await logAudit({ module: "Equipment", recordId: vehicle.id, afterValue: code, reasonCode: "SUPPORT_VEHICLE_CREATED" });
@@ -279,6 +363,9 @@ export async function updateSupportVehicle(formData: FormData) {
   const year = Number(formData.get("year") ?? 0) || null;
   const chassisNumber = String(formData.get("chassisNumber") ?? "").trim() || null;
   const plateNumber = String(formData.get("plateNumber") ?? "").trim() || null;
+  const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
+  const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
+  const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
   const status = String(formData.get("status") ?? "ACTIVE");
 
@@ -292,7 +379,18 @@ export async function updateSupportVehicle(formData: FormData) {
 
   await prisma.supportVehicle.update({
     where: { id },
-    data: { plantId, code, year, chassisNumber, plateNumber, defaultDriverId, status },
+    data: {
+      plantId,
+      code,
+      year,
+      chassisNumber,
+      plateNumber,
+      licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
+      periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
+      operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      defaultDriverId,
+      status,
+    },
   });
   await logTransferIfChanged("Equipment", id, existingVehicle.plantId, plantId);
 

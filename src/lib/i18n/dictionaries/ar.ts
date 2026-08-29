@@ -541,6 +541,11 @@ const ar = {
       save: "حفظ",
       shared: {
         code: "الرمز", plant: "المصنع", year: "سنة الصنع", chassisNumber: "رقم الشاسيه", plateNumber: "رقم لوحة المرور", status: "الحالة", actions: "الإجراءات",
+        licenseValidFrom: "تاريخ سريان الرخصة",
+        periodicInspectionDueAt: "موعد الفحص الدوري",
+        operatingCardExpiry: "تاريخ انتهاء كارت التشغيل",
+        expired: "منتهية",
+        daysLeft: (n: number) => `متبقٍ ${n} يوم`,
       },
       mixers: {
         col: { truck: "الشاحنة", drumCapacity: "سعة الأسطوانة", maxRpm: "أقصى سرعة دوران", gpsDevice: "جهاز GPS", defaultDriver: "السائق الافتراضي", maintenance: "الصيانة" },

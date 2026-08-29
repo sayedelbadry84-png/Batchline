@@ -50,6 +50,18 @@ const bookingStatusChip: Record<string, string> = {
   CANCELLED: "bg-critical-soft text-critical",
 };
 
+// Pure and outside the component body on purpose — same shape as the
+// Employees module's own expiryFlag (license expiry), applied here to the
+// two real deadlines (periodic inspection, operating card) rather than
+// licenseValidFrom, which is purely informational.
+function expiryFlag(date: Date | null, nowMs: number, labels: { expired: string; daysLeft: (n: number) => string }) {
+  if (!date) return null;
+  const days = Math.ceil((date.getTime() - nowMs) / (1000 * 60 * 60 * 24));
+  if (days < 0) return { label: labels.expired, cls: "bg-critical-soft text-critical" };
+  if (days <= 30) return { label: labels.daysLeft(days), cls: "bg-warn-soft text-warn" };
+  return null;
+}
+
 export default async function EquipmentPage({
   searchParams,
 }: {
@@ -149,6 +161,9 @@ async function MixersTab({
     return { ...t, openTripsCount: t.trips.filter((trip) => trip.status !== "CLOSED").length, maintenance, atYard };
   });
 
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
+
   const mapTrucks = trucks
     .filter((t) => t.lastLat != null && t.lastLng != null)
     .map((t) => ({
@@ -177,6 +192,8 @@ async function MixersTab({
               <th className={ui.th}>{m.mixers.col.defaultDriver}</th>
               <th className={ui.th}>{m.shared.plateNumber}</th>
               <th className={ui.th}>{m.mixers.col.maintenance}</th>
+              <th className={ui.th}>{m.shared.periodicInspectionDueAt}</th>
+              <th className={ui.th}>{m.shared.operatingCardExpiry}</th>
               <th className={ui.th}>{m.shared.status}</th>
               <th className={ui.th}>{m.shared.actions}</th>
             </tr>
@@ -185,7 +202,7 @@ async function MixersTab({
             {trucks.map((t) =>
               editId === t.id ? (
                 <tr key={t.id}>
-                  <td className={ui.td} colSpan={8}>
+                  <td className={ui.td} colSpan={10}>
                     <form action={updateTruck} className="flex flex-wrap items-end gap-2">
                       <input type="hidden" name="id" value={t.id} />
                       <div>
@@ -223,6 +240,33 @@ async function MixersTab({
                       <div>
                         <label className={ui.label}>{m.shared.plateNumber}</label>
                         <input name="plateNumber" defaultValue={t.plateNumber ?? ""} className={`${ui.input} w-28`} dir="ltr" />
+                      </div>
+                      <div>
+                        <label className={ui.label}>{m.shared.licenseValidFrom}</label>
+                        <input
+                          name="licenseValidFrom"
+                          type="date"
+                          defaultValue={t.licenseValidFrom ? new Date(t.licenseValidFrom).toISOString().slice(0, 10) : ""}
+                          className={`${ui.input} w-40`}
+                        />
+                      </div>
+                      <div>
+                        <label className={ui.label}>{m.shared.periodicInspectionDueAt}</label>
+                        <input
+                          name="periodicInspectionDueAt"
+                          type="date"
+                          defaultValue={t.periodicInspectionDueAt ? new Date(t.periodicInspectionDueAt).toISOString().slice(0, 10) : ""}
+                          className={`${ui.input} w-40`}
+                        />
+                      </div>
+                      <div>
+                        <label className={ui.label}>{m.shared.operatingCardExpiry}</label>
+                        <input
+                          name="operatingCardExpiry"
+                          type="date"
+                          defaultValue={t.operatingCardExpiry ? new Date(t.operatingCardExpiry).toISOString().slice(0, 10) : ""}
+                          className={`${ui.input} w-40`}
+                        />
                       </div>
                       <div>
                         <label className={ui.label}>{m.mixers.f.defaultDriver}</label>
@@ -273,6 +317,20 @@ async function MixersTab({
                     </form>
                   </td>
                   <td className={ui.td}>
+                    {t.periodicInspectionDueAt ? new Date(t.periodicInspectionDueAt).toLocaleDateString() : "—"}
+                    {(() => {
+                      const flag = expiryFlag(t.periodicInspectionDueAt, nowMs, m.shared);
+                      return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
+                    })()}
+                  </td>
+                  <td className={ui.td}>
+                    {t.operatingCardExpiry ? new Date(t.operatingCardExpiry).toLocaleDateString() : "—"}
+                    {(() => {
+                      const flag = expiryFlag(t.operatingCardExpiry, nowMs, m.shared);
+                      return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
+                    })()}
+                  </td>
+                  <td className={ui.td}>
                     <span className={`${ui.chip} ${statusChip[t.status] ?? ""}`}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</span>
                   </td>
                   <td className={ui.td}>
@@ -285,7 +343,7 @@ async function MixersTab({
             )}
             {trucks.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={8}><span className="text-ink-muted">{m.mixers.empty}</span></td>
+                <td className={ui.td} colSpan={10}><span className="text-ink-muted">{m.mixers.empty}</span></td>
               </tr>
             )}
           </tbody>
@@ -330,6 +388,18 @@ async function MixersTab({
         <div>
           <label className={ui.label}>{m.shared.plateNumber}</label>
           <input name="plateNumber" className={ui.input} dir="ltr" />
+        </div>
+        <div>
+          <label className={ui.label}>{m.shared.licenseValidFrom}</label>
+          <input name="licenseValidFrom" type="date" className={ui.input} />
+        </div>
+        <div>
+          <label className={ui.label}>{m.shared.periodicInspectionDueAt}</label>
+          <input name="periodicInspectionDueAt" type="date" className={ui.input} />
+        </div>
+        <div>
+          <label className={ui.label}>{m.shared.operatingCardExpiry}</label>
+          <input name="operatingCardExpiry" type="date" className={ui.input} />
         </div>
         <div>
           <label className={ui.label}>{m.mixers.f.defaultDriver}</label>
@@ -392,6 +462,8 @@ async function PumpsTab({
 
   const operators = pumpCrew.filter((c) => c.role === "OPERATOR");
   const assistants = pumpCrew.filter((c) => c.role === "HELPER");
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
 
   return (
     <div className="flex flex-col gap-6">
@@ -407,6 +479,8 @@ async function PumpsTab({
                 <th className={ui.th}>{m.pumps.col.defaultAssistant}</th>
                 <th className={ui.th}>{m.pumps.col.rate}</th>
                 <th className={ui.th}>{m.pumps.col.maintenance}</th>
+                <th className={ui.th}>{m.shared.periodicInspectionDueAt}</th>
+                <th className={ui.th}>{m.shared.operatingCardExpiry}</th>
                 <th className={ui.th}>{m.shared.status}</th>
                 <th className={ui.th}>{m.shared.actions}</th>
               </tr>
@@ -415,7 +489,7 @@ async function PumpsTab({
               {pumps.map((p) =>
                 editId === p.id ? (
                   <tr key={p.id}>
-                    <td className={ui.td} colSpan={9}>
+                    <td className={ui.td} colSpan={11}>
                       <form action={updatePump} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={p.id} />
                         <div>
@@ -461,6 +535,33 @@ async function PumpsTab({
                         <div>
                           <label className={ui.label}>{m.shared.plateNumber}</label>
                           <input name="plateNumber" defaultValue={p.plateNumber ?? ""} className={`${ui.input} w-28`} dir="ltr" />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.shared.licenseValidFrom}</label>
+                          <input
+                            name="licenseValidFrom"
+                            type="date"
+                            defaultValue={p.licenseValidFrom ? new Date(p.licenseValidFrom).toISOString().slice(0, 10) : ""}
+                            className={`${ui.input} w-40`}
+                          />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.shared.periodicInspectionDueAt}</label>
+                          <input
+                            name="periodicInspectionDueAt"
+                            type="date"
+                            defaultValue={p.periodicInspectionDueAt ? new Date(p.periodicInspectionDueAt).toISOString().slice(0, 10) : ""}
+                            className={`${ui.input} w-40`}
+                          />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{m.shared.operatingCardExpiry}</label>
+                          <input
+                            name="operatingCardExpiry"
+                            type="date"
+                            defaultValue={p.operatingCardExpiry ? new Date(p.operatingCardExpiry).toISOString().slice(0, 10) : ""}
+                            className={`${ui.input} w-40`}
+                          />
                         </div>
                         <div>
                           <label className={ui.label}>{m.pumps.f.defaultOperator}</label>
@@ -516,6 +617,20 @@ async function PumpsTab({
                       </form>
                     </td>
                     <td className={ui.td}>
+                      {p.periodicInspectionDueAt ? new Date(p.periodicInspectionDueAt).toLocaleDateString() : "—"}
+                      {(() => {
+                        const flag = expiryFlag(p.periodicInspectionDueAt, nowMs, m.shared);
+                        return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
+                      })()}
+                    </td>
+                    <td className={ui.td}>
+                      {p.operatingCardExpiry ? new Date(p.operatingCardExpiry).toLocaleDateString() : "—"}
+                      {(() => {
+                        const flag = expiryFlag(p.operatingCardExpiry, nowMs, m.shared);
+                        return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
+                      })()}
+                    </td>
+                    <td className={ui.td}>
                       <span className={`${ui.chip} ${statusChip[p.status] ?? ""}`}>{dict.status[p.status as keyof typeof dict.status] ?? p.status}</span>
                     </td>
                     <td className={ui.td}>
@@ -527,7 +642,7 @@ async function PumpsTab({
                 )
               )}
               {pumps.length === 0 && (
-                <tr><td className={ui.td} colSpan={9}><span className="text-ink-muted">{m.pumps.empty}</span></td></tr>
+                <tr><td className={ui.td} colSpan={11}><span className="text-ink-muted">{m.pumps.empty}</span></td></tr>
               )}
             </tbody>
           </table>
@@ -579,6 +694,18 @@ async function PumpsTab({
           <div>
             <label className={ui.label}>{m.shared.plateNumber}</label>
             <input name="plateNumber" className={ui.input} dir="ltr" />
+          </div>
+          <div>
+            <label className={ui.label}>{m.shared.licenseValidFrom}</label>
+            <input name="licenseValidFrom" type="date" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.shared.periodicInspectionDueAt}</label>
+            <input name="periodicInspectionDueAt" type="date" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.shared.operatingCardExpiry}</label>
+            <input name="operatingCardExpiry" type="date" className={ui.input} />
           </div>
           <div>
             <label className={ui.label}>{m.pumps.f.defaultOperator}</label>
@@ -717,6 +844,8 @@ async function SupportVehicleTab({
     }),
     prisma.employee.findMany({ where: { role: driverRole, status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" }, include: { plant: { include: { site: true } } } }),
   ]);
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
 
   return (
     <div className="grid grid-cols-[1fr_320px] gap-6">
@@ -729,6 +858,8 @@ async function SupportVehicleTab({
               <th className={ui.th}>{m.shared.year}</th>
               <th className={ui.th}>{m.shared.chassisNumber}</th>
               <th className={ui.th}>{m.shared.plateNumber}</th>
+              <th className={ui.th}>{m.shared.periodicInspectionDueAt}</th>
+              <th className={ui.th}>{m.shared.operatingCardExpiry}</th>
               <th className={ui.th}>{m.supportVehicle.col.defaultDriver}</th>
               <th className={ui.th}>{m.shared.status}</th>
               <th className={ui.th}>{m.shared.actions}</th>
@@ -738,7 +869,7 @@ async function SupportVehicleTab({
             {vehicles.map((v) =>
               editId === v.id ? (
                 <tr key={v.id}>
-                  <td className={ui.td} colSpan={8}>
+                  <td className={ui.td} colSpan={10}>
                     <form action={updateSupportVehicle} className="flex flex-wrap items-end gap-2">
                       <input type="hidden" name="id" value={v.id} />
                       <div>
@@ -764,6 +895,33 @@ async function SupportVehicleTab({
                       <div>
                         <label className={ui.label}>{m.shared.plateNumber}</label>
                         <input name="plateNumber" defaultValue={v.plateNumber ?? ""} className={`${ui.input} w-28`} dir="ltr" />
+                      </div>
+                      <div>
+                        <label className={ui.label}>{m.shared.licenseValidFrom}</label>
+                        <input
+                          name="licenseValidFrom"
+                          type="date"
+                          defaultValue={v.licenseValidFrom ? new Date(v.licenseValidFrom).toISOString().slice(0, 10) : ""}
+                          className={`${ui.input} w-40`}
+                        />
+                      </div>
+                      <div>
+                        <label className={ui.label}>{m.shared.periodicInspectionDueAt}</label>
+                        <input
+                          name="periodicInspectionDueAt"
+                          type="date"
+                          defaultValue={v.periodicInspectionDueAt ? new Date(v.periodicInspectionDueAt).toISOString().slice(0, 10) : ""}
+                          className={`${ui.input} w-40`}
+                        />
+                      </div>
+                      <div>
+                        <label className={ui.label}>{m.shared.operatingCardExpiry}</label>
+                        <input
+                          name="operatingCardExpiry"
+                          type="date"
+                          defaultValue={v.operatingCardExpiry ? new Date(v.operatingCardExpiry).toISOString().slice(0, 10) : ""}
+                          className={`${ui.input} w-40`}
+                        />
                       </div>
                       <div>
                         <label className={ui.label}>{m.supportVehicle.f.defaultDriver}</label>
@@ -795,6 +953,20 @@ async function SupportVehicleTab({
                   <td className={`${ui.td} font-mono tabular`}>{v.year ?? "—"}</td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{v.chassisNumber || "—"}</td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{v.plateNumber || "—"}</td>
+                  <td className={ui.td}>
+                    {v.periodicInspectionDueAt ? new Date(v.periodicInspectionDueAt).toLocaleDateString() : "—"}
+                    {(() => {
+                      const flag = expiryFlag(v.periodicInspectionDueAt, nowMs, m.shared);
+                      return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
+                    })()}
+                  </td>
+                  <td className={ui.td}>
+                    {v.operatingCardExpiry ? new Date(v.operatingCardExpiry).toLocaleDateString() : "—"}
+                    {(() => {
+                      const flag = expiryFlag(v.operatingCardExpiry, nowMs, m.shared);
+                      return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
+                    })()}
+                  </td>
                   <td className={ui.td}>{v.defaultDriver?.name || "—"}</td>
                   <td className={ui.td}>
                     <span className={`${ui.chip} ${statusChip[v.status] ?? ""}`}>{dict.status[v.status as keyof typeof dict.status] ?? v.status}</span>
@@ -808,7 +980,7 @@ async function SupportVehicleTab({
               )
             )}
             {vehicles.length === 0 && (
-              <tr><td className={ui.td} colSpan={8}><span className="text-ink-muted">{m.supportVehicle.empty}</span></td></tr>
+              <tr><td className={ui.td} colSpan={10}><span className="text-ink-muted">{m.supportVehicle.empty}</span></td></tr>
             )}
           </tbody>
         </table>
@@ -841,6 +1013,18 @@ async function SupportVehicleTab({
         <div>
           <label className={ui.label}>{m.shared.plateNumber}</label>
           <input name="plateNumber" className={ui.input} dir="ltr" />
+        </div>
+        <div>
+          <label className={ui.label}>{m.shared.licenseValidFrom}</label>
+          <input name="licenseValidFrom" type="date" className={ui.input} />
+        </div>
+        <div>
+          <label className={ui.label}>{m.shared.periodicInspectionDueAt}</label>
+          <input name="periodicInspectionDueAt" type="date" className={ui.input} />
+        </div>
+        <div>
+          <label className={ui.label}>{m.shared.operatingCardExpiry}</label>
+          <input name="operatingCardExpiry" type="date" className={ui.input} />
         </div>
         <div>
           <label className={ui.label}>{m.supportVehicle.f.defaultDriver}</label>
