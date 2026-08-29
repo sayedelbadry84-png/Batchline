@@ -108,9 +108,14 @@ export default async function CustomersPage({
                       <td className={ui.td} dir="ltr">{c.contactEmail || c.contactPhone || "—"}</td>
                       <td className={`${ui.td} font-mono tabular`}>{c._count.projects}</td>
                       <td className={ui.td}>
-                        <Link href={`/customers?edit=${c.id}`} className="text-xs font-medium text-accent-strong hover:underline">
-                          {dict.field.edit}
-                        </Link>
+                        <div className="flex flex-col gap-1">
+                          <Link href={`/customers?edit=${c.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                            {dict.field.edit}
+                          </Link>
+                          <Link href={`/finance/customers/${c.id}/statement`} className="text-xs font-medium text-accent-strong hover:underline">
+                            {m.statement}
+                          </Link>
+                        </div>
                       </td>
                     </tr>
                   )
