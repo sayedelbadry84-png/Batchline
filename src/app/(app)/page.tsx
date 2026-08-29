@@ -332,7 +332,7 @@ export default async function DashboardPage() {
       <div>
         <h2 className="mb-3 font-display text-lg font-semibold">{d.kpiTitle}</h2>
         <div className="grid grid-cols-4 gap-4">
-          <Link href="/reports" className={`${ui.card} block transition-shadow hover:shadow-md`}>
+          <Link href="/reports" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--accent)" } as React.CSSProperties}>
             <div className="font-mono text-2xl tabular">{produced7d.toFixed(1)} m³</div>
             <div className="mt-1 text-sm text-ink-muted">{d.kpiProduction7d}</div>
             <div className="mt-2 flex h-8 items-end gap-1">
@@ -346,19 +346,19 @@ export default async function DashboardPage() {
             </div>
           </Link>
           {canSeeBilling && (
-            <Link href="/finance?tab=billing" className={`${ui.card} block transition-shadow hover:shadow-md`}>
+            <Link href="/finance?tab=billing" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--critical)" } as React.CSSProperties}>
               <div className="font-mono text-2xl tabular" dir="ltr">{arOutstanding.toLocaleString()}</div>
               <div className="mt-1 text-sm text-ink-muted">{d.kpiArOutstanding}</div>
               {overdueInvoiceCount > 0 && <div className="mt-1 text-xs text-critical">{r.arOverdue}: {overdueInvoiceCount}</div>}
             </Link>
           )}
           {canSeeQuality && (
-            <Link href="/quality" className={`${ui.card} block transition-shadow hover:shadow-md`}>
+            <Link href="/quality" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--good)" } as React.CSSProperties}>
               <div className="font-mono text-2xl tabular">{passRate !== null ? `${passRate.toFixed(0)}%` : "—"}</div>
               <div className="mt-1 text-sm text-ink-muted">{d.kpiQualityPassRate}</div>
             </Link>
           )}
-          <Link href="/trips" className={`${ui.card} block transition-shadow hover:shadow-md`}>
+          <Link href="/trips" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--warn)" } as React.CSSProperties}>
             <div className="font-mono text-2xl tabular">{openTrips.length}</div>
             <div className="mt-1 text-sm text-ink-muted">{d.kpiOpenTrips}</div>
           </Link>
