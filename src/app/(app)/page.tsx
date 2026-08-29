@@ -11,6 +11,7 @@ import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { DrumTimer } from "@/components/DrumTimer";
 import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
+import { invoiceAmountDue } from "@/lib/billing";
 
 const SEVEN_DAYS = 7;
 const OUTLOOK_DAYS = 7;
@@ -83,7 +84,7 @@ export default async function DashboardPage() {
     prisma.complianceCertificate.findMany({ include: { mix: true } }), // attached to MixDesign, not a site — same as Quality module
     prisma.invoice.findMany({
       where: { status: "SENT", ...plantScopeWhere(siteId) },
-      include: { payments: true },
+      include: { payments: true, creditNotes: true },
     }),
     prisma.labResult.findMany({ where: { ...(siteId ? { testBatch: { trip: tripPlantScopeWhere(siteId) } } : {}) } }),
     prisma.truck.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true, trips: { select: { batchTime: true } } } }),
@@ -211,7 +212,7 @@ export default async function DashboardPage() {
     : [[], []];
 
   const arOutstanding = canSeeBilling
-    ? sentInvoices.reduce((sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)), 0)
+    ? sentInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0)
     : 0;
   const overdueInvoiceCount = canSeeBilling ? sentInvoices.filter((inv) => inv.dueDate.getTime() < nowMs).length : 0;
 
@@ -272,7 +273,7 @@ export default async function DashboardPage() {
   if (canSeeBilling) {
     for (const inv of sentInvoices) {
       const overdueDays = Math.floor((nowMs - inv.dueDate.getTime()) / 86400000);
-      if (overdueDays > 0 && inv.total - inv.payments.reduce((s, p) => s + p.amount, 0) > 0.01) {
+      if (overdueDays > 0 && invoiceAmountDue(inv) > 0.01) {
         alerts.push({ key: `invoice-${inv.id}`, severity: "critical", href: `/finance/invoices/${inv.id}`, label: d.alertOverdueInvoice(inv.invoiceNumber, overdueDays) });
       }
     }

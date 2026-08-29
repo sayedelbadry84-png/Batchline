@@ -88,6 +88,7 @@ model User {
   sparePartsRequisitionsRequested  SparePartsRequisition[]   @relation("SPRRequestedBy")
   sparePartsRequisitionsApproved   SparePartsRequisition[]   @relation("SPRApprovedBy")
   finishedProductMovementsRecorded FinishedProductMovement[]
+  creditNotesIssued                CreditNote[]
 }
 
 model Session {
@@ -1022,8 +1023,9 @@ model Invoice {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  lines    InvoiceLine[]
-  payments Payment[]
+  lines       InvoiceLine[]
+  payments    Payment[]
+  creditNotes CreditNote[]
 }
 
 // One line per delivered trip — the delivery ticket is the natural billing
@@ -1055,6 +1057,26 @@ model Payment {
   reconciled   Boolean   @default(false)
   reconciledAt DateTime?
   createdAt    DateTime  @default(now())
+}
+
+// A discount/credit against a specific invoice (return, price dispute,
+// goodwill gesture, correction) — reduces what the customer still owes the
+// same way a Payment does, but no cash actually changed hands, so this
+// never appears in the Reconciliation tab (no `reconciled` field, unlike
+// Payment). Every "what's still owed" calculation site treats total minus
+// payments minus creditNotes as the real amount due — see
+// src/lib/billing.ts's invoiceAmountDue.
+model CreditNote {
+  id               String   @id @default(cuid())
+  creditNoteNumber String   @unique // CN-YYYY-NNNN
+  invoiceId        String
+  invoice          Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  amount           Float
+  reason           String // RETURN, PRICE_ADJUSTMENT, QUALITY_ISSUE, GOODWILL, OTHER
+  notes            String?
+  issuedById       String
+  issuedBy         User     @relation(fields: [issuedById], references: [id])
+  createdAt        DateTime @default(now())
 }
 
 // ---------------------------------------------------------------------------

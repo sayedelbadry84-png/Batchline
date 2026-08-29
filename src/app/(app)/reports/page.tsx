@@ -31,6 +31,7 @@ import {
 import { markDrumReturnFate } from "../trips/actions";
 import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
+import { invoiceAmountDue } from "@/lib/billing";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
@@ -153,7 +154,7 @@ export default async function ReportsPage({
     prisma.silo.findMany({ where: { ...plantScopeWhere(siteId, plantId) } }),
     prisma.invoice.findMany({
       where: { status: { not: "CANCELLED" }, ...plantScopeWhere(siteId, plantId) },
-      include: { payments: true },
+      include: { payments: true, creditNotes: true },
     }),
   ]);
 
@@ -281,13 +282,10 @@ export default async function ReportsPage({
     .reduce((sum, inv) => sum + inv.total, 0);
 
   const sentInvoices = invoices.filter((inv) => inv.status === "SENT");
-  const arOutstanding = sentInvoices.reduce(
-    (sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)),
-    0,
-  );
+  const arOutstanding = sentInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
   const arOverdue = sentInvoices
     .filter((inv) => inv.dueDate.getTime() < nowMs)
-    .reduce((sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)), 0);
+    .reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
 
   // --- Data for the non-overview report tabs, only fetched for whichever
   // tab is actually open. ---

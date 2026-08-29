@@ -4,8 +4,9 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { markInvoiceSent, recordPayment, cancelInvoice } from "../../../billing/actions";
+import { markInvoiceSent, recordPayment, cancelInvoice, issueCreditNote } from "../../../billing/actions";
 import { getActiveSiteId } from "@/lib/siteScope";
+import { invoiceAmountDue } from "@/lib/billing";
 
 const statusChip: Record<string, string> = {
   DRAFT: "bg-surface-alt text-ink-muted",
@@ -33,16 +34,17 @@ export default async function InvoiceDetailPage({
       plant: true,
       lines: { include: { trip: { include: { truck: true, batchTicket: { include: { mix: true, reservation: true } } } } } },
       payments: { orderBy: { paidAt: "desc" } },
+      creditNotes: { include: { issuedBy: true }, orderBy: { createdAt: "desc" } },
     },
   });
   if (!invoice) notFound();
   const siteId = await getActiveSiteId(user);
   if (siteId !== null && invoice.plant?.siteId !== siteId) notFound();
 
-  const paid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
-  const amountDue = Math.max(0, invoice.total - paid);
+  const amountDue = invoiceAmountDue(invoice);
   const canRecordPayment = invoice.status === "SENT" || invoice.status === "DRAFT";
-  const canCancel = (invoice.status === "DRAFT" || invoice.status === "SENT") && invoice.payments.length === 0;
+  const canIssueCreditNote = canRecordPayment && amountDue > 0.01;
+  const canCancel = (invoice.status === "DRAFT" || invoice.status === "SENT") && invoice.payments.length === 0 && invoice.creditNotes.length === 0;
 
   return (
     <div className="flex flex-col gap-8">
@@ -207,7 +209,70 @@ export default async function InvoiceDetailPage({
               </button>
             </form>
           )}
+
+          {canIssueCreditNote && (
+            <form action={issueCreditNote} className={`${ui.card} flex flex-col gap-3`}>
+              <input type="hidden" name="invoiceId" value={invoice.id} />
+              <h2 className="font-display text-lg font-semibold">{d.issueCreditNoteTitle}</h2>
+              <div>
+                <label className={ui.label}>{d.fCreditNote.amount}</label>
+                <input name="amount" type="number" step="0.01" max={amountDue || undefined} required className={ui.input} />
+              </div>
+              <div>
+                <label className={ui.label}>{d.fCreditNote.reason}</label>
+                <select name="reason" required className={ui.select}>
+                  <option value="RETURN">{d.creditReasonLabel.RETURN}</option>
+                  <option value="PRICE_ADJUSTMENT">{d.creditReasonLabel.PRICE_ADJUSTMENT}</option>
+                  <option value="QUALITY_ISSUE">{d.creditReasonLabel.QUALITY_ISSUE}</option>
+                  <option value="GOODWILL">{d.creditReasonLabel.GOODWILL}</option>
+                  <option value="OTHER">{d.creditReasonLabel.OTHER}</option>
+                </select>
+              </div>
+              <div>
+                <label className={ui.label}>{d.fCreditNote.notes}</label>
+                <input name="notes" className={ui.input} />
+              </div>
+              <button type="submit" className={`${ui.button} mt-2`}>
+                {d.issueCreditNote}
+              </button>
+            </form>
+          )}
         </div>
+      </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-3 font-display text-lg font-semibold">{d.creditNotesTitle}</h2>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              <th className={ui.th}>{d.colCreditNote.number}</th>
+              <th className={ui.th}>{d.colCreditNote.amount}</th>
+              <th className={ui.th}>{d.colCreditNote.reason}</th>
+              <th className={ui.th}>{d.colCreditNote.notes}</th>
+              <th className={ui.th}>{d.colCreditNote.issuedBy}</th>
+              <th className={ui.th}>{d.colCreditNote.date}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {invoice.creditNotes.map((c) => (
+              <tr key={c.id}>
+                <td className={`${ui.td} font-mono text-xs`}>{c.creditNoteNumber}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{c.amount.toLocaleString()}</td>
+                <td className={ui.td}>{d.creditReasonLabel[c.reason as keyof typeof d.creditReasonLabel] ?? c.reason}</td>
+                <td className={`${ui.td} text-xs text-ink-muted`}>{c.notes ?? "—"}</td>
+                <td className={ui.td}>{c.issuedBy.name}</td>
+                <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(c.createdAt).toLocaleDateString()}</td>
+              </tr>
+            ))}
+            {invoice.creditNotes.length === 0 && (
+              <tr>
+                <td className={ui.td} colSpan={6}>
+                  <span className="text-ink-muted">{d.emptyCreditNotes}</span>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       <Link href="/finance?tab=billing" className="text-sm font-medium text-accent-strong hover:underline">

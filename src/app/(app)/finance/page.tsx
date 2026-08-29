@@ -5,6 +5,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { getActiveSiteId, reservationSiteScopeWhere, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
+import { invoiceAmountDue } from "@/lib/billing";
 import { Modal } from "@/components/Modal";
 import {
   createSupplierBill,
@@ -127,14 +128,14 @@ async function OverviewTab({
   monthStart.setHours(0, 0, 0, 0);
 
   const [invoices, bills, cashThisMonth, paymentsThisMonth, supplierPaymentsThisMonth] = await Promise.all([
-    prisma.invoice.findMany({ where: { status: { notIn: ["DRAFT", "CANCELLED"] }, ...(siteScope.siteId ? { plant: { siteId: (siteScope as { siteId: string }).siteId } } : {}) }, select: { total: true, payments: { select: { amount: true } } } }),
+    prisma.invoice.findMany({ where: { status: { notIn: ["DRAFT", "CANCELLED"] }, ...(siteScope.siteId ? { plant: { siteId: (siteScope as { siteId: string }).siteId } } : {}) }, select: { total: true, payments: { select: { amount: true } }, creditNotes: { select: { amount: true } } } }),
     prisma.supplierBill.findMany({ where: { status: { notIn: ["CANCELLED"] }, ...siteScope }, select: { total: true, payments: { select: { amount: true } } } }),
     prisma.cashTransaction.findMany({ where: { occurredAt: { gte: monthStart }, ...siteScope }, select: { direction: true, amount: true } }),
     prisma.payment.findMany({ where: { paidAt: { gte: monthStart } }, select: { amount: true } }),
     prisma.supplierPayment.findMany({ where: { paidAt: { gte: monthStart } }, select: { amount: true } }),
   ]);
 
-  const arOutstanding = invoices.reduce((sum, inv) => sum + Math.max(0, inv.total - inv.payments.reduce((s, p) => s + p.amount, 0)), 0);
+  const arOutstanding = invoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
   const apOutstanding = bills.reduce((sum, b) => sum + Math.max(0, b.total - b.payments.reduce((s, p) => s + p.amount, 0)), 0);
   const cashIn = cashThisMonth.filter((t) => t.direction === "IN").reduce((s, t) => s + t.amount, 0) + paymentsThisMonth.reduce((s, p) => s + p.amount, 0);
   const cashOut = cashThisMonth.filter((t) => t.direction === "OUT").reduce((s, t) => s + t.amount, 0) + supplierPaymentsThisMonth.reduce((s, p) => s + p.amount, 0);
@@ -448,7 +449,7 @@ async function AgingTab({
   const [invoices, bills] = await Promise.all([
     prisma.invoice.findMany({
       where: { status: { notIn: ["DRAFT", "CANCELLED"] }, ...(siteScope.siteId ? { plant: { siteId: (siteScope as { siteId: string }).siteId } } : {}) },
-      include: { customer: true, payments: true },
+      include: { customer: true, payments: true, creditNotes: true },
     }),
     prisma.supplierBill.findMany({
       where: { status: { notIn: ["CANCELLED"] }, ...siteScope },
@@ -462,7 +463,7 @@ async function AgingTab({
   const arRows = invoices
     .map((inv) => ({
       label: `${inv.invoiceNumber} — ${inv.customer.legalName}`,
-      outstanding: inv.total - inv.payments.reduce((s, p) => s + p.amount, 0),
+      outstanding: invoiceAmountDue(inv),
       currency: inv.currency,
       bucket: agingBucket(inv.dueDate, now),
     }))
@@ -674,7 +675,7 @@ async function BillingTab({
     prisma.invoice.findMany({
       where: { ...plantScopeWhere(siteId) },
       orderBy: { issueDate: "desc" },
-      include: { customer: true, project: true, payments: true },
+      include: { customer: true, project: true, payments: true, creditNotes: true },
       take: 30,
     }),
     prisma.priceListEntry.findMany({ include: { customer: true, mix: true }, orderBy: { createdAt: "asc" } }),
@@ -737,8 +738,7 @@ async function BillingTab({
   const projectGroups = [...byProject.values()];
 
   const invoices = invoicesRaw.map((inv) => {
-    const paid = inv.payments.reduce((sum, p) => sum + p.amount, 0);
-    const due = inv.total - paid;
+    const due = invoiceAmountDue(inv);
     const isOverdue = inv.status === "SENT" && due > 0.01 && inv.dueDate.getTime() < nowMs;
     const daysOverdue = isOverdue ? Math.floor((nowMs - inv.dueDate.getTime()) / 86400000) : 0;
     return { ...inv, isOverdue, daysOverdue };

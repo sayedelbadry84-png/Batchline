@@ -3,8 +3,9 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
-import { parseNetDays } from "@/lib/billing";
+import { parseNetDays, invoiceAmountDue } from "@/lib/billing";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
+import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -162,8 +163,8 @@ export async function cancelInvoice(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  const invoice = await prisma.invoice.findUnique({ where: { id }, include: { payments: true } });
-  if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID" || invoice.payments.length > 0) return;
+  const invoice = await prisma.invoice.findUnique({ where: { id }, include: { payments: true, creditNotes: true } });
+  if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID" || invoice.payments.length > 0 || invoice.creditNotes.length > 0) return;
   if (!(await invoiceInScope(id, effectiveSiteId(user)))) return;
 
   await prisma.$transaction([
@@ -210,6 +211,56 @@ export async function recordPayment(formData: FormData) {
     recordId: invoiceId,
     afterValue: `${amount} ${invoice.currency}`,
     reasonCode: "PAYMENT_RECORDED",
+  });
+
+  revalidatePath(`/finance/invoices/${invoiceId}`);
+  revalidatePath("/finance");
+}
+
+// A discount/credit against a specific invoice — returns, price disputes,
+// goodwill, corrections. Reduces what's still owed exactly like
+// recordPayment does (same PAID-flip-once-covered logic), capped at
+// whatever's still actually due so a credit note can never push an
+// invoice into owing the customer money — that would be a refund, not a
+// credit note, and this app has no such flow.
+export async function issueCreditNote(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+
+  const invoiceId = String(formData.get("invoiceId") ?? "");
+  const amount = Number(formData.get("amount") ?? 0);
+  const reason = String(formData.get("reason") ?? "");
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (!invoiceId || !amount || amount <= 0 || !reason) return;
+
+  const invoice = await prisma.invoice.findUnique({
+    where: { id: invoiceId },
+    include: { payments: true, creditNotes: true },
+  });
+  if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return;
+  if (!(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
+
+  const amountDue = invoiceAmountDue(invoice);
+  if (amount > amountDue + 0.01) return;
+
+  const creditNote = await withSequentialNumber(
+    "CN",
+    () => prisma.creditNote.count(),
+    (creditNoteNumber) =>
+      prisma.creditNote.create({
+        data: { creditNoteNumber, invoiceId, amount, reason, notes, issuedById: user!.id },
+      }),
+  );
+
+  if (amountDue - amount <= 0.01) {
+    await prisma.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
+  }
+
+  await logAudit({
+    module: "Billing",
+    recordId: invoiceId,
+    afterValue: `${creditNote.creditNoteNumber} — ${amount} ${invoice.currency} (${reason})`,
+    reasonCode: "CREDIT_NOTE_ISSUED",
   });
 
   revalidatePath(`/finance/invoices/${invoiceId}`);
