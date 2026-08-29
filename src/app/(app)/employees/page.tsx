@@ -15,6 +15,7 @@ import {
   rejectLeaveRequest,
   cancelLeaveRequest,
 } from "./actions";
+import { generatePayrollRun } from "./payroll/actions";
 import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { RoleSelect } from "@/components/RoleSelect";
 
@@ -30,8 +31,9 @@ const LEAVE_TYPES = ["ANNUAL", "SICK", "UNPAID", "EMERGENCY", "OTHER"] as const;
 // asks for a role at all. "attendance"/"leave" are cross-role — every
 // active employee regardless of which other tab they'd show up in — so
 // they're rendered by their own branch below, same as isCrewTab already is.
-const TAB_KEYS = ["mixerDriver", "pumpOperator", "pumpAssistant", "bulkerDriver", "waterDriver", "loaderDriver", "admin", "attendance", "leave"] as const;
+const TAB_KEYS = ["mixerDriver", "pumpOperator", "pumpAssistant", "bulkerDriver", "waterDriver", "loaderDriver", "admin", "attendance", "leave", "payroll"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
+const WAGE_TYPES = ["MONTHLY", "DAILY"] as const;
 
 const EMPLOYEE_TAB_ROLE: Partial<Record<TabKey, string>> = {
   mixerDriver: "DRIVER",
@@ -78,6 +80,7 @@ export default async function EmployeesPage({
   const isCrewTab = tab === "pumpOperator" || tab === "pumpAssistant";
   const isAttendanceTab = tab === "attendance";
   const isLeaveTab = tab === "leave";
+  const isPayrollTab = tab === "payroll";
   const isHrTab = isAttendanceTab || isLeaveTab;
   const fixedRole = EMPLOYEE_TAB_ROLE[tab];
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
@@ -107,7 +110,7 @@ export default async function EmployeesPage({
   // ADMIN_ROLES list. A custom job title (built-in or picked via "Other"
   // on this same tab) belongs here too, or it would vanish from every
   // tab's listing the moment it's saved.
-  const employees = !isCrewTab && !isHrTab
+  const employees = !isCrewTab && !isHrTab && !isPayrollTab
     ? await prisma.employee.findMany({
         where: {
           role: fixedRole ?? { notIn: Object.values(EMPLOYEE_TAB_ROLE) },
@@ -157,6 +160,20 @@ export default async function EmployeesPage({
     usedAnnualByEmployee.set(l.employeeId, (usedAnnualByEmployee.get(l.employeeId) ?? 0) + l.daysCount);
   }
 
+  // Payroll touches salary data, so its tab is only offered to full Admins —
+  // everyone else keeps seeing the rest of the module unchanged. The real
+  // boundary is still the requireRole(["ADMIN"]) check inside every payroll
+  // action (payroll/actions.ts); hiding the tab is just so a non-admin never
+  // lands on a screen of buttons that would throw.
+  const isAdmin = user.role === "ADMIN";
+
+  const payrollRuns = isPayrollTab
+    ? await prisma.payrollRun.findMany({
+        orderBy: { createdAt: "desc" },
+        include: { lines: { select: { netPay: true } } },
+      })
+    : [];
+
   const tabs: { key: TabKey; label: string }[] = [
     { key: "mixerDriver", label: m.tabs.mixerDriver },
     { key: "pumpOperator", label: m.tabs.pumpOperator },
@@ -167,6 +184,7 @@ export default async function EmployeesPage({
     { key: "admin", label: m.tabs.admin },
     { key: "attendance", label: m.tabs.attendance },
     { key: "leave", label: m.tabs.leave },
+    ...(isAdmin ? [{ key: "payroll" as TabKey, label: m.tabs.payroll }] : []),
   ];
 
   return (
@@ -513,6 +531,65 @@ export default async function EmployeesPage({
             )}
           </div>
         </div>
+      ) : isPayrollTab ? (
+        isAdmin ? (
+          <div className="grid grid-cols-[1fr_320px] gap-6">
+            <div className={ui.card}>
+              <table className={ui.table}>
+                <thead>
+                  <tr>
+                    <th className={ui.th}>{m.payroll.col.number}</th>
+                    <th className={ui.th}>{m.payroll.col.period}</th>
+                    <th className={ui.th}>{m.payroll.col.status}</th>
+                    <th className={ui.th}>{m.payroll.col.total}</th>
+                    <th className={ui.th}>{dict.field.actions}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {payrollRuns.map((r) => {
+                    const total = r.lines.reduce((sum, l) => sum + l.netPay, 0);
+                    return (
+                      <tr key={r.id}>
+                        <td className={`${ui.td} font-mono text-xs`}>{r.runNumber}</td>
+                        <td className={ui.td}>
+                          {new Date(r.periodStart).toLocaleDateString("en-GB")} — {new Date(r.periodEnd).toLocaleDateString("en-GB")}
+                        </td>
+                        <td className={ui.td}>
+                          <span className={`${ui.chip} ${r.status === "PAID" ? "bg-good-soft text-good" : r.status === "APPROVED" ? "bg-accent-soft text-accent-strong" : r.status === "CANCELLED" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
+                            {m.payroll.statusLabel[r.status as keyof typeof m.payroll.statusLabel] ?? r.status}
+                          </span>
+                        </td>
+                        <td className={`${ui.td} font-mono tabular`} dir="ltr">{total.toLocaleString()}</td>
+                        <td className={ui.td}>
+                          <Link href={`/employees/payroll/${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                            {m.payroll.view}
+                          </Link>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {payrollRuns.length === 0 && (
+                    <tr><td className={ui.td} colSpan={5}><span className="text-ink-muted">{m.payroll.empty}</span></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <form action={generatePayrollRun} className={`${ui.card} flex flex-col gap-3`}>
+              <h2 className="font-display text-lg font-semibold">{m.payroll.newTitle}</h2>
+              <div>
+                <label className={ui.label}>{m.payroll.f.periodStart}</label>
+                <input name="periodStart" type="date" required className={ui.input} />
+              </div>
+              <div>
+                <label className={ui.label}>{m.payroll.f.periodEnd}</label>
+                <input name="periodEnd" type="date" required className={ui.input} />
+              </div>
+              <p className="text-xs text-ink-muted">{m.payroll.newHint}</p>
+              <button type="submit" className={`${ui.button} mt-2`}>{m.payroll.generate}</button>
+            </form>
+          </div>
+        ) : null
       ) : (
         <div className="grid grid-cols-[1fr_320px] gap-6">
           <div className={ui.card}>
@@ -589,6 +666,19 @@ export default async function EmployeesPage({
                                   <option key={s} value={s}>{dict.status[s]}</option>
                                 ))}
                               </select>
+                            </div>
+                            <div>
+                              <label className={ui.label}>{m.f.wageType}</label>
+                              <select name="wageType" defaultValue={e.wageType ?? ""} className={`${ui.select} w-28`}>
+                                <option value="">—</option>
+                                {WAGE_TYPES.map((w) => (
+                                  <option key={w} value={w}>{m.payroll.wageTypeLabel[w]}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className={ui.label}>{m.f.wageRate}</label>
+                              <input name="wageRate" type="number" step="0.01" defaultValue={e.wageRate ?? ""} className={`${ui.input} w-28`} dir="ltr" />
                             </div>
                             <button className={ui.button}>{dict.field.save}</button>
                             <Link href={`/employees?tab=${tab}`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
@@ -677,6 +767,19 @@ export default async function EmployeesPage({
             <div>
               <label className={ui.label}>{m.f.licenseExpiry}</label>
               <input name="licenseExpiry" type="date" className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.wageType}</label>
+              <select name="wageType" defaultValue="" className={ui.select}>
+                <option value="">—</option>
+                {WAGE_TYPES.map((w) => (
+                  <option key={w} value={w}>{m.payroll.wageTypeLabel[w]}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.wageRate}</label>
+              <input name="wageRate" type="number" step="0.01" className={ui.input} dir="ltr" />
             </div>
             <button type="submit" className={`${ui.button} mt-2`}>
               {m.add}

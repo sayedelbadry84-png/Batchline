@@ -35,6 +35,9 @@ export async function createEmployee(formData: FormData) {
   const code = String(formData.get("code") ?? "").trim() || null;
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
+  const wageType = String(formData.get("wageType") ?? "").trim() || null;
+  const wageRateRaw = String(formData.get("wageRate") ?? "").trim();
+  const wageRate = wageType && wageRateRaw ? Number(wageRateRaw) : null;
 
   if (!siteId || !name || !role) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
@@ -49,6 +52,8 @@ export async function createEmployee(formData: FormData) {
       code,
       shiftPattern,
       licenseExpiry: licenseExpiryRaw ? new Date(licenseExpiryRaw) : null,
+      wageType,
+      wageRate,
     },
   });
 
@@ -72,6 +77,9 @@ export async function updateEmployee(formData: FormData) {
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
   const status = String(formData.get("status") ?? "ACTIVE");
+  const wageType = String(formData.get("wageType") ?? "").trim() || null;
+  const wageRateRaw = String(formData.get("wageRate") ?? "").trim();
+  const wageRate = wageType && wageRateRaw ? Number(wageRateRaw) : null;
 
   if (!id || !siteId || !name || !role) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
@@ -90,6 +98,8 @@ export async function updateEmployee(formData: FormData) {
       shiftPattern,
       licenseExpiry: licenseExpiryRaw ? new Date(licenseExpiryRaw) : null,
       status,
+      wageType,
+      wageRate,
     },
   });
   await logTransferIfChanged("Employees", id, existingEmployee.plantId, plantId);

@@ -89,6 +89,8 @@ model User {
   sparePartsRequisitionsApproved   SparePartsRequisition[]   @relation("SPRApprovedBy")
   finishedProductMovementsRecorded FinishedProductMovement[]
   creditNotesIssued                CreditNote[]
+  payrollRunsCreated               PayrollRun[]               @relation("PayrollRunCreatedBy")
+  payrollRunsApproved              PayrollRun[]               @relation("PayrollRunApprovedBy")
 }
 
 model Session {
@@ -545,6 +547,11 @@ model Employee {
   // nothing here hard-blocks a request that would exceed it, since real
   // policies sometimes allow unpaid overflow.
   annualLeaveEntitlementDays Int       @default(21)
+  // Optional on purpose — payroll runs simply skip any employee missing
+  // either field, so existing rows (and roles this doesn't apply to) never
+  // break. wageRate is per-month when wageType is MONTHLY, per-day when DAILY.
+  wageType                   String?
+  wageRate                   Float?
   createdAt                  DateTime  @default(now())
   updatedAt                  DateTime  @updatedAt
 
@@ -557,6 +564,50 @@ model Employee {
   attendanceRecords         AttendanceRecord[]
   leaveRequests             LeaveRequest[]
   maintenanceOrders         MaintenanceOrderTechnician[]
+  payrollLines               PayrollLine[]
+}
+
+model PayrollRun {
+  id           String    @id @default(cuid())
+  runNumber    String    @unique // PYR-YYYY-NNNN
+  periodStart  DateTime
+  periodEnd    DateTime
+  status       String    @default("DRAFT") // DRAFT, APPROVED, PAID, CANCELLED
+  createdById  String
+  createdBy    User      @relation("PayrollRunCreatedBy", fields: [createdById], references: [id])
+  approvedById String?
+  approvedBy   User?     @relation("PayrollRunApprovedBy", fields: [approvedById], references: [id])
+  approvedAt   DateTime?
+  paidAt       DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  lines PayrollLine[]
+}
+
+model PayrollLine {
+  id           String     @id @default(cuid())
+  payrollRunId String
+  payrollRun   PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  employeeId   String
+  employee     Employee   @relation(fields: [employeeId], references: [id])
+  // wageType/wageRate snapshotted from Employee at generation time, so a
+  // later change to the employee's rate never reshapes an already-generated
+  // (or already-paid) run.
+  wageType     String
+  wageRate     Float
+  periodDays   Int
+  // ABSENT attendance days + UNPAID approved leave days overlapping the
+  // period — see generatePayrollRun for the exact query.
+  unpaidDays   Float
+  grossPay     Float
+  // Manual +/- (bonus or extra deduction), editable only while the run is
+  // DRAFT.
+  adjustment   Float      @default(0)
+  netPay       Float
+  notes        String?
+
+  @@unique([payrollRunId, employeeId])
 }
 
 // ---------------------------------------------------------------------------
