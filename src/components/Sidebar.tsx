@@ -45,13 +45,27 @@ export function Sidebar({
 }) {
   const pathname = usePathname();
   const canSee = (key: ModuleKey) => allowedModules.includes(key);
+  // One shared shape for every nav row — a filled, rounded accent pill
+  // when active instead of the old left-border stripe, matching the
+  // approved glass mockup's sidebar treatment.
+  const navItemClass = (active: boolean) =>
+    `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
+      active ? "bg-accent-soft font-medium text-ink" : "text-ink-muted hover:bg-surface-alt hover:text-ink"
+    }`;
 
   return (
-    <nav className="no-print sticky top-0 flex h-screen w-60 shrink-0 flex-col gap-1 overflow-y-auto border-e border-border px-4 py-6">
-      <div className="mb-1 flex items-baseline gap-2">
-        <span className="font-display text-xl font-semibold tracking-tight">
-          Batchline
-        </span>
+    <nav className="no-print bg-glass border-glass-border sticky top-0 flex h-screen w-60 shrink-0 flex-col gap-1 overflow-y-auto border-e px-4 py-6 backdrop-blur-xl">
+      <div className="mb-4 flex items-center gap-2.5">
+        <div
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-linear-to-br from-accent-strong to-accent text-xs font-bold text-[var(--on-accent)] shadow-[0_6px_16px_-6px_var(--accent-glow)]"
+          aria-hidden="true"
+        >
+          BL
+        </div>
+        <div className="leading-tight">
+          <span className="font-display block text-lg font-semibold tracking-tight">Batchline</span>
+          <span className="text-ink-faint block text-[0.68rem]">{common.tagline}</span>
+        </div>
       </div>
 
       {sites && sites.length > 0 && (
@@ -80,15 +94,7 @@ export function Sidebar({
         const active =
           m.href === "/" ? pathname === "/" : pathname.startsWith(m.href);
         return (
-          <Link
-            key={m.href}
-            href={m.href}
-            className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
-              active
-                ? "border-accent bg-surface-alt font-medium text-ink"
-                : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
-            }`}
-          >
+          <Link key={m.href} href={m.href} className={navItemClass(active)}>
             <span
               className={`font-mono text-xs ${active ? "text-accent-strong" : "text-ink-faint"}`}
             >
@@ -106,15 +112,7 @@ export function Sidebar({
         {VIEW_NAV.filter((v) => canSee(v.key)).map((v) => {
           const active = pathname.startsWith(v.href);
           return (
-            <Link
-              key={v.href}
-              href={v.href}
-              className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
-                active
-                  ? "border-accent bg-surface-alt font-medium text-ink"
-                  : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
-              }`}
-            >
+            <Link key={v.href} href={v.href} className={navItemClass(active)}>
               {nav[v.labelKey]}
             </Link>
           );
@@ -126,68 +124,26 @@ export function Sidebar({
           <div className="mb-1 px-3 font-mono text-[0.65rem] tracking-widest text-ink-faint uppercase">
             {nav.administration}
           </div>
-          <Link
-            href="/users"
-            className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
-              pathname.startsWith("/users")
-                ? "border-accent bg-surface-alt font-medium text-ink"
-                : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
-            }`}
-          >
+          <Link href="/users" className={navItemClass(pathname.startsWith("/users"))}>
             {nav.users}
           </Link>
-          <Link
-            href="/permissions"
-            className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
-              pathname.startsWith("/permissions")
-                ? "border-accent bg-surface-alt font-medium text-ink"
-                : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
-            }`}
-          >
+          <Link href="/permissions" className={navItemClass(pathname.startsWith("/permissions"))}>
             {nav.permissions}
           </Link>
-          <Link
-            href="/roles"
-            className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
-              pathname.startsWith("/roles")
-                ? "border-accent bg-surface-alt font-medium text-ink"
-                : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
-            }`}
-          >
+          <Link href="/roles" className={navItemClass(pathname.startsWith("/roles"))}>
             {nav.roles}
           </Link>
-          <Link
-            href="/integrations"
-            className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
-              pathname.startsWith("/integrations")
-                ? "border-accent bg-surface-alt font-medium text-ink"
-                : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
-            }`}
-          >
+          <Link href="/integrations" className={navItemClass(pathname.startsWith("/integrations"))}>
             {nav.integrations}
           </Link>
-          <Link
-            href="/audit-log"
-            className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
-              pathname.startsWith("/audit-log")
-                ? "border-accent bg-surface-alt font-medium text-ink"
-                : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
-            }`}
-          >
+          <Link href="/audit-log" className={navItemClass(pathname.startsWith("/audit-log"))}>
             {nav.auditLog}
           </Link>
         </div>
       )}
 
       <div className="mt-auto flex flex-col gap-2 border-t border-border pt-4">
-        <Link
-          href="/account"
-          className={`flex items-center gap-3 rounded-md border-s-2 px-3 py-2 text-sm ${
-            pathname.startsWith("/account")
-              ? "border-accent bg-surface-alt font-medium text-ink"
-              : "border-transparent text-ink-muted hover:bg-surface-alt hover:text-ink"
-          }`}
-        >
+        <Link href="/account" className={navItemClass(pathname.startsWith("/account"))}>
           {nav.account}
         </Link>
         <div className="px-3">

@@ -47,6 +47,7 @@ export default async function DashboardPage() {
     customerCount,
     projectCount,
     reservationCount,
+    activeReservationsCount,
     truckCount,
     silos,
     openTrips,
@@ -55,7 +56,6 @@ export default async function DashboardPage() {
     holdReservations,
     certificates,
     sentInvoices,
-    labResults,
     maintenanceTrucks,
     maintenancePumps,
   ] = await Promise.all([
@@ -65,6 +65,8 @@ export default async function DashboardPage() {
     prisma.customer.count(), // company-wide customer list — never site-scoped, same as everywhere else
     prisma.project.count(), // company-wide — a project isn't tied to any one plant, see the Project model comment
     prisma.reservation.count({ where: { ...reservationSiteScopeWhere(siteId) } }),
+    // "Active" — currently open pipeline, not the all-time total above.
+    prisma.reservation.count({ where: { status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] }, ...reservationSiteScopeWhere(siteId) } }),
     prisma.truck.count({ where: { ...plantScopeWhere(siteId) } }),
     prisma.silo.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true } }),
     prisma.trip.findMany({
@@ -86,7 +88,6 @@ export default async function DashboardPage() {
       where: { status: "SENT", ...plantScopeWhere(siteId) },
       include: { payments: true, creditNotes: true },
     }),
-    prisma.labResult.findMany({ where: { ...(siteId ? { testBatch: { trip: tripPlantScopeWhere(siteId) } } : {}) } }),
     prisma.truck.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true, trips: { select: { batchTime: true } } } }),
     prisma.pump.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true, trips: { select: { batchTime: true } } } }),
   ]);
@@ -96,6 +97,22 @@ export default async function DashboardPage() {
     .map((s) => ({ ...s, pct: s.capacityTons > 0 ? (s.currentLevelTons / s.capacityTons) * 100 : 0 }))
     .filter((s) => s.pct <= s.minThresholdPct)
     .sort((a, b) => a.pct - b.pct);
+
+  // --- Cement days-of-cover KPI — same derivation as the Silos report tab
+  // (reports/page.tsx): last-7-days consumption rate against what's on
+  // hand right now, for CEMENT specifically (not every silo material). ---
+  const since7d = new Date(todayStart);
+  since7d.setDate(since7d.getDate() - SEVEN_DAYS);
+  const cementConsumedKg7d = completedTickets
+    .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= since7d)
+    .flatMap((t) => t.components)
+    .filter((c) => c.material.type === "CEMENT")
+    .reduce((sum, c) => sum + (c.actualMassKg ?? c.targetMassKg), 0);
+  const cementDailyTons = cementConsumedKg7d / 1000 / SEVEN_DAYS;
+  const cementSilos = silos.filter((s) => s.materialType === "CEMENT");
+  const cementLevelTons = cementSilos.reduce((sum, s) => sum + s.currentLevelTons, 0);
+  const cementDaysOfCover = cementDailyTons > 0 ? cementLevelTons / cementDailyTons : null;
+  const cementBelowSafe = siloAlerts.some((s) => s.materialType === "CEMENT");
 
   const drumAlerts = openTrips
     .map((t) => ({ ...t, elapsedMin: Math.floor((nowMs - t.batchTime.getTime()) / 60000) }))
@@ -150,6 +167,16 @@ export default async function DashboardPage() {
   }
   const produced7d = sparklineDays.reduce((sum, day) => sum + day.volumeM3, 0);
   const sparklineMax = Math.max(...sparklineDays.map((day) => day.volumeM3), 1);
+  // Today vs. yesterday are always the sparkline's last two entries — the
+  // loop above pushes oldest-first, today last.
+  const producedToday = sparklineDays[sparklineDays.length - 1].volumeM3;
+  const producedYesterday = sparklineDays[sparklineDays.length - 2].volumeM3;
+  const productionDeltaPct = producedYesterday > 0 ? ((producedToday - producedYesterday) / producedYesterday) * 100 : null;
+
+  // Reservations whose pour window falls today specifically, out of the
+  // already-fetched 7-day outlook window.
+  const tomorrowStart = new Date(todayStart.getTime() + 86400000);
+  const reservationsPourToday = upcomingReservations.filter((res) => res.pourWindowStart >= todayStart && res.pourWindowStart < tomorrowStart).length;
 
   // --- Anomaly detection — same method as Reports (src/lib/anomaly.ts). ---
   const byMaterial = new Map<string, { materialName: string; samples: DeviationSample[] }>();
@@ -215,10 +242,6 @@ export default async function DashboardPage() {
     ? sentInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0)
     : 0;
   const overdueInvoiceCount = canSeeBilling ? sentInvoices.filter((inv) => inv.dueDate.getTime() < nowMs).length : 0;
-
-  const passRate = canSeeQuality && labResults.length > 0
-    ? (labResults.filter((res) => res.passFail === "PASS").length / labResults.length) * 100
-    : null;
 
   // --- Unified alert feed: every warning scattered across Silos, Trips,
   // Quality, Reservations, Billing, and Reports, in one prioritized list —
@@ -333,8 +356,13 @@ export default async function DashboardPage() {
         <h2 className="mb-3 font-display text-lg font-semibold">{d.kpiTitle}</h2>
         <div className="grid grid-cols-4 gap-4">
           <Link href="/reports" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--accent)" } as React.CSSProperties}>
-            <div className="font-mono text-2xl tabular">{produced7d.toFixed(1)} m³</div>
-            <div className="mt-1 text-sm text-ink-muted">{d.kpiProduction7d}</div>
+            <div className="font-mono text-2xl tabular">{producedToday.toFixed(1)} m³</div>
+            <div className="mt-1 text-sm text-ink-muted">{d.kpiProductionToday}</div>
+            {productionDeltaPct !== null && (
+              <div className={`mt-1 text-xs ${productionDeltaPct >= 0 ? "text-good" : "text-critical"}`}>
+                {productionDeltaPct >= 0 ? d.kpiDeltaUp(productionDeltaPct.toFixed(0)) : d.kpiDeltaDown(Math.abs(productionDeltaPct).toFixed(0))}
+              </div>
+            )}
             <div className="mt-2 flex h-8 items-end gap-1">
               {sparklineDays.map((day, i) => (
                 <div
@@ -352,16 +380,20 @@ export default async function DashboardPage() {
               {overdueInvoiceCount > 0 && <div className="mt-1 text-xs text-critical">{r.arOverdue}: {overdueInvoiceCount}</div>}
             </Link>
           )}
-          {canSeeQuality && (
-            <Link href="/quality" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--good)" } as React.CSSProperties}>
-              <div className="font-mono text-2xl tabular">{passRate !== null ? `${passRate.toFixed(0)}%` : "—"}</div>
-              <div className="mt-1 text-sm text-ink-muted">{d.kpiQualityPassRate}</div>
+          {canSeeReservations && (
+            <Link href="/reservations" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--good)" } as React.CSSProperties}>
+              <div className="font-mono text-2xl tabular">{activeReservationsCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{d.kpiActiveReservations}</div>
+              {reservationsPourToday > 0 && <div className="mt-1 text-xs text-ink-muted">{d.kpiTodayCount(reservationsPourToday)}</div>}
             </Link>
           )}
-          <Link href="/trips" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--warn)" } as React.CSSProperties}>
-            <div className="font-mono text-2xl tabular">{openTrips.length}</div>
-            <div className="mt-1 text-sm text-ink-muted">{d.kpiOpenTrips}</div>
-          </Link>
+          {canSeeProduction && (
+            <Link href="/warehouses?tab=rawMaterials&sub=silos" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--warn)" } as React.CSSProperties}>
+              <div className="font-mono text-2xl tabular">{cementDaysOfCover !== null ? `${cementDaysOfCover.toFixed(1)} ${d.kpiDayUnit}` : "—"}</div>
+              <div className="mt-1 text-sm text-ink-muted">{d.kpiCementCoverage}</div>
+              {cementBelowSafe && <div className="mt-1 text-xs text-warn">{d.kpiBelowSafeCoverage}</div>}
+            </Link>
+          )}
         </div>
       </div>
 
