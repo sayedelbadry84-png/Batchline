@@ -88,9 +88,9 @@ export default async function DriverTripPage({
           <form action={uploadDeliveryPhoto} className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-4">
             <div className="text-sm font-medium">{d.deliveryPhoto}</div>
             <input type="hidden" name="tripId" value={trip.id} />
-            {trip.deliveryPhotoDataUrl ? (
+            {trip.deliveryPhotoUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={trip.deliveryPhotoDataUrl} alt={d.deliveryPhoto} className="rounded-lg border border-border" />
+              <img src={trip.deliveryPhotoUrl} alt={d.deliveryPhoto} className="rounded-lg border border-border" />
             ) : (
               <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-border text-ink-faint">
                 {d.noPhotoYet}

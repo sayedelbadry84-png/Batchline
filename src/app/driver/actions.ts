@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser } from "@/lib/session";
+import { uploadFile, deleteFile } from "@/lib/blob";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
@@ -38,11 +39,17 @@ export async function uploadDeliveryPhoto(formData: FormData) {
   const file = formData.get("photo");
   if (!tripId || !(file instanceof File) || file.size === 0) return;
   await requireOwnTrip(tripId);
+  const trip = await prisma.trip.findUnique({ where: { id: tripId }, select: { deliveryPhotoUrl: true } });
 
-  const buffer = Buffer.from(await file.arrayBuffer());
-  const dataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
+  const ext = file.name.split(".").pop() || "jpg";
+  const url = await uploadFile(`delivery-photos/${tripId}.${ext}`, file);
 
-  await prisma.trip.update({ where: { id: tripId }, data: { deliveryPhotoDataUrl: dataUrl } });
+  await prisma.trip.update({ where: { id: tripId }, data: { deliveryPhotoUrl: url } });
+  // A re-take replaces the row's own URL immediately above — clean up the
+  // old blob after so a driver retrying the photo doesn't leave orphaned
+  // files behind in storage.
+  if (trip?.deliveryPhotoUrl) await deleteFile(trip.deliveryPhotoUrl);
+
   await logAudit({ module: "Fleet", recordId: tripId, reasonCode: "DELIVERY_PHOTO_CAPTURED" });
 
   revalidatePath(`/driver/trip/${tripId}`);

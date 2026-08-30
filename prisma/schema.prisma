@@ -917,10 +917,10 @@ model Trip {
   // billed/ticketed for the full amount; only the component target
   // masses drawn from inventory shrink by this much.
   reclaimedVolumeM3    Float?
-  // Driver-app delivery confirmation. The photo is stored as a data URL for
-  // this phase (no object storage wired up yet) — fine for demo volumes,
-  // swap for a real blob store (S3-compatible) before production traffic.
-  deliveryPhotoDataUrl String?
+  // Driver-app delivery confirmation photo — a real Vercel Blob URL (see
+  // src/lib/blob.ts and uploadDeliveryPhoto in src/app/driver/actions.ts),
+  // not a data: URI stored in the row.
+  deliveryPhotoUrl     String?
   deliverySignedBy     String?
   deliverySignedAt     DateTime?
   createdAt            DateTime        @default(now())
