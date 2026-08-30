@@ -623,6 +623,16 @@ model PayrollLine {
   // (see markPayrollRunPaid, which folds both into the posted transaction).
   employeeGosi Float      @default(0)
   employerGosi Float      @default(0)
+  // Pulled automatically from src/lib/incentives.ts for the same period,
+  // for the three incentive roles backed by a real Employee record
+  // (MIXER_DRIVER, BULKER_DRIVER, WATER_TANKER_DRIVER — see
+  // generatePayrollRun). PUMP_OPERATOR/PUMP_ASSISTANT are excluded: their
+  // incentive activity is keyed by PumpCrewMember.id, a separate roster
+  // with no link to Employee, so there is no reliable id to match against
+  // a payroll line. Added to netPay below, same as employeeGosi is
+  // subtracted from it — not editable directly (adjustment is still the
+  // manual override for anything this doesn't cover).
+  incentiveAmount Float   @default(0)
   // Manual +/- (bonus or extra deduction), editable only while the run is
   // DRAFT.
   adjustment   Float      @default(0)

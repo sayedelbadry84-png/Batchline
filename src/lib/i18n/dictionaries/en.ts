@@ -726,7 +726,7 @@ const en: typeof ar = {
       },
       payroll: {
         eyebrow: "Module 09 — Payroll",
-        col: { number: "Number", period: "Period", status: "Status", total: "Total net", employee: "Employee", wageType: "Wage type", wageRate: "Wage rate", unpaidDays: "Unpaid days", grossPay: "Gross pay", employeeGosi: "GOSI (employee)", employerGosi: "GOSI (employer)", adjustment: "Adjustment", netPay: "Net pay" },
+        col: { number: "Number", period: "Period", status: "Status", total: "Total net", employee: "Employee", wageType: "Wage type", wageRate: "Wage rate", unpaidDays: "Unpaid days", grossPay: "Gross pay", incentiveAmount: "Incentive", employeeGosi: "GOSI (employee)", employerGosi: "GOSI (employer)", adjustment: "Adjustment", netPay: "Net pay" },
         statusLabel: { DRAFT: "Draft", APPROVED: "Approved", PAID: "Paid", CANCELLED: "Cancelled" },
         wageTypeLabel: { MONTHLY: "Monthly", DAILY: "Daily" },
         view: "View",
@@ -743,6 +743,7 @@ const en: typeof ar = {
         back: "Back to payroll",
         employeeCount: "Employees",
         totalGross: "Total gross",
+        totalIncentives: "Total incentives",
         totalAdjustment: "Total adjustments",
         totalNet: "Total net",
         totalEmployeeGosi: "Total employee GOSI",

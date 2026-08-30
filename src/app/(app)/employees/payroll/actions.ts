@@ -5,6 +5,7 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
+import { activityForRole, aggregateIncentiveResults, buildSitePricingMap, getIncentiveSiteData } from "@/lib/incentives";
 
 // Salary data is more sensitive than the rest of the Employees module
 // (which PLANT_ADMIN can already use for attendance/leave), so every
@@ -25,6 +26,38 @@ const GOSI_DEFAULTS = {
 
 function daysInclusive(start: Date, end: Date): number {
   return Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
+}
+
+// Only these three incentive roles are backed by a real Employee record
+// (Trip.driverId / MaterialReceipt.driverId) — PUMP_OPERATOR/PUMP_ASSISTANT
+// activity is keyed by PumpCrewMember.id, a separate roster with no FK to
+// Employee, so there's no reliable id to pull a payroll line from.
+//
+// Maps Employee.role (the string actually stored on the employee, see
+// EMPLOYEE_TAB_ROLE in employees/page.tsx) to the incentive system's own
+// role key (src/lib/incentives.ts's INCENTIVE_ROLE_KEYS) — the mixer-driver
+// case is a real mismatch (Employee.role is "DRIVER", the incentive key is
+// "MIXER_DRIVER"); bulker/water-tanker happen to already match.
+const PAYROLL_INCENTIVE_ROLE_MAP: Record<string, string> = {
+  DRIVER: "MIXER_DRIVER",
+  BULKER_DRIVER: "BULKER_DRIVER",
+  WATER_TANKER_DRIVER: "WATER_TANKER_DRIVER",
+};
+
+// One activity fetch + pricing pass per role, shared across every employee
+// of that role in this run — activityForRole/aggregateIncentiveResults are
+// company-wide per call, so calling them per-employee would refetch the
+// same data once per person for nothing.
+async function buildIncentiveLookup(periodStart: Date, periodEnd: Date) {
+  const siteData = await getIncentiveSiteData();
+  const byRole = new Map<string, Map<string, { currency: string; amount: number }[]>>();
+  for (const role of new Set(Object.values(PAYROLL_INCENTIVE_ROLE_MAP))) {
+    const entries = await activityForRole(role, periodStart, periodEnd);
+    const pricingMap = buildSitePricingMap(siteData, role);
+    const results = aggregateIncentiveResults(entries, pricingMap);
+    byRole.set(role, new Map(results.map((r) => [r.id, r.payoutByCurrency])));
+  }
+  return byRole;
 }
 
 // Company-wide by design, not site-scoped — a payroll run naturally spans
@@ -49,7 +82,9 @@ export async function generatePayrollRun(formData: FormData) {
   // blocked, since not every role necessarily goes through this system yet.
   const employees = await prisma.employee.findMany({
     where: { status: "ACTIVE", wageType: { not: null }, wageRate: { not: null } },
+    include: { plant: true },
   });
+  const incentiveLookup = await buildIncentiveLookup(periodStart, periodEnd);
 
   const run = await withSequentialNumber(
     "PYR",
@@ -101,7 +136,19 @@ export async function generatePayrollRun(formData: FormData) {
     const employeeGosi = (grossPay * employeeGosiPct) / 100;
     const employerGosi = (grossPay * employerGosiPct) / 100;
 
-    const netPay = grossPay - deduction - employeeGosi;
+    // Only the amount in the employee's own plant currency counts — a
+    // driver who also worked a different-currency site in this period
+    // gets that portion left out here (still visible on the Incentives
+    // page itself), same "never blend currencies" rule used everywhere
+    // else money is grouped in this app.
+    let incentiveAmount = 0;
+    const incentiveRole = PAYROLL_INCENTIVE_ROLE_MAP[employee.role];
+    if (incentiveRole) {
+      const payoutByCurrency = incentiveLookup.get(incentiveRole)?.get(employee.id) ?? [];
+      incentiveAmount = payoutByCurrency.find((p) => p.currency === employee.plant.currency)?.amount ?? 0;
+    }
+
+    const netPay = grossPay - deduction - employeeGosi + incentiveAmount;
 
     await prisma.payrollLine.create({
       data: {
@@ -114,6 +161,7 @@ export async function generatePayrollRun(formData: FormData) {
         grossPay,
         employeeGosi,
         employerGosi,
+        incentiveAmount,
         adjustment: 0,
         netPay,
       },
@@ -136,7 +184,8 @@ export async function updatePayrollLine(formData: FormData) {
   const line = await prisma.payrollLine.findUnique({ where: { id }, include: { payrollRun: true } });
   if (!line || line.payrollRun.status !== "DRAFT") return;
 
-  const netPay = line.grossPay - (line.wageType === "MONTHLY" ? (line.wageRate / 30) * line.unpaidDays : 0) - line.employeeGosi + adjustment;
+  const netPay =
+    line.grossPay - (line.wageType === "MONTHLY" ? (line.wageRate / 30) * line.unpaidDays : 0) - line.employeeGosi + line.incentiveAmount + adjustment;
 
   await prisma.payrollLine.update({ where: { id }, data: { adjustment, notes, netPay } });
 

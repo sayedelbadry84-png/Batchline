@@ -719,7 +719,7 @@ const ar = {
       },
       payroll: {
         eyebrow: "الوحدة 09 — الرواتب",
-        col: { number: "الرقم", period: "الفترة", status: "الحالة", total: "إجمالي الصافي", employee: "الموظف", wageType: "نوع الأجر", wageRate: "قيمة الأجر", unpaidDays: "أيام بدون أجر", grossPay: "الإجمالي", employeeGosi: "تأمينات الموظف", employerGosi: "تأمينات المنشأة", adjustment: "تعديل", netPay: "الصافي" },
+        col: { number: "الرقم", period: "الفترة", status: "الحالة", total: "إجمالي الصافي", employee: "الموظف", wageType: "نوع الأجر", wageRate: "قيمة الأجر", unpaidDays: "أيام بدون أجر", grossPay: "الإجمالي", incentiveAmount: "الحوافز", employeeGosi: "تأمينات الموظف", employerGosi: "تأمينات المنشأة", adjustment: "تعديل", netPay: "الصافي" },
         statusLabel: { DRAFT: "مسودة", APPROVED: "معتمد", PAID: "مدفوع", CANCELLED: "ملغى" },
         wageTypeLabel: { MONTHLY: "شهري", DAILY: "يومي" },
         view: "عرض",
@@ -736,6 +736,7 @@ const ar = {
         back: "عودة لقائمة الرواتب",
         employeeCount: "عدد الموظفين",
         totalGross: "إجمالي الرواتب",
+        totalIncentives: "إجمالي الحوافز",
         totalAdjustment: "إجمالي التعديلات",
         totalNet: "إجمالي الصافي",
         totalEmployeeGosi: "إجمالي تأمينات الموظفين",
