@@ -164,6 +164,14 @@ export const ACTION_ROLES = {
     complete: ["PLANT_OPERATOR", "ADMIN"],
     deleteTicket: ["PLANT_OPERATOR", "ADMIN"],
   },
+  // A deliberately narrower set than PURCHASING_ROLES (which can create/
+  // send a PO under threshold on their own) — approving one over the
+  // plant's own poApprovalThreshold is management sign-off, same
+  // segregation-of-duties reasoning as Reservation's approveFinal being
+  // narrower than create/edit.
+  purchasing: {
+    approve: ["ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER"],
+  },
 } as const satisfies Record<string, Record<string, readonly string[]>>;
 
 export type ActionModuleKey = keyof typeof ACTION_ROLES;

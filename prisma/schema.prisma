@@ -70,6 +70,7 @@ model User {
   fieldVisitsLogged                FieldVisit[]              @relation("FieldVisitVisitedBy")
   quotesPrepared                   Quote[]                   @relation("QuotePreparedBy")
   purchaseOrdersCreated            PurchaseOrder[]           @relation("PurchaseOrderCreatedBy")
+  purchaseOrdersApproved            PurchaseOrder[]           @relation("PurchaseOrderApprovedBy")
   maintenanceTicketsReported       MaintenanceTicket[]       @relation("MaintenanceReportedBy")
   maintenanceTicketsAssigned       MaintenanceTicket[]       @relation("MaintenanceAssignedTo")
   cashTransactionsCreated          CashTransaction[]         @relation("CashTransactionCreatedBy")
@@ -195,6 +196,15 @@ model Plant {
   // term applies depends on the plant's own jurisdiction, not the app.
   taxRatePct                  Float    @default(0)
   taxLabel                    String   @default("VAT")
+  // A PurchaseOrder created against this plant's own site (see
+  // resolvePlantIdForSite in purchasing/actions.ts, the same lookup
+  // createPurchaseOrder already uses for currency/tax) whose total is at
+  // or above this figure, in the plant's own currency, can't move past
+  // DRAFT to SENT without approvePurchaseOrder first (see
+  // markPurchaseOrderSent). Null/0 means no threshold is configured — the
+  // existing no-approval-required behavior, unchanged for a plant that
+  // never sets this.
+  poApprovalThreshold         Float?
   // Batching tolerance & alert configuration (Module 12 — Plant Management).
   drumTimerLimitMinutes       Int      @default(90)
   returnAbsorptionThresholdM3 Float    @default(0.2)
@@ -1443,6 +1453,15 @@ model PurchaseOrder {
   taxRatePct   Float     @default(0)
   taxAmount    Float     @default(0)
   total        Float
+  // Required before markPurchaseOrderSent will let this move past DRAFT
+  // only when total is at/above the issuing plant's own
+  // poApprovalThreshold (see that field's comment on Plant) — same
+  // "status stays DRAFT, a separate gate field controls what can happen
+  // next" shape as Quote.finalApprovedAt gating markQuoteSent. Null for
+  // every PO under its plant's threshold, same as before this existed.
+  approvedAt   DateTime?
+  approvedById String?
+  approvedBy   User?     @relation("PurchaseOrderApprovedBy", fields: [approvedById], references: [id])
   notes        String?
   createdById  String
   createdBy    User      @relation("PurchaseOrderCreatedBy", fields: [createdById], references: [id])

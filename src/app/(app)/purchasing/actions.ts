@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
@@ -89,6 +89,27 @@ export async function updatePurchaseOrder(formData: FormData) {
   revalidatePath("/purchasing");
 }
 
+// Sign-off from a narrower, management-tier role set than PURCHASING_ROLES
+// (see ACTION_ROLES.purchasing in permissions.ts) — required by
+// markPurchaseOrderSent before a PO at/above its own plant's
+// poApprovalThreshold can go out, same reasoning as Reservation's
+// approveFinal.
+export async function approvePurchaseOrder(formData: FormData) {
+  const actor = await getCurrentUser();
+  await requireActionPermission(actor, "purchasing", "approve");
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const po = await prisma.purchaseOrder.findUnique({ where: { id } });
+  if (!po || po.status !== "DRAFT" || po.approvedAt) return;
+
+  await prisma.purchaseOrder.update({ where: { id }, data: { approvedAt: new Date(), approvedById: actor!.id } });
+
+  await logAudit({ module: "Purchasing", recordId: id, afterValue: "APPROVED", reasonCode: "PO_APPROVED" });
+  revalidatePath("/purchasing");
+}
+
 export async function markPurchaseOrderSent(formData: FormData) {
   const actor = await getCurrentUser();
   requireRole(actor, PURCHASING_ROLES);
@@ -98,6 +119,13 @@ export async function markPurchaseOrderSent(formData: FormData) {
 
   const po = await prisma.purchaseOrder.findUnique({ where: { id } });
   if (!po || po.status !== "DRAFT") return;
+
+  // A PO at/above its own plant's poApprovalThreshold can't go out
+  // without approvePurchaseOrder first — a plant that never sets a
+  // threshold (null) keeps the old no-approval-required behavior.
+  const plantId = await resolvePlantIdForSite(po.siteId);
+  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId }, select: { poApprovalThreshold: true } }) : null;
+  if (plant?.poApprovalThreshold && po.total >= plant.poApprovalThreshold && !po.approvedAt) return;
 
   await prisma.purchaseOrder.update({ where: { id }, data: { status: "SENT" } });
 

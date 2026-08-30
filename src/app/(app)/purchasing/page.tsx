@@ -10,12 +10,14 @@ import {
   createPurchaseOrder,
   markPurchaseOrderSent,
   cancelPurchaseOrder,
+  approvePurchaseOrder,
   createSupplierContract,
   terminateSupplierContract,
   renewSupplierContract,
   createPurchaseOrderFromRequisitions,
   createPurchaseOrderFromMaterialRequisitions,
 } from "./actions";
+import { resolvePlantIdForSite } from "@/lib/siteScope";
 import { createSupplier, createMaterial, updateSupplier, updateMaterial } from "../suppliers/actions";
 
 const PURCHASING_TABS = ["orders", "contracts", "suppliers"] as const;
@@ -155,10 +157,26 @@ async function OrdersTab({
   newFromMaterialReqFlag?: string;
   baseUrl: string;
 }) {
-  const orders = await prisma.purchaseOrder.findMany({
+  const ordersRaw = await prisma.purchaseOrder.findMany({
     where: siteScope,
     orderBy: { createdAt: "desc" },
     include: { supplier: true, lines: { include: { material: true, sparePart: true } } },
+  });
+
+  // Same plant resolution createPurchaseOrder itself uses for currency/tax
+  // — one lookup per distinct site among the fetched orders rather than
+  // per order, then each order gets its own plant's poApprovalThreshold to
+  // decide whether it's still waiting on approvePurchaseOrder.
+  const thresholdBySite = new Map<string, number | null>();
+  for (const siteId of new Set(ordersRaw.map((o) => o.siteId))) {
+    const plantId = await resolvePlantIdForSite(siteId);
+    const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId }, select: { poApprovalThreshold: true } }) : null;
+    thresholdBySite.set(siteId, plant?.poApprovalThreshold ?? null);
+  }
+  const orders = ordersRaw.map((o) => {
+    const threshold = thresholdBySite.get(o.siteId) ?? null;
+    const needsApproval = !!threshold && o.total >= threshold && !o.approvedAt;
+    return { ...o, needsApproval };
   });
   const viewedOrder = viewPO ? orders.find((o) => o.id === viewPO) : null;
 
@@ -247,6 +265,8 @@ async function OrdersTab({
                 <td className={ui.td}>{o.supplier.name}</td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${poStatusChip[o.status] ?? ""}`}>{m.orders.statusLabel[o.status as keyof typeof m.orders.statusLabel] ?? o.status}</span>
+                  {o.needsApproval && <span className={`${ui.chip} bg-warn-soft text-warn ms-1`}>{m.orders.needsApproval}</span>}
+                  {o.approvedAt && <span className={`${ui.chip} bg-good-soft text-good ms-1`}>{m.orders.approved}</span>}
                 </td>
                 <td className={`${ui.td} font-mono`}>{o.total.toFixed(2)} {o.currency}</td>
                 <td className={ui.td}>{fmtDate(o.expectedDate)}</td>
@@ -254,7 +274,13 @@ async function OrdersTab({
                   <div className="flex flex-col gap-1">
                     <Link href={`${baseUrl}&viewPO=${o.id}`} className="text-xs font-medium text-accent-strong hover:underline">{m.orders.viewLines}</Link>
                     <Link href={`/purchasing/orders/${o.id}`} className="text-xs font-medium text-accent-strong hover:underline">{m.orders.print}</Link>
-                    {o.status === "DRAFT" && (
+                    {o.status === "DRAFT" && o.needsApproval && (
+                      <form action={approvePurchaseOrder}>
+                        <input type="hidden" name="id" value={o.id} />
+                        <button className="text-xs font-medium text-good hover:underline">{m.orders.approve}</button>
+                      </form>
+                    )}
+                    {o.status === "DRAFT" && !o.needsApproval && (
                       <form action={markPurchaseOrderSent}>
                         <input type="hidden" name="id" value={o.id} />
                         <button className="text-xs font-medium text-accent-strong hover:underline">{m.orders.markSent}</button>

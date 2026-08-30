@@ -63,12 +63,13 @@ export async function createPlant(formData: FormData) {
   const timezone = String(formData.get("timezone") ?? "Africa/Cairo").trim();
   const taxRatePct = Number(formData.get("taxRatePct") ?? 0) || 0;
   const taxLabel = String(formData.get("taxLabel") ?? "VAT").trim() || "VAT";
+  const poApprovalThreshold = Number(formData.get("poApprovalThreshold") ?? 0) || null;
 
   if (!siteId || !name) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
   const plant = await prisma.plant.create({
-    data: { siteId, name, currency, timezone, taxRatePct, taxLabel },
+    data: { siteId, name, currency, timezone, taxRatePct, taxLabel, poApprovalThreshold },
   });
 
   await logAudit({
@@ -100,6 +101,7 @@ export async function updatePlant(formData: FormData) {
   const timezone = String(formData.get("timezone") ?? "").trim();
   const taxRatePct = Number(formData.get("taxRatePct") ?? 0) || 0;
   const taxLabel = String(formData.get("taxLabel") ?? "VAT").trim() || "VAT";
+  const poApprovalThreshold = Number(formData.get("poApprovalThreshold") ?? 0) || null;
   const statusRaw = String(formData.get("status") ?? "ACTIVE");
   const status = (PLANT_STATUSES as readonly string[]).includes(statusRaw) ? statusRaw : "ACTIVE";
   if (!id || !requestedSiteId || !name) return;
@@ -112,7 +114,7 @@ export async function updatePlant(formData: FormData) {
   const siteId = isAdmin ? requestedSiteId : before.siteId;
   if (isAdmin && !isSiteInScope(siteId, effectiveSiteId(user))) return;
 
-  await prisma.plant.update({ where: { id }, data: { siteId, name, currency, timezone, taxRatePct, taxLabel, status } });
+  await prisma.plant.update({ where: { id }, data: { siteId, name, currency, timezone, taxRatePct, taxLabel, poApprovalThreshold, status } });
 
   await logAudit({
     module: "PlantManagement",

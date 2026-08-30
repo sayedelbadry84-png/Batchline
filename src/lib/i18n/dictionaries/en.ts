@@ -826,6 +826,9 @@ const en: typeof ar = {
           complete: "Complete a batch (deducts inventory)",
           deleteTicket: "Delete a batch ticket",
         },
+        purchasing: {
+          approve: "Approve a PO over the threshold",
+        },
       },
     },
     integrations: {
@@ -889,7 +892,7 @@ const en: typeof ar = {
       empty: "No stations yet at this plant.",
       newTitle: "New station",
       selectSite: "Select a plant",
-      f: { name: "Station name", site: "Plant", siteCode: "Plant code", siteName: "Plant name", city: "City", country: "Country", currency: "Currency", timezone: "Timezone", taxLabel: "Tax name", taxRatePct: "Tax rate (%)", status: "Status" },
+      f: { name: "Station name", site: "Plant", siteCode: "Plant code", siteName: "Plant name", city: "City", country: "Country", currency: "Currency", timezone: "Timezone", taxLabel: "Tax name", taxRatePct: "Tax rate (%)", poApprovalThreshold: "PO approval threshold (optional)", status: "Status" },
       statusHint: "Freezing or decommissioning refuses this station as a choice when releasing a batch ticket, and refuses any new equipment or material receipt against it, while everything already on file keeps working and stays visible. Moving a station to another plant is ADMIN-only.",
       add: "Add station",
       thresholdsTitle: "Batching tolerance & alert thresholds",
@@ -1358,6 +1361,9 @@ const en: typeof ar = {
         },
         add: "Create purchase order",
         markSent: "Send to supplier",
+        approve: "Approve",
+        needsApproval: "Needs approval",
+        approved: "Approved",
         cancel: "Cancel order",
         viewLines: "View lines",
         print: "View / Print",

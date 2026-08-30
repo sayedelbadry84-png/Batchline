@@ -197,6 +197,10 @@ export default async function PlantsPage({
                                 <input name="taxRatePct" type="number" step="0.1" defaultValue={p.taxRatePct} className={`${ui.input} w-24`} />
                               </div>
                               <div>
+                                <label className={ui.label}>{m.f.poApprovalThreshold}</label>
+                                <input name="poApprovalThreshold" type="number" step="1" defaultValue={p.poApprovalThreshold ?? ""} className={`${ui.input} w-32`} />
+                              </div>
+                              <div>
                                 <label className={ui.label}>{m.f.status}</label>
                                 <select name="status" defaultValue={p.status} className={`${ui.select} w-36`}>
                                   {PLANT_STATUSES.map((st) => (
@@ -274,6 +278,10 @@ export default async function PlantsPage({
             <div>
               <label className={ui.label}>{m.f.taxRatePct}</label>
               <input name="taxRatePct" type="number" step="0.1" defaultValue={0} className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.poApprovalThreshold}</label>
+              <input name="poApprovalThreshold" type="number" step="1" className={ui.input} />
             </div>
             <button type="submit" className={`${ui.button} mt-2`}>{m.add}</button>
           </form>
