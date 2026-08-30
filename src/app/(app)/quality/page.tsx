@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createTestBatch, addLabResult, createCertificate, updateCertificate, approveWasteMemo, recordWasteMemoNote } from "./actions";
+import { createTestBatch, addLabResult, createCertificate, updateCertificate, approveWasteMemo, recordWasteMemoNote, saveCapaRecord, closeCapaRecord } from "./actions";
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
 import { getActiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
@@ -47,7 +47,7 @@ export default async function QualityPage({
   const { editCert: editCertId } = await searchParams;
   const siteId = await getActiveSiteId(user);
 
-  const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos, unfinishedWasteMemos] = await Promise.all([
+  const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos, unfinishedWasteMemos, openCapaRecords, qualityUsers] = await Promise.all([
     prisma.testBatch.findMany({
       where: { ...(siteId ? { trip: tripPlantScopeWhere(siteId) } : {}) },
       orderBy: { sampleTime: "desc" },
@@ -90,6 +90,23 @@ export default async function QualityPage({
         approvedBy: true,
       },
     }),
+    // Auto-opened by addLabResult on a FAIL result (see quality/actions.ts)
+    // — CLOSED ones are historical record, not something needing anyone's
+    // attention here.
+    prisma.capaRecord.findMany({
+      where: {
+        status: { in: ["OPEN", "IN_PROGRESS"] },
+        ...(siteId ? { labResult: { testBatch: { trip: tripPlantScopeWhere(siteId) } } } : {}),
+      },
+      orderBy: { createdAt: "asc" },
+      include: {
+        labResult: {
+          include: { testBatch: { include: { trip: { include: { batchTicket: { include: { mix: true, reservation: { include: { project: true } } } } } } } } },
+        },
+        responsible: true,
+      },
+    }),
+    prisma.user.findMany({ where: { role: { in: ["QUALITY_SUPERVISOR", "ADMIN"] } }, orderBy: { name: "asc" } }),
   ]);
 
   // Train the early-vs-final strength regression from every test batch that
@@ -356,6 +373,72 @@ export default async function QualityPage({
                 </div>
               </form>
             ))}
+          </div>
+        </div>
+      )}
+
+      {openCapaRecords.length > 0 && (
+        <div className={`${ui.card} border-warn/40`}>
+          <h2 className="mb-1 font-display text-lg font-semibold">{m.capa.title}</h2>
+          <p className="mb-3 text-sm text-ink-muted">{m.capa.intro}</p>
+          <div className="flex flex-col gap-3">
+            {openCapaRecords.map((capa) => {
+              const tb = capa.labResult.testBatch;
+              const canClose = !!(capa.rootCause && capa.correctiveAction);
+              return (
+                <form key={capa.id} action={saveCapaRecord} className="flex flex-col gap-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                  <input type="hidden" name="id" value={capa.id} />
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                    <span className="font-mono text-xs font-medium text-accent-strong" dir="ltr">{capa.capaNumber}</span>
+                    <Link href={`/production/${tb.trip.batchTicket.id}`} className="font-mono text-xs text-accent-strong hover:underline" dir="ltr">
+                      {tb.trip.batchTicket.ticketNumber}
+                    </Link>
+                    <span>{tb.trip.batchTicket.reservation.project.name}</span>
+                    <span className="font-mono text-xs" dir="ltr">{tb.trip.batchTicket.mix.code} ({tb.trip.batchTicket.mix.grade})</span>
+                    <span className="font-mono tabular text-critical">{capa.labResult.breakStrengthMpa} / {capa.labResult.targetStrengthMpa} MPa @ {capa.labResult.ageDays}d</span>
+                    <span className={`${ui.chip} ${capa.status === "OPEN" ? "bg-critical-soft text-critical" : "bg-warn-soft text-warn"}`}>
+                      {m.capa.statusLabel[capa.status as keyof typeof m.capa.statusLabel] ?? capa.status}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className={ui.label}>{m.capa.f.rootCause}</label>
+                      <textarea name="rootCause" defaultValue={capa.rootCause ?? ""} rows={2} className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
+                    </div>
+                    <div>
+                      <label className={ui.label}>{m.capa.f.correctiveAction}</label>
+                      <textarea name="correctiveAction" defaultValue={capa.correctiveAction ?? ""} rows={2} className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
+                    </div>
+                    <div>
+                      <label className={ui.label}>{m.capa.f.preventiveAction}</label>
+                      <textarea name="preventiveAction" defaultValue={capa.preventiveAction ?? ""} rows={2} className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <div>
+                        <label className={ui.label}>{m.capa.f.responsibleId}</label>
+                        <select name="responsibleId" defaultValue={capa.responsibleId ?? ""} className={`${ui.select} w-full`}>
+                          <option value="">{dict.field.none}</option>
+                          {qualityUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className={ui.label}>{m.capa.f.dueDate}</label>
+                        <input name="dueDate" type="date" defaultValue={capa.dueDate ? new Date(capa.dueDate).toISOString().slice(0, 10) : ""} className={`${ui.input} w-full`} />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-alt">{m.capa.save}</button>
+                    {canClose && (
+                      <button formAction={closeCapaRecord} className="rounded-md border border-good bg-good-soft px-3 py-1.5 text-xs font-medium text-good hover:opacity-80">
+                        {m.capa.close}
+                      </button>
+                    )}
+                    {!canClose && <span className="text-xs text-ink-muted">{m.capa.closeHint}</span>}
+                  </div>
+                </form>
+              );
+            })}
           </div>
         </div>
       )}

@@ -89,6 +89,8 @@ model User {
   sparePartsRequisitionsApproved   SparePartsRequisition[]   @relation("SPRApprovedBy")
   materialRequisitionsRequested    MaterialRequisition[]     @relation("MTRRequestedBy")
   materialRequisitionsApproved     MaterialRequisition[]     @relation("MTRApprovedBy")
+  capaResponsibleFor               CapaRecord[]               @relation("CapaResponsible")
+  capaClosed                       CapaRecord[]               @relation("CapaClosedBy")
   finishedProductMovementsRecorded FinishedProductMovement[]
   creditNotesIssued                CreditNote[]
   payrollRunsCreated               PayrollRun[]               @relation("PayrollRunCreatedBy")
@@ -1014,6 +1016,37 @@ model LabResult {
   passFail          String // PASS, FAIL
   testedOn          DateTime  @default(now())
   createdAt         DateTime  @default(now())
+
+  capa CapaRecord?
+}
+
+// Corrective and Preventive Action — auto-opened by addLabResult the
+// instant a LabResult comes back FAIL (see quality/actions.ts), so a
+// failed strength test can't just sit there as a chip on a table with
+// nobody assigned to explain why or fix it, closing the "silent failure"
+// gap a FAIL result previously left. One CAPA per failed result
+// (labResultId unique) — root cause/actions/responsible/due date start
+// blank and get filled in afterward by Quality; status moves OPEN →
+// IN_PROGRESS the first time those details are saved, → CLOSED only once
+// both rootCause and correctiveAction are actually on file (same "the
+// reason must be written" precedent as WasteIncidentMemo.approvalNote).
+model CapaRecord {
+  id               String     @id @default(cuid())
+  capaNumber       String     @unique // CAPA-YYYY-NNNN
+  labResultId      String     @unique
+  labResult        LabResult  @relation(fields: [labResultId], references: [id])
+  status           String     @default("OPEN") // OPEN, IN_PROGRESS, CLOSED
+  rootCause        String?
+  correctiveAction String?
+  preventiveAction String?
+  responsibleId    String?
+  responsible      User?      @relation("CapaResponsible", fields: [responsibleId], references: [id])
+  dueDate          DateTime?
+  closedAt         DateTime?
+  closedById       String?
+  closedBy         User?      @relation("CapaClosedBy", fields: [closedById], references: [id])
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
 }
 
 model ComplianceCertificate {

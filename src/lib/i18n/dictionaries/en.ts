@@ -1083,6 +1083,21 @@ const en: typeof ar = {
         backfillIntro: "Approved before writing a finding was required — fill in the actual finding for each to complete the record.",
         saveNote: "Save finding",
       },
+      capa: {
+        title: "Corrective & Preventive Actions (CAPA)",
+        intro: "Opened automatically when a lab result fails — fill in the root cause and corrective action to close it out.",
+        statusLabel: { OPEN: "Open", IN_PROGRESS: "In progress", CLOSED: "Closed" },
+        f: {
+          rootCause: "Root cause",
+          correctiveAction: "Corrective action",
+          preventiveAction: "Preventive action (optional)",
+          responsibleId: "Responsible",
+          dueDate: "Due date",
+        },
+        save: "Save",
+        close: "Close",
+        closeHint: "Fill in the root cause and corrective action first to close this out.",
+      },
     },
     reports: {
       eyebrow: "Reports & KPIs",

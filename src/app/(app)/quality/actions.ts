@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
+import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 
 async function tripInScope(tripId: string, siteId: string | null): Promise<boolean> {
@@ -80,6 +81,79 @@ export async function addLabResult(formData: FormData) {
     reasonCode: "LAB_RESULT_RECORDED",
   });
 
+  // A FAIL used to just sit there as a red chip with nobody assigned to
+  // explain why or fix it — auto-opening a CAPA the instant it's recorded
+  // closes that gap the same way a low silo now auto-opens a
+  // MaterialRequisition (see completeBatch in production/actions.ts):
+  // detection is automatic, the actual write-up (root cause, corrective/
+  // preventive action) still needs a person, via saveCapaRecord below.
+  if (passFail === "FAIL") {
+    const capa = await withSequentialNumber(
+      "CAPA",
+      () => prisma.capaRecord.count(),
+      (capaNumber) => prisma.capaRecord.create({ data: { capaNumber, labResultId: result.id } }),
+    );
+    await logAudit({ module: "Quality", recordId: capa.id, afterValue: capa.capaNumber, reasonCode: "CAPA_AUTO_OPENED" });
+  }
+
+  revalidatePath("/quality");
+}
+
+// Fills in the write-up (root cause, corrective/preventive action,
+// responsible person, due date) — bumps status to IN_PROGRESS the first
+// time this is saved from OPEN, same "started work on it" signal
+// startMaintenanceOrder/startMaintenanceTicket already give elsewhere.
+export async function saveCapaRecord(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, ["QUALITY_SUPERVISOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  const rootCause = String(formData.get("rootCause") ?? "").trim() || null;
+  const correctiveAction = String(formData.get("correctiveAction") ?? "").trim() || null;
+  const preventiveAction = String(formData.get("preventiveAction") ?? "").trim() || null;
+  const responsibleId = String(formData.get("responsibleId") ?? "") || null;
+  const dueDateRaw = String(formData.get("dueDate") ?? "");
+  if (!id) return;
+
+  const capa = await prisma.capaRecord.findUnique({ where: { id } });
+  if (!capa || capa.status === "CLOSED") return;
+
+  await prisma.capaRecord.update({
+    where: { id },
+    data: {
+      rootCause,
+      correctiveAction,
+      preventiveAction,
+      responsibleId,
+      dueDate: dueDateRaw ? new Date(dueDateRaw) : null,
+      status: capa.status === "OPEN" ? "IN_PROGRESS" : capa.status,
+    },
+  });
+
+  await logAudit({ module: "Quality", recordId: id, reasonCode: "CAPA_UPDATED" });
+  revalidatePath("/quality");
+}
+
+// Requires the write-up to actually exist first — same "the reason must
+// be written" precedent as WasteIncidentMemo.approvalNote — rather than
+// letting a FAIL get closed out with nothing on file about why it
+// happened or what was done about it.
+export async function closeCapaRecord(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, ["QUALITY_SUPERVISOR", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const capa = await prisma.capaRecord.findUnique({ where: { id } });
+  if (!capa || capa.status === "CLOSED" || !capa.rootCause || !capa.correctiveAction) return;
+
+  await prisma.capaRecord.update({
+    where: { id },
+    data: { status: "CLOSED", closedAt: new Date(), closedById: actor!.id },
+  });
+
+  await logAudit({ module: "Quality", recordId: id, afterValue: "CLOSED", reasonCode: "CAPA_CLOSED" });
   revalidatePath("/quality");
 }
 
