@@ -7,6 +7,8 @@ import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations"
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { getAvailableReclaimForTruck } from "@/lib/reclaim";
 import { withSequentialNumber } from "@/lib/sequence";
+import { REQUISITION_APPROVAL_ROLES } from "@/lib/permissions";
+import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -63,11 +65,22 @@ async function maybeAutoRequisitionMaterial(
   });
   if (existing) return;
 
-  await withSequentialNumber(
+  const requisition = await withSequentialNumber(
     "MTR",
     () => prisma.materialRequisition.count(),
-    (requisitionNumber) => prisma.materialRequisition.create({ data: { requisitionNumber, materialId, siteId, quantityNeededKg: toKg(shortfall) } }),
+    (requisitionNumber) =>
+      prisma.materialRequisition.create({
+        data: { requisitionNumber, materialId, siteId, quantityNeededKg: toKg(shortfall) },
+        include: { material: true },
+      }),
   );
+
+  await notifyRoles(REQUISITION_APPROVAL_ROLES, {
+    title: requisition.requisitionNumber,
+    body: `${requisition.material.name} — auto-requested, stock at or below threshold`,
+    link: "/warehouses?tab=rawMaterials&sub=silos",
+    module: "Warehouses",
+  });
 }
 
 // A single mixer truck load, never exceeded regardless of how much of the

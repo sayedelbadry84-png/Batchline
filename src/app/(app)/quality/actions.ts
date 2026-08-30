@@ -5,6 +5,7 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
+import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 
 async function tripInScope(tripId: string, siteId: string | null): Promise<boolean> {
@@ -94,6 +95,12 @@ export async function addLabResult(formData: FormData) {
       (capaNumber) => prisma.capaRecord.create({ data: { capaNumber, labResultId: result.id } }),
     );
     await logAudit({ module: "Quality", recordId: capa.id, afterValue: capa.capaNumber, reasonCode: "CAPA_AUTO_OPENED" });
+    await notifyRoles(["QUALITY_SUPERVISOR", "ADMIN"], {
+      title: capa.capaNumber,
+      body: `Lab result failed — ${breakStrengthMpa} / ${targetStrengthMpa} MPa @ ${ageDays}d`,
+      link: "/quality",
+      module: "Quality",
+    });
   }
 
   revalidatePath("/quality");

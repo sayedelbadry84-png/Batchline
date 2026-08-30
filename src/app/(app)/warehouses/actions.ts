@@ -5,13 +5,13 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
+import { REQUISITION_APPROVAL_ROLES } from "@/lib/permissions";
 import { revalidatePath } from "next/cache";
 
 const WAREHOUSE_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"];
 // Approving a requisition commits the company to actually buying it —
 // tighter than the general warehouse roster, same reasoning as the Sales
 // approval chains elsewhere this session.
-const REQUISITION_APPROVAL_ROLES = ["ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER"];
 
 // ---------------------------------------------------------------------------
 // Spare Parts

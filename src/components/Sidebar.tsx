@@ -10,6 +10,7 @@ import type { Dictionary } from "@/lib/i18n";
 import type { Locale } from "@/lib/i18n/config";
 import type { Theme } from "@/lib/theme";
 import { setTheme } from "@/app/theme-actions";
+import { NotificationBell } from "@/components/NotificationBell";
 
 export function Sidebar({
   user,
@@ -20,6 +21,8 @@ export function Sidebar({
   theme,
   sites,
   activeSiteId,
+  notifications,
+  unreadNotificationCount,
 }: {
   user: { name: string; role: string };
   // Computed server-side (permissions are database-backed — see
@@ -42,6 +45,8 @@ export function Sidebar({
   // their one site.
   sites?: { id: string; name: string }[];
   activeSiteId?: string | null;
+  notifications: { id: string; title: string; body: string | null; link: string | null; readAt: Date | null; createdAt: Date }[];
+  unreadNotificationCount: number;
 }) {
   const pathname = usePathname();
   const canSee = (key: ModuleKey) => allowedModules.includes(key);
@@ -66,6 +71,14 @@ export function Sidebar({
           <span className="font-display block text-lg font-semibold tracking-tight">Batchline</span>
           <span className="text-ink-faint block text-[0.68rem]">{common.tagline}</span>
         </div>
+      </div>
+
+      <div className="mb-4">
+        <NotificationBell
+          notifications={notifications}
+          unreadCount={unreadNotificationCount}
+          labels={{ title: common.notifications, empty: common.notificationsEmpty, markAllRead: common.markAllRead }}
+        />
       </div>
 
       {sites && sites.length > 0 && (

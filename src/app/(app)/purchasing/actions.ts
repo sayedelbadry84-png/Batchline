@@ -5,9 +5,23 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
+import { ACTION_ROLES } from "@/lib/permissions";
+import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 
 const PURCHASING_ROLES = ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"];
+
+// Shared by markPurchaseOrderSent (the gate) and every PO-creation path
+// (the "does this need approvePurchaseOrder before it can be sent, so
+// should we notify approvers now" decision) — one place computing this so
+// the two can't drift apart. Same plant resolution createPurchaseOrder
+// itself already used for currency/tax.
+async function poNeedsApproval(siteId: string, total: number, approvedAt: Date | null): Promise<boolean> {
+  if (approvedAt) return false;
+  const plantId = await resolvePlantIdForSite(siteId);
+  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId }, select: { poApprovalThreshold: true } }) : null;
+  return !!plant?.poApprovalThreshold && total >= plant.poApprovalThreshold;
+}
 
 export async function createPurchaseOrder(formData: FormData) {
   const actor = await getCurrentUser();
@@ -61,6 +75,14 @@ export async function createPurchaseOrder(formData: FormData) {
   );
 
   await logAudit({ module: "Purchasing", recordId: po.id, afterValue: `${po.poNumber} — ${total} ${currency}`, reasonCode: "PO_CREATED" });
+  if (await poNeedsApproval(siteId, total, null)) {
+    await notifyRoles(ACTION_ROLES.purchasing.approve, {
+      title: po.poNumber,
+      body: `${total.toLocaleString()} ${currency} — needs approval before it can be sent`,
+      link: "/purchasing?tab=orders",
+      module: "Purchasing",
+    });
+  }
   revalidatePath("/purchasing");
 }
 
@@ -123,9 +145,7 @@ export async function markPurchaseOrderSent(formData: FormData) {
   // A PO at/above its own plant's poApprovalThreshold can't go out
   // without approvePurchaseOrder first — a plant that never sets a
   // threshold (null) keeps the old no-approval-required behavior.
-  const plantId = await resolvePlantIdForSite(po.siteId);
-  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId }, select: { poApprovalThreshold: true } }) : null;
-  if (plant?.poApprovalThreshold && po.total >= plant.poApprovalThreshold && !po.approvedAt) return;
+  if (await poNeedsApproval(po.siteId, po.total, po.approvedAt)) return;
 
   await prisma.purchaseOrder.update({ where: { id }, data: { status: "SENT" } });
 
@@ -322,6 +342,14 @@ export async function createPurchaseOrderFromRequisitions(formData: FormData) {
   );
 
   await logAudit({ module: "Purchasing", recordId: po.id, afterValue: `${po.poNumber} — ${total} ${currency} (${lines.length} spare-part lines)`, reasonCode: "PO_CREATED_FROM_REQUISITIONS" });
+  if (await poNeedsApproval(siteId, total, null)) {
+    await notifyRoles(ACTION_ROLES.purchasing.approve, {
+      title: po.poNumber,
+      body: `${total.toLocaleString()} ${currency} — needs approval before it can be sent`,
+      link: "/purchasing?tab=orders",
+      module: "Purchasing",
+    });
+  }
   revalidatePath("/purchasing");
   revalidatePath("/warehouses");
   revalidatePath("/maintenance");
@@ -395,6 +423,14 @@ export async function createPurchaseOrderFromMaterialRequisitions(formData: Form
   );
 
   await logAudit({ module: "Purchasing", recordId: po.id, afterValue: `${po.poNumber} — ${total} ${currency} (${lines.length} material lines)`, reasonCode: "PO_CREATED_FROM_MATERIAL_REQUISITIONS" });
+  if (await poNeedsApproval(siteId, total, null)) {
+    await notifyRoles(ACTION_ROLES.purchasing.approve, {
+      title: po.poNumber,
+      body: `${total.toLocaleString()} ${currency} — needs approval before it can be sent`,
+      link: "/purchasing?tab=orders",
+      module: "Purchasing",
+    });
+  }
   revalidatePath("/purchasing");
   revalidatePath("/warehouses");
   revalidatePath("/");

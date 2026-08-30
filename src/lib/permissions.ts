@@ -151,6 +151,13 @@ export async function getAccessibleModules(role: string): Promise<ModuleKey[]> {
 // Production where different people genuinely need different rights,
 // mirroring RhinoMaster's own example of splitting "create/edit a
 // booking" from "assign pumps" and "approve" within one module.
+// Shared by both requisition flows (spare parts in warehouses/actions.ts,
+// raw materials in production/actions.ts's maybeAutoRequisitionMaterial)
+// for who may approve one, and by the notification engine to know who to
+// notify when one auto-opens — centralized here so the two never drift
+// out of sync with each other.
+export const REQUISITION_APPROVAL_ROLES = ["ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER"];
+
 export const ACTION_ROLES = {
   reservations: {
     create: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],

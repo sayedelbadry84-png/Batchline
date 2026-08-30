@@ -22,10 +22,14 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
   // The plant picker only ever applies to ADMIN — every other role has no
   // choice to make (their own site is fixed), so skip the query entirely
   // rather than fetch a list nobody else can act on.
-  const [sites, activeSiteId] =
-    user.role === "ADMIN"
-      ? await Promise.all([prisma.site.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }), getActiveSiteId(user)])
-      : [undefined, undefined];
+  const [sites, activeSiteId, notifications, unreadNotificationCount] = await Promise.all([
+    user.role === "ADMIN" ? prisma.site.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }) : Promise.resolve(undefined),
+    user.role === "ADMIN" ? getActiveSiteId(user) : Promise.resolve(undefined),
+    // Latest 20 regardless of read state, newest first — the bell's own
+    // dropdown, not a full paginated inbox (see NotificationBell).
+    prisma.notification.findMany({ where: { userId: user.id }, orderBy: { createdAt: "desc" }, take: 20 }),
+    prisma.notification.count({ where: { userId: user.id, readAt: null } }),
+  ]);
 
   return (
     <div className="flex min-h-full">
@@ -38,6 +42,8 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
         theme={theme}
         sites={sites}
         activeSiteId={activeSiteId}
+        notifications={notifications}
+        unreadNotificationCount={unreadNotificationCount}
       />
       <main className="min-w-0 flex-1 px-10 py-8">{children}</main>
     </div>

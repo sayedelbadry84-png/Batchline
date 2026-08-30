@@ -96,6 +96,7 @@ model User {
   creditNotesIssued                CreditNote[]
   payrollRunsCreated               PayrollRun[]               @relation("PayrollRunCreatedBy")
   payrollRunsApproved              PayrollRun[]               @relation("PayrollRunApprovedBy")
+  notifications                    Notification[]
 }
 
 model Session {
@@ -2140,4 +2141,35 @@ model ApiKey {
   createdById String?
   createdBy   User?     @relation(fields: [createdById], references: [id])
   createdAt   DateTime  @default(now())
+}
+
+// The general notification engine — a single persistent per-user inbox
+// any part of the app can write to via notify()/notifyRoles() (see
+// src/lib/notify.ts), read by the bell in the sidebar (see
+// NotificationBell). Deliberately in-app only for this first version — no
+// email/SMS/push delivery channel exists yet, same "detection is
+// automatic, the delivery method is the simplest one that actually works
+// today" scoping already used for the WhatsApp pour reminder and the CAPA
+// auto-open this session; a real external delivery channel is a separate
+// later decision once this inbox itself has proven useful. No live push
+// either — the bell's list is fetched at page load/navigation like every
+// other "due" panel already in this app (reservation reminders, material
+// requisitions), not over a socket.
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String?
+  // Where clicking the notification should take the user — an
+  // app-relative path, same shape as every internal Link href elsewhere.
+  link      String?
+  // Which part of the app raised this (e.g. "Quality", "Purchasing") —
+  // for grouping/an icon in the bell, same free-text convention
+  // logAudit's own `module` field already uses.
+  module    String
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
 }

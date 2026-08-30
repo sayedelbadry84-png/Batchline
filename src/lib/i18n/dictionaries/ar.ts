@@ -5,6 +5,9 @@ const ar = {
     toggleTheme: "تبديل المظهر الفاتح/الداكن",
     themeDark: "داكن",
     themeLight: "فاتح",
+    notifications: "الإشعارات",
+    notificationsEmpty: "لا توجد إشعارات بعد.",
+    markAllRead: "تعليم الكل كمقروء",
   },
   nav: {
     allPlants: "كل المصانع",

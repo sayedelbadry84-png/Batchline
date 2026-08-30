@@ -7,6 +7,9 @@ const en: typeof ar = {
     toggleTheme: "Toggle light/dark theme",
     themeDark: "Dark",
     themeLight: "Light",
+    notifications: "Notifications",
+    notificationsEmpty: "No notifications yet.",
+    markAllRead: "Mark all read",
   },
   nav: {
     allPlants: "All plants",
