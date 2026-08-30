@@ -513,6 +513,14 @@ model Reservation {
   // distinct from the structured pour-detail fields above, same role as
   // RhinoMaster's "Remarks" field on its own booking form.
   notes                 String?
+  // Stamped when someone sends the pre-pour WhatsApp reminder (see
+  // reservationsDueForReminder in src/lib/reservations.ts and
+  // markReservationReminderSent in reservations/actions.ts) — the send
+  // itself is a manual wa.me click (no WhatsApp Business API account is
+  // wired up), so this only records that a human did it, not that the
+  // message was actually delivered/read. Null keeps the reservation in the
+  // "due for reminder" list.
+  reminderSentAt        DateTime?
   // Set when this reservation was created by converting an accepted
   // QuoteLine (see convertQuoteLineToReservation in sales/actions.ts) —
   // traceability back to the price offer that led to the booking. Null for

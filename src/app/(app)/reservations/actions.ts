@@ -289,3 +289,21 @@ export async function approveReservationFinal(formData: FormData) {
   revalidatePath("/reservations");
   revalidatePath("/production");
 }
+
+// Fired from the "due for reminder" panel's send button — the WhatsApp
+// message itself is opened client-side via a wa.me link (no WhatsApp
+// Business API account is wired up, see WhatsAppShareButton), so all this
+// records is that a human actually clicked send, taking the reservation
+// out of reservationsDueForReminder's list. Same "edit" permission as the
+// rest of the booking, since this is just another field on the record.
+export async function markReservationReminderSent(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "reservations", "edit");
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  await prisma.reservation.update({ where: { id }, data: { reminderSentAt: new Date() } });
+  await logAudit({ module: "Reservations", recordId: id, reasonCode: "RESERVATION_REMINDER_SENT" });
+  revalidatePath("/reservations");
+}

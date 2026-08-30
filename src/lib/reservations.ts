@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { reservationSiteScopeWhere } from "@/lib/siteScope";
 
 const VOLUME_EPSILON_M3 = 0.01;
 
@@ -55,6 +56,37 @@ export async function getRemainingVolumeM3(reservationId: string, requestedVolum
 // "the picker only offered valid options" re-check in this app.
 export function isReservationApproved(reservation: { initialApprovedAt: Date | null; finalApprovedAt: Date | null }): boolean {
   return reservation.initialApprovedAt != null && reservation.finalApprovedAt != null;
+}
+
+// How far ahead of the pour a reminder becomes "due" — wide enough that a
+// reservations officer checking the board once every hour or two won't miss
+// one, narrow enough that the list stays a same-day, actionable set rather
+// than tomorrow's whole schedule.
+export const REMINDER_WINDOW_HOURS = 3;
+
+/**
+ * Reservations whose pour is coming up soon and haven't had their WhatsApp
+ * reminder sent yet — the "automatic" half of the reminder feature: no
+ * WhatsApp Business API account is wired up (see WhatsAppShareButton), so
+ * the actual send is a manual wa.me click, but detecting which bookings
+ * need that click is what this computes on every page load instead of
+ * relying on someone remembering to check. A reservation with no
+ * siteContactPhone on file is still included (nothing to send to, but it
+ * should surface as a gap rather than silently vanish from the list).
+ */
+export async function reservationsDueForReminder(siteId: string | null) {
+  const now = new Date();
+  const windowEnd = new Date(now.getTime() + REMINDER_WINDOW_HOURS * 60 * 60 * 1000);
+  return prisma.reservation.findMany({
+    where: {
+      ...reservationSiteScopeWhere(siteId),
+      status: { in: ["CONFIRMED", "IN_PRODUCTION"] },
+      pourWindowStart: { gte: now, lte: windowEnd },
+      reminderSentAt: null,
+    },
+    orderBy: { pourWindowStart: "asc" },
+    include: { project: { include: { customer: true } }, site: true, mix: true },
+  });
 }
 
 export async function isReservationFullyDelivered(reservationId: string): Promise<boolean> {

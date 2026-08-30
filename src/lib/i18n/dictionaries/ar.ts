@@ -408,6 +408,13 @@ const ar = {
       alreadyReleased: (n: number) => `${n} م³ صُرفت بالفعل — لا يمكن التقليل عن هذا الحد`,
       originalVolume: (n: number) => `الكمية الأصلية عند الحجز: ${n} م³`,
       closeReservation: "إنهاء الحجز",
+      reminderPanelTitle: "تذكيرات الصب القادمة",
+      reminderDueIn: (mins: number) => (mins < 60 ? `بعد ${mins} د` : `بعد ${Math.round(mins / 60)} س`),
+      reminderNoPhone: "لا يوجد رقم تواصل — أضِفه في بيانات الحجز",
+      reminderSend: "إرسال تذكير واتساب",
+      reminderMessage: (reservationNumber: string, projectName: string, mixCode: string, volume: number, time: string, siteLocation: string | null) =>
+        `تذكير: حجز ${reservationNumber} — ${projectName}\nموعد الصب: ${time}\nالخلطة: ${mixCode} — الكمية: ${volume} م³` +
+        (siteLocation ? `\nالموقع: ${siteLocation}` : ""),
     },
     production: {
       eyebrow: "الوحدة 03 — الإنتاج",

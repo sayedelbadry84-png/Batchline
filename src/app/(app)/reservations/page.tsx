@@ -3,15 +3,16 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal, closeReservation } from "./actions";
+import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal, closeReservation, markReservationReminderSent } from "./actions";
 import { getActiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
-import { sumAcceptedVolumeM3 } from "@/lib/reservations";
+import { sumAcceptedVolumeM3, reservationsDueForReminder } from "@/lib/reservations";
 import { canPerformAction } from "@/lib/permissions";
 import { Modal } from "@/components/Modal";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { DeliveryPumpSection } from "@/components/DeliveryPumpSection";
 import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
+import { ReservationReminderButton } from "@/components/ReservationReminderButton";
 import { ReservationMixSelect } from "@/components/ReservationMixSelect";
 
 const statusChip: Record<string, string> = {
@@ -82,7 +83,7 @@ export default async function ReservationsPage({
     pumpAssignments: { include: { pump: true, pumpOperator: true, pumpAssistant: true } },
   };
 
-  const [reservationsRaw, editReservation, projects, mixes, sitesForPicker, pumpsRaw, crew] = await Promise.all([
+  const [reservationsRaw, editReservation, projects, mixes, sitesForPicker, pumpsRaw, crew, dueForReminder] = await Promise.all([
     prisma.reservation.findMany({
       where: {
         ...reservationSiteScopeWhere(siteId),
@@ -119,6 +120,10 @@ export default async function ReservationsPage({
       select: { id: true, code: true, reachM: true, defaultOperatorId: true, defaultAssistantId: true },
     }),
     prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } }),
+    // Independent of the date filter above — a pour coming up in the next
+    // few hours needs to surface regardless of which day the board is
+    // currently showing (see REMINDER_WINDOW_HOURS in src/lib/reservations.ts).
+    reservationsDueForReminder(siteId),
   ]);
 
   // Which customer+mix pairs currently have a price on file — drives the
@@ -173,6 +178,41 @@ export default async function ReservationsPage({
         <h1 className={ui.h1}>{m.title}</h1>
         <p className={ui.intro}>{m.intro}</p>
       </header>
+
+      {dueForReminder.length > 0 && (
+        <div className={`${ui.card} border-warn`}>
+          <div className="mb-3 text-sm font-semibold text-warn">
+            {m.reminderPanelTitle} ({dueForReminder.length})
+          </div>
+          <div className="flex flex-col gap-2">
+            {dueForReminder.map((r) => {
+              const minsUntil = Math.max(0, Math.round((r.pourWindowStart.getTime() - Date.now()) / 60000));
+              const message = m.reminderMessage(r.reservationNumber, r.project.name, r.mix.code, r.requestedVolumeM3, fmtDateTime(r.pourWindowStart), r.siteLocation);
+              return (
+                <div key={r.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface-alt px-3 py-2 text-sm">
+                  <div>
+                    <span className="font-medium">{r.reservationNumber}</span> — {r.project.name} ({r.project.customer.legalName})
+                    <span className="ms-2 text-ink-muted">
+                      {fmtDateTime(r.pourWindowStart)} · {m.reminderDueIn(minsUntil)}
+                    </span>
+                  </div>
+                  {r.siteContactPhone ? (
+                    <ReservationReminderButton
+                      reservationId={r.id}
+                      phone={r.siteContactPhone}
+                      message={message}
+                      label={m.reminderSend}
+                      markAction={markReservationReminderSent}
+                    />
+                  ) : (
+                    <span className="text-xs text-critical">{m.reminderNoPhone}</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <form action="/reservations" className="flex flex-wrap items-end gap-3">
         <Link href={`/reservations?date=${addDays(selectedDate, -1)}`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt" aria-label={m.prevDay}>

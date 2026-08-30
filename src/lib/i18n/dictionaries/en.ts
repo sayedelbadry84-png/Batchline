@@ -409,6 +409,13 @@ const en: typeof ar = {
       alreadyReleased: (n: number) => `${n} m³ already released — can't reduce below this`,
       originalVolume: (n: number) => `Original volume at booking: ${n} m³`,
       closeReservation: "End reservation",
+      reminderPanelTitle: "Upcoming pour reminders",
+      reminderDueIn: (mins: number) => (mins < 60 ? `in ${mins}m` : `in ${Math.round(mins / 60)}h`),
+      reminderNoPhone: "No contact number on file — add one on the booking",
+      reminderSend: "Send WhatsApp reminder",
+      reminderMessage: (reservationNumber: string, projectName: string, mixCode: string, volume: number, time: string, siteLocation: string | null) =>
+        `Reminder: booking ${reservationNumber} — ${projectName}\nPour time: ${time}\nMix: ${mixCode} — Volume: ${volume} m³` +
+        (siteLocation ? `\nSite: ${siteLocation}` : ""),
     },
     production: {
       eyebrow: "Module 03 — Production",
