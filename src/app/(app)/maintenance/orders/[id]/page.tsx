@@ -6,6 +6,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { getActiveSiteId } from "@/lib/siteScope";
 import { Modal } from "@/components/Modal";
+import { computeLaborCost, hourlyWageRate } from "@/lib/maintenance";
 import {
   startMaintenanceOrder,
   completeMaintenanceOrder,
@@ -65,6 +66,7 @@ export default async function MaintenanceOrderDetailPage({
 
   const baseUrl = `/maintenance/orders/${id}`;
   const partsCost = order.parts.reduce((sum, p) => sum + p.lineTotal, 0);
+  const laborCost = computeLaborCost(order.technicians);
   const canAct = ["OPEN", "IN_PROGRESS"].includes(order.status);
 
   return (
@@ -114,6 +116,7 @@ export default async function MaintenanceOrderDetailPage({
                 <th className={ui.th}>{d.colTech.name}</th>
                 <th className={ui.th}>{d.colTech.role}</th>
                 <th className={ui.th}>{d.colTech.hours}</th>
+                <th className={ui.th}>{d.colTech.cost}</th>
                 <th className={ui.th}></th>
               </tr>
             </thead>
@@ -123,6 +126,7 @@ export default async function MaintenanceOrderDetailPage({
                   <td className={ui.td}>{t.employee.name}</td>
                   <td className={ui.td}>{t.employee.role}</td>
                   <td className={`${ui.td} font-mono tabular`}>{t.hoursWorked ?? "—"}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{((t.hoursWorked ?? 0) * hourlyWageRate(t.employee)).toFixed(2)}</td>
                   <td className={ui.td}>
                     {canAct && (
                       <form action={removeOrderTechnician}>
@@ -134,7 +138,14 @@ export default async function MaintenanceOrderDetailPage({
                 </tr>
               ))}
               {order.technicians.length === 0 && (
-                <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{d.noTechnicians}</span></td></tr>
+                <tr><td className={ui.td} colSpan={5}><span className="text-ink-muted">{d.noTechnicians}</span></td></tr>
+              )}
+              {order.technicians.length > 0 && (
+                <tr>
+                  <td className={ui.td} colSpan={3}></td>
+                  <td className={`${ui.td} font-mono font-semibold tabular`}>{laborCost.toFixed(2)}</td>
+                  <td className={ui.td}></td>
+                </tr>
               )}
             </tbody>
           </table>
@@ -269,7 +280,8 @@ export default async function MaintenanceOrderDetailPage({
             </div>
             <div>
               <label className={ui.label}>{d.f.laborCost}</label>
-              <input name="laborCost" type="number" step="0.01" className={ui.input} />
+              <div className={`${ui.input} bg-surface-alt font-mono tabular`} dir="ltr">{laborCost.toFixed(2)}</div>
+              <p className="mt-1 text-xs text-ink-muted">{d.f.laborCostHint}</p>
             </div>
             <button type="submit" className={`${ui.button} mt-2`}>{d.markComplete}</button>
           </form>

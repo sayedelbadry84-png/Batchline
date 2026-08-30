@@ -5,6 +5,7 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
+import { computeLaborCost } from "@/lib/maintenance";
 import { revalidatePath } from "next/cache";
 
 const MAINTENANCE_ROLES = ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"];
@@ -267,25 +268,28 @@ export async function startMaintenanceOrder(formData: FormData) {
 // Same written-resolution-notes requirement as completeMaintenanceTicket.
 // Cascades to complete the parent ticket too (same equipment
 // lastMaintenanceAt stamp + plan cycle advance), and rolls this order's
-// actual parts consumption up into the ticket's own partsCost — real
-// numbers from MaintenanceOrderPart instead of a hand-typed guess.
+// actual parts consumption AND technician hours up into real costs —
+// laborCost from computeLaborCost (hoursWorked × each technician's own
+// payroll wage, see src/lib/maintenance.ts) the same way partsCost was
+// already computed from MaterialOrderPart, instead of either being a
+// hand-typed guess.
 export async function completeMaintenanceOrder(formData: FormData) {
   const actor = await getCurrentUser();
   requireRole(actor, MAINTENANCE_ROLES);
 
   const id = String(formData.get("id") ?? "");
   const resolutionNotes = String(formData.get("resolutionNotes") ?? "").trim();
-  const laborCost = Number(formData.get("laborCost") ?? 0) || null;
   if (!id || !resolutionNotes) return;
 
   const order = await prisma.maintenanceOrder.findUnique({
     where: { id },
-    include: { ticket: { include: { plan: true } }, parts: true },
+    include: { ticket: { include: { plan: true } }, parts: true, technicians: { include: { employee: true } } },
   });
   if (!order || !["OPEN", "IN_PROGRESS"].includes(order.status)) return;
 
   const now = new Date();
   const partsCost = order.parts.reduce((sum, p) => sum + p.lineTotal, 0) || null;
+  const laborCost = computeLaborCost(order.technicians) || null;
 
   await prisma.maintenanceOrder.update({
     where: { id },

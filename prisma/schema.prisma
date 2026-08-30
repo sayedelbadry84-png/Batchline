@@ -1555,8 +1555,11 @@ model MaintenanceOrder {
   startedAt       DateTime?
   completedAt     DateTime?
   resolutionNotes String?
-  // No wage-rate table exists anywhere in this schema, so labor cost stays
-  // a manual entry rather than being computed from technician hours.
+  // Computed automatically at completion time from each technician's
+  // hoursWorked × their own payroll wage (see computeLaborCost in
+  // src/lib/maintenance.ts and completeMaintenanceOrder) — not a manual
+  // entry. Nullable because a technician-less order (parts only) has
+  // nothing to compute.
   laborCost       Float?
   createdById     String
   createdBy       User              @relation(fields: [createdById], references: [id])
