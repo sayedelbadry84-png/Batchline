@@ -137,6 +137,49 @@ export async function rejectSparePartsRequisition(formData: FormData) {
   revalidatePath("/warehouses");
 }
 
+// Raw-material counterpart to the two actions above — same approval gate,
+// same PENDING_APPROVAL-only guard, for MaterialRequisition rows
+// auto-created by completeBatch (production/actions.ts) instead of raised
+// by a person.
+export async function approveMaterialRequisition(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, REQUISITION_APPROVAL_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const requisition = await prisma.materialRequisition.findUnique({ where: { id } });
+  if (!requisition || requisition.status !== "PENDING_APPROVAL") return;
+
+  await prisma.materialRequisition.update({
+    where: { id },
+    data: { status: "APPROVED", approvedById: actor!.id, approvedAt: new Date() },
+  });
+
+  await logAudit({ module: "Warehouses", recordId: id, afterValue: "APPROVED", reasonCode: "MATERIAL_REQUISITION_APPROVED" });
+  revalidatePath("/warehouses");
+  revalidatePath("/purchasing");
+}
+
+export async function rejectMaterialRequisition(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, REQUISITION_APPROVAL_ROLES);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const requisition = await prisma.materialRequisition.findUnique({ where: { id } });
+  if (!requisition || requisition.status !== "PENDING_APPROVAL") return;
+
+  await prisma.materialRequisition.update({
+    where: { id },
+    data: { status: "REJECTED", approvedById: actor!.id, approvedAt: new Date() },
+  });
+
+  await logAudit({ module: "Warehouses", recordId: id, afterValue: "REJECTED", reasonCode: "MATERIAL_REQUISITION_REJECTED" });
+  revalidatePath("/warehouses");
+}
+
 // ---------------------------------------------------------------------------
 // Finished Goods
 // ---------------------------------------------------------------------------

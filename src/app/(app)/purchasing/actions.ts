@@ -298,3 +298,76 @@ export async function createPurchaseOrderFromRequisitions(formData: FormData) {
   revalidatePath("/warehouses");
   revalidatePath("/maintenance");
 }
+
+// Raw-material counterpart to createPurchaseOrderFromRequisitions above —
+// bundles APPROVED MaterialRequisition rows (auto-opened by completeBatch
+// on a low silo/hopper/tank, see production/actions.ts) into one new PO,
+// one materialId/orderedMassKg line per requisition, same "0 or blank
+// means skip this row" price filtering.
+export async function createPurchaseOrderFromMaterialRequisitions(formData: FormData) {
+  const actor = await getCurrentUser();
+  requireRole(actor, PURCHASING_ROLES);
+
+  const supplierId = String(formData.get("supplierId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
+  if (!supplierId || !siteId) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
+
+  const requisitionIds = formData.getAll("requisitionId").map(String);
+  const unitPrices = formData.getAll("unitPrice").map(Number);
+  const picks = requisitionIds
+    .map((id, i) => ({ id, unitPrice: unitPrices[i] || 0 }))
+    .filter((p) => p.id && p.unitPrice > 0);
+  if (picks.length === 0) return;
+
+  const requisitions = await prisma.materialRequisition.findMany({
+    where: { id: { in: picks.map((p) => p.id) }, status: "APPROVED" },
+  });
+  if (requisitions.length === 0) return;
+
+  const plantId = await resolvePlantIdForSite(siteId);
+  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId } }) : null;
+  const currency = plant?.currency ?? "EGP";
+  const taxRatePct = plant?.taxRatePct ?? 0;
+
+  const lines = requisitions.map((r) => {
+    const unitPrice = picks.find((p) => p.id === r.id)!.unitPrice;
+    return { requisition: r, unitPrice, lineTotal: r.quantityNeededKg * unitPrice };
+  });
+  const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0);
+  const taxAmount = subtotal * (taxRatePct / 100);
+  const total = subtotal + taxAmount;
+
+  const po = await withSequentialNumber(
+    "PO",
+    () => prisma.purchaseOrder.count(),
+    (poNumber) =>
+      prisma.$transaction(async (tx) => {
+        const created = await tx.purchaseOrder.create({
+          data: { poNumber, supplierId, siteId, currency, subtotal, taxRatePct, taxAmount, total, createdById: actor!.id },
+        });
+        for (const l of lines) {
+          const line = await tx.purchaseOrderLine.create({
+            data: {
+              purchaseOrderId: created.id,
+              materialId: l.requisition.materialId,
+              orderedMassKg: l.requisition.quantityNeededKg,
+              receivedMassKg: 0,
+              unitPrice: l.unitPrice,
+              lineTotal: l.lineTotal,
+            },
+          });
+          await tx.materialRequisition.update({
+            where: { id: l.requisition.id },
+            data: { status: "ORDERED", purchaseOrderLineId: line.id },
+          });
+        }
+        return created;
+      }),
+  );
+
+  await logAudit({ module: "Purchasing", recordId: po.id, afterValue: `${po.poNumber} — ${total} ${currency} (${lines.length} material lines)`, reasonCode: "PO_CREATED_FROM_MATERIAL_REQUISITIONS" });
+  revalidatePath("/purchasing");
+  revalidatePath("/warehouses");
+  revalidatePath("/");
+}

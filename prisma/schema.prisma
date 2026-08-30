@@ -87,6 +87,8 @@ model User {
   sparePartReceiptsReceived        SparePartReceipt[]
   sparePartsRequisitionsRequested  SparePartsRequisition[]   @relation("SPRRequestedBy")
   sparePartsRequisitionsApproved   SparePartsRequisition[]   @relation("SPRApprovedBy")
+  materialRequisitionsRequested    MaterialRequisition[]     @relation("MTRRequestedBy")
+  materialRequisitionsApproved     MaterialRequisition[]     @relation("MTRApprovedBy")
   finishedProductMovementsRecorded FinishedProductMovement[]
   creditNotesIssued                CreditNote[]
   payrollRunsCreated               PayrollRun[]               @relation("PayrollRunCreatedBy")
@@ -163,6 +165,7 @@ model Site {
   cashTransactions         CashTransaction[]
   sparePartReceipts        SparePartReceipt[]
   sparePartsRequisitions   SparePartsRequisition[]
+  materialRequisitions     MaterialRequisition[]
   finishedProductMovements FinishedProductMovement[]
 }
 
@@ -257,6 +260,12 @@ model Hopper {
   aggregateType      String
   capacityTons       Float
   currentLevelTons   Float    @default(0)
+  // Same low-stock threshold as Silo.minThresholdPct — drives the
+  // dashboard alert and the auto-requisition check in completeBatch
+  // (production/actions.ts), extended here so aggregate/water hoppers get
+  // the same "flag it, then auto-request more" coverage cement silos
+  // already had.
+  minThresholdPct    Float    @default(15)
   // A yard heap multiple production lines at the same site draw from —
   // plantId above is still the "home"/organizational line, but
   // completeBatch's consumption lookup (production/actions.ts) matches a
@@ -285,6 +294,10 @@ model ChemicalTank {
   name               String
   capacityLiters     Float?
   currentLevelLiters Float    @default(0)
+  // Same low-stock threshold as Silo.minThresholdPct — only meaningful
+  // once capacityLiters is set (a tank with no known capacity has no
+  // percentage to compare against, so the completeBatch check skips it).
+  minThresholdPct    Float    @default(15)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
@@ -337,6 +350,7 @@ model Material {
   chemicalTanks      ChemicalTank[]
   purchaseOrderLines PurchaseOrderLine[]
   supplierContracts  SupplierContract[]
+  requisitions       MaterialRequisition[]
 }
 
 model MixComponent {
@@ -1433,6 +1447,9 @@ model PurchaseOrderLine {
   // — routes the requisition's status to ORDERED once the PO is created
   // (see createPurchaseOrder).
   sourceRequisition SparePartsRequisition?
+  // Same back-relation, for the raw-material equivalent (see
+  // MaterialRequisition below and completeBatch in production/actions.ts).
+  sourceMaterialRequisition MaterialRequisition?
   unitPrice         Float
   lineTotal         Float
 
@@ -1657,6 +1674,41 @@ model SparePartsRequisition {
   requestedBy         User               @relation("SPRRequestedBy", fields: [requestedById], references: [id])
   approvedById        String?
   approvedBy          User?              @relation("SPRApprovedBy", fields: [approvedById], references: [id])
+  approvedAt          DateTime?
+  purchaseOrderLineId String?            @unique
+  purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id])
+  notes               String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+}
+
+// The raw-material counterpart to SparePartsRequisition above — same
+// PENDING_APPROVAL → APPROVED → ORDERED → FULFILLED lifecycle and the same
+// approve/reject/bundle-into-PO actions (see warehouses/actions.ts and
+// createPurchaseOrderFromMaterialRequisitions in purchasing/actions.ts),
+// but auto-created by completeBatch (production/actions.ts) the moment a
+// silo/hopper/chemical tank's level crosses at/below its own
+// minThresholdPct, rather than by a human hitting a stock shortfall while
+// issuing a part. requestedById is nullable for exactly that reason —
+// there's no technician to attribute it to; a null value renders as
+// "auto-generated" in the UI, same as logAudit's own SYSTEM actor
+// fallback. Never more than one open (PENDING_APPROVAL/APPROVED/ORDERED)
+// requisition per materialId+siteId at a time — completeBatch checks for
+// one before creating another, so a run of many low batches doesn't flood
+// Purchasing with duplicates for the same shortage.
+model MaterialRequisition {
+  id                  String             @id @default(cuid())
+  requisitionNumber   String             @unique // MTR-YYYY-NNNN
+  materialId          String
+  material            Material           @relation(fields: [materialId], references: [id])
+  siteId              String
+  site                Site               @relation(fields: [siteId], references: [id])
+  quantityNeededKg    Float
+  status              String             @default("PENDING_APPROVAL") // PENDING_APPROVAL, APPROVED, REJECTED, ORDERED, FULFILLED, CANCELLED
+  requestedById       String?
+  requestedBy         User?              @relation("MTRRequestedBy", fields: [requestedById], references: [id])
+  approvedById        String?
+  approvedBy          User?              @relation("MTRApprovedBy", fields: [approvedById], references: [id])
   approvedAt          DateTime?
   purchaseOrderLineId String?            @unique
   purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id])

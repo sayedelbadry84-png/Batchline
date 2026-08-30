@@ -135,6 +135,7 @@ export async function createHopper(formData: FormData) {
   const aggregateType = String(formData.get("aggregateType") ?? "").trim();
   const capacityTons = Number(formData.get("capacityTons") ?? 0);
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
+  const minThresholdPct = Number(formData.get("minThresholdPct") ?? 15);
   const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
 
   if (!siteId || !name || !aggregateType || !capacityTons) return;
@@ -144,7 +145,7 @@ export async function createHopper(formData: FormData) {
   if (!(await isPlantActive(plantId))) return;
 
   const hopper = await prisma.hopper.create({
-    data: { plantId, name, aggregateType, capacityTons, currentLevelTons, sharedAcrossPlants },
+    data: { plantId, name, aggregateType, capacityTons, currentLevelTons, minThresholdPct, sharedAcrossPlants },
   });
 
   await logAudit({ module: "Silos", recordId: hopper.id, afterValue: `${name} / ${aggregateType}`, reasonCode: "HOPPER_CREATED" });
@@ -213,14 +214,15 @@ export async function createChemicalTank(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const capacityLiters = Number(formData.get("capacityLiters") ?? 0) || null;
   const currentLevelLiters = Number(formData.get("currentLevelLiters") ?? 0);
+  const minThresholdPct = Number(formData.get("minThresholdPct") ?? 15);
 
   if (!plantId || !materialId || !name) return;
   if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
 
   const tank = await prisma.chemicalTank.upsert({
     where: { plantId_materialId: { plantId, materialId } },
-    create: { plantId, materialId, name, capacityLiters, currentLevelLiters },
-    update: { name, capacityLiters, currentLevelLiters },
+    create: { plantId, materialId, name, capacityLiters, currentLevelLiters, minThresholdPct },
+    update: { name, capacityLiters, currentLevelLiters, minThresholdPct },
   });
 
   await logAudit({ module: "Silos", recordId: tank.id, afterValue: name, reasonCode: "CHEMICAL_TANK_CREATED" });

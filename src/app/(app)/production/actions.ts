@@ -34,6 +34,42 @@ async function findMatchingSilo(plantId: string, siteId: string, materialType: s
   return prisma.silo.findFirst({ where: { sharedAcrossPlants: true, materialType, plant: { siteId } } });
 }
 
+// Raw-material counterpart to issueSparePartToOrder's shortfall handling —
+// called from completeBatch right after a silo/hopper/tank's level is
+// deducted; if what's left is at or below the store's own minThresholdPct,
+// opens a MaterialRequisition for enough to refill it (skipped if capacity
+// is unset/zero, since there's then no percentage to compare against, or
+// if one's already open for this material+site — a run of many low
+// batches must not flood Purchasing with duplicate requests for the same
+// shortage). toKg converts the store's own unit (tons for silo/hopper,
+// liters for a chemical tank) to the kg PurchaseOrderLine.orderedMassKg
+// expects.
+async function maybeAutoRequisitionMaterial(
+  materialId: string,
+  siteId: string,
+  currentLevel: number,
+  capacity: number,
+  minThresholdPct: number,
+  toKg: (units: number) => number,
+) {
+  if (capacity <= 0) return;
+  if ((currentLevel / capacity) * 100 > minThresholdPct) return;
+
+  const shortfall = capacity - currentLevel;
+  if (shortfall <= 0) return;
+
+  const existing = await prisma.materialRequisition.findFirst({
+    where: { materialId, siteId, status: { in: ["PENDING_APPROVAL", "APPROVED", "ORDERED"] } },
+  });
+  if (existing) return;
+
+  await withSequentialNumber(
+    "MTR",
+    () => prisma.materialRequisition.count(),
+    (requisitionNumber) => prisma.materialRequisition.create({ data: { requisitionNumber, materialId, siteId, quantityNeededKg: toKg(shortfall) } }),
+  );
+}
+
 // A single mixer truck load, never exceeded regardless of how much of the
 // reservation remains — the same ceiling the release form's own input
 // max enforces client-side (production/page.tsx); this is the real gate.
@@ -321,10 +357,9 @@ export async function completeBatch(formData: FormData) {
     if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
       const silo = await findMatchingSilo(ticket.plantId, ticket.plant.siteId, c.material.type);
       if (silo) {
-        await prisma.silo.update({
-          where: { id: silo.id },
-          data: { currentLevelTons: Math.max(0, silo.currentLevelTons - massTons) },
-        });
+        const newLevelTons = Math.max(0, silo.currentLevelTons - massTons);
+        await prisma.silo.update({ where: { id: silo.id }, data: { currentLevelTons: newLevelTons } });
+        await maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, silo.capacityTons, silo.minThresholdPct, (tons) => tons * 1000);
       }
     } else if (AGGREGATE_TYPES.has(c.material.type)) {
       const hopper = await findMatchingHopper(
@@ -333,10 +368,9 @@ export async function completeBatch(formData: FormData) {
         c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
       );
       if (hopper) {
-        await prisma.hopper.update({
-          where: { id: hopper.id },
-          data: { currentLevelTons: Math.max(0, hopper.currentLevelTons - massTons) },
-        });
+        const newLevelTons = Math.max(0, hopper.currentLevelTons - massTons);
+        await prisma.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: newLevelTons } });
+        await maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, hopper.capacityTons, hopper.minThresholdPct, (tons) => tons * 1000);
       }
     } else if (c.material.type === "WATER") {
       // Reuses Hopper (a plain tonnage heap) rather than a new model — a
@@ -345,10 +379,9 @@ export async function completeBatch(formData: FormData) {
       // same silent no-op as any other unregistered destination.
       const waterHopper = await findMatchingHopper(ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
       if (waterHopper) {
-        await prisma.hopper.update({
-          where: { id: waterHopper.id },
-          data: { currentLevelTons: Math.max(0, waterHopper.currentLevelTons - massTons) },
-        });
+        const newLevelTons = Math.max(0, waterHopper.currentLevelTons - massTons);
+        await prisma.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: newLevelTons } });
+        await maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, waterHopper.capacityTons, waterHopper.minThresholdPct, (tons) => tons * 1000);
       }
     } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
       // Batched mass is always stored in kg (see addComponent in
@@ -357,10 +390,17 @@ export async function completeBatch(formData: FormData) {
       const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
       if (tank) {
         const liters = massKg / c.material.specificGravity;
-        await prisma.chemicalTank.update({
-          where: { id: tank.id },
-          data: { currentLevelLiters: Math.max(0, tank.currentLevelLiters - liters) },
-        });
+        const newLevelLiters = Math.max(0, tank.currentLevelLiters - liters);
+        await prisma.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: newLevelLiters } });
+        const specificGravity = c.material.specificGravity;
+        await maybeAutoRequisitionMaterial(
+          c.materialId,
+          ticket.plant.siteId,
+          newLevelLiters,
+          tank.capacityLiters ?? 0,
+          tank.minThresholdPct,
+          (liters) => liters * specificGravity,
+        );
       }
     }
   }
