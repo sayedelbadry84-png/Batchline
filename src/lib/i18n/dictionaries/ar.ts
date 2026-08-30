@@ -551,6 +551,7 @@ const ar = {
         licenseValidFrom: "تاريخ سريان الرخصة",
         periodicInspectionDueAt: "موعد الفحص الدوري",
         operatingCardExpiry: "تاريخ انتهاء كارت التشغيل",
+        insurancePolicyExpiry: "تاريخ انتهاء بوليصة التأمين",
         expired: "منتهية",
         daysLeft: (n: number) => `متبقٍ ${n} يوم`,
       },

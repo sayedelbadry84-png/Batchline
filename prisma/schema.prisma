@@ -789,6 +789,10 @@ model Truck {
   licenseValidFrom        DateTime?
   periodicInspectionDueAt DateTime?
   operatingCardExpiry     DateTime?
+  // Same real-deadline shape as operatingCardExpiry above — flagged by the
+  // Equipment screen's own expiryFlag the same way once it approaches/
+  // passes, not just informational like licenseValidFrom.
+  insurancePolicyExpiry   DateTime?
   // Pre-fills the driver field when this truck is picked to start a trip
   // (see startTrip/updateTripAssignment) — still just a default, not a
   // lock: the operator can always pick someone else for that specific trip.
@@ -1031,6 +1035,10 @@ model Pump {
   licenseValidFrom        DateTime?
   periodicInspectionDueAt DateTime?
   operatingCardExpiry     DateTime?
+  // Same real-deadline shape as operatingCardExpiry above — flagged by the
+  // Equipment screen's own expiryFlag the same way once it approaches/
+  // passes, not just informational like licenseValidFrom.
+  insurancePolicyExpiry   DateTime?
   // Pre-fill the operator/assistant fields when this pump is picked to
   // start a pump-delivery trip — still just defaults, always overridable
   // for that specific trip (see startTrip/updateTripAssignment).
@@ -1991,6 +1999,10 @@ model SupportVehicle {
   licenseValidFrom        DateTime?
   periodicInspectionDueAt DateTime?
   operatingCardExpiry     DateTime?
+  // Same real-deadline shape as operatingCardExpiry above — flagged by the
+  // Equipment screen's own expiryFlag the same way once it approaches/
+  // passes, not just informational like licenseValidFrom.
+  insurancePolicyExpiry   DateTime?
   defaultDriverId String?
   defaultDriver   Employee? @relation(fields: [defaultDriverId], references: [id])
   status          String    @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE

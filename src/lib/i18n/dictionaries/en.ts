@@ -552,6 +552,7 @@ const en: typeof ar = {
         licenseValidFrom: "License valid from",
         periodicInspectionDueAt: "Periodic inspection due",
         operatingCardExpiry: "Operating card expiry",
+        insurancePolicyExpiry: "Insurance policy expiry",
         expired: "Expired",
         daysLeft: (n: number) => `${n}d left`,
       },

@@ -194,6 +194,7 @@ async function MixersTab({
               <th className={ui.th}>{m.mixers.col.maintenance}</th>
               <th className={ui.th}>{m.shared.periodicInspectionDueAt}</th>
               <th className={ui.th}>{m.shared.operatingCardExpiry}</th>
+              <th className={ui.th}>{m.shared.insurancePolicyExpiry}</th>
               <th className={ui.th}>{m.shared.status}</th>
               <th className={ui.th}>{m.shared.actions}</th>
             </tr>
@@ -202,7 +203,7 @@ async function MixersTab({
             {trucks.map((t) =>
               editId === t.id ? (
                 <tr key={t.id}>
-                  <td className={ui.td} colSpan={10}>
+                  <td className={ui.td} colSpan={11}>
                     <form action={updateTruck} className="flex flex-wrap items-end gap-2">
                       <input type="hidden" name="id" value={t.id} />
                       <div>
@@ -269,6 +270,15 @@ async function MixersTab({
                         />
                       </div>
                       <div>
+                        <label className={ui.label}>{m.shared.insurancePolicyExpiry}</label>
+                        <input
+                          name="insurancePolicyExpiry"
+                          type="date"
+                          defaultValue={t.insurancePolicyExpiry ? new Date(t.insurancePolicyExpiry).toISOString().slice(0, 10) : ""}
+                          className={`${ui.input} w-40`}
+                        />
+                      </div>
+                      <div>
                         <label className={ui.label}>{m.mixers.f.defaultDriver}</label>
                         <select name="defaultDriverId" defaultValue={t.defaultDriverId ?? ""} className={`${ui.select} w-40`}>
                           <option value="">{dict.field.none}</option>
@@ -331,6 +341,13 @@ async function MixersTab({
                     })()}
                   </td>
                   <td className={ui.td}>
+                    {t.insurancePolicyExpiry ? new Date(t.insurancePolicyExpiry).toLocaleDateString() : "—"}
+                    {(() => {
+                      const flag = expiryFlag(t.insurancePolicyExpiry, nowMs, m.shared);
+                      return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
+                    })()}
+                  </td>
+                  <td className={ui.td}>
                     <span className={`${ui.chip} ${statusChip[t.status] ?? ""}`}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</span>
                   </td>
                   <td className={ui.td}>
@@ -343,7 +360,7 @@ async function MixersTab({
             )}
             {trucks.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={10}><span className="text-ink-muted">{m.mixers.empty}</span></td>
+                <td className={ui.td} colSpan={11}><span className="text-ink-muted">{m.mixers.empty}</span></td>
               </tr>
             )}
           </tbody>
@@ -400,6 +417,10 @@ async function MixersTab({
         <div>
           <label className={ui.label}>{m.shared.operatingCardExpiry}</label>
           <input name="operatingCardExpiry" type="date" className={ui.input} />
+        </div>
+        <div>
+          <label className={ui.label}>{m.shared.insurancePolicyExpiry}</label>
+          <input name="insurancePolicyExpiry" type="date" className={ui.input} />
         </div>
         <div>
           <label className={ui.label}>{m.mixers.f.defaultDriver}</label>
@@ -481,6 +502,7 @@ async function PumpsTab({
                 <th className={ui.th}>{m.pumps.col.maintenance}</th>
                 <th className={ui.th}>{m.shared.periodicInspectionDueAt}</th>
                 <th className={ui.th}>{m.shared.operatingCardExpiry}</th>
+                <th className={ui.th}>{m.shared.insurancePolicyExpiry}</th>
                 <th className={ui.th}>{m.shared.status}</th>
                 <th className={ui.th}>{m.shared.actions}</th>
               </tr>
@@ -489,7 +511,7 @@ async function PumpsTab({
               {pumps.map((p) =>
                 editId === p.id ? (
                   <tr key={p.id}>
-                    <td className={ui.td} colSpan={11}>
+                    <td className={ui.td} colSpan={12}>
                       <form action={updatePump} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={p.id} />
                         <div>
@@ -564,6 +586,15 @@ async function PumpsTab({
                           />
                         </div>
                         <div>
+                          <label className={ui.label}>{m.shared.insurancePolicyExpiry}</label>
+                          <input
+                            name="insurancePolicyExpiry"
+                            type="date"
+                            defaultValue={p.insurancePolicyExpiry ? new Date(p.insurancePolicyExpiry).toISOString().slice(0, 10) : ""}
+                            className={`${ui.input} w-40`}
+                          />
+                        </div>
+                        <div>
                           <label className={ui.label}>{m.pumps.f.defaultOperator}</label>
                           <select name="defaultOperatorId" defaultValue={p.defaultOperatorId ?? ""} className={`${ui.select} w-40`}>
                             <option value="">{dict.field.none}</option>
@@ -631,6 +662,13 @@ async function PumpsTab({
                       })()}
                     </td>
                     <td className={ui.td}>
+                      {p.insurancePolicyExpiry ? new Date(p.insurancePolicyExpiry).toLocaleDateString() : "—"}
+                      {(() => {
+                        const flag = expiryFlag(p.insurancePolicyExpiry, nowMs, m.shared);
+                        return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
+                      })()}
+                    </td>
+                    <td className={ui.td}>
                       <span className={`${ui.chip} ${statusChip[p.status] ?? ""}`}>{dict.status[p.status as keyof typeof dict.status] ?? p.status}</span>
                     </td>
                     <td className={ui.td}>
@@ -642,7 +680,7 @@ async function PumpsTab({
                 )
               )}
               {pumps.length === 0 && (
-                <tr><td className={ui.td} colSpan={11}><span className="text-ink-muted">{m.pumps.empty}</span></td></tr>
+                <tr><td className={ui.td} colSpan={12}><span className="text-ink-muted">{m.pumps.empty}</span></td></tr>
               )}
             </tbody>
           </table>
@@ -706,6 +744,10 @@ async function PumpsTab({
           <div>
             <label className={ui.label}>{m.shared.operatingCardExpiry}</label>
             <input name="operatingCardExpiry" type="date" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.shared.insurancePolicyExpiry}</label>
+            <input name="insurancePolicyExpiry" type="date" className={ui.input} />
           </div>
           <div>
             <label className={ui.label}>{m.pumps.f.defaultOperator}</label>
@@ -860,6 +902,7 @@ async function SupportVehicleTab({
               <th className={ui.th}>{m.shared.plateNumber}</th>
               <th className={ui.th}>{m.shared.periodicInspectionDueAt}</th>
               <th className={ui.th}>{m.shared.operatingCardExpiry}</th>
+              <th className={ui.th}>{m.shared.insurancePolicyExpiry}</th>
               <th className={ui.th}>{m.supportVehicle.col.defaultDriver}</th>
               <th className={ui.th}>{m.shared.status}</th>
               <th className={ui.th}>{m.shared.actions}</th>
@@ -869,7 +912,7 @@ async function SupportVehicleTab({
             {vehicles.map((v) =>
               editId === v.id ? (
                 <tr key={v.id}>
-                  <td className={ui.td} colSpan={10}>
+                  <td className={ui.td} colSpan={11}>
                     <form action={updateSupportVehicle} className="flex flex-wrap items-end gap-2">
                       <input type="hidden" name="id" value={v.id} />
                       <div>
@@ -924,6 +967,15 @@ async function SupportVehicleTab({
                         />
                       </div>
                       <div>
+                        <label className={ui.label}>{m.shared.insurancePolicyExpiry}</label>
+                        <input
+                          name="insurancePolicyExpiry"
+                          type="date"
+                          defaultValue={v.insurancePolicyExpiry ? new Date(v.insurancePolicyExpiry).toISOString().slice(0, 10) : ""}
+                          className={`${ui.input} w-40`}
+                        />
+                      </div>
+                      <div>
                         <label className={ui.label}>{m.supportVehicle.f.defaultDriver}</label>
                         <select name="defaultDriverId" defaultValue={v.defaultDriverId ?? ""} className={`${ui.select} w-40`}>
                           <option value="">{dict.field.none}</option>
@@ -967,6 +1019,13 @@ async function SupportVehicleTab({
                       return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
                     })()}
                   </td>
+                  <td className={ui.td}>
+                    {v.insurancePolicyExpiry ? new Date(v.insurancePolicyExpiry).toLocaleDateString() : "—"}
+                    {(() => {
+                      const flag = expiryFlag(v.insurancePolicyExpiry, nowMs, m.shared);
+                      return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
+                    })()}
+                  </td>
                   <td className={ui.td}>{v.defaultDriver?.name || "—"}</td>
                   <td className={ui.td}>
                     <span className={`${ui.chip} ${statusChip[v.status] ?? ""}`}>{dict.status[v.status as keyof typeof dict.status] ?? v.status}</span>
@@ -980,7 +1039,7 @@ async function SupportVehicleTab({
               )
             )}
             {vehicles.length === 0 && (
-              <tr><td className={ui.td} colSpan={10}><span className="text-ink-muted">{m.supportVehicle.empty}</span></td></tr>
+              <tr><td className={ui.td} colSpan={11}><span className="text-ink-muted">{m.supportVehicle.empty}</span></td></tr>
             )}
           </tbody>
         </table>
@@ -1025,6 +1084,10 @@ async function SupportVehicleTab({
         <div>
           <label className={ui.label}>{m.shared.operatingCardExpiry}</label>
           <input name="operatingCardExpiry" type="date" className={ui.input} />
+        </div>
+        <div>
+          <label className={ui.label}>{m.shared.insurancePolicyExpiry}</label>
+          <input name="insurancePolicyExpiry" type="date" className={ui.input} />
         </div>
         <div>
           <label className={ui.label}>{m.supportVehicle.f.defaultDriver}</label>

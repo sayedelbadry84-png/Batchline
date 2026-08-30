@@ -33,6 +33,7 @@ export async function createTruck(formData: FormData) {
   const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
   const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
   const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
+  const insurancePolicyExpiryRaw = String(formData.get("insurancePolicyExpiry") ?? "");
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
 
   if (!siteId || !code || !drumCapacityM3) return;
@@ -53,6 +54,7 @@ export async function createTruck(formData: FormData) {
       licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
       periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
       operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      insurancePolicyExpiry: insurancePolicyExpiryRaw ? new Date(insurancePolicyExpiryRaw) : null,
       defaultDriverId,
     },
   });
@@ -77,6 +79,7 @@ export async function updateTruck(formData: FormData) {
   const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
   const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
   const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
+  const insurancePolicyExpiryRaw = String(formData.get("insurancePolicyExpiry") ?? "");
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
   // status change (active/idle/maintenance/out-of-service) and plant
   // transfer both go through this same edit form — a plant transfer is
@@ -105,6 +108,7 @@ export async function updateTruck(formData: FormData) {
       licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
       periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
       operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      insurancePolicyExpiry: insurancePolicyExpiryRaw ? new Date(insurancePolicyExpiryRaw) : null,
       defaultDriverId,
       status,
     },
@@ -154,6 +158,7 @@ export async function createPump(formData: FormData) {
   const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
   const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
   const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
+  const insurancePolicyExpiryRaw = String(formData.get("insurancePolicyExpiry") ?? "");
   const defaultOperatorId = String(formData.get("defaultOperatorId") ?? "") || null;
   const defaultAssistantId = String(formData.get("defaultAssistantId") ?? "") || null;
 
@@ -176,6 +181,7 @@ export async function createPump(formData: FormData) {
       licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
       periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
       operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      insurancePolicyExpiry: insurancePolicyExpiryRaw ? new Date(insurancePolicyExpiryRaw) : null,
       defaultOperatorId,
       defaultAssistantId,
     },
@@ -202,6 +208,7 @@ export async function updatePump(formData: FormData) {
   const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
   const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
   const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
+  const insurancePolicyExpiryRaw = String(formData.get("insurancePolicyExpiry") ?? "");
   const defaultOperatorId = String(formData.get("defaultOperatorId") ?? "") || null;
   const defaultAssistantId = String(formData.get("defaultAssistantId") ?? "") || null;
   const status = String(formData.get("status") ?? "ACTIVE");
@@ -229,6 +236,7 @@ export async function updatePump(formData: FormData) {
       licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
       periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
       operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      insurancePolicyExpiry: insurancePolicyExpiryRaw ? new Date(insurancePolicyExpiryRaw) : null,
       defaultOperatorId,
       defaultAssistantId,
       status,
@@ -326,6 +334,7 @@ export async function createSupportVehicle(formData: FormData) {
   const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
   const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
   const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
+  const insurancePolicyExpiryRaw = String(formData.get("insurancePolicyExpiry") ?? "");
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
 
   if (!siteId || !type || !code) return;
@@ -345,6 +354,7 @@ export async function createSupportVehicle(formData: FormData) {
       licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
       periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
       operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      insurancePolicyExpiry: insurancePolicyExpiryRaw ? new Date(insurancePolicyExpiryRaw) : null,
       defaultDriverId,
     },
   });
@@ -366,6 +376,7 @@ export async function updateSupportVehicle(formData: FormData) {
   const licenseValidFromRaw = String(formData.get("licenseValidFrom") ?? "");
   const periodicInspectionDueAtRaw = String(formData.get("periodicInspectionDueAt") ?? "");
   const operatingCardExpiryRaw = String(formData.get("operatingCardExpiry") ?? "");
+  const insurancePolicyExpiryRaw = String(formData.get("insurancePolicyExpiry") ?? "");
   const defaultDriverId = String(formData.get("defaultDriverId") ?? "") || null;
   const status = String(formData.get("status") ?? "ACTIVE");
 
@@ -388,6 +399,7 @@ export async function updateSupportVehicle(formData: FormData) {
       licenseValidFrom: licenseValidFromRaw ? new Date(licenseValidFromRaw) : null,
       periodicInspectionDueAt: periodicInspectionDueAtRaw ? new Date(periodicInspectionDueAtRaw) : null,
       operatingCardExpiry: operatingCardExpiryRaw ? new Date(operatingCardExpiryRaw) : null,
+      insurancePolicyExpiry: insurancePolicyExpiryRaw ? new Date(insurancePolicyExpiryRaw) : null,
       defaultDriverId,
       status,
     },
