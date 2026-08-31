@@ -160,6 +160,12 @@ const ar = {
     notificationsEnabled: "الإشعارات الفورية مفعّلة",
     notificationsDenied: "الإشعارات محظورة — فعّلها من إعدادات المتصفح",
     openLocation: "فتح موقع العميل",
+    reportDelay: "الإبلاغ عن تأخير",
+    delayReasonLabel: "السبب",
+    delayReason: { TRAFFIC: "ازدحام مروري", BREAKDOWN: "عطل بالشاحنة", WEATHER: "سوء الأحوال الجوية", ACCIDENT: "حادث", OTHER: "أخرى" },
+    delayNotePlaceholder: "تفاصيل إضافية (اختياري)",
+    submitDelay: "إرسال البلاغ",
+    delayReportsTitle: "بلاغات التأخير على هذه الرحلة",
   },
   pumpCrew: {
     brand: "طاقم المضخة — باتشلاين",

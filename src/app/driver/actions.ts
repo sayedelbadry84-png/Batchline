@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser } from "@/lib/session";
 import { uploadFile, deleteFile } from "@/lib/blob";
+import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
@@ -32,6 +33,38 @@ export async function driverAdvanceTrip(formData: FormData) {
   await advanceTripBase(formData);
   revalidatePath(`/driver/trip/${tripId}`);
   revalidatePath("/driver");
+}
+
+const DELAY_REASONS = new Set(["TRAFFIC", "BREAKDOWN", "WEATHER", "ACCIDENT", "OTHER"]);
+
+// Real push (see src/lib/push.ts, via notify()) to dispatch the instant a
+// driver reports a delay — the whole point being that the office finds
+// out before the customer has to call and ask where their delivery is.
+export async function reportTripDelay(formData: FormData) {
+  const tripId = String(formData.get("tripId") ?? "");
+  const reason = String(formData.get("reason") ?? "");
+  const note = String(formData.get("note") ?? "").trim() || null;
+  if (!tripId || !DELAY_REASONS.has(reason)) return;
+  await requireOwnTrip(tripId);
+
+  const trip = await prisma.trip.findUnique({
+    where: { id: tripId },
+    select: { batchTicket: { select: { ticketNumber: true, reservation: { select: { reservationNumber: true, project: { select: { name: true } } } } } } },
+  });
+  if (!trip) return;
+
+  await prisma.tripDelayReport.create({ data: { tripId, reason, note } });
+
+  await logAudit({ module: "Fleet", recordId: tripId, afterValue: reason, reasonCode: "TRIP_DELAY_REPORTED" });
+  await notifyRoles(["PLANT_OPERATOR", "ADMIN"], {
+    title: trip.batchTicket.reservation.reservationNumber,
+    body: `${trip.batchTicket.ticketNumber} — ${trip.batchTicket.reservation.project.name}: ${reason}${note ? ` — ${note}` : ""}`,
+    link: "/trips",
+    module: "Fleet",
+  });
+
+  revalidatePath(`/driver/trip/${tripId}`);
+  revalidatePath("/trips");
 }
 
 export async function uploadDeliveryPhoto(formData: FormData) {

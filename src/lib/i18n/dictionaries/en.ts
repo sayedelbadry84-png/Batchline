@@ -162,6 +162,12 @@ const en: typeof ar = {
     notificationsEnabled: "Push notifications enabled",
     notificationsDenied: "Notifications blocked — enable them in your browser settings",
     openLocation: "Open customer location",
+    reportDelay: "Report a delay",
+    delayReasonLabel: "Reason",
+    delayReason: { TRAFFIC: "Traffic", BREAKDOWN: "Truck breakdown", WEATHER: "Bad weather", ACCIDENT: "Accident", OTHER: "Other" },
+    delayNotePlaceholder: "Additional detail (optional)",
+    submitDelay: "Submit report",
+    delayReportsTitle: "Delay reports on this trip",
   },
   pumpCrew: {
     brand: "Batchline Pump Crew",

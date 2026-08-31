@@ -34,6 +34,7 @@ export default async function TripsPage() {
         truck: true,
         driver: true,
         batchTicket: { include: { plant: true, mix: true, reservation: { include: { project: { include: { customer: true } } } } } },
+        delayReports: { orderBy: { reportedAt: "desc" }, take: 1 },
       },
       orderBy: { batchTime: "asc" },
     }),
@@ -99,6 +100,14 @@ export default async function TripsPage() {
                 </td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${statusChip[t.status] ?? ""}`}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</span>
+                  {t.delayReports.length > 0 && (
+                    <div className="mt-1">
+                      <span className={`${ui.chip} bg-critical-soft text-critical`}>
+                        {dict.driver.delayReason[t.delayReports[0].reason as keyof typeof dict.driver.delayReason] ?? t.delayReports[0].reason}
+                      </span>
+                      {t.delayReports[0].note && <div className="mt-1 text-xs text-ink-muted">{t.delayReports[0].note}</div>}
+                    </div>
+                  )}
                 </td>
                 <td className={ui.td}>
                   <DrumTimer batchTimeIso={t.batchTime.toISOString()} limitMinutes={t.batchTicket.plant.drumTimerLimitMinutes} />

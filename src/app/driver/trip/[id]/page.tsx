@@ -9,6 +9,7 @@ import {
   uploadDeliveryPhoto,
   confirmDeliveryFull,
   confirmDeliveryWithReturn,
+  reportTripDelay,
 } from "../../actions";
 
 export default async function DriverTripPage({
@@ -34,6 +35,7 @@ export default async function DriverTripPage({
         include: { plant: true, mix: true, reservation: { include: { project: { include: { customer: true } } } } },
       },
       drumReturn: true,
+      delayReports: { orderBy: { reportedAt: "desc" } },
     },
   });
   if (!trip) notFound();
@@ -92,6 +94,38 @@ export default async function DriverTripPage({
             {d.nextAction[trip.status as keyof typeof d.nextAction]}
           </button>
         </form>
+      )}
+
+      {trip.status !== "CLOSED" && (
+        <form action={reportTripDelay} className="flex flex-col gap-2 rounded-xl border border-warn/40 bg-warn-soft p-4">
+          <div className="text-sm font-medium text-warn">{d.reportDelay}</div>
+          <input type="hidden" name="tripId" value={trip.id} />
+          <div>
+            <label className="text-xs text-ink-muted">{d.delayReasonLabel}</label>
+            <select name="reason" required className="mt-1 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm">
+              <option value="TRAFFIC">{d.delayReason.TRAFFIC}</option>
+              <option value="BREAKDOWN">{d.delayReason.BREAKDOWN}</option>
+              <option value="WEATHER">{d.delayReason.WEATHER}</option>
+              <option value="ACCIDENT">{d.delayReason.ACCIDENT}</option>
+              <option value="OTHER">{d.delayReason.OTHER}</option>
+            </select>
+          </div>
+          <input name="note" placeholder={d.delayNotePlaceholder} className="rounded-md border border-border bg-surface px-3 py-2 text-sm" />
+          <button className="rounded-md border border-warn bg-surface py-2 text-sm font-medium text-warn">{d.submitDelay}</button>
+        </form>
+      )}
+
+      {trip.delayReports.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <div className="font-mono text-xs text-ink-muted uppercase">{d.delayReportsTitle}</div>
+          {trip.delayReports.map((r) => (
+            <div key={r.id} className="rounded-lg border border-border bg-surface px-3 py-2 text-sm">
+              <span className="font-medium">{d.delayReason[r.reason as keyof typeof d.delayReason] ?? r.reason}</span>
+              <span className="ms-2 font-mono text-xs text-ink-muted" dir="ltr">{new Date(r.reportedAt).toLocaleTimeString()}</span>
+              {r.note && <div className="mt-1 text-xs text-ink-muted">{r.note}</div>}
+            </div>
+          ))}
+        </div>
       )}
 
       {trip.status === "DISCHARGING" && (

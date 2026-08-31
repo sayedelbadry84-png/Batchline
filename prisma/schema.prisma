@@ -989,6 +989,25 @@ model Trip {
   consumedDrumReturn DrumReturn?  @relation("ReclaimConsumedInTrip")
   testBatches        TestBatch[]
   invoiceLine        InvoiceLine?
+  delayReports       TripDelayReport[]
+}
+
+// A driver-reported delay (traffic, breakdown, weather, accident) while a
+// trip is in progress — an append-only log, never overwritten, since a
+// single trip can genuinely hit more than one delay (stuck in traffic,
+// then later a flat tire). Concrete is time-sensitive (see DrumTimer),
+// so this exists to give dispatch/customer service a real, timestamped
+// reason for why a load is running long instead of them finding out only
+// once it's already a problem.
+model TripDelayReport {
+  id         String   @id @default(cuid())
+  tripId     String
+  trip       Trip     @relation(fields: [tripId], references: [id])
+  reason     String   // TRAFFIC, BREAKDOWN, WEATHER, ACCIDENT, OTHER
+  note       String?
+  reportedAt DateTime @default(now())
+
+  @@index([tripId, reportedAt])
 }
 
 model DrumReturn {
