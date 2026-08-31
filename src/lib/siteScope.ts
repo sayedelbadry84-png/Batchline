@@ -48,6 +48,20 @@ export async function getActiveSiteId(user: CurrentUser | null): Promise<string 
   return store.get(ACTIVE_SITE_COOKIE)?.value || null;
 }
 
+// The active site's brand color (see Site.accentColor / src/lib/
+// accentColor.ts), read once from the root layout — null for a logged-
+// out visitor, an ADMIN with no site picked, or a site that never set
+// one, all of which just mean "use the default amber" (see globals.css).
+// A stale/unassigned id from getActiveSiteId above simply finds no
+// matching Site row and falls through to that same default, same
+// fail-safe posture that function's own comment describes.
+export async function getActiveSiteAccentColor(user: CurrentUser | null): Promise<string | null> {
+  const siteId = await getActiveSiteId(user);
+  if (!siteId) return null;
+  const site = await prisma.site.findUnique({ where: { id: siteId }, select: { accentColor: true } });
+  return site?.accentColor ?? null;
+}
+
 // For models with their own plantId scalar, i.e. tied to a specific
 // station (Employee, Truck, Pump, MaterialReceipt, Silo, Hopper, Invoice,
 // ...) — NOT Reservation, which is booked at the Plant/Site level; see

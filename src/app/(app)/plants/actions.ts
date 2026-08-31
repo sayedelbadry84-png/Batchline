@@ -5,6 +5,7 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { extractYardLatLng } from "@/lib/mapLink";
 import { effectiveSiteId, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
+import { isValidHexColor } from "@/lib/accentColor";
 import { revalidatePath } from "next/cache";
 
 const PLANT_STATUSES = ["ACTIVE", "FROZEN", "DECOMMISSIONED"] as const;
@@ -34,10 +35,16 @@ export async function updateSite(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const city = String(formData.get("city") ?? "").trim();
   const country = String(formData.get("country") ?? "").trim() || null;
+  const accentColorRaw = String(formData.get("accentColor") ?? "").trim();
+  // Malformed input (shouldn't happen from the <input type="color"> this
+  // form actually submits, but defends the field either way) is dropped
+  // rather than saved as garbage — same "silently skip, don't corrupt"
+  // posture as every other soft-validated field in this app.
+  const accentColor = accentColorRaw && isValidHexColor(accentColorRaw) ? accentColorRaw.toLowerCase() : null;
   if (!id || !code || !name || !city) return;
 
   const before = await prisma.site.findUnique({ where: { id } });
-  await prisma.site.update({ where: { id }, data: { code, name, city, country } });
+  await prisma.site.update({ where: { id }, data: { code, name, city, country, accentColor } });
 
   await logAudit({
     module: "PlantManagement",

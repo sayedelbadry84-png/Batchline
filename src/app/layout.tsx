@@ -3,6 +3,9 @@ import { Oswald, IBM_Plex_Sans, IBM_Plex_Sans_Arabic, IBM_Plex_Mono } from "next
 import { getLocale } from "@/lib/i18n";
 import { dirFor } from "@/lib/i18n/config";
 import { getTheme } from "@/lib/theme";
+import { getCurrentUser } from "@/lib/session";
+import { getActiveSiteAccentColor } from "@/lib/siteScope";
+import { deriveAccentTheme, accentThemeCss } from "@/lib/accentColor";
 import { ServiceWorkerRegister } from "@/components/ServiceWorkerRegister";
 import "./globals.css";
 
@@ -52,6 +55,15 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   // the attribute entirely, leaving @media (prefers-color-scheme: dark)
   // in globals.css to decide.
   const theme = await getTheme();
+  // Per-site brand color (see Site.accentColor) — read alongside locale/
+  // theme so it's correct from the very first byte too, same no-flash
+  // reasoning. A logged-out visitor, an ADMIN viewing "all sites", or a
+  // site that never set one all just fall through to null, which emits
+  // no override at all — the default amber from globals.css stands
+  // completely untouched in that case.
+  const user = await getCurrentUser();
+  const accentColor = await getActiveSiteAccentColor(user);
+  const accentCss = accentColor ? accentThemeCss(deriveAccentTheme(accentColor)) : null;
 
   return (
     <html
@@ -60,6 +72,7 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
       data-theme={theme ?? undefined}
       className={`${oswald.variable} ${plexSans.variable} ${plexSansArabic.variable} ${plexMono.variable} h-full`}
     >
+      {accentCss && <style dangerouslySetInnerHTML={{ __html: accentCss }} />}
       <body className="min-h-full font-sans antialiased">
         <ServiceWorkerRegister />
         {children}

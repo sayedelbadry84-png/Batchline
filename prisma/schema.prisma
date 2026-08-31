@@ -155,6 +155,14 @@ model Site {
   name      String
   city      String
   country   String?
+  // Optional brand color ("#rrggbb") — when set, the whole app's accent
+  // hue (buttons, links, chips, glow) switches to this plant/company's
+  // own color for anyone viewing this site, in both light and dark theme
+  // (see src/lib/accentColor.ts for how the rest of the accent family is
+  // derived from this one value). Null means the default amber, exactly
+  // as globals.css already defines it — nothing changes for a site that
+  // never sets one.
+  accentColor String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

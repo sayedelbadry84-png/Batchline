@@ -4,6 +4,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createSite, updateSite, createPlant, updatePlant, updatePlantThresholds, updateZatcaSettings } from "./actions";
+import { AccentColorPicker } from "@/components/AccentColorPicker";
 
 const PLANT_STATUSES = ["ACTIVE", "FROZEN", "DECOMMISSIONED"] as const;
 const PLANT_STATUS_CHIP: Record<string, string> = {
@@ -85,6 +86,21 @@ export default async function PlantsPage({
                           <div>
                             <label className={ui.label}>{m.f.country}</label>
                             <input name="country" defaultValue={s.country ?? ""} className={`${ui.input} w-32`} />
+                          </div>
+                          <div className="w-full">
+                            <label className={ui.label}>{m.accentColorLabel}</label>
+                            <AccentColorPicker
+                              name="accentColor"
+                              defaultValue={s.accentColor}
+                              enableLabel={m.accentColorEnable}
+                              previewLabel={m.accentColorPreview}
+                              presets={[
+                                { label: m.accentColorPresets.blue, value: "#2563eb" },
+                                { label: m.accentColorPresets.green, value: "#16a34a" },
+                                { label: m.accentColorPresets.amber, value: "#d9761e" },
+                              ]}
+                            />
+                            <p className="mt-1 text-xs text-ink-muted">{m.accentColorHint}</p>
                           </div>
                           <button className={ui.button}>{dict.field.save}</button>
                           <Link href="/plants" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
