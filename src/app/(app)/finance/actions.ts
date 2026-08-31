@@ -5,7 +5,7 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
-import { postSupplierBill, postSupplierPayment, postCashTransaction } from "@/lib/ledger";
+import { postSupplierBill, postSupplierPayment, postCashTransaction, reverseJournalEntry } from "@/lib/ledger";
 import { revalidatePath } from "next/cache";
 
 const FINANCE_ROLES = ["ACCOUNTANT", "ADMIN"];
@@ -94,12 +94,23 @@ export async function cancelSupplierBill(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  const bill = await prisma.supplierBill.findUnique({ where: { id } });
-  if (!bill || bill.status === "PAID") return;
+  // Tightened to unpaid-only (was PAID-only before) — same reasoning as
+  // cancelInvoice's own guard: cancelling a bill that already has real
+  // SupplierPayment money moved against it can't be undone by simply
+  // reversing the bill's own entry (the payment's own Dr AP/Cr Cash entry
+  // would be left referencing a since-reversed AP balance). A
+  // partially-paid bill needs a credit memo from the supplier or a
+  // manual correction, not a one-click cancel — out of scope here.
+  const bill = await prisma.supplierBill.findUnique({ where: { id }, include: { payments: true } });
+  if (!bill || bill.status === "CANCELLED" || bill.status === "PAID" || bill.payments.length > 0) return;
 
   await prisma.supplierBill.update({ where: { id }, data: { status: "CANCELLED" } });
 
   await logAudit({ module: "Finance", recordId: id, afterValue: "CANCELLED", reasonCode: "SUPPLIER_BILL_CANCELLED" });
+  // Reverses whatever postSupplierBill posted at creation time (Dr
+  // COGS/Materials / Cr AP) — see the same reasoning on cancelInvoice's
+  // own reversal call in billing/actions.ts.
+  await reverseJournalEntry("Finance", id, "Supplier bill cancelled");
   revalidatePath("/finance");
 }
 

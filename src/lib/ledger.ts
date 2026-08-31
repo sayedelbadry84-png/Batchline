@@ -90,6 +90,38 @@ export async function postJournalEntry(params: {
   );
 }
 
+/**
+ * Posts a reversing entry for whatever was originally posted under this
+ * sourceModule/sourceRecordId — every debit becomes a credit and vice
+ * versa, same amounts, so the two entries net to zero on the Trial
+ * Balance. Never mutates or deletes the original entry (same
+ * never-rewrite-history posture as every other document in this app) —
+ * this is the standard double-entry way to undo a posting. A no-op if
+ * nothing was ever posted for this record (e.g. an Invoice with no
+ * plantId, which postInvoice's own callers already skip).
+ */
+export async function reverseJournalEntry(sourceModule: string, sourceRecordId: string, memo?: string): Promise<void> {
+  const original = await prisma.journalEntry.findFirst({ where: { sourceModule, sourceRecordId }, include: { lines: true } });
+  if (!original) return;
+
+  await withSequentialNumber(
+    "JE",
+    () => prisma.journalEntry.count(),
+    (entryNumber) =>
+      prisma.journalEntry.create({
+        data: {
+          entryNumber,
+          siteId: original.siteId,
+          currency: original.currency,
+          sourceModule,
+          sourceRecordId,
+          memo: memo ?? `Reversal of ${original.entryNumber}`,
+          lines: { create: original.lines.map((l) => ({ accountId: l.accountId, debit: l.credit, credit: l.debit })) },
+        },
+      }),
+  );
+}
+
 // --- One small poster per real financial event, called right after the
 // event's own existing create/update — see billing/actions.ts,
 // finance/actions.ts, and employees/payroll/actions.ts for the call

@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { parseNetDays, invoiceAmountDue } from "@/lib/billing";
-import { postInvoice, postPayment, postCreditNote } from "@/lib/ledger";
+import { postInvoice, postPayment, postCreditNote, reverseJournalEntry } from "@/lib/ledger";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
@@ -182,6 +182,11 @@ export async function cancelInvoice(formData: FormData) {
     afterValue: "CANCELLED",
     reasonCode: "INVOICE_CANCELLED",
   });
+  // Reverses whatever postInvoice posted at generation time (Dr AR / Cr
+  // Revenue [/ Cr Tax Payable]) — without this, a cancelled invoice
+  // permanently overstates AR and Revenue on the Trial Balance forever,
+  // since postInvoice already ran and nothing else ever corrects it.
+  await reverseJournalEntry("Billing", id, "Invoice cancelled");
 
   revalidatePath(`/finance/invoices/${id}`);
   revalidatePath("/finance");
