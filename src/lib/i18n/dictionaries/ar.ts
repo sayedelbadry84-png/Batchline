@@ -1243,6 +1243,7 @@ const ar = {
         profitability: "الربحية",
       },
       exportCsv: "تصدير CSV",
+      exportExcel: "تصدير Excel",
       exportPdf: "تصدير PDF",
       sendWhatsApp: "إرسال عبر واتساب",
       whatsAppPrompt: "رقم واتساب مع رمز الدولة",

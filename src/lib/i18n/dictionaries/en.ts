@@ -1250,6 +1250,7 @@ const en: typeof ar = {
         profitability: "Profitability",
       },
       exportCsv: "Export CSV",
+      exportExcel: "Export Excel",
       exportPdf: "Export PDF",
       sendWhatsApp: "Send via WhatsApp",
       whatsAppPrompt: "WhatsApp number, with country code",

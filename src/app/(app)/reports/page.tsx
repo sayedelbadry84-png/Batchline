@@ -10,6 +10,7 @@ import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
 import { CsvExportButton } from "@/components/CsvExportButton";
+import { ExcelExportButton } from "@/components/ExcelExportButton";
 import { rowsToCsv } from "@/lib/csv";
 import {
   getProductionReport,
@@ -48,25 +49,31 @@ function fmt(n: number | null, digits = 1, suffix = "") {
   return `${n.toFixed(digits)}${suffix}`;
 }
 
-// Report export bar shared by every non-overview tab: date range + Print +
-// WhatsApp. `message` is the pre-built plain-text summary for that tab.
+// Report export bar shared by every non-overview tab: date range + CSV +
+// Excel + Print + WhatsApp. `message` is the pre-built plain-text summary
+// for that tab. headers/rows are the same tabular data every tab already
+// builds once — CSV and the real .xlsx (see ExcelExportButton) are both
+// derived from it here rather than each tab building two separate exports.
 function ExportBar({
   m,
   tab,
   from,
   to,
   message,
-  csv,
-  csvFilename,
+  headers,
+  rows,
+  filenameBase,
 }: {
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["reports"];
   tab: ReportTab;
   from: string;
   to: string;
   message: string;
-  csv?: string;
-  csvFilename?: string;
+  headers?: string[];
+  rows?: (string | number)[][];
+  filenameBase?: string;
 }) {
+  const csv = headers && rows ? rowsToCsv(headers, rows) : undefined;
   return (
     <form action={`/reports`} className="no-print flex flex-wrap items-end gap-3">
       <input type="hidden" name="tab" value={tab} />
@@ -80,7 +87,10 @@ function ExportBar({
       </div>
       <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">{m.applyRange}</button>
       <div className="ms-auto flex gap-2">
-        {csv && csvFilename && <CsvExportButton label={m.exportCsv} filename={csvFilename} csv={csv} />}
+        {csv && filenameBase && <CsvExportButton label={m.exportCsv} filename={`${filenameBase}.csv`} csv={csv} />}
+        {headers && rows && filenameBase && (
+          <ExcelExportButton label={m.exportExcel} filename={`${filenameBase}.xlsx`} sheetName={m.tabs[tab]} headers={headers} rows={rows} />
+        )}
         <PrintButton label={m.exportPdf} />
         <WhatsAppShareButton label={m.sendWhatsApp} promptLabel={m.whatsAppPrompt} message={message} />
       </div>
@@ -637,24 +647,22 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.production} ${rangeFrom} → ${rangeTo}\n${m.production.totalVolume(production.totalVolumeM3.toFixed(1))}\n${m.production.ticketCount(production.ticketCount)} (${m.production.completedCount(production.completedCount)})`}
-            csvFilename={`production-${rangeFrom}-${rangeTo}.csv`}
-            csv={rowsToCsv(
-              ["Ticket", "Project", "Customer", "Customer code", "Reservation", "Mix", "Grade", "Pour location", "Volume m3", "Status", "Released", "Load time"],
-              production.rows.map((t) => [
-                t.ticketNumber,
-                t.reservation.project.name,
-                t.reservation.project.customer.legalName,
-                t.reservation.project.customer.code ?? "",
-                t.reservation.reservationNumber,
-                t.mix.code,
-                t.mix.grade,
-                t.reservation.siteLocation ?? "",
-                t.volumeM3,
-                t.status,
-                new Date(t.releasedAt).toISOString(),
-                t.batchCompletedAt ? new Date(t.batchCompletedAt).toISOString() : "",
-              ]),
-            )}
+            filenameBase={`production-${rangeFrom}-${rangeTo}`}
+            headers={["Ticket", "Project", "Customer", "Customer code", "Reservation", "Mix", "Grade", "Pour location", "Volume m3", "Status", "Released", "Load time"]}
+            rows={production.rows.map((t) => [
+              t.ticketNumber,
+              t.reservation.project.name,
+              t.reservation.project.customer.legalName,
+              t.reservation.project.customer.code ?? "",
+              t.reservation.reservationNumber,
+              t.mix.code,
+              t.mix.grade,
+              t.reservation.siteLocation ?? "",
+              t.volumeM3,
+              t.status,
+              new Date(t.releasedAt).toISOString(),
+              t.batchCompletedAt ? new Date(t.batchCompletedAt).toISOString() : "",
+            ])}
           />
           <div className="flex gap-4">
             <div className={ui.card}>
@@ -723,11 +731,9 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.incoming} ${rangeFrom} → ${rangeTo}\n${m.incoming.totalNetWeight(incoming.totalNetKg.toFixed(0))}\n${m.incoming.receiptCount(incoming.receiptCount)}`}
-            csvFilename={`incoming-${rangeFrom}-${rangeTo}.csv`}
-            csv={rowsToCsv(
-              ["Received", "Supplier", "Material", "Net weight kg", "PO", "QC status", "Driver"],
-              incoming.rows.map((r) => [new Date(r.receivedAt).toISOString(), r.supplier.name, r.material.name, r.netWeightKg, r.poNumber ?? "", r.qcStatus, r.driver?.name ?? r.driverName ?? ""]),
-            )}
+            filenameBase={`incoming-${rangeFrom}-${rangeTo}`}
+            headers={["Received", "Supplier", "Material", "Net weight kg", "PO", "QC status", "Driver"]}
+            rows={incoming.rows.map((r) => [new Date(r.receivedAt).toISOString(), r.supplier.name, r.material.name, r.netWeightKg, r.poNumber ?? "", r.qcStatus, r.driver?.name ?? r.driverName ?? ""])}
           />
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{incoming.totalNetKg.toFixed(0)} kg</div>
@@ -775,11 +781,9 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.consumption} ${rangeFrom} → ${rangeTo}\n${m.consumption.ticketCount(consumption.ticketCount)}\n${consumption.rows.map((r) => `${r.materialName}: ${(r.massKg / 1000).toFixed(2)} t`).join("\n")}`}
-            csvFilename={`consumption-${rangeFrom}-${rangeTo}.csv`}
-            csv={rowsToCsv(
-              ["Material", "Type", "Mass kg", "Tickets"],
-              consumption.rows.map((r) => [r.materialName, r.type, r.massKg, r.ticketCount]),
-            )}
+            filenameBase={`consumption-${rangeFrom}-${rangeTo}`}
+            headers={["Material", "Type", "Mass kg", "Tickets"]}
+            rows={consumption.rows.map((r) => [r.materialName, r.type, r.massKg, r.ticketCount])}
           />
           <div className={ui.card}>
             <table className={ui.table}>
@@ -818,21 +822,19 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.profitability} ${rangeFrom} → ${rangeTo}\n${m.profitability.revenue}: ${profitability.revenue.toLocaleString()}\n${m.profitability.totalCost}: ${profitability.totalCost.toLocaleString()}\n${m.profitability.margin}: ${profitability.margin.toLocaleString()}`}
-            csvFilename={`profitability-${rangeFrom}-${rangeTo}.csv`}
-            csv={rowsToCsv(
-              ["Metric", "Amount"],
-              [
-                [m.profitability.revenue, profitability.revenue],
-                [m.profitability.materialCost, profitability.materialCost],
-                [m.profitability.laborCost, profitability.laborCost],
-                [m.profitability.maintenanceCost, profitability.maintenanceCost],
-                [m.profitability.fuelCost, profitability.fuelCost],
-                [m.profitability.utilitiesCost, profitability.utilitiesCost],
-                [m.profitability.otherCost, profitability.otherCost],
-                [m.profitability.totalCost, profitability.totalCost],
-                [m.profitability.margin, profitability.margin],
-              ],
-            )}
+            filenameBase={`profitability-${rangeFrom}-${rangeTo}`}
+            headers={["Metric", "Amount"]}
+            rows={[
+              [m.profitability.revenue, profitability.revenue],
+              [m.profitability.materialCost, profitability.materialCost],
+              [m.profitability.laborCost, profitability.laborCost],
+              [m.profitability.maintenanceCost, profitability.maintenanceCost],
+              [m.profitability.fuelCost, profitability.fuelCost],
+              [m.profitability.utilitiesCost, profitability.utilitiesCost],
+              [m.profitability.otherCost, profitability.otherCost],
+              [m.profitability.totalCost, profitability.totalCost],
+              [m.profitability.margin, profitability.margin],
+            ]}
           />
 
           {profitability.unpricedComponents > 0 && (
@@ -951,28 +953,26 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.returns} ${rangeFrom} → ${rangeTo}\n${m.returnsReport.totalReturned(returnsData.totalReturnedM3.toFixed(1))}\n${m.returnsReport.wasted(returnsData.wastedM3.toFixed(1))}`}
-            csvFilename={`returns-${rangeFrom}-${rangeTo}.csv`}
-            csv={rowsToCsv(
-              ["Discharged", "Truck", "Driver", "Project", "Customer", "Customer code", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Returned m3", "Disposition", "Reason", "Quality approval", "Quality finding"],
-              returnsData.rows.map((r) => [
-                r.trip.dischargeEnd ? new Date(r.trip.dischargeEnd).toISOString() : "",
-                r.trip.truck.code,
-                r.trip.driver.name,
-                r.trip.batchTicket.reservation.project.name,
-                r.trip.batchTicket.reservation.project.customer.legalName,
-                r.trip.batchTicket.reservation.project.customer.code ?? "",
-                r.trip.batchTicket.ticketNumber,
-                r.trip.batchTicket.reservation.reservationNumber,
-                r.trip.batchTicket.mix.code,
-                r.trip.batchTicket.mix.grade,
-                r.trip.batchTicket.reservation.siteLocation ?? "",
-                r.returnedVolumeM3,
-                r.disposition,
-                r.reasonCode ?? "",
-                r.reasonCode === "QUALITY_REJECTED" ? (r.wasteMemo?.status === "APPROVED" ? "APPROVED" : "PENDING") : "",
-                r.wasteMemo?.approvalNote ?? "",
-              ]),
-            )}
+            filenameBase={`returns-${rangeFrom}-${rangeTo}`}
+            headers={["Discharged", "Truck", "Driver", "Project", "Customer", "Customer code", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Returned m3", "Disposition", "Reason", "Quality approval", "Quality finding"]}
+            rows={returnsData.rows.map((r) => [
+              r.trip.dischargeEnd ? new Date(r.trip.dischargeEnd).toISOString() : "",
+              r.trip.truck.code,
+              r.trip.driver.name,
+              r.trip.batchTicket.reservation.project.name,
+              r.trip.batchTicket.reservation.project.customer.legalName,
+              r.trip.batchTicket.reservation.project.customer.code ?? "",
+              r.trip.batchTicket.ticketNumber,
+              r.trip.batchTicket.reservation.reservationNumber,
+              r.trip.batchTicket.mix.code,
+              r.trip.batchTicket.mix.grade,
+              r.trip.batchTicket.reservation.siteLocation ?? "",
+              r.returnedVolumeM3,
+              r.disposition,
+              r.reasonCode ?? "",
+              r.reasonCode === "QUALITY_REJECTED" ? (r.wasteMemo?.status === "APPROVED" ? "APPROVED" : "PENDING") : "",
+              r.wasteMemo?.approvalNote ?? "",
+            ])}
           />
           <div className="flex gap-4">
             <div className={ui.card}>
@@ -1068,25 +1068,23 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.trips} ${rangeFrom} → ${rangeTo}\n${m.tripsReport.totalDelivered(tripsData.totalDeliveredM3.toFixed(1))}\n${m.tripsReport.tripCount(tripsData.tripCount)}`}
-            csvFilename={`trips-${rangeFrom}-${rangeTo}.csv`}
-            csv={rowsToCsv(
-              ["Discharged", "Truck", "Driver", "Project", "Customer", "Customer code", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Load time", "Delivered m3"],
-              tripsData.rows.map((t) => [
-                t.dischargeEnd ? new Date(t.dischargeEnd).toISOString() : "",
-                t.truck.code,
-                t.driver.name,
-                t.batchTicket.reservation.project.name,
-                t.batchTicket.reservation.project.customer.legalName,
-                t.batchTicket.reservation.project.customer.code ?? "",
-                t.batchTicket.ticketNumber,
-                t.batchTicket.reservation.reservationNumber,
-                t.batchTicket.mix.code,
-                t.batchTicket.mix.grade,
-                t.batchTicket.reservation.siteLocation ?? "",
-                t.batchTicket.batchCompletedAt ? new Date(t.batchTicket.batchCompletedAt).toISOString() : "",
-                t.volumeDeliveredM3 ?? 0,
-              ]),
-            )}
+            filenameBase={`trips-${rangeFrom}-${rangeTo}`}
+            headers={["Discharged", "Truck", "Driver", "Project", "Customer", "Customer code", "Ticket", "Reservation", "Mix", "Grade", "Pour location", "Load time", "Delivered m3"]}
+            rows={tripsData.rows.map((t) => [
+              t.dischargeEnd ? new Date(t.dischargeEnd).toISOString() : "",
+              t.truck.code,
+              t.driver.name,
+              t.batchTicket.reservation.project.name,
+              t.batchTicket.reservation.project.customer.legalName,
+              t.batchTicket.reservation.project.customer.code ?? "",
+              t.batchTicket.ticketNumber,
+              t.batchTicket.reservation.reservationNumber,
+              t.batchTicket.mix.code,
+              t.batchTicket.mix.grade,
+              t.batchTicket.reservation.siteLocation ?? "",
+              t.batchTicket.batchCompletedAt ? new Date(t.batchTicket.batchCompletedAt).toISOString() : "",
+              t.volumeDeliveredM3 ?? 0,
+            ])}
           />
           <div className="flex gap-4">
             <div className={ui.card}>
@@ -1197,14 +1195,12 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.equipment} ${rangeFrom} → ${rangeTo}\n${equipmentData.trucks.map((t) => `${t.code}: ${t.tripCount} trips, ${t.volumeM3.toFixed(1)} m³`).join("\n")}`}
-            csvFilename={`equipment-${rangeFrom}-${rangeTo}.csv`}
-            csv={rowsToCsv(
-              ["Type", "Code", "Trips", "Volume m3"],
-              [
-                ...equipmentData.trucks.map((t) => ["Truck", t.code, t.tripCount, t.volumeM3]),
-                ...equipmentData.pumps.map((p) => ["Pump", p.code, p.tripCount, p.volumeM3]),
-              ],
-            )}
+            filenameBase={`equipment-${rangeFrom}-${rangeTo}`}
+            headers={["Type", "Code", "Trips", "Volume m3"]}
+            rows={[
+              ...equipmentData.trucks.map((t) => ["Truck", t.code, t.tripCount, t.volumeM3]),
+              ...equipmentData.pumps.map((p) => ["Pump", p.code, p.tripCount, p.volumeM3]),
+            ]}
           />
           <div className="grid grid-cols-2 gap-6">
             <div className={ui.card}>
@@ -1267,11 +1263,9 @@ export default async function ReportsPage({
             from={rangeFrom}
             to={rangeTo}
             message={`${m.tabs.workers} ${rangeFrom} → ${rangeTo}\n${workersData.rows.map((r) => `${r.name} (${dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role}): ${r.count}`).join("\n")}`}
-            csvFilename={`workers-${rangeFrom}-${rangeTo}.csv`}
-            csv={rowsToCsv(
-              ["Name", "Role", "Count", "Volume"],
-              workersData.rows.map((r) => [r.name, dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role, r.count, r.volumeM3]),
-            )}
+            filenameBase={`workers-${rangeFrom}-${rangeTo}`}
+            headers={["Name", "Role", "Count", "Volume"]}
+            rows={workersData.rows.map((r) => [r.name, dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role, r.count, r.volumeM3])}
           />
           <div className={ui.card}>
             <table className={ui.table}>
@@ -1313,12 +1307,10 @@ export default async function ReportsPage({
             message={`${m.tabs.incentives} ${rangeFrom} → ${rangeTo}\n${incentivesData.byRole
               .flatMap((g) => g.rows.map((r) => `${r.name} (${dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role}): ${r.payout.toFixed(0)}`))
               .join("\n")}`}
-            csvFilename={`incentives-${rangeFrom}-${rangeTo}.csv`}
-            csv={rowsToCsv(
-              ["Name", "Role", "Trips", "Volume m3", "Sites", "Payout"],
-              incentivesData.byRole.flatMap((g) =>
-                g.rows.map((r) => [r.name, dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role, r.tripCount, r.volumeM3, r.siteCount, r.payout]),
-              ),
+            filenameBase={`incentives-${rangeFrom}-${rangeTo}`}
+            headers={["Name", "Role", "Trips", "Volume m3", "Sites", "Payout"]}
+            rows={incentivesData.byRole.flatMap((g) =>
+              g.rows.map((r) => [r.name, dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role, r.tripCount, r.volumeM3, r.siteCount, r.payout]),
             )}
           />
           <p className="text-sm text-ink-muted">{m.incentivesReport.intro}</p>
