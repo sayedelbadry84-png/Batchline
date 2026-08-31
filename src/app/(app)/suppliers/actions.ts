@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
+import { CO2E_FACTOR_KG_PER_KG } from "@/lib/carbon";
 import { revalidatePath } from "next/cache";
 
 export async function createSupplier(formData: FormData) {
@@ -38,10 +39,15 @@ export async function createMaterial(formData: FormData) {
   const specificGravity = Number(formData.get("specificGravity") ?? 0) || null;
   const absorptionPct = Number(formData.get("absorptionPct") ?? 0) || null;
   const lastUnitCost = Number(formData.get("lastUnitCost") ?? 0) || null;
+  // Explicit 0 is a real, meaningful override (e.g. a recycled/by-product
+  // material with no attributed footprint) — only an entirely blank field
+  // falls back to the standard published default for this material type.
+  const co2FactorRaw = String(formData.get("co2FactorKgPerKg") ?? "").trim();
+  const co2FactorKgPerKg = co2FactorRaw ? Number(co2FactorRaw) : (CO2E_FACTOR_KG_PER_KG[type] ?? null);
   if (!name || !type) return;
 
   const material = await prisma.material.create({
-    data: { supplierId, name, type, brand, specificGravity, absorptionPct, lastUnitCost },
+    data: { supplierId, name, type, brand, specificGravity, absorptionPct, lastUnitCost, co2FactorKgPerKg },
   });
 
   await logAudit({ module: "Suppliers", recordId: material.id, afterValue: name, reasonCode: "MATERIAL_CREATED" });
@@ -76,11 +82,12 @@ export async function updateMaterial(formData: FormData) {
   const specificGravity = Number(formData.get("specificGravity") ?? 0) || null;
   const absorptionPct = Number(formData.get("absorptionPct") ?? 0) || null;
   const lastUnitCost = Number(formData.get("lastUnitCost") ?? 0) || null;
+  const co2FactorKgPerKg = Number(formData.get("co2FactorKgPerKg") ?? 0) || null;
   if (!id || !name || !type) return;
 
   await prisma.material.update({
     where: { id },
-    data: { supplierId, name, type, brand, specificGravity, absorptionPct, lastUnitCost },
+    data: { supplierId, name, type, brand, specificGravity, absorptionPct, lastUnitCost, co2FactorKgPerKg },
   });
 
   await logAudit({ module: "Suppliers", recordId: id, afterValue: name, reasonCode: "MATERIAL_UPDATED" });

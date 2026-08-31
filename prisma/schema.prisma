@@ -355,6 +355,15 @@ model Material {
   // getProfitabilityReport to price consumed mass; null means "no cost
   // data for this material yet", surfaced there rather than treated as 0.
   lastUnitCost    Float?
+  // kg of embodied CO2e per kg of this material — same "manually
+  // maintained, null means no data yet, never fabricated" shape as
+  // lastUnitCost above. Prefilled from CO2E_FACTOR_KG_PER_KG (a standard
+  // published industry figure per material type, src/lib/carbon.ts) when
+  // a new Material is created, but always the plant's own number to
+  // override once they have a real supplier EPD/factor — estimateCo2eKg
+  // prefers this per-material figure and only falls back to the generic
+  // table when it's null.
+  co2FactorKgPerKg Float?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 

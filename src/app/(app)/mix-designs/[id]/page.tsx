@@ -45,7 +45,7 @@ export default async function MixDesignDetailPage({
   }
   const totalMassKg = mix.components.reduce((sum, c) => sum + c.designMassKgPerM3, 0);
   const embodiedCo2eKg = mix.components.reduce(
-    (sum, c) => sum + estimateCo2eKg(c.material.type, c.designMassKgPerM3),
+    (sum, c) => sum + estimateCo2eKg(c.material.type, c.designMassKgPerM3, c.material.co2FactorKgPerKg),
     0,
   );
 

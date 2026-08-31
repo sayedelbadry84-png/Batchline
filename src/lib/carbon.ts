@@ -9,6 +9,15 @@
 // plant — every surface that shows a number derived from this table says
 // so explicitly, the same honesty discipline the Reports page already
 // applies to metrics it can't back with real data.
+//
+// Materials also carry their own Material.co2FactorKgPerKg — prefilled
+// from this table when a material is created (see createMaterial in
+// suppliers/actions.ts), but always the plant's own number to override
+// once they have a real supplier EPD/factor. estimateCo2eKg prefers that
+// per-material figure when one is on file and only falls back to this
+// generic table when it isn't — same "prefer this plant's own data, fall
+// back to a disclosed generic default" posture strength-prediction.ts and
+// demand.ts already use.
 export const CO2E_FACTOR_KG_PER_KG: Record<string, number> = {
   CEMENT: 0.83,
   FLY_ASH: 0.015,
@@ -20,7 +29,7 @@ export const CO2E_FACTOR_KG_PER_KG: Record<string, number> = {
   WATER: 0.0003,
 };
 
-export function estimateCo2eKg(materialType: string, massKg: number): number {
-  const factor = CO2E_FACTOR_KG_PER_KG[materialType];
+export function estimateCo2eKg(materialType: string, massKg: number, materialFactorOverride?: number | null): number {
+  const factor = materialFactorOverride ?? CO2E_FACTOR_KG_PER_KG[materialType];
   return factor == null ? 0 : factor * massKg;
 }

@@ -211,7 +211,7 @@ export default async function ReportsPage({
   const co2e7dKg = completedTickets
     .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= since)
     .flatMap((t) => t.components)
-    .reduce((sum, c) => sum + estimateCo2eKg(c.material.type, c.actualMassKg ?? c.targetMassKg), 0);
+    .reduce((sum, c) => sum + estimateCo2eKg(c.material.type, c.actualMassKg ?? c.targetMassKg, c.material.co2FactorKgPerKg), 0);
   const co2ePerM3 = produced7d > 0 ? co2e7dKg / produced7d : null;
 
   // --- Anomaly detection: statistical outliers + directional drift per
