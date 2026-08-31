@@ -322,6 +322,15 @@ export default async function EmployeesPage({
               <label className={ui.label}>{m.crewF.phone}</label>
               <input name="phone" className={ui.input} dir="ltr" />
             </div>
+            <div>
+              <label className={ui.label}>{m.crewF.loginEmail}</label>
+              <input name="loginEmail" type="email" className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.crewF.loginPassword}</label>
+              <input name="loginPassword" type="password" minLength={8} className={ui.input} dir="ltr" />
+            </div>
+            <p className="text-xs text-ink-muted">{m.loginAccountHint}</p>
             <button type="submit" className={`${ui.button} mt-2`}>
               {m.add}
             </button>
@@ -764,6 +773,19 @@ export default async function EmployeesPage({
               <label className={ui.label}>{m.f.code}</label>
               <input name="code" className={ui.input} dir="ltr" />
             </div>
+            {tab === "mixerDriver" && (
+              <>
+                <div>
+                  <label className={ui.label}>{m.f.loginEmail}</label>
+                  <input name="loginEmail" type="email" className={ui.input} dir="ltr" />
+                </div>
+                <div>
+                  <label className={ui.label}>{m.f.loginPassword}</label>
+                  <input name="loginPassword" type="password" minLength={8} className={ui.input} dir="ltr" />
+                </div>
+                <p className="text-xs text-ink-muted">{m.loginAccountHint}</p>
+              </>
+            )}
             {tab === "admin" && (
               <div>
                 <label className={ui.label}>{m.f.role}</label>

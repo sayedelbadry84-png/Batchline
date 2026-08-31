@@ -6,14 +6,16 @@
 // response. Actual offline *writes* are handled at the app level (see
 // src/lib/offlineQueue.ts), not here.
 const CACHE_NAME = "batchline-shell-v1";
-// Both offline-relevant shells — the plant-floor tablet UI and the
-// driver's own mobile UI, two different roles, two different pages. Both
-// get precached so an offline navigation can fall back to whichever one
-// actually matches what the user was trying to reach (see the fetch
-// handler below) instead of always bouncing everyone to /operator.
+// Every offline-relevant shell — the plant-floor tablet UI, the driver's
+// own mobile UI, and the pump crew's — three different roles, three
+// different pages. All get precached so an offline navigation can fall
+// back to whichever one actually matches what the user was trying to
+// reach (see the fetch handler below) instead of always bouncing everyone
+// to /operator.
 const OPERATOR_SHELL = "/operator";
 const DRIVER_SHELL = "/driver";
-const APP_SHELL = [OPERATOR_SHELL, DRIVER_SHELL, "/manifest.json", "/icon.svg"];
+const PUMP_CREW_SHELL = "/pump-crew";
+const APP_SHELL = [OPERATOR_SHELL, DRIVER_SHELL, PUMP_CREW_SHELL, "/manifest.json", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -52,12 +54,16 @@ self.addEventListener("fetch", (event) => {
   // online), falling back to the last cached shell when the network
   // fails — the yard/floor scenario this whole feature exists for. The
   // fallback shell matches the role the failed navigation was actually
-  // for (driver vs. operator) — a driver who goes offline mid-shift must
-  // land back on their own /driver shell, not get bounced into the
-  // plant-operator UI just because that's the only shell this worker used
-  // to remember.
+  // for (driver vs. pump crew vs. operator) — a driver who goes offline
+  // mid-shift must land back on their own /driver shell, not get bounced
+  // into some other role's UI just because that's the only shell this
+  // worker used to remember.
   if (request.mode === "navigate") {
-    const fallbackShell = url.pathname.startsWith(DRIVER_SHELL) ? DRIVER_SHELL : OPERATOR_SHELL;
+    const fallbackShell = url.pathname.startsWith(DRIVER_SHELL)
+      ? DRIVER_SHELL
+      : url.pathname.startsWith(PUMP_CREW_SHELL)
+        ? PUMP_CREW_SHELL
+        : OPERATOR_SHELL;
     event.respondWith(
       fetch(request)
         .then((res) => {

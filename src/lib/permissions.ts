@@ -63,22 +63,23 @@ export const MODULE_ROLES = {
 export type ModuleKey = keyof typeof MODULE_ROLES;
 
 // The login roles a module's access can actually be granted to — the same
-// list Users offers when creating an account. DRIVER is deliberately
-// excluded: drivers get their own /driver surface (see (app)/layout.tsx)
-// and never see this sidebar, so there's nothing here to grant them.
+// list Users offers when creating an account. DRIVER and PUMP_OPERATOR are
+// deliberately excluded: both get their own phone-first surface (/driver,
+// /pump-crew — see (app)/layout.tsx) and never see this sidebar, so
+// there's nothing here to grant them.
 export const ASSIGNABLE_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "ADMIN"] as const;
 export type AssignableRole = (typeof ASSIGNABLE_ROLES)[number];
 
-// The real, dynamic role roster (see the Role model + /roles) — DRIVER
-// stays excluded here too, same reasoning as ASSIGNABLE_ROLES above.
-// ASSIGNABLE_ROLES itself is left as-is: it's still the compiled fallback
-// getEffectiveRoles/getEffectiveActionRoles fall back to for a module with
-// no MODULE_ROLES default and no saved RolePermission rows, and changing
-// what "everyone" resolves to for old modules isn't part of this change.
-// Screens that render a role *picker* (Users, Permissions) should call
-// this instead of reading ASSIGNABLE_ROLES directly.
+// The real, dynamic role roster (see the Role model + /roles) — DRIVER and
+// PUMP_OPERATOR stay excluded here too, same reasoning as ASSIGNABLE_ROLES
+// above. ASSIGNABLE_ROLES itself is left as-is: it's still the compiled
+// fallback getEffectiveRoles/getEffectiveActionRoles fall back to for a
+// module with no MODULE_ROLES default and no saved RolePermission rows,
+// and changing what "everyone" resolves to for old modules isn't part of
+// this change. Screens that render a role *picker* (Users, Permissions)
+// should call this instead of reading ASSIGNABLE_ROLES directly.
 export async function getAllRoles() {
-  return prisma.role.findMany({ where: { key: { not: "DRIVER" } }, orderBy: { createdAt: "asc" } });
+  return prisma.role.findMany({ where: { key: { notIn: ["DRIVER", "PUMP_OPERATOR"] } }, orderBy: { createdAt: "asc" } });
 }
 
 // One entry per module the sidebar/permissions screen knows about — the

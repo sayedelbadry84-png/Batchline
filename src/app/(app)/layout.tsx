@@ -10,8 +10,10 @@ import { Sidebar } from "@/components/Sidebar";
 export default async function AppLayout({ children }: LayoutProps<"/">) {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
-  // Drivers have their own phone-first surface — the back office isn't for them.
+  // Drivers and pump crew each have their own phone-first surface — the
+  // back office isn't for them.
   if (user.role === "DRIVER") redirect("/driver");
+  if (user.role === "PUMP_OPERATOR") redirect("/pump-crew");
 
   const { locale, dict } = await getDictionary();
   const theme = await getTheme();

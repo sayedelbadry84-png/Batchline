@@ -10,6 +10,16 @@ import { redirect } from "next/navigation";
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
 
+// DRIVER and PUMP_OPERATOR each have their own phone-first surface instead
+// of the back-office sidebar — see the matching redirect in
+// src/app/(app)/layout.tsx, and the exclusion of both roles from
+// ASSIGNABLE_ROLES/getAllRoles in src/lib/permissions.ts.
+function postLoginPath(role: string): string {
+  if (role === "DRIVER") return "/driver";
+  if (role === "PUMP_OPERATOR") return "/pump-crew";
+  return "/";
+}
+
 export async function login(formData: FormData) {
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
   const password = String(formData.get("password") ?? "");
@@ -68,7 +78,7 @@ export async function login(formData: FormData) {
   // session orphaned in the database.
   await destroySession();
   await createSession(user.id);
-  redirect(user.role === "DRIVER" ? "/driver" : "/");
+  redirect(postLoginPath(user.role));
 }
 
 export async function verifyTotpLogin(formData: FormData) {
@@ -100,7 +110,7 @@ export async function verifyTotpLogin(formData: FormData) {
   await clearPending2fa();
   await destroySession();
   await createSession(user.id);
-  redirect(user.role === "DRIVER" ? "/driver" : "/");
+  redirect(postLoginPath(user.role));
 }
 
 export async function logout() {

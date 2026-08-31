@@ -36,8 +36,13 @@ model User {
   plant               Plant?    @relation(fields: [plantId], references: [id])
   // Links a DRIVER-role account to their Employee record, so the driver app
   // resolves "my trips" from the logged-in session instead of a picker.
-  employeeId          String?   @unique
-  employee            Employee? @relation(fields: [employeeId], references: [id])
+  employeeId          String?           @unique
+  employee            Employee?         @relation(fields: [employeeId], references: [id])
+  // Same idea as employeeId above, but for a PUMP_OPERATOR-role account —
+  // PumpCrewMember is a separate roster from Employee (see that model's
+  // own comment), so it needs its own link rather than reusing employeeId.
+  pumpCrewMemberId    String?           @unique
+  pumpCrewMember      PumpCrewMember?   @relation(fields: [pumpCrewMemberId], references: [id])
   // Brute-force lockout: failedLoginAttempts resets to 0 on any successful
   // login; once it reaches the threshold in login.ts, lockedUntil is set a
   // fixed window into the future and every login attempt is rejected with
@@ -1975,6 +1980,7 @@ model PumpCrewMember {
   defaultForPumpsAsAssistant Pump[]           @relation("PumpDefaultAssistant")
   operatorAssignments        PumpAssignment[] @relation("PumpAssignmentOperator")
   assistantAssignments       PumpAssignment[] @relation("PumpAssignmentAssistant")
+  user                       User?
 }
 
 // A tiered per-trip bonus, one policy per plant — trips 1..freeTripsThreshold

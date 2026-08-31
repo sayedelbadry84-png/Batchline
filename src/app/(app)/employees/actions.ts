@@ -1,5 +1,6 @@
 "use server";
 
+import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
@@ -10,6 +11,46 @@ import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 
 const HR_ROLES = ["ADMIN", "PLANT_ADMIN"];
+const LOGIN_SALT_ROUNDS = 10;
+
+// Auto-provisions a login the moment a driver or pump-crew member is
+// added, instead of requiring a separate manual trip through /users
+// afterward (see createEmployee/createPumpCrewMember below — the only
+// two rosters with their own phone-first app to log into: /driver and
+// /pump-crew). Both email and password are optional fields on the create
+// form; this silently does nothing if either is blank, the password is
+// under the same 8-char minimum users/actions.ts's createUser enforces,
+// or the email is already taken — the roster entry itself always
+// succeeds regardless, and an admin can still link/create the account by
+// hand from /users afterward in any of those cases.
+async function createLoginAccountIfRequested(params: {
+  email: string;
+  password: string;
+  name: string;
+  role: string;
+  plantId: string;
+  employeeId?: string;
+  pumpCrewMemberId?: string;
+}): Promise<void> {
+  const email = params.email.trim().toLowerCase();
+  if (!email || params.password.length < 8) return;
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) return;
+
+  const passwordHash = await bcrypt.hash(params.password, LOGIN_SALT_ROUNDS);
+  const created = await prisma.user.create({
+    data: {
+      email,
+      name: params.name,
+      passwordHash,
+      role: params.role,
+      plantId: params.plantId,
+      employeeId: params.employeeId,
+      pumpCrewMemberId: params.pumpCrewMemberId,
+    },
+  });
+  await logAudit({ module: "Users", recordId: created.id, afterValue: `${email} / ${params.role}`, reasonCode: "USER_CREATED" });
+}
 
 // Picking "Other" in the admin-tab role select submits this sentinel plus
 // a typed newRoleName instead of a catalog value — resolve it down to a
@@ -66,6 +107,23 @@ export async function createEmployee(formData: FormData) {
   });
 
   await logAudit({ module: "Employees", recordId: employee.id, afterValue: name, reasonCode: "EMPLOYEE_CREATED" });
+
+  // Only the standard mixer-truck DRIVER role has a phone app to log
+  // into (/driver) — a bulker/water-tanker/loader driver is tracked here
+  // for roster/payroll purposes but never gets assigned a Trip (see the
+  // driver picker in production/[id]/page.tsx, which only ever offers
+  // role "DRIVER"), so there's nothing for them to log into yet.
+  if (role === "DRIVER") {
+    await createLoginAccountIfRequested({
+      email: String(formData.get("loginEmail") ?? ""),
+      password: String(formData.get("loginPassword") ?? ""),
+      name,
+      role: "DRIVER",
+      plantId,
+      employeeId: employee.id,
+    });
+  }
+
   revalidatePath("/employees");
 }
 
@@ -165,6 +223,19 @@ export async function createPumpCrewMember(formData: FormData) {
   const member = await prisma.pumpCrewMember.create({ data: { plantId, name, role, phone, code } });
 
   await logAudit({ module: "Employees", recordId: member.id, afterValue: name, reasonCode: "PUMP_CREW_CREATED" });
+
+  // Both OPERATOR and HELPER get the same PUMP_OPERATOR login role and
+  // land on the same /pump-crew view — the two only differ in their
+  // on-site duty, not in what they need to see in the app.
+  await createLoginAccountIfRequested({
+    email: String(formData.get("loginEmail") ?? ""),
+    password: String(formData.get("loginPassword") ?? ""),
+    name,
+    role: "PUMP_OPERATOR",
+    plantId,
+    pumpCrewMemberId: member.id,
+  });
+
   revalidatePath("/employees");
 }
 

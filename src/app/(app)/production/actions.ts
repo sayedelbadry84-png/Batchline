@@ -566,6 +566,23 @@ export async function startTrip(formData: FormData) {
     });
   }
 
+  // Same real push for whichever pump crew just got assigned — /pump-crew
+  // has no per-trip detail page (see that page's own comment on why it
+  // stays read-only), so the link opens straight to their job list, where
+  // this trip now shows up.
+  const pumpCrewIds = [pumpOperatorId, pumpAssistantId].filter((id): id is string => Boolean(id));
+  if (pumpCrewIds.length > 0) {
+    const pumpCrewUsers = await prisma.user.findMany({ where: { pumpCrewMemberId: { in: pumpCrewIds } } });
+    if (pumpCrewUsers.length > 0) {
+      await notify(pumpCrewUsers.map((u) => u.id), {
+        title: ticket.reservation.reservationNumber,
+        body: `${ticket.ticketNumber} — ${ticket.volumeM3} m³`,
+        link: "/pump-crew",
+        module: "Fleet",
+      });
+    }
+  }
+
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath("/operator");
   revalidatePath("/trips");

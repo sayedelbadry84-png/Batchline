@@ -74,6 +74,17 @@ export default async function DriverTripPage({
         </div>
       </div>
 
+      {trip.batchTicket.reservation.siteLocationUrl && (
+        <a
+          href={trip.batchTicket.reservation.siteLocationUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center justify-center gap-2 rounded-md bg-accent-soft px-4 py-3 text-sm font-medium text-accent-strong"
+        >
+          {d.openLocation}
+        </a>
+      )}
+
       {["LOADING", "IN_TRANSIT", "ON_SITE"].includes(trip.status) && (
         <form action={driverAdvanceTrip}>
           <input type="hidden" name="tripId" value={trip.id} />

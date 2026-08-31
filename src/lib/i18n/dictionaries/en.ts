@@ -161,6 +161,17 @@ const en: typeof ar = {
     enableNotifications: "Enable push notifications",
     notificationsEnabled: "Push notifications enabled",
     notificationsDenied: "Notifications blocked — enable them in your browser settings",
+    openLocation: "Open customer location",
+  },
+  pumpCrew: {
+    brand: "Batchline Pump Crew",
+    notLinked: "Your account isn't linked to a pump crew record yet. Contact a plant admin to link it from the Employees screen.",
+    signOut: "Sign out",
+    todaysJobs: "Today's jobs",
+    noJobsAssigned: "No jobs assigned right now.",
+    recentlyCompleted: "Recently completed",
+    roleLabel: { OPERATOR: "Operator", HELPER: "Helper" },
+    openLocation: "Open customer location",
   },
   status: {
     DRAFT: "Draft",
@@ -710,7 +721,10 @@ const en: typeof ar = {
         employeeGosiRatePct: "GOSI rate — employee %", employerGosiRatePct: "GOSI rate — employer %",
         gosiDefaultPlaceholder: "Default by nationality",
         gosiHint: "Leave blank to use the nationality-based default rate (illustrative — verify against the current official GOSI rate).",
+        loginEmail: "Login email (optional)",
+        loginPassword: "Password (optional)",
       },
+      loginAccountHint: "Fill both fields to create a mobile-app login right away — leave them blank to add one later from the Users screen. Password must be at least 8 characters.",
       otherRole: "Other…",
       newRoleNamePlaceholder: "Type the new job title",
       add: "Add",
@@ -721,7 +735,7 @@ const en: typeof ar = {
       // employee directory, so their table/form share this smaller shape
       // instead of col/f above.
       crewCol: { name: "Name", code: "Code", phone: "Phone", status: "Status" },
-      crewF: { name: "Name", code: "Code", phone: "Phone" },
+      crewF: { name: "Name", code: "Code", phone: "Phone", loginEmail: "Login email (optional)", loginPassword: "Password (optional)" },
       crewEmpty: "Nobody in this tab yet.",
       attendance: {
         date: "Date", applyDate: "Apply",
