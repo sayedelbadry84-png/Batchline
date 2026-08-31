@@ -158,6 +158,9 @@ const en: typeof ar = {
     delivered: (m3: string) => `Delivered ${m3} m³`,
     returnedNote: (m3: number, disposition: string) => `${m3} m³ returned — ${disposition}`,
     signedBy: (name: string, time: string) => `Signed by ${name} at ${time}`,
+    enableNotifications: "Enable push notifications",
+    notificationsEnabled: "Push notifications enabled",
+    notificationsDenied: "Notifications blocked — enable them in your browser settings",
   },
   status: {
     DRAFT: "Draft",

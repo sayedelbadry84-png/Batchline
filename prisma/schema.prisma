@@ -97,6 +97,7 @@ model User {
   payrollRunsCreated               PayrollRun[]               @relation("PayrollRunCreatedBy")
   payrollRunsApproved              PayrollRun[]               @relation("PayrollRunApprovedBy")
   notifications                    Notification[]
+  pushSubscriptions                PushSubscription[]
 }
 
 model Session {
@@ -2237,6 +2238,26 @@ model Notification {
   createdAt DateTime  @default(now())
 
   @@index([userId, readAt])
+}
+
+// A browser's Web Push subscription — one row per device a user has
+// enabled notifications on (a phone and a desktop both work, independently).
+// endpoint/p256dh/auth are exactly the three fields the Push API's own
+// PushSubscription.toJSON() returns; nothing here is invented. See
+// src/lib/push.ts for how these get used, and notify()'s own extension in
+// src/lib/notify.ts for why this piggybacks on the existing in-app
+// notification entry point rather than being a separate call every action
+// has to remember to make. A subscription the push service reports as
+// gone (expired, uninstalled, permission revoked) gets deleted the moment
+// a send to it fails with 404/410 — never left around silently failing.
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
 }
 
 // ---------------------------------------------------------------------------

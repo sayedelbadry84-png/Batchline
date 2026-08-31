@@ -8,7 +8,7 @@ import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@
 import { getAvailableReclaimForTruck } from "@/lib/reclaim";
 import { withSequentialNumber } from "@/lib/sequence";
 import { REQUISITION_APPROVAL_ROLES } from "@/lib/permissions";
-import { notifyRoles } from "@/lib/notify";
+import { notify, notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
@@ -549,6 +549,22 @@ export async function startTrip(formData: FormData) {
   });
 
   await logAudit({ module: "Fleet", recordId: trip.id, afterValue: "LOADING", reasonCode: "TRIP_STARTED" });
+
+  // Real push notification (see src/lib/push.ts) the instant this driver
+  // is actually dispatched — the whole point of the driver app knowing
+  // about a trip the moment it exists, not whenever they next happen to
+  // open it. A driver with no linked User account (or none subscribed to
+  // push yet) simply gets nothing here — same silent no-op notify() and
+  // sendPushToUser() already are in every other case.
+  const driverUser = await prisma.user.findUnique({ where: { employeeId: driverId } });
+  if (driverUser) {
+    await notify([driverUser.id], {
+      title: ticket.reservation.reservationNumber,
+      body: `${ticket.ticketNumber} — ${ticket.volumeM3} m³`,
+      link: `/driver/trip/${trip.id}`,
+      module: "Fleet",
+    });
+  }
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath("/operator");

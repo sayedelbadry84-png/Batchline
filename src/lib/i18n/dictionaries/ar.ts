@@ -156,6 +156,9 @@ const ar = {
     delivered: (m3: string) => `تم تسليم ${m3} م³`,
     returnedNote: (m3: number, disposition: string) => `تم إرجاع ${m3} م³ — ${disposition}`,
     signedBy: (name: string, time: string) => `وقّع عليه ${name} الساعة ${time}`,
+    enableNotifications: "تفعيل الإشعارات الفورية",
+    notificationsEnabled: "الإشعارات الفورية مفعّلة",
+    notificationsDenied: "الإشعارات محظورة — فعّلها من إعدادات المتصفح",
   },
   // Shared enum-value translations — one flat map reused by every status
   // chip across the app, since a raw value like COMPLETE/CANCELLED/ACTIVE

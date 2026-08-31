@@ -69,3 +69,43 @@ self.addEventListener("fetch", (event) => {
     );
   }
 });
+
+// Web Push — the payload is whatever notify() in src/lib/notify.ts sent
+// (see src/lib/push.ts), a plain { title, body, link } JSON object, not a
+// push-provider-specific shape. Falls back to a generic title if the
+// payload is somehow missing/malformed rather than silently dropping the
+// notification the OS already woke this worker up for.
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    // Non-JSON payload — fall through to the generic title below.
+  }
+  const title = payload.title || "Batchline";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: payload.body,
+      icon: "/icon.svg",
+      badge: "/icon.svg",
+      data: { link: payload.link || "/driver" },
+    }),
+  );
+});
+
+// Tapping the notification focuses an already-open tab on that link if
+// one exists, rather than always opening a fresh one — the common case
+// for a driver who already has the app open in the background.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const link = event.notification.data && event.notification.data.link ? event.notification.data.link : "/driver";
+  const targetUrl = new URL(link, self.location.origin).href;
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url === targetUrl && "focus" in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
+    }),
+  );
+});

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { DrumTimer } from "@/components/DrumTimer";
+import { NotificationPermissionButton } from "@/components/NotificationPermissionButton";
 import { logout } from "@/app/login/actions";
 import { setLocale } from "@/app/locale-actions";
 
@@ -58,6 +59,14 @@ export default async function DriverHomePage() {
             <button className="rounded-md border border-border px-2.5 py-1.5 text-xs text-ink-muted">{d.signOut}</button>
           </form>
         </div>
+      </div>
+
+      <div className="flex justify-end">
+        <NotificationPermissionButton
+          enableLabel={d.enableNotifications}
+          enabledLabel={d.notificationsEnabled}
+          deniedLabel={d.notificationsDenied}
+        />
       </div>
 
       <div className="flex flex-col gap-3">
