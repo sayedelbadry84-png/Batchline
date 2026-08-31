@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { withSequentialNumber } from "@/lib/sequence";
+import { postCashTransaction } from "@/lib/ledger";
 import { revalidatePath } from "next/cache";
 import { activityForRole, aggregateIncentiveResults, buildSitePricingMap, getIncentiveSiteData } from "@/lib/incentives";
 
@@ -245,7 +246,8 @@ export async function markPayrollRunPaid(formData: FormData) {
 
   for (const site of bySite.values()) {
     if (site.total <= 0) continue;
-    await withSequentialNumber(
+    const description = `Payroll run ${run.runNumber}`;
+    const txn = await withSequentialNumber(
       "TXN",
       () => prisma.cashTransaction.count(),
       (txnNumber) =>
@@ -257,12 +259,13 @@ export async function markPayrollRunPaid(formData: FormData) {
             category: "PAYROLL",
             amount: site.total,
             currency: site.currency,
-            description: `Payroll run ${run.runNumber}`,
+            description,
             occurredAt: new Date(),
             createdById: user!.id,
           },
         }),
     );
+    await postCashTransaction({ siteId: site.siteId, currency: site.currency, txnId: txn.id, direction: "OUT", category: "PAYROLL", amount: site.total, description });
   }
 
   await prisma.payrollRun.update({ where: { id }, data: { status: "PAID", paidAt: new Date() } });

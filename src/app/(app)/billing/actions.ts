@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { parseNetDays, invoiceAmountDue } from "@/lib/billing";
+import { postInvoice, postPayment, postCreditNote } from "@/lib/ledger";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
@@ -120,6 +121,7 @@ export async function generateInvoiceForProject(formData: FormData) {
       afterValue: `${invoiceNumber} — ${subtotal} + ${taxLabel} ${taxAmount} = ${total} ${plant.currency}`,
       reasonCode: "INVOICE_GENERATED",
     });
+    await postInvoice({ siteId: plant.siteId, currency: plant.currency, invoiceId: invoice.id, subtotal, taxAmount, total });
 
     firstInvoiceId ??= invoice.id;
   }
@@ -195,11 +197,11 @@ export async function recordPayment(formData: FormData) {
   const reference = String(formData.get("reference") ?? "").trim() || null;
   if (!invoiceId || !amount || amount <= 0) return;
 
-  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { payments: true } });
+  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { payments: true, plant: true } });
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return;
   if (!(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
 
-  await prisma.payment.create({ data: { invoiceId, amount, method, reference } });
+  const payment = await prisma.payment.create({ data: { invoiceId, amount, method, reference } });
 
   const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0) + amount;
   if (totalPaid >= invoice.total - 0.01) {
@@ -212,6 +214,10 @@ export async function recordPayment(formData: FormData) {
     afterValue: `${amount} ${invoice.currency}`,
     reasonCode: "PAYMENT_RECORDED",
   });
+  // No journal entry when plantId is unset — same nullable-plantId edge
+  // case invoiceInScope already treats specially (an invoice that
+  // predates plant-scoping, or had no in-scope trips at generation time).
+  if (invoice.plant) await postPayment({ siteId: invoice.plant.siteId, currency: invoice.currency, paymentId: payment.id, amount });
 
   revalidatePath(`/finance/invoices/${invoiceId}`);
   revalidatePath("/finance");
@@ -235,7 +241,7 @@ export async function issueCreditNote(formData: FormData) {
 
   const invoice = await prisma.invoice.findUnique({
     where: { id: invoiceId },
-    include: { payments: true, creditNotes: true },
+    include: { payments: true, creditNotes: true, plant: true },
   });
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return;
   if (!(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
@@ -262,6 +268,7 @@ export async function issueCreditNote(formData: FormData) {
     afterValue: `${creditNote.creditNoteNumber} — ${amount} ${invoice.currency} (${reason})`,
     reasonCode: "CREDIT_NOTE_ISSUED",
   });
+  if (invoice.plant) await postCreditNote({ siteId: invoice.plant.siteId, currency: invoice.currency, creditNoteId: creditNote.id, amount });
 
   revalidatePath(`/finance/invoices/${invoiceId}`);
   revalidatePath("/finance");

@@ -5,6 +5,7 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
+import { postSupplierBill, postSupplierPayment, postCashTransaction } from "@/lib/ledger";
 import { revalidatePath } from "next/cache";
 
 const FINANCE_ROLES = ["ACCOUNTANT", "ADMIN"];
@@ -50,6 +51,7 @@ export async function createSupplierBill(formData: FormData) {
   );
 
   await logAudit({ module: "Finance", recordId: bill.id, afterValue: `${bill.billNumber} — ${total} ${currency}`, reasonCode: "SUPPLIER_BILL_CREATED" });
+  await postSupplierBill({ siteId, currency, billId: bill.id, total });
   revalidatePath("/finance");
 }
 
@@ -81,6 +83,7 @@ export async function recordSupplierPayment(formData: FormData) {
   await recomputeBillStatus(supplierBillId);
 
   await logAudit({ module: "Finance", recordId: payment.id, afterValue: `${amount} against ${bill.billNumber}`, reasonCode: "SUPPLIER_PAYMENT_RECORDED" });
+  await postSupplierPayment({ siteId: bill.siteId, currency: bill.currency, paymentId: payment.id, amount });
   revalidatePath("/finance");
 }
 
@@ -140,6 +143,7 @@ export async function createCashTransaction(formData: FormData) {
   );
 
   await logAudit({ module: "Finance", recordId: txn.id, afterValue: `${direction} ${amount} ${currency} — ${category}`, reasonCode: "CASH_TRANSACTION_RECORDED" });
+  await postCashTransaction({ siteId, currency, txnId: txn.id, direction: direction as "IN" | "OUT", category, amount, description });
   revalidatePath("/finance");
 }
 

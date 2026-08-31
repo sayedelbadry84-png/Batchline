@@ -16,7 +16,7 @@ import {
 } from "./actions";
 import { generateInvoiceForProject } from "../billing/actions";
 
-const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation"] as const;
+const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation", "ledger"] as const;
 const AGING_BUCKETS = [
   { key: "current", max: 0 },
   { key: "d30", max: 30 },
@@ -112,6 +112,8 @@ export default async function FinancePage({
       {tab === "aging" && <AgingTab m={m} siteScope={siteScope} />}
 
       {tab === "reconciliation" && <ReconciliationTab m={m} dict={dict} siteScope={siteScope} />}
+
+      {tab === "ledger" && <LedgerTab m={m} siteScope={siteScope} />}
     </div>
   );
 }
@@ -573,6 +575,86 @@ async function AgingTab({
           </table>
         )}
       </div>
+    </div>
+  );
+}
+
+// Read-only — nothing here is entered by hand, every row was posted by
+// postJournalEntry (src/lib/ledger.ts) from a real Billing/Finance/
+// Payroll event. Grouped by currency, never blended across currencies
+// (same rule every other money-grouping in this app already follows) —
+// with "all plants" selected this can show more than one currency's own
+// balanced trial balance, one table per currency.
+async function LedgerTab({
+  m,
+  siteScope,
+}: {
+  m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["finance"];
+  siteScope: Record<string, unknown>;
+}) {
+  const lines = await prisma.journalLine.findMany({
+    where: { journalEntry: { ...siteScope } },
+    include: { account: true, journalEntry: { select: { currency: true } } },
+  });
+
+  type Row = { account: { code: string; name: string }; debit: number; credit: number };
+  const byCurrency = new Map<string, Map<string, Row>>();
+  for (const line of lines) {
+    const currency = line.journalEntry.currency;
+    if (!byCurrency.has(currency)) byCurrency.set(currency, new Map());
+    const accounts = byCurrency.get(currency)!;
+    const row = accounts.get(line.accountId) ?? { account: line.account, debit: 0, credit: 0 };
+    row.debit += line.debit;
+    row.credit += line.credit;
+    accounts.set(line.accountId, row);
+  }
+  const currencies = [...byCurrency.keys()].sort();
+
+  return (
+    <div className="flex flex-col gap-6">
+      <p className="text-sm text-ink-muted">{m.ledger.intro}</p>
+      {currencies.length === 0 && <p className="text-sm text-ink-muted">{m.ledger.empty}</p>}
+      {currencies.map((currency) => {
+        const rows = [...byCurrency.get(currency)!.values()].sort((a, b) => a.account.code.localeCompare(b.account.code));
+        const totalDebit = rows.reduce((sum, r) => sum + r.debit, 0);
+        const totalCredit = rows.reduce((sum, r) => sum + r.credit, 0);
+        const balanced = Math.abs(totalDebit - totalCredit) < 0.01;
+        return (
+          <div key={currency} className={ui.card}>
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="font-display text-lg font-semibold" dir="ltr">{currency}</h2>
+              <span className={`${ui.chip} ${balanced ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}>
+                {balanced ? m.ledger.balanced : `${totalDebit.toFixed(2)} ≠ ${totalCredit.toFixed(2)}`}
+              </span>
+            </div>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.ledger.col.account}</th>
+                  <th className={ui.th}>{m.ledger.col.debit}</th>
+                  <th className={ui.th}>{m.ledger.col.credit}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.account.code}>
+                    <td className={ui.td}>
+                      <span className="font-mono text-xs text-ink-muted" dir="ltr">{r.account.code}</span> {r.account.name}
+                    </td>
+                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.debit > 0 ? r.debit.toFixed(2) : "—"}</td>
+                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.credit > 0 ? r.credit.toFixed(2) : "—"}</td>
+                  </tr>
+                ))}
+                <tr>
+                  <td className={`${ui.td} font-semibold`}>{m.ledger.total}</td>
+                  <td className={`${ui.td} font-mono font-semibold tabular`} dir="ltr">{totalDebit.toFixed(2)}</td>
+                  <td className={`${ui.td} font-mono font-semibold tabular`} dir="ltr">{totalCredit.toFixed(2)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -171,6 +171,7 @@ model Site {
   sparePartsRequisitions   SparePartsRequisition[]
   materialRequisitions     MaterialRequisition[]
   finishedProductMovements FinishedProductMovement[]
+  journalEntries           JournalEntry[]
 }
 
 model Plant {
@@ -2172,4 +2173,65 @@ model Notification {
   createdAt DateTime  @default(now())
 
   @@index([userId, readAt])
+}
+
+// ---------------------------------------------------------------------------
+// General ledger — an ADDITIVE double-entry layer that runs alongside the
+// existing Invoice/Payment/CreditNote/SupplierBill/SupplierPayment/
+// CashTransaction models, never replacing them. Every real financial event
+// those models already record also auto-posts a balanced JournalEntry
+// here (see postJournalEntry in src/lib/ledger.ts) — nothing about the
+// existing Billing/Finance/Payroll screens or their data changes; a
+// Trial Balance report reads from this ledger only. A small fixed chart
+// of accounts (self-seeded on first use, not user-editable in this first
+// version — that's a real accounting-system feature, out of scope here).
+// ---------------------------------------------------------------------------
+
+model Account {
+  id   String @id @default(cuid())
+  // Plain external convention (1000s assets, 2000s liabilities, 3000s
+  // equity, 4000s revenue, 5000s expense) — informational only, not
+  // enforced against `type`.
+  code String @unique
+  name String
+  type String // ASSET, LIABILITY, EQUITY, REVENUE, EXPENSE
+
+  journalLines JournalLine[]
+}
+
+// One balanced posting per real financial event — sum(debit) must equal
+// sum(credit) across its lines, checked in code at post time
+// (postJournalEntry) since Postgres itself can't express that constraint
+// across rows. Scoped to one site + currency, never blended, same "never
+// mix currencies" rule every other money-grouping in this app already
+// follows — a plant's own Trial Balance is filtered by both, same as
+// every other financial report.
+model JournalEntry {
+  id          String   @id @default(cuid())
+  entryNumber String   @unique // JE-YYYY-NNNN
+  siteId      String
+  site        Site     @relation(fields: [siteId], references: [id])
+  currency    String
+  // Which real event caused this posting, and its id — the same "why does
+  // this number exist" traceability logAudit already gives every other
+  // write in this app, e.g. sourceModule "Billing", sourceRecordId the
+  // Invoice's own id.
+  sourceModule   String
+  sourceRecordId String
+  memo        String?
+  postedAt    DateTime @default(now())
+
+  lines JournalLine[]
+
+  @@index([siteId, postedAt])
+}
+
+model JournalLine {
+  id             String       @id @default(cuid())
+  journalEntryId String
+  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  accountId      String
+  account        Account      @relation(fields: [accountId], references: [id])
+  debit          Float        @default(0)
+  credit         Float        @default(0)
 }

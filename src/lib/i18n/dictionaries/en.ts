@@ -1498,7 +1498,7 @@ const en: typeof ar = {
       eyebrow: "Module 18 — Finance",
       title: "Finance",
       intro: "Accounts payable for suppliers, a cash-movement journal, and manual bank reconciliation — the payable side that complements the receivable side (customer invoices) Billing already handles.",
-      tabs: { overview: "Overview", billing: "Billing", payable: "Accounts Payable", cash: "Cash Ledger", aging: "Aging", reconciliation: "Bank Reconciliation" },
+      tabs: { overview: "Overview", billing: "Billing", payable: "Accounts Payable", cash: "Cash Ledger", aging: "Aging", reconciliation: "Bank Reconciliation", ledger: "Trial Balance" },
       overview: {
         arOutstanding: "Owed by customers (AR)",
         apOutstanding: "Owed to suppliers (AP)",
@@ -1544,6 +1544,13 @@ const en: typeof ar = {
         col: { date: "Date", direction: "Direction", description: "Description", amount: "Amount" },
         markReconciled: "Mark reconciled",
         empty: "Everything is reconciled — nothing waiting to be matched.",
+      },
+      ledger: {
+        intro: "A double-entry journal posted automatically behind every invoice, payment, credit note, supplier bill, and cash movement — never entered by hand. Debits and credits always balance, one currency at a time.",
+        col: { account: "Account", debit: "Debit", credit: "Credit" },
+        total: "Total",
+        balanced: "Balanced ✓",
+        empty: "No journal entries yet.",
       },
       statement: {
         eyebrow: "Customer statement",
