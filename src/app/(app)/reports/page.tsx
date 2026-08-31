@@ -21,6 +21,8 @@ import {
   getEquipmentProductivityReport,
   getWorkerProductivityReport,
   getProfitabilityReport,
+  getQualityReport,
+  getMaintenanceReport,
 } from "@/lib/reportQueries";
 import {
   aggregateIncentiveResults,
@@ -41,7 +43,7 @@ const WEEKS_BACK_FOR_WEEKDAY_AVG = 8;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
 const FINAL_STRENGTH_AGE_DAYS = 28; // The real acceptance age — 3/7/14-day results are early-age diagnostics, not the final result.
 const SILO_MATERIAL_TYPES = new Set(["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"]);
-const REPORT_TABS = ["overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers", "profitability"] as const;
+const REPORT_TABS = ["overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers", "profitability", "quality", "maintenance"] as const;
 type ReportTab = (typeof REPORT_TABS)[number];
 
 function fmt(n: number | null, digits = 1, suffix = "") {
@@ -334,6 +336,9 @@ export default async function ReportsPage({
   const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport({ from: rangeStart, to: rangeEnd }) : null;
   const workersData = tab === "workers" ? await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
   const profitability = tab === "profitability" ? await getProfitabilityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const qualityData = tab === "quality" ? await getQualityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  // No plantId narrowing — see getMaintenanceReport's own comment.
+  const maintenanceData = tab === "maintenance" ? await getMaintenanceReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
 
   const incentivesData =
     tab === "incentives"
@@ -390,6 +395,8 @@ export default async function ReportsPage({
     equipment: m.tabs.equipment,
     workers: m.tabs.workers,
     profitability: m.tabs.profitability,
+    quality: m.tabs.quality,
+    maintenance: m.tabs.maintenance,
   };
 
   return (
@@ -782,8 +789,8 @@ export default async function ReportsPage({
             to={rangeTo}
             message={`${m.tabs.consumption} ${rangeFrom} → ${rangeTo}\n${m.consumption.ticketCount(consumption.ticketCount)}\n${consumption.rows.map((r) => `${r.materialName}: ${(r.massKg / 1000).toFixed(2)} t`).join("\n")}`}
             filenameBase={`consumption-${rangeFrom}-${rangeTo}`}
-            headers={["Material", "Type", "Mass kg", "Tickets"]}
-            rows={consumption.rows.map((r) => [r.materialName, r.type, r.massKg, r.ticketCount])}
+            headers={["From", "To", "Material", "Type", "Mass kg", "Tickets"]}
+            rows={consumption.rows.map((r) => [rangeFrom, rangeTo, r.materialName, r.type, r.massKg, r.ticketCount])}
           />
           <div className={ui.card}>
             <table className={ui.table}>
@@ -823,17 +830,17 @@ export default async function ReportsPage({
             to={rangeTo}
             message={`${m.tabs.profitability} ${rangeFrom} → ${rangeTo}\n${m.profitability.revenue}: ${profitability.revenue.toLocaleString()}\n${m.profitability.totalCost}: ${profitability.totalCost.toLocaleString()}\n${m.profitability.margin}: ${profitability.margin.toLocaleString()}`}
             filenameBase={`profitability-${rangeFrom}-${rangeTo}`}
-            headers={["Metric", "Amount"]}
+            headers={["From", "To", "Metric", "Amount"]}
             rows={[
-              [m.profitability.revenue, profitability.revenue],
-              [m.profitability.materialCost, profitability.materialCost],
-              [m.profitability.laborCost, profitability.laborCost],
-              [m.profitability.maintenanceCost, profitability.maintenanceCost],
-              [m.profitability.fuelCost, profitability.fuelCost],
-              [m.profitability.utilitiesCost, profitability.utilitiesCost],
-              [m.profitability.otherCost, profitability.otherCost],
-              [m.profitability.totalCost, profitability.totalCost],
-              [m.profitability.margin, profitability.margin],
+              [rangeFrom, rangeTo, m.profitability.revenue, profitability.revenue],
+              [rangeFrom, rangeTo, m.profitability.materialCost, profitability.materialCost],
+              [rangeFrom, rangeTo, m.profitability.laborCost, profitability.laborCost],
+              [rangeFrom, rangeTo, m.profitability.maintenanceCost, profitability.maintenanceCost],
+              [rangeFrom, rangeTo, m.profitability.fuelCost, profitability.fuelCost],
+              [rangeFrom, rangeTo, m.profitability.utilitiesCost, profitability.utilitiesCost],
+              [rangeFrom, rangeTo, m.profitability.otherCost, profitability.otherCost],
+              [rangeFrom, rangeTo, m.profitability.totalCost, profitability.totalCost],
+              [rangeFrom, rangeTo, m.profitability.margin, profitability.margin],
             ]}
           />
 
@@ -920,6 +927,182 @@ export default async function ReportsPage({
                   <td className={`${ui.td} font-mono tabular`} dir="ltr">{fmt(profitability.costPerM3, 2)}</td>
                   <td className={`${ui.td} font-mono tabular`} dir="ltr">{fmt(profitability.marginPerM3, 2)}</td>
                 </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "quality" && qualityData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.quality} ${rangeFrom} → ${rangeTo}\n${m.qualityReport.resultCount(qualityData.resultCount)}\n${qualityData.passRate === null ? "" : m.qualityReport.passRate(qualityData.passRate.toFixed(1))}`}
+            filenameBase={`quality-${rangeFrom}-${rangeTo}`}
+            headers={["Tested on", "Ticket", "Project", "Customer", "Mix", "Age days", "Measured MPa", "Target MPa", "Margin %", "Result"]}
+            rows={qualityData.rows.map((r) => {
+              const ticket = r.testBatch.trip.batchTicket;
+              return [
+                new Date(r.testedOn).toISOString(),
+                ticket.ticketNumber,
+                ticket.reservation.project.name,
+                ticket.reservation.project.customer.legalName,
+                ticket.mix.code,
+                r.ageDays,
+                r.breakStrengthMpa,
+                r.targetStrengthMpa,
+                ((r.breakStrengthMpa - r.targetStrengthMpa) / r.targetStrengthMpa) * 100,
+                r.passFail,
+              ];
+            })}
+          />
+          <p className="text-sm text-ink-muted">{m.qualityReport.intro}</p>
+          <div className="flex gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{fmt(qualityData.passRate, 1, "%")}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.qualityReport.finalOnlyNote(qualityData.finalResultCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{qualityData.resultCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.qualityReport.resultCount(qualityData.resultCount)}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.qualityReport.col.testedOn}</th>
+                  <th className={ui.th}>{m.qualityReport.col.ticket}</th>
+                  <th className={ui.th}>{m.qualityReport.col.project}</th>
+                  <th className={ui.th}>{m.qualityReport.col.mix}</th>
+                  <th className={ui.th}>{m.qualityReport.col.age}</th>
+                  <th className={ui.th}>{m.qualityReport.col.strength}</th>
+                  <th className={ui.th}>{m.qualityReport.col.target}</th>
+                  <th className={ui.th}>{m.qualityReport.col.margin}</th>
+                  <th className={ui.th}>{m.qualityReport.col.result}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {qualityData.rows.map((r) => {
+                  const ticket = r.testBatch.trip.batchTicket;
+                  const marginPct = ((r.breakStrengthMpa - r.targetStrengthMpa) / r.targetStrengthMpa) * 100;
+                  return (
+                    <tr key={r.id}>
+                      <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.testedOn).toLocaleDateString()}</td>
+                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{ticket.ticketNumber}</td>
+                      <td className={ui.td}>
+                        {ticket.reservation.project.name}
+                        <div className="text-xs text-ink-muted">{ticket.reservation.project.customer.legalName}</div>
+                      </td>
+                      <td className={ui.td}>
+                        <span className="font-mono text-xs" dir="ltr">{ticket.mix.code}</span>
+                        <div className="text-xs text-ink-muted">{ticket.mix.grade}</div>
+                      </td>
+                      <td className={`${ui.td} font-mono tabular`}>{r.ageDays}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{r.breakStrengthMpa.toFixed(1)}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{r.targetStrengthMpa.toFixed(1)}</td>
+                      <td className={`${ui.td} font-mono tabular ${marginPct < 0 ? "text-critical" : "text-good"}`}>
+                        {marginPct > 0 ? "+" : ""}{marginPct.toFixed(1)}%
+                      </td>
+                      <td className={ui.td}>
+                        <span className={`${ui.chip} ${r.passFail === "PASS" ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}>
+                          {dict.status[r.passFail as keyof typeof dict.status] ?? r.passFail}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {qualityData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={9}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "maintenance" && maintenanceData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.maintenance} ${rangeFrom} → ${rangeTo}\n${m.maintenanceReport.ticketCount(maintenanceData.ticketCount)}\n${m.maintenanceReport.totalCost(maintenanceData.totalCost.toFixed(0))}`}
+            filenameBase={`maintenance-${rangeFrom}-${rangeTo}`}
+            headers={["Ticket", "Equipment", "Type", "Priority", "Status", "Reported", "Completed", "Assigned to", "Downtime hours", "Labor cost", "Parts cost"]}
+            rows={maintenanceData.rows.map((t) => [
+              t.ticketNumber,
+              t.equipmentLabel,
+              t.type,
+              t.priority,
+              t.status,
+              new Date(t.createdAt).toISOString(),
+              t.completedAt ? new Date(t.completedAt).toISOString() : "",
+              t.assignedTo?.name ?? "",
+              t.downtimeHours ?? 0,
+              t.laborCost ?? 0,
+              t.partsCost ?? 0,
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.maintenanceReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{maintenanceData.ticketCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.maintenanceReport.ticketCount(maintenanceData.ticketCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{maintenanceData.openCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.maintenanceReport.openCount(maintenanceData.openCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{maintenanceData.totalDowntimeHours.toFixed(1)}h</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.maintenanceReport.totalDowntime(maintenanceData.totalDowntimeHours.toFixed(1))}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{maintenanceData.totalCost.toFixed(0)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.maintenanceReport.totalCost(maintenanceData.totalCost.toFixed(0))}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.maintenanceReport.col.ticket}</th>
+                  <th className={ui.th}>{m.maintenanceReport.col.equipment}</th>
+                  <th className={ui.th}>{m.maintenanceReport.col.type}</th>
+                  <th className={ui.th}>{m.maintenanceReport.col.priority}</th>
+                  <th className={ui.th}>{m.maintenanceReport.col.status}</th>
+                  <th className={ui.th}>{m.maintenanceReport.col.reported}</th>
+                  <th className={ui.th}>{m.maintenanceReport.col.assignedTo}</th>
+                  <th className={ui.th}>{m.maintenanceReport.col.downtime}</th>
+                  <th className={ui.th}>{m.maintenanceReport.col.cost}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {maintenanceData.rows.map((t) => (
+                  <tr key={t.id}>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.ticketNumber}</td>
+                    <td className={ui.td}>{t.equipmentLabel}</td>
+                    <td className={`${ui.td} font-mono text-xs`}>{dict.modules.maintenance.typeLabel[t.type as keyof typeof dict.modules.maintenance.typeLabel] ?? t.type}</td>
+                    <td className={ui.td}>{dict.modules.maintenance.priorityLabel[t.priority as keyof typeof dict.modules.maintenance.priorityLabel] ?? t.priority}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${t.status === "COMPLETED" ? "bg-good-soft text-good" : t.status === "CANCELLED" ? "bg-critical-soft text-critical" : "bg-warn-soft text-warn"}`}>
+                        {dict.modules.maintenance.statusLabel[t.status as keyof typeof dict.modules.maintenance.statusLabel] ?? t.status}
+                      </span>
+                    </td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(t.createdAt).toLocaleDateString()}</td>
+                    <td className={ui.td}>{t.assignedTo?.name ?? "—"}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{fmt(t.downtimeHours, 1)}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{fmt((t.laborCost ?? 0) + (t.partsCost ?? 0), 0)}</td>
+                  </tr>
+                ))}
+                {maintenanceData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={9}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -1196,10 +1379,10 @@ export default async function ReportsPage({
             to={rangeTo}
             message={`${m.tabs.equipment} ${rangeFrom} → ${rangeTo}\n${equipmentData.trucks.map((t) => `${t.code}: ${t.tripCount} trips, ${t.volumeM3.toFixed(1)} m³`).join("\n")}`}
             filenameBase={`equipment-${rangeFrom}-${rangeTo}`}
-            headers={["Type", "Code", "Trips", "Volume m3"]}
+            headers={["From", "To", "Type", "Code", "Trips", "Volume m3"]}
             rows={[
-              ...equipmentData.trucks.map((t) => ["Truck", t.code, t.tripCount, t.volumeM3]),
-              ...equipmentData.pumps.map((p) => ["Pump", p.code, p.tripCount, p.volumeM3]),
+              ...equipmentData.trucks.map((t) => [rangeFrom, rangeTo, "Truck", t.code, t.tripCount, t.volumeM3]),
+              ...equipmentData.pumps.map((p) => [rangeFrom, rangeTo, "Pump", p.code, p.tripCount, p.volumeM3]),
             ]}
           />
           <div className="grid grid-cols-2 gap-6">
@@ -1264,8 +1447,8 @@ export default async function ReportsPage({
             to={rangeTo}
             message={`${m.tabs.workers} ${rangeFrom} → ${rangeTo}\n${workersData.rows.map((r) => `${r.name} (${dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role}): ${r.count}`).join("\n")}`}
             filenameBase={`workers-${rangeFrom}-${rangeTo}`}
-            headers={["Name", "Role", "Count", "Volume"]}
-            rows={workersData.rows.map((r) => [r.name, dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role, r.count, r.volumeM3])}
+            headers={["From", "To", "Name", "Role", "Count", "Volume"]}
+            rows={workersData.rows.map((r) => [rangeFrom, rangeTo, r.name, dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role, r.count, r.volumeM3])}
           />
           <div className={ui.card}>
             <table className={ui.table}>
@@ -1308,9 +1491,9 @@ export default async function ReportsPage({
               .flatMap((g) => g.rows.map((r) => `${r.name} (${dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role}): ${r.payout.toFixed(0)}`))
               .join("\n")}`}
             filenameBase={`incentives-${rangeFrom}-${rangeTo}`}
-            headers={["Name", "Role", "Trips", "Volume m3", "Sites", "Payout"]}
+            headers={["From", "To", "Name", "Role", "Trips", "Volume m3", "Sites", "Payout"]}
             rows={incentivesData.byRole.flatMap((g) =>
-              g.rows.map((r) => [r.name, dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role, r.tripCount, r.volumeM3, r.siteCount, r.payout]),
+              g.rows.map((r) => [rangeFrom, rangeTo, r.name, dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role, r.tripCount, r.volumeM3, r.siteCount, r.payout]),
             )}
           />
           <p className="text-sm text-ink-muted">{m.incentivesReport.intro}</p>

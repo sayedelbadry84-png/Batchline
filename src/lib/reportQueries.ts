@@ -461,3 +461,52 @@ export async function getVolumeTripDetailsForRole(role: string, { from, to, site
   }
   return Array.from(byId.values());
 }
+
+// Every cylinder break within the period — the same LabResult rows the
+// Overview tab's own pass-rate KPI already summarizes, surfaced here as
+// individual, exportable rows instead of just the one aggregate rate.
+// Only final-age (28-day-or-later) results count toward pass rate here,
+// same "the early-age reading isn't the real acceptance result" reasoning
+// strength-prediction.ts and the strength-anomaly detector already use —
+// an early result still appears in the row list (it's real lab data),
+// just excluded from the summary pass-rate figure.
+const FINAL_STRENGTH_AGE_DAYS = 28;
+
+export async function getQualityReport({ from, to, siteId, plantId }: ReportFilter) {
+  const results = await prisma.labResult.findMany({
+    where: {
+      testedOn: { gte: from, lte: to },
+      testBatch: { trip: tripPlantScopeWhere(siteId, plantId) },
+    },
+    include: {
+      testBatch: { include: { trip: { include: { batchTicket: { include: { mix: true, reservation: { include: { project: { include: { customer: true } } } } } } } } } },
+    },
+    orderBy: { testedOn: "asc" },
+  });
+
+  const finalResults = results.filter((r) => r.ageDays >= FINAL_STRENGTH_AGE_DAYS);
+  const passCount = finalResults.filter((r) => r.passFail === "PASS").length;
+  const passRate = finalResults.length ? (passCount / finalResults.length) * 100 : null;
+
+  return { rows: results, resultCount: results.length, finalResultCount: finalResults.length, passRate };
+}
+
+// One row per maintenance ticket reported within the period — no
+// plantId to narrow by (equipment here isn't necessarily tied to one
+// production line), so this respects siteId only, same posture
+// getEquipmentProductivityReport's own comment explains for why it
+// ignores scope entirely; this one at least has a real siteId scalar to
+// filter by.
+export async function getMaintenanceReport({ from, to, siteId }: Pick<ReportFilter, "from" | "to" | "siteId">) {
+  const tickets = await prisma.maintenanceTicket.findMany({
+    where: { createdAt: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+    include: { assignedTo: { select: { name: true } } },
+    orderBy: { createdAt: "asc" },
+  });
+
+  const openCount = tickets.filter((t) => t.status === "OPEN" || t.status === "IN_PROGRESS").length;
+  const totalDowntimeHours = tickets.reduce((sum, t) => sum + (t.downtimeHours ?? 0), 0);
+  const totalCost = tickets.reduce((sum, t) => sum + (t.laborCost ?? 0) + (t.partsCost ?? 0), 0);
+
+  return { rows: tickets, ticketCount: tickets.length, openCount, totalDowntimeHours, totalCost };
+}
