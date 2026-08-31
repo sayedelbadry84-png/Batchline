@@ -1,5 +1,6 @@
 "use server";
 
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
@@ -9,6 +10,11 @@ import { postSupplierBill, postSupplierPayment, postCashTransaction, reverseJour
 import { revalidatePath } from "next/cache";
 
 const FINANCE_ROLES = ["ACCOUNTANT", "ADMIN"];
+
+// See the same note on billing/actions.ts's own TX_OPTIONS — several
+// sequential round trips to Neon inside one interactive transaction can
+// exceed Prisma's 5s default timeout, especially on a cold connection.
+const TX_OPTIONS = { timeout: 15000 };
 
 export async function createSupplierBill(formData: FormData) {
   const actor = await getCurrentUser();
@@ -30,40 +36,45 @@ export async function createSupplierBill(formData: FormData) {
   const currency = plant?.currency ?? "EGP";
   const total = subtotal + taxAmount;
 
-  const bill = await withSequentialNumber(
-    "BILL",
-    () => prisma.supplierBill.count(),
-    (billNumber) =>
-      prisma.supplierBill.create({
-        data: {
-          billNumber,
-          supplierId,
-          purchaseOrderId,
-          siteId,
-          dueDate: new Date(dueDateRaw),
-          subtotal,
-          taxAmount,
-          total,
-          currency,
-          notes,
-        },
-      }),
-  );
+  // The bill and its journal entry commit as one unit — see the same
+  // rationale on generateInvoiceForProject in billing/actions.ts.
+  const bill = await prisma.$transaction(async (tx) => {
+    const bill = await withSequentialNumber(
+      "BILL",
+      () => tx.supplierBill.count(),
+      (billNumber) =>
+        tx.supplierBill.create({
+          data: {
+            billNumber,
+            supplierId,
+            purchaseOrderId,
+            siteId,
+            dueDate: new Date(dueDateRaw),
+            subtotal,
+            taxAmount,
+            total,
+            currency,
+            notes,
+          },
+        }),
+    );
+    await postSupplierBill(tx, { siteId, currency, billId: bill.id, total });
+    return bill;
+  }, TX_OPTIONS);
 
   await logAudit({ module: "Finance", recordId: bill.id, afterValue: `${bill.billNumber} — ${total} ${currency}`, reasonCode: "SUPPLIER_BILL_CREATED" });
-  await postSupplierBill({ siteId, currency, billId: bill.id, total });
   revalidatePath("/finance");
 }
 
 // Recomputes the bill's own status from the sum of its payments — same
 // "derive the parent's status from its children" shape used throughout
 // this app (PurchaseOrder from its lines, Reservation from its tickets).
-async function recomputeBillStatus(supplierBillId: string) {
-  const bill = await prisma.supplierBill.findUnique({ where: { id: supplierBillId }, include: { payments: true } });
+async function recomputeBillStatus(db: Prisma.TransactionClient, supplierBillId: string) {
+  const bill = await db.supplierBill.findUnique({ where: { id: supplierBillId }, include: { payments: true } });
   if (!bill) return;
   const paid = bill.payments.reduce((sum, p) => sum + p.amount, 0);
   const status = paid <= 0 ? "UNPAID" : paid >= bill.total ? "PAID" : "PARTIALLY_PAID";
-  if (status !== bill.status) await prisma.supplierBill.update({ where: { id: supplierBillId }, data: { status } });
+  if (status !== bill.status) await db.supplierBill.update({ where: { id: supplierBillId }, data: { status } });
 }
 
 export async function recordSupplierPayment(formData: FormData) {
@@ -79,11 +90,16 @@ export async function recordSupplierPayment(formData: FormData) {
   const bill = await prisma.supplierBill.findUnique({ where: { id: supplierBillId } });
   if (!bill || bill.status === "CANCELLED") return;
 
-  const payment = await prisma.supplierPayment.create({ data: { supplierBillId, amount, method, reference } });
-  await recomputeBillStatus(supplierBillId);
+  // The payment and its journal entry commit as one unit — see the same
+  // rationale on generateInvoiceForProject in billing/actions.ts.
+  const payment = await prisma.$transaction(async (tx) => {
+    const payment = await tx.supplierPayment.create({ data: { supplierBillId, amount, method, reference } });
+    await recomputeBillStatus(tx, supplierBillId);
+    await postSupplierPayment(tx, { siteId: bill.siteId, currency: bill.currency, paymentId: payment.id, amount });
+    return payment;
+  }, TX_OPTIONS);
 
   await logAudit({ module: "Finance", recordId: payment.id, afterValue: `${amount} against ${bill.billNumber}`, reasonCode: "SUPPLIER_PAYMENT_RECORDED" });
-  await postSupplierPayment({ siteId: bill.siteId, currency: bill.currency, paymentId: payment.id, amount });
   revalidatePath("/finance");
 }
 
@@ -104,13 +120,17 @@ export async function cancelSupplierBill(formData: FormData) {
   const bill = await prisma.supplierBill.findUnique({ where: { id }, include: { payments: true } });
   if (!bill || bill.status === "CANCELLED" || bill.status === "PAID" || bill.payments.length > 0) return;
 
-  await prisma.supplierBill.update({ where: { id }, data: { status: "CANCELLED" } });
+  // The cancellation and its reversing journal entry commit as one unit —
+  // see the same rationale on cancelInvoice in billing/actions.ts.
+  await prisma.$transaction(async (tx) => {
+    await tx.supplierBill.update({ where: { id }, data: { status: "CANCELLED" } });
+    // Reverses whatever postSupplierBill posted at creation time (Dr
+    // COGS/Materials / Cr AP) — see the same reasoning on cancelInvoice's
+    // own reversal call in billing/actions.ts.
+    await reverseJournalEntry(tx, "Finance", id, "Supplier bill cancelled");
+  }, TX_OPTIONS);
 
   await logAudit({ module: "Finance", recordId: id, afterValue: "CANCELLED", reasonCode: "SUPPLIER_BILL_CANCELLED" });
-  // Reverses whatever postSupplierBill posted at creation time (Dr
-  // COGS/Materials / Cr AP) — see the same reasoning on cancelInvoice's
-  // own reversal call in billing/actions.ts.
-  await reverseJournalEntry("Finance", id, "Supplier bill cancelled");
   revalidatePath("/finance");
 }
 
@@ -133,28 +153,33 @@ export async function createCashTransaction(formData: FormData) {
   const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId } }) : null;
   const currency = plant?.currency ?? "EGP";
 
-  const txn = await withSequentialNumber(
-    "TXN",
-    () => prisma.cashTransaction.count(),
-    (txnNumber) =>
-      prisma.cashTransaction.create({
-        data: {
-          txnNumber,
-          siteId,
-          direction,
-          category,
-          amount,
-          currency,
-          description,
-          reference,
-          occurredAt: occurredAtRaw ? new Date(occurredAtRaw) : new Date(),
-          createdById: actor!.id,
-        },
-      }),
-  );
+  // The transaction and its journal entry commit as one unit — see the
+  // same rationale on generateInvoiceForProject in billing/actions.ts.
+  const txn = await prisma.$transaction(async (tx) => {
+    const txn = await withSequentialNumber(
+      "TXN",
+      () => tx.cashTransaction.count(),
+      (txnNumber) =>
+        tx.cashTransaction.create({
+          data: {
+            txnNumber,
+            siteId,
+            direction,
+            category,
+            amount,
+            currency,
+            description,
+            reference,
+            occurredAt: occurredAtRaw ? new Date(occurredAtRaw) : new Date(),
+            createdById: actor!.id,
+          },
+        }),
+    );
+    await postCashTransaction(tx, { siteId, currency, txnId: txn.id, direction: direction as "IN" | "OUT", category, amount, description });
+    return txn;
+  }, TX_OPTIONS);
 
   await logAudit({ module: "Finance", recordId: txn.id, afterValue: `${direction} ${amount} ${currency} — ${category}`, reasonCode: "CASH_TRANSACTION_RECORDED" });
-  await postCashTransaction({ siteId, currency, txnId: txn.id, direction: direction as "IN" | "OUT", category, amount, description });
   revalidatePath("/finance");
 }
 

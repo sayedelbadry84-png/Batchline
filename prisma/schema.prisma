@@ -2243,4 +2243,16 @@ model JournalLine {
   account        Account      @relation(fields: [accountId], references: [id])
   debit          Float        @default(0)
   credit         Float        @default(0)
+  // Denormalized copies of the parent JournalEntry's own siteId/currency,
+  // set once at creation (postJournalEntry) and never changed — Prisma's
+  // groupBy can only group/filter by a model's own scalar columns, not a
+  // related model's, so without these the Trial Balance would have to
+  // fetch every line ever posted into the app just to sum them in JS. With
+  // them, it can ask Postgres to do the summing directly (see LedgerTab in
+  // finance/page.tsx), which stays fast regardless of how many years of
+  // journal entries have piled up.
+  siteId   String
+  currency String
+
+  @@index([siteId, currency, accountId])
 }

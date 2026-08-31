@@ -12,11 +12,11 @@ export default async function MaterialLedgerDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ site?: string }>;
+  searchParams: Promise<{ site?: string; from?: string; to?: string }>;
 }) {
   const user = await requirePageAccess("warehouses");
   const { id } = await params;
-  const { site: siteParam } = await searchParams;
+  const { site: siteParam, from: fromRaw, to: toRaw } = await searchParams;
   const { dict } = await getDictionary();
   const m = dict.modules.stockLedger;
   const restrictedSiteId = await getActiveSiteId(user);
@@ -26,18 +26,66 @@ export default async function MaterialLedgerDetailPage({
   if (!material) notFound();
   const filterSite = filterSiteId ? await prisma.site.findUnique({ where: { id: filterSiteId }, select: { code: true, name: true } }) : null;
 
+  // Defaults to the current month, same convention Reports uses — a
+  // material's full receive/consume history only ever grows, so showing
+  // it unbounded by default would mean this page's query keeps getting
+  // slower for as long as the plant stays in business.
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const defaultFrom = (() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  })();
+  const rangeFrom = fromRaw || defaultFrom;
+  const rangeTo = toRaw || todayIso;
+  const rangeStart = new Date(`${rangeFrom}T00:00:00`);
+  const rangeEnd = new Date(`${rangeTo}T23:59:59`);
+
   const siteWhere = filterSiteId ? { plant: { siteId: filterSiteId } } : {};
-  const [receipts, actuals] = await Promise.all([
+  const batchTicketSiteWhere = filterSiteId ? { plant: { siteId: filterSiteId } } : {};
+  // A ticket's ledger date is batchCompletedAt, falling back to
+  // releasedAt only when it was never completed — same fallback the
+  // ledger events themselves use below, kept in sync here so a row
+  // counted in the opening balance is never also counted (or skipped) in
+  // the in-range list.
+  const beforeRangeTicketDate = { OR: [{ batchCompletedAt: { lt: rangeStart } }, { batchCompletedAt: null, releasedAt: { lt: rangeStart } }] };
+  const inRangeTicketDate = {
+    OR: [
+      { batchCompletedAt: { gte: rangeStart, lte: rangeEnd } },
+      { batchCompletedAt: null, releasedAt: { gte: rangeStart, lte: rangeEnd } },
+    ],
+  };
+
+  const [receipts, actuals, openingReceipts, openingActualWeighed, openingActualUnweighed] = await Promise.all([
     prisma.materialReceipt.findMany({
-      where: { materialId: id, postedToInventory: true, ...siteWhere },
+      where: { materialId: id, postedToInventory: true, receivedAt: { gte: rangeStart, lte: rangeEnd }, ...siteWhere },
       include: { supplier: true },
       orderBy: { receivedAt: "asc" },
     }),
     prisma.batchComponentActual.findMany({
-      where: { materialId: id, batchTicket: { status: "COMPLETE", ...(filterSiteId ? { plant: { siteId: filterSiteId } } : {}) } },
+      where: { materialId: id, batchTicket: { status: "COMPLETE", ...batchTicketSiteWhere, ...inRangeTicketDate } },
       include: { batchTicket: true },
     }),
+    // Opening balance: everything before the range, summed by Postgres
+    // rather than fetched row-by-row — the page never pulls a material's
+    // full lifetime history, just this one running total plus whatever's
+    // actually in the visible window.
+    prisma.materialReceipt.aggregate({
+      _sum: { netWeightKg: true },
+      where: { materialId: id, postedToInventory: true, receivedAt: { lt: rangeStart }, ...siteWhere },
+    }),
+    prisma.batchComponentActual.aggregate({
+      _sum: { actualMassKg: true },
+      where: { materialId: id, actualMassKg: { not: null }, batchTicket: { status: "COMPLETE", ...batchTicketSiteWhere, ...beforeRangeTicketDate } },
+    }),
+    prisma.batchComponentActual.aggregate({
+      _sum: { targetMassKg: true },
+      where: { materialId: id, actualMassKg: null, batchTicket: { status: "COMPLETE", ...batchTicketSiteWhere, ...beforeRangeTicketDate } },
+    }),
   ]);
+
+  const openingBalanceKg =
+    (openingReceipts._sum.netWeightKg ?? 0) - (openingActualWeighed._sum.actualMassKg ?? 0) - (openingActualUnweighed._sum.targetMassKg ?? 0);
 
   const ledger = buildStockLedger(
     receipts.map((r) => ({
@@ -51,6 +99,7 @@ export default async function MaterialLedgerDetailPage({
       ticketNumber: a.batchTicket.ticketNumber,
       massKg: a.actualMassKg ?? a.targetMassKg,
     })),
+    openingBalanceKg,
   );
 
   return (
@@ -72,6 +121,25 @@ export default async function MaterialLedgerDetailPage({
           {m.back}
         </Link>
       </header>
+
+      <form action={`/warehouses/materials/${id}`} className="flex flex-wrap items-end gap-3">
+        {filterSiteId && <input type="hidden" name="site" value={filterSiteId} />}
+        <div>
+          <label className={ui.label}>{m.detail.dateFrom}</label>
+          <input name="from" type="date" defaultValue={rangeFrom} className={`${ui.input} w-40`} />
+        </div>
+        <div>
+          <label className={ui.label}>{m.detail.dateTo}</label>
+          <input name="to" type="date" defaultValue={rangeTo} className={`${ui.input} w-40`} />
+        </div>
+        <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">{m.detail.applyRange}</button>
+      </form>
+
+      <div className={ui.card}>
+        <div className="font-mono text-xs text-ink-muted uppercase">{m.detail.openingBalance}</div>
+        <div className="mt-1 font-mono text-2xl tabular" dir="ltr">{openingBalanceKg.toLocaleString()} kg</div>
+        <p className="mt-1 text-xs text-ink-muted">{m.detail.openingBalanceNote(new Date(rangeStart).toLocaleDateString())}</p>
+      </div>
 
       <div className={ui.card}>
         <table className={ui.table}>

@@ -1,5 +1,18 @@
-import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import { withSequentialNumber } from "@/lib/sequence";
+
+// Every function here takes its Prisma client as the first argument rather
+// than importing the module-level singleton directly — the caller is
+// expected to pass a transaction handle (prisma.$transaction(async (tx) =>
+// ...)) that also created/updated the source record (Invoice, Payment,
+// SupplierBill, ...) in the same call, so the two can never diverge: either
+// both commit or neither does. A caller who genuinely has no source record
+// of its own to wrap (there currently isn't one) could still pass the
+// plain `prisma` singleton — Prisma.TransactionClient's shape is a subset
+// of PrismaClient's, so it's accepted too — but every real event in this
+// app posts inside its own transaction; see billing/actions.ts,
+// finance/actions.ts, and employees/payroll/actions.ts for the call sites.
+type Db = Prisma.TransactionClient;
 
 type AccountRef = { code: string; name: string; type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE" };
 
@@ -39,8 +52,8 @@ export const CASH_CATEGORY_ACCOUNT: Record<string, AccountRef> = {
   OTHER: ACCOUNTS.OTHER_EXPENSE,
 };
 
-async function ensureAccount(ref: AccountRef): Promise<string> {
-  const account = await prisma.account.upsert({ where: { code: ref.code }, create: ref, update: {} });
+async function ensureAccount(db: Db, ref: AccountRef): Promise<string> {
+  const account = await db.account.upsert({ where: { code: ref.code }, create: ref, update: {} });
   return account.id;
 }
 
@@ -54,27 +67,30 @@ async function ensureAccount(ref: AccountRef): Promise<string> {
  * below), so a mismatch means a real bug in the caller, not a stray
  * amount to be tolerated.
  */
-export async function postJournalEntry(params: {
-  siteId: string;
-  currency: string;
-  sourceModule: string;
-  sourceRecordId: string;
-  memo?: string;
-  lines: { account: AccountRef; debit?: number; credit?: number }[];
-}): Promise<void> {
+export async function postJournalEntry(
+  db: Db,
+  params: {
+    siteId: string;
+    currency: string;
+    sourceModule: string;
+    sourceRecordId: string;
+    memo?: string;
+    lines: { account: AccountRef; debit?: number; credit?: number }[];
+  },
+): Promise<void> {
   const totalDebit = params.lines.reduce((sum, l) => sum + (l.debit ?? 0), 0);
   const totalCredit = params.lines.reduce((sum, l) => sum + (l.credit ?? 0), 0);
   if (Math.abs(totalDebit - totalCredit) > 0.01) {
     throw new Error(`Unbalanced journal entry for ${params.sourceModule}/${params.sourceRecordId}: debit ${totalDebit} != credit ${totalCredit}`);
   }
 
-  const accountIds = await Promise.all(params.lines.map((l) => ensureAccount(l.account)));
+  const accountIds = await Promise.all(params.lines.map((l) => ensureAccount(db, l.account)));
 
   await withSequentialNumber(
     "JE",
-    () => prisma.journalEntry.count(),
+    () => db.journalEntry.count(),
     (entryNumber) =>
-      prisma.journalEntry.create({
+      db.journalEntry.create({
         data: {
           entryNumber,
           siteId: params.siteId,
@@ -83,7 +99,7 @@ export async function postJournalEntry(params: {
           sourceRecordId: params.sourceRecordId,
           memo: params.memo,
           lines: {
-            create: params.lines.map((l, i) => ({ accountId: accountIds[i], debit: l.debit ?? 0, credit: l.credit ?? 0 })),
+            create: params.lines.map((l, i) => ({ accountId: accountIds[i], debit: l.debit ?? 0, credit: l.credit ?? 0, siteId: params.siteId, currency: params.currency })),
           },
         },
       }),
@@ -100,15 +116,15 @@ export async function postJournalEntry(params: {
  * nothing was ever posted for this record (e.g. an Invoice with no
  * plantId, which postInvoice's own callers already skip).
  */
-export async function reverseJournalEntry(sourceModule: string, sourceRecordId: string, memo?: string): Promise<void> {
-  const original = await prisma.journalEntry.findFirst({ where: { sourceModule, sourceRecordId }, include: { lines: true } });
+export async function reverseJournalEntry(db: Db, sourceModule: string, sourceRecordId: string, memo?: string): Promise<void> {
+  const original = await db.journalEntry.findFirst({ where: { sourceModule, sourceRecordId }, include: { lines: true } });
   if (!original) return;
 
   await withSequentialNumber(
     "JE",
-    () => prisma.journalEntry.count(),
+    () => db.journalEntry.count(),
     (entryNumber) =>
-      prisma.journalEntry.create({
+      db.journalEntry.create({
         data: {
           entryNumber,
           siteId: original.siteId,
@@ -116,7 +132,7 @@ export async function reverseJournalEntry(sourceModule: string, sourceRecordId: 
           sourceModule,
           sourceRecordId,
           memo: memo ?? `Reversal of ${original.entryNumber}`,
-          lines: { create: original.lines.map((l) => ({ accountId: l.accountId, debit: l.credit, credit: l.debit })) },
+          lines: { create: original.lines.map((l) => ({ accountId: l.accountId, debit: l.credit, credit: l.debit, siteId: original.siteId, currency: original.currency })) },
         },
       }),
   );
@@ -127,19 +143,21 @@ export async function reverseJournalEntry(sourceModule: string, sourceRecordId: 
 // finance/actions.ts, and employees/payroll/actions.ts for the call
 // sites. Each is a thin, self-explanatory wrapper around
 // postJournalEntry; kept here so the accounting logic lives in one place
-// rather than scattered across every module's own actions file. ---
+// rather than scattered across every module's own actions file. Every
+// call site passes the same `tx` it used to create/update the source
+// record, inside one prisma.$transaction — see the Db type note above. ---
 
-export async function postInvoice(params: { siteId: string; currency: string; invoiceId: string; subtotal: number; taxAmount: number; total: number }): Promise<void> {
+export async function postInvoice(db: Db, params: { siteId: string; currency: string; invoiceId: string; subtotal: number; taxAmount: number; total: number }): Promise<void> {
   const lines: { account: AccountRef; debit?: number; credit?: number }[] = [
     { account: ACCOUNTS.AR, debit: params.total },
     { account: ACCOUNTS.REVENUE, credit: params.subtotal },
   ];
   if (params.taxAmount > 0) lines.push({ account: ACCOUNTS.TAX_PAYABLE, credit: params.taxAmount });
-  await postJournalEntry({ siteId: params.siteId, currency: params.currency, sourceModule: "Billing", sourceRecordId: params.invoiceId, memo: "Invoice issued", lines });
+  await postJournalEntry(db, { siteId: params.siteId, currency: params.currency, sourceModule: "Billing", sourceRecordId: params.invoiceId, memo: "Invoice issued", lines });
 }
 
-export async function postPayment(params: { siteId: string; currency: string; paymentId: string; amount: number }): Promise<void> {
-  await postJournalEntry({
+export async function postPayment(db: Db, params: { siteId: string; currency: string; paymentId: string; amount: number }): Promise<void> {
+  await postJournalEntry(db, {
     siteId: params.siteId,
     currency: params.currency,
     sourceModule: "Billing",
@@ -149,8 +167,8 @@ export async function postPayment(params: { siteId: string; currency: string; pa
   });
 }
 
-export async function postCreditNote(params: { siteId: string; currency: string; creditNoteId: string; amount: number }): Promise<void> {
-  await postJournalEntry({
+export async function postCreditNote(db: Db, params: { siteId: string; currency: string; creditNoteId: string; amount: number }): Promise<void> {
+  await postJournalEntry(db, {
     siteId: params.siteId,
     currency: params.currency,
     sourceModule: "Billing",
@@ -160,8 +178,8 @@ export async function postCreditNote(params: { siteId: string; currency: string;
   });
 }
 
-export async function postSupplierBill(params: { siteId: string; currency: string; billId: string; total: number }): Promise<void> {
-  await postJournalEntry({
+export async function postSupplierBill(db: Db, params: { siteId: string; currency: string; billId: string; total: number }): Promise<void> {
+  await postJournalEntry(db, {
     siteId: params.siteId,
     currency: params.currency,
     sourceModule: "Finance",
@@ -171,8 +189,8 @@ export async function postSupplierBill(params: { siteId: string; currency: strin
   });
 }
 
-export async function postSupplierPayment(params: { siteId: string; currency: string; paymentId: string; amount: number }): Promise<void> {
-  await postJournalEntry({
+export async function postSupplierPayment(db: Db, params: { siteId: string; currency: string; paymentId: string; amount: number }): Promise<void> {
+  await postJournalEntry(db, {
     siteId: params.siteId,
     currency: params.currency,
     sourceModule: "Finance",
@@ -186,11 +204,11 @@ export async function postSupplierPayment(params: { siteId: string; currency: st
 // gets credited. direction "OUT": cash goes out, the category account
 // (an expense, normally) gets debited. Same "IN/OUT" vocabulary
 // CashTransaction.direction already uses.
-export async function postCashTransaction(params: { siteId: string; currency: string; txnId: string; direction: "IN" | "OUT"; category: string; amount: number; description: string }): Promise<void> {
+export async function postCashTransaction(db: Db, params: { siteId: string; currency: string; txnId: string; direction: "IN" | "OUT"; category: string; amount: number; description: string }): Promise<void> {
   const categoryAccount = CASH_CATEGORY_ACCOUNT[params.category] ?? ACCOUNTS.OTHER_EXPENSE;
   const lines =
     params.direction === "IN"
       ? [{ account: ACCOUNTS.CASH, debit: params.amount }, { account: categoryAccount, credit: params.amount }]
       : [{ account: categoryAccount, debit: params.amount }, { account: ACCOUNTS.CASH, credit: params.amount }];
-  await postJournalEntry({ siteId: params.siteId, currency: params.currency, sourceModule: "Finance", sourceRecordId: params.txnId, memo: params.description, lines });
+  await postJournalEntry(db, { siteId: params.siteId, currency: params.currency, sourceModule: "Finance", sourceRecordId: params.txnId, memo: params.description, lines });
 }

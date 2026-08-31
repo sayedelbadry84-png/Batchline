@@ -6,7 +6,14 @@
 // response. Actual offline *writes* are handled at the app level (see
 // src/lib/offlineQueue.ts), not here.
 const CACHE_NAME = "batchline-shell-v1";
-const APP_SHELL = ["/operator", "/manifest.json", "/icon.svg"];
+// Both offline-relevant shells — the plant-floor tablet UI and the
+// driver's own mobile UI, two different roles, two different pages. Both
+// get precached so an offline navigation can fall back to whichever one
+// actually matches what the user was trying to reach (see the fetch
+// handler below) instead of always bouncing everyone to /operator.
+const OPERATOR_SHELL = "/operator";
+const DRIVER_SHELL = "/driver";
+const APP_SHELL = [OPERATOR_SHELL, DRIVER_SHELL, "/manifest.json", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -43,8 +50,14 @@ self.addEventListener("fetch", (event) => {
 
   // Page navigations: network-first (always prefer fresh data when
   // online), falling back to the last cached shell when the network
-  // fails — the yard/floor scenario this whole feature exists for.
+  // fails — the yard/floor scenario this whole feature exists for. The
+  // fallback shell matches the role the failed navigation was actually
+  // for (driver vs. operator) — a driver who goes offline mid-shift must
+  // land back on their own /driver shell, not get bounced into the
+  // plant-operator UI just because that's the only shell this worker used
+  // to remember.
   if (request.mode === "navigate") {
+    const fallbackShell = url.pathname.startsWith(DRIVER_SHELL) ? DRIVER_SHELL : OPERATOR_SHELL;
     event.respondWith(
       fetch(request)
         .then((res) => {
@@ -52,7 +65,7 @@ self.addEventListener("fetch", (event) => {
           caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
           return res;
         })
-        .catch(() => caches.match(request).then((cached) => cached ?? caches.match("/operator"))),
+        .catch(() => caches.match(request).then((cached) => cached ?? caches.match(fallbackShell))),
     );
   }
 });

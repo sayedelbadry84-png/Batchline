@@ -592,21 +592,28 @@ async function LedgerTab({
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["finance"];
   siteScope: Record<string, unknown>;
 }) {
-  const lines = await prisma.journalLine.findMany({
-    where: { journalEntry: { ...siteScope } },
-    include: { account: true, journalEntry: { select: { currency: true } } },
+  // Summed directly by Postgres (groupBy) rather than fetched row-by-row
+  // and reduced in JS — a Trial Balance is a lifetime-to-date balance by
+  // definition (there's no "period" to bound it to, unlike Reports' other
+  // metrics), so the fix for its growing-forever query isn't pagination,
+  // it's asking the database to do the summing instead of pulling every
+  // journal line ever posted into the app on every render.
+  const grouped = await prisma.journalLine.groupBy({
+    by: ["accountId", "currency"],
+    where: { ...siteScope },
+    _sum: { debit: true, credit: true },
   });
+  const accounts = await prisma.account.findMany({ where: { id: { in: [...new Set(grouped.map((g) => g.accountId))] } } });
+  const accountById = new Map(accounts.map((a) => [a.id, a]));
 
   type Row = { account: { code: string; name: string }; debit: number; credit: number };
-  const byCurrency = new Map<string, Map<string, Row>>();
-  for (const line of lines) {
-    const currency = line.journalEntry.currency;
-    if (!byCurrency.has(currency)) byCurrency.set(currency, new Map());
-    const accounts = byCurrency.get(currency)!;
-    const row = accounts.get(line.accountId) ?? { account: line.account, debit: 0, credit: 0 };
-    row.debit += line.debit;
-    row.credit += line.credit;
-    accounts.set(line.accountId, row);
+  const byCurrency = new Map<string, Row[]>();
+  for (const g of grouped) {
+    const account = accountById.get(g.accountId);
+    if (!account) continue;
+    const rows = byCurrency.get(g.currency) ?? [];
+    rows.push({ account, debit: g._sum.debit ?? 0, credit: g._sum.credit ?? 0 });
+    byCurrency.set(g.currency, rows);
   }
   const currencies = [...byCurrency.keys()].sort();
 
@@ -615,7 +622,7 @@ async function LedgerTab({
       <p className="text-sm text-ink-muted">{m.ledger.intro}</p>
       {currencies.length === 0 && <p className="text-sm text-ink-muted">{m.ledger.empty}</p>}
       {currencies.map((currency) => {
-        const rows = [...byCurrency.get(currency)!.values()].sort((a, b) => a.account.code.localeCompare(b.account.code));
+        const rows = [...byCurrency.get(currency)!].sort((a, b) => a.account.code.localeCompare(b.account.code));
         const totalDebit = rows.reduce((sum, r) => sum + r.debit, 0);
         const totalCredit = rows.reduce((sum, r) => sum + r.credit, 0);
         const balanced = Math.abs(totalDebit - totalCredit) < 0.01;

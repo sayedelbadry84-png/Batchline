@@ -14,6 +14,11 @@ import { activityForRole, aggregateIncentiveResults, buildSitePricingMap, getInc
 // tab from non-admins, but this is the real boundary, independent of that.
 const PAYROLL_ROLES = ["ADMIN"];
 
+// See the same note on billing/actions.ts's own TX_OPTIONS — several
+// sequential round trips to Neon inside one interactive transaction can
+// exceed Prisma's 5s default timeout, especially on a cold connection.
+const TX_OPTIONS = { timeout: 15000 };
+
 // Illustrative Saudi GOSI rates, not a compliance guarantee — verify
 // against the current official rate before relying on this for real
 // payroll. Saudi nationals contribute to the annuities branch (employee +
@@ -247,25 +252,30 @@ export async function markPayrollRunPaid(formData: FormData) {
   for (const site of bySite.values()) {
     if (site.total <= 0) continue;
     const description = `Payroll run ${run.runNumber}`;
-    const txn = await withSequentialNumber(
-      "TXN",
-      () => prisma.cashTransaction.count(),
-      (txnNumber) =>
-        prisma.cashTransaction.create({
-          data: {
-            txnNumber,
-            siteId: site.siteId,
-            direction: "OUT",
-            category: "PAYROLL",
-            amount: site.total,
-            currency: site.currency,
-            description,
-            occurredAt: new Date(),
-            createdById: user!.id,
-          },
-        }),
-    );
-    await postCashTransaction({ siteId: site.siteId, currency: site.currency, txnId: txn.id, direction: "OUT", category: "PAYROLL", amount: site.total, description });
+    // The cash transaction and its journal entry commit as one unit — see
+    // the same rationale on generateInvoiceForProject in
+    // billing/actions.ts.
+    await prisma.$transaction(async (tx) => {
+      const txn = await withSequentialNumber(
+        "TXN",
+        () => tx.cashTransaction.count(),
+        (txnNumber) =>
+          tx.cashTransaction.create({
+            data: {
+              txnNumber,
+              siteId: site.siteId,
+              direction: "OUT",
+              category: "PAYROLL",
+              amount: site.total,
+              currency: site.currency,
+              description,
+              occurredAt: new Date(),
+              createdById: user!.id,
+            },
+          }),
+      );
+      await postCashTransaction(tx, { siteId: site.siteId, currency: site.currency, txnId: txn.id, direction: "OUT", category: "PAYROLL", amount: site.total, description });
+    }, TX_OPTIONS);
   }
 
   await prisma.payrollRun.update({ where: { id }, data: { status: "PAID", paidAt: new Date() } });

@@ -10,6 +10,14 @@ import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
+// Every financial event below posts its source record and journal entry
+// inside one interactive transaction (see the ledger.ts Db type note) —
+// each is several sequential round trips to Neon (a remote serverless
+// Postgres), which can comfortably exceed Prisma's 5s default interactive-
+// transaction timeout, especially on a cold connection. 15s gives real
+// headroom without masking a genuinely broken/looping query.
+const TX_OPTIONS = { timeout: 15000 };
+
 // Invoice.plantId is set at generation time from whichever line produced
 // the trips it bills (see generateInvoiceForProject) — an invoice with no
 // plant (predates this, or had no in-scope trips) is only ever
@@ -95,33 +103,43 @@ export async function generateInvoiceForProject(formData: FormData) {
     const taxAmount = subtotal * (taxRatePct / 100);
     const total = subtotal + taxAmount;
     const dueDate = new Date(Date.now() + parseNetDays(project.customer.paymentTerms) * 24 * 60 * 60 * 1000);
-    const invoiceCount = await prisma.invoice.count();
-    const invoiceNumber = `INV-${new Date().getFullYear()}-${String(invoiceCount + 1).padStart(4, "0")}`;
 
-    const invoice = await prisma.invoice.create({
-      data: {
-        invoiceNumber,
-        customerId: project.customerId,
-        projectId,
-        plantId: plant.id,
-        dueDate,
-        subtotal,
-        taxRatePct,
-        taxLabel,
-        taxAmount,
-        total,
-        currency: plant.currency,
-        lines: { create: lines },
-      },
-    });
+    // Invoice creation and its journal entry commit as one unit — without
+    // this, a crash or a throw from postInvoice between the two calls
+    // would leave a real invoice on file with no matching journal entry,
+    // silently understating AR and Revenue on the Trial Balance forever
+    // with nothing to detect or reconcile the gap.
+    const invoice = await prisma.$transaction(async (tx) => {
+      const invoiceCount = await tx.invoice.count();
+      const invoiceNumber = `INV-${new Date().getFullYear()}-${String(invoiceCount + 1).padStart(4, "0")}`;
+
+      const invoice = await tx.invoice.create({
+        data: {
+          invoiceNumber,
+          customerId: project.customerId,
+          projectId,
+          plantId: plant.id,
+          dueDate,
+          subtotal,
+          taxRatePct,
+          taxLabel,
+          taxAmount,
+          total,
+          currency: plant.currency,
+          lines: { create: lines },
+        },
+      });
+
+      await postInvoice(tx, { siteId: plant.siteId, currency: plant.currency, invoiceId: invoice.id, subtotal, taxAmount, total });
+      return invoice;
+    }, TX_OPTIONS);
 
     await logAudit({
       module: "Billing",
       recordId: invoice.id,
-      afterValue: `${invoiceNumber} — ${subtotal} + ${taxLabel} ${taxAmount} = ${total} ${plant.currency}`,
+      afterValue: `${invoice.invoiceNumber} — ${subtotal} + ${taxLabel} ${taxAmount} = ${total} ${plant.currency}`,
       reasonCode: "INVOICE_GENERATED",
     });
-    await postInvoice({ siteId: plant.siteId, currency: plant.currency, invoiceId: invoice.id, subtotal, taxAmount, total });
 
     firstInvoiceId ??= invoice.id;
   }
@@ -169,10 +187,17 @@ export async function cancelInvoice(formData: FormData) {
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID" || invoice.payments.length > 0 || invoice.creditNotes.length > 0) return;
   if (!(await invoiceInScope(id, effectiveSiteId(user)))) return;
 
-  await prisma.$transaction([
-    prisma.invoiceLine.deleteMany({ where: { invoiceId: id } }),
-    prisma.invoice.update({ where: { id }, data: { status: "CANCELLED" } }),
-  ]);
+  // The cancellation and its reversing journal entry commit as one unit —
+  // see the same rationale on generateInvoiceForProject above. Without it,
+  // a crash between the two would leave an invoice marked CANCELLED whose
+  // original Dr AR / Cr Revenue entry was never reversed, permanently
+  // overstating AR and Revenue on the Trial Balance with nothing left to
+  // correct it.
+  await prisma.$transaction(async (tx) => {
+    await tx.invoiceLine.deleteMany({ where: { invoiceId: id } });
+    await tx.invoice.update({ where: { id }, data: { status: "CANCELLED" } });
+    await reverseJournalEntry(tx, "Billing", id, "Invoice cancelled");
+  }, TX_OPTIONS);
 
   await logAudit({
     module: "Billing",
@@ -182,11 +207,6 @@ export async function cancelInvoice(formData: FormData) {
     afterValue: "CANCELLED",
     reasonCode: "INVOICE_CANCELLED",
   });
-  // Reverses whatever postInvoice posted at generation time (Dr AR / Cr
-  // Revenue [/ Cr Tax Payable]) — without this, a cancelled invoice
-  // permanently overstates AR and Revenue on the Trial Balance forever,
-  // since postInvoice already ran and nothing else ever corrects it.
-  await reverseJournalEntry("Billing", id, "Invoice cancelled");
 
   revalidatePath(`/finance/invoices/${id}`);
   revalidatePath("/finance");
@@ -206,12 +226,21 @@ export async function recordPayment(formData: FormData) {
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return;
   if (!(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
 
-  const payment = await prisma.payment.create({ data: { invoiceId, amount, method, reference } });
+  // The payment and its journal entry commit as one unit — same rationale
+  // as generateInvoiceForProject above.
+  await prisma.$transaction(async (tx) => {
+    const payment = await tx.payment.create({ data: { invoiceId, amount, method, reference } });
 
-  const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0) + amount;
-  if (totalPaid >= invoice.total - 0.01) {
-    await prisma.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
-  }
+    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0) + amount;
+    if (totalPaid >= invoice.total - 0.01) {
+      await tx.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
+    }
+
+    // No journal entry when plantId is unset — same nullable-plantId edge
+    // case invoiceInScope already treats specially (an invoice that
+    // predates plant-scoping, or had no in-scope trips at generation time).
+    if (invoice.plant) await postPayment(tx, { siteId: invoice.plant.siteId, currency: invoice.currency, paymentId: payment.id, amount });
+  }, TX_OPTIONS);
 
   await logAudit({
     module: "Billing",
@@ -219,10 +248,6 @@ export async function recordPayment(formData: FormData) {
     afterValue: `${amount} ${invoice.currency}`,
     reasonCode: "PAYMENT_RECORDED",
   });
-  // No journal entry when plantId is unset — same nullable-plantId edge
-  // case invoiceInScope already treats specially (an invoice that
-  // predates plant-scoping, or had no in-scope trips at generation time).
-  if (invoice.plant) await postPayment({ siteId: invoice.plant.siteId, currency: invoice.currency, paymentId: payment.id, amount });
 
   revalidatePath(`/finance/invoices/${invoiceId}`);
   revalidatePath("/finance");
@@ -254,18 +279,25 @@ export async function issueCreditNote(formData: FormData) {
   const amountDue = invoiceAmountDue(invoice);
   if (amount > amountDue + 0.01) return;
 
-  const creditNote = await withSequentialNumber(
-    "CN",
-    () => prisma.creditNote.count(),
-    (creditNoteNumber) =>
-      prisma.creditNote.create({
-        data: { creditNoteNumber, invoiceId, amount, reason, notes, issuedById: user!.id },
-      }),
-  );
+  // The credit note and its journal entry commit as one unit — same
+  // rationale as generateInvoiceForProject above.
+  const creditNote = await prisma.$transaction(async (tx) => {
+    const creditNote = await withSequentialNumber(
+      "CN",
+      () => tx.creditNote.count(),
+      (creditNoteNumber) =>
+        tx.creditNote.create({
+          data: { creditNoteNumber, invoiceId, amount, reason, notes, issuedById: user!.id },
+        }),
+    );
 
-  if (amountDue - amount <= 0.01) {
-    await prisma.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
-  }
+    if (amountDue - amount <= 0.01) {
+      await tx.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
+    }
+
+    if (invoice.plant) await postCreditNote(tx, { siteId: invoice.plant.siteId, currency: invoice.currency, creditNoteId: creditNote.id, amount });
+    return creditNote;
+  }, TX_OPTIONS);
 
   await logAudit({
     module: "Billing",
@@ -273,7 +305,6 @@ export async function issueCreditNote(formData: FormData) {
     afterValue: `${creditNote.creditNoteNumber} — ${amount} ${invoice.currency} (${reason})`,
     reasonCode: "CREDIT_NOTE_ISSUED",
   });
-  if (invoice.plant) await postCreditNote({ siteId: invoice.plant.siteId, currency: invoice.currency, creditNoteId: creditNote.id, amount });
 
   revalidatePath(`/finance/invoices/${invoiceId}`);
   revalidatePath("/finance");

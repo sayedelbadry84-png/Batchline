@@ -6,6 +6,14 @@
 // touching a silo/hopper level); outflows are completed batch tickets,
 // using actual weighed mass when recorded and target mass otherwise (the
 // same fallback completeBatch itself uses when deducting inventory).
+//
+// receipts/consumptions are expected to already be bounded to whatever
+// date range the caller is displaying (warehouses/materials/[id]/page.tsx
+// fetches only that window's rows, not the material's entire history) —
+// openingBalanceKg carries forward everything from before that window, a
+// single pre-aggregated number rather than every prior row, so the
+// running balance stays correct without the page ever having to pull a
+// material's full lifetime history just to show one month of it.
 export type LedgerEvent = {
   date: Date;
   type: "RECEIPT" | "CONSUMPTION";
@@ -18,6 +26,7 @@ export type LedgerEntry = LedgerEvent & { runningBalanceKg: number };
 export function buildStockLedger(
   receipts: { receivedAt: Date; netWeightKg: number; poNumber: string | null; supplierName: string }[],
   consumptions: { date: Date; ticketNumber: string; massKg: number }[],
+  openingBalanceKg = 0,
 ): LedgerEntry[] {
   const events: LedgerEvent[] = [
     ...receipts.map((r) => ({
@@ -36,7 +45,7 @@ export function buildStockLedger(
 
   events.sort((a, b) => a.date.getTime() - b.date.getTime());
 
-  let balance = 0;
+  let balance = openingBalanceKg;
   return events.map((e) => {
     balance += e.quantityKg;
     return { ...e, runningBalanceKg: balance };
