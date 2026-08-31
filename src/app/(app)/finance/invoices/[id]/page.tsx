@@ -1,12 +1,14 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
+import QRCode from "qrcode";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { markInvoiceSent, recordPayment, cancelInvoice, issueCreditNote } from "../../../billing/actions";
+import { markInvoiceSent, recordPayment, cancelInvoice, issueCreditNote, generateZatcaInvoiceDocuments, submitZatcaInvoiceForClearance } from "../../../billing/actions";
 import { getActiveSiteId } from "@/lib/siteScope";
 import { invoiceAmountDue } from "@/lib/billing";
+import { getZatcaReadiness } from "@/lib/zatca/settings";
 
 const statusChip: Record<string, string> = {
   DRAFT: "bg-surface-alt text-ink-muted",
@@ -45,6 +47,9 @@ export default async function InvoiceDetailPage({
   const canRecordPayment = invoice.status === "SENT" || invoice.status === "DRAFT";
   const canIssueCreditNote = canRecordPayment && amountDue > 0.01;
   const canCancel = (invoice.status === "DRAFT" || invoice.status === "SENT") && invoice.payments.length === 0 && invoice.creditNotes.length === 0;
+
+  const zatcaReadiness = invoice.plant ? await getZatcaReadiness(invoice.plant.siteId) : ({ level: "NOT_CONFIGURED" } as const);
+  const zatcaQrDataUrl = invoice.zatcaQrCode ? await QRCode.toDataURL(invoice.zatcaQrCode, { margin: 1, width: 180 }) : null;
 
   return (
     <div className="flex flex-col gap-8">
@@ -131,6 +136,69 @@ export default async function InvoiceDetailPage({
             <span className="font-mono tabular" dir="ltr">{invoice.total.toLocaleString()} {invoice.currency}</span>
           </div>
         </div>
+      </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-3 font-display text-lg font-semibold">{d.zatcaTitle}</h2>
+        {zatcaReadiness.level === "NOT_CONFIGURED" && !invoice.zatcaStatus ? (
+          <p className="text-sm text-ink-muted">{d.zatcaNotConfigured}</p>
+        ) : (
+          <div className="flex flex-wrap items-start gap-6">
+            <div className="flex flex-col gap-2 text-sm">
+              {invoice.zatcaStatus ? (
+                <span className={`${ui.chip} w-fit ${invoice.zatcaStatus === "CLEARED" ? "bg-good-soft text-good" : invoice.zatcaStatus === "FAILED" ? "bg-critical-soft text-critical" : "bg-warn-soft text-warn"}`}>
+                  {d.zatcaStatusLabel[invoice.zatcaStatus as keyof typeof d.zatcaStatusLabel] ?? invoice.zatcaStatus}
+                </span>
+              ) : (
+                <span className={`${ui.chip} w-fit bg-surface-alt text-ink-muted`}>{d.zatcaQrOnlyHint}</span>
+              )}
+
+              {invoice.zatcaUuid && (
+                <div>
+                  <span className="text-ink-muted">{d.zatcaUuid}: </span>
+                  <span className="font-mono text-xs" dir="ltr">{invoice.zatcaUuid}</span>
+                </div>
+              )}
+              {invoice.zatcaInvoiceHash && (
+                <div>
+                  <span className="text-ink-muted">{d.zatcaHash}: </span>
+                  <span className="break-all font-mono text-xs" dir="ltr">{invoice.zatcaInvoiceHash}</span>
+                </div>
+              )}
+              {invoice.zatcaErrorMessage && (
+                <div className="text-critical">
+                  <span className="text-ink-muted">{d.zatcaError}: </span>
+                  <span className="text-xs">{invoice.zatcaErrorMessage}</span>
+                </div>
+              )}
+
+              {!invoice.zatcaStatus && (
+                <form action={generateZatcaInvoiceDocuments}>
+                  <input type="hidden" name="id" value={invoice.id} />
+                  <button type="submit" className={`${ui.button} mt-1 w-fit`}>{d.zatcaGenerate}</button>
+                </form>
+              )}
+              {invoice.zatcaStatus && invoice.zatcaStatus !== "CLEARED" && (
+                zatcaReadiness.level === "CLEARANCE_READY" ? (
+                  <form action={submitZatcaInvoiceForClearance}>
+                    <input type="hidden" name="id" value={invoice.id} />
+                    <button type="submit" className={`${ui.button} mt-1 w-fit`}>{d.zatcaSubmit}</button>
+                  </form>
+                ) : (
+                  <p className="max-w-sm text-xs text-ink-muted">{d.zatcaClearanceNotReady}</p>
+                )
+              )}
+            </div>
+
+            {zatcaQrDataUrl && (
+              <div className="flex flex-col items-center gap-1">
+                {/* eslint-disable-next-line @next/next/no-img-element -- a server-rendered data: URL, not an optimizable remote/static asset */}
+                <img src={zatcaQrDataUrl} alt={d.zatcaQrLabel} width={140} height={140} className="rounded-md border border-border" />
+                <span className="text-xs text-ink-muted">{d.zatcaQrLabel}</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-6">

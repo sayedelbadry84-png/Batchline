@@ -172,3 +172,42 @@ export async function updatePlantThresholds(formData: FormData) {
 
   revalidatePath("/plants");
 }
+
+// ZATCA (Saudi e-invoicing) registration for a site — see ZatcaSettings'
+// own schema comment for why only the non-secret identifiers (VAT/CR
+// number, seller legal name, sandbox/production) live here at all; the
+// actual CSID certificate/private key from onboarding go in environment
+// variables, never through this form. Gated to Accountant/Admin, not the
+// plant-operator roles that manage the rest of this page — this is a tax
+// compliance fact, not an operational plant setting.
+export async function updateZatcaSettings(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+
+  const siteId = String(formData.get("siteId") ?? "");
+  if (!siteId) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
+
+  const sellerLegalName = String(formData.get("sellerLegalName") ?? "").trim() || null;
+  const vatNumber = String(formData.get("vatNumber") ?? "").trim() || null;
+  const crNumber = String(formData.get("crNumber") ?? "").trim() || null;
+  const environment = String(formData.get("environment") ?? "SANDBOX") === "PRODUCTION" ? "PRODUCTION" : "SANDBOX";
+
+  const before = await prisma.zatcaSettings.findUnique({ where: { siteId } });
+  await prisma.zatcaSettings.upsert({
+    where: { siteId },
+    create: { siteId, sellerLegalName, vatNumber, crNumber, environment },
+    update: { sellerLegalName, vatNumber, crNumber, environment },
+  });
+
+  await logAudit({
+    module: "PlantManagement",
+    recordId: siteId,
+    field: "zatcaSettings",
+    beforeValue: before ? `${before.vatNumber ?? "—"} / ${before.crNumber ?? "—"} / ${before.environment}` : "—",
+    afterValue: `${vatNumber ?? "—"} / ${crNumber ?? "—"} / ${environment}`,
+    reasonCode: "ZATCA_SETTINGS_UPDATED",
+  });
+
+  revalidatePath("/plants");
+}

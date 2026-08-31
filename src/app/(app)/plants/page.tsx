@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createSite, updateSite, createPlant, updatePlant, updatePlantThresholds } from "./actions";
+import { createSite, updateSite, createPlant, updatePlant, updatePlantThresholds, updateZatcaSettings } from "./actions";
 
 const PLANT_STATUSES = ["ACTIVE", "FROZEN", "DECOMMISSIONED"] as const;
 const PLANT_STATUS_CHIP: Record<string, string> = {
@@ -30,8 +30,14 @@ export default async function PlantsPage({
         orderBy: { createdAt: "asc" },
         include: { _count: { select: { silos: true, employees: true, batchTickets: true } } },
       },
+      zatcaSettings: true,
     },
   });
+  // Whether a real onboarded CSID exists — purely informational here (the
+  // status column), the actual gate on submitting anything to ZATCA lives
+  // in src/lib/zatca/settings.ts, read fresh at submit time, not cached
+  // from this page render.
+  const zatcaCsidConfigured = Boolean(process.env.ZATCA_CSID_CERT && process.env.ZATCA_CSID_SECRET);
 
   return (
     <div className="flex flex-col gap-8">
@@ -379,6 +385,53 @@ export default async function PlantsPage({
               <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">{m.save}</button>
             </form>
           ))}
+        </div>
+      </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.zatcaTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.zatcaIntro}</p>
+        <div className="flex flex-col gap-3">
+          {sites.map((s) => {
+            const status = zatcaCsidConfigured && s.zatcaSettings?.vatNumber ? m.zatcaStatusClearanceReady : s.zatcaSettings?.vatNumber ? m.zatcaStatusQrOnly : m.zatcaStatusNotConfigured;
+            return (
+              <form
+                key={s.id}
+                action={updateZatcaSettings}
+                className="flex flex-wrap items-end gap-4 border-b border-border pb-3 last:border-0 last:pb-0"
+              >
+                <input type="hidden" name="siteId" value={s.id} />
+                <div className="min-w-32 font-medium">
+                  {s.name}
+                  <div className="mt-1">
+                    <span className={`${ui.chip} ${zatcaCsidConfigured && s.zatcaSettings?.vatNumber ? "bg-good-soft text-good" : s.zatcaSettings?.vatNumber ? "bg-warn-soft text-warn" : "bg-surface-alt text-ink-muted"}`}>
+                      {status}
+                    </span>
+                  </div>
+                </div>
+                <div>
+                  <label className={ui.label}>{m.zatcaFSellerName}</label>
+                  <input name="sellerLegalName" defaultValue={s.zatcaSettings?.sellerLegalName ?? ""} className="w-48 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" />
+                </div>
+                <div>
+                  <label className={ui.label}>{m.zatcaFVatNumber}</label>
+                  <input name="vatNumber" defaultValue={s.zatcaSettings?.vatNumber ?? ""} className="w-36 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" dir="ltr" />
+                </div>
+                <div>
+                  <label className={ui.label}>{m.zatcaFCrNumber}</label>
+                  <input name="crNumber" defaultValue={s.zatcaSettings?.crNumber ?? ""} className="w-32 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" dir="ltr" />
+                </div>
+                <div>
+                  <label className={ui.label}>{m.zatcaFEnvironment}</label>
+                  <select name="environment" defaultValue={s.zatcaSettings?.environment ?? "SANDBOX"} className="w-36 rounded-md border border-border bg-surface px-2 py-1.5 text-sm">
+                    <option value="SANDBOX">{m.zatcaEnvSandbox}</option>
+                    <option value="PRODUCTION">{m.zatcaEnvProduction}</option>
+                  </select>
+                </div>
+                <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">{m.zatcaSave}</button>
+              </form>
+            );
+          })}
         </div>
       </div>
     </div>

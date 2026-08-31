@@ -172,6 +172,36 @@ model Site {
   materialRequisitions     MaterialRequisition[]
   finishedProductMovements FinishedProductMovement[]
   journalEntries           JournalEntry[]
+  zatcaSettings            ZatcaSettings?
+}
+
+// A site's ZATCA (Saudi e-invoicing) registration — one row per site,
+// since VAT/CR registration is a legal-entity/branch fact, not a
+// production-line one. Deliberately holds only the non-secret identifiers
+// a human types in from their CR/VAT certificate; the actual onboarded
+// CSID certificate and private key (obtained via ZATCA's CSR -> OTP ->
+// compliance-CSID -> production-CSID flow) are never stored here or
+// anywhere in this database — they live in environment variables
+// (ZATCA_CSID_CERT / ZATCA_CSID_SECRET, see src/lib/zatca/settings.ts),
+// the same posture this app already takes for the database URL and blob
+// storage token. onboardedAt is just a human-readable "did we finish that
+// flow" marker, set manually once it has been.
+//
+// Every field here is optional — a site with no row (or an empty one)
+// simply never generates ZATCA documents; nothing is fabricated in its
+// place. See src/lib/zatca/ for the actual document generation/submission
+// logic this configures.
+model ZatcaSettings {
+  id              String    @id @default(cuid())
+  siteId          String    @unique
+  site            Site      @relation(fields: [siteId], references: [id])
+  sellerLegalName String?
+  vatNumber       String? // 15-digit ZATCA VAT registration number
+  crNumber        String? // Commercial Registration number
+  environment     String    @default("SANDBOX") // SANDBOX, PRODUCTION
+  onboardedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 }
 
 model Plant {
@@ -1201,6 +1231,31 @@ model Invoice {
   currency      String   @default("EGP")
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  // ZATCA e-invoicing (Saudi Arabia) — populated by
+  // src/lib/zatca/generate.ts once this invoice's site has ZatcaSettings
+  // on file. All null until then: no QR, no XML, no status, nothing
+  // fabricated in their place. zatcaStatus is GENERATED (documents built,
+  // not yet sent — Phase 1 QR compliance already met at this point),
+  // CLEARED (Phase 2: accepted by ZATCA's clearance API), or FAILED.
+  zatcaUuid        String?
+  // SHA256 of this invoice's own generated XML, and the prior CLEARED
+  // invoice's own zatcaInvoiceHash — ZATCA requires each invoice to chain
+  // to the one before it (Previous Invoice Hash), the same tamper-evidence
+  // idea as a blockchain, so an invoice can't be quietly inserted or
+  // altered after the fact.
+  zatcaInvoiceHash String?
+  zatcaPreviousHash String?
+  // Base64 TLV payload — Phase 1's 5-tag shape (seller name, VAT number,
+  // timestamp, total, VAT total). Phase 2 extends this to 9 tags once a
+  // real CSID exists to compute the signature/certificate tags.
+  zatcaQrCode       String?
+  zatcaXml          String?
+  zatcaStatus       String?
+  zatcaGeneratedAt  DateTime?
+  zatcaSubmittedAt  DateTime?
+  zatcaClearedAt    DateTime?
+  zatcaErrorMessage String?
 
   lines       InvoiceLine[]
   payments    Payment[]

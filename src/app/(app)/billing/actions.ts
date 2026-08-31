@@ -5,6 +5,8 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireRole } from "@/lib/session";
 import { parseNetDays, invoiceAmountDue } from "@/lib/billing";
 import { postInvoice, postPayment, postCreditNote, reverseJournalEntry } from "@/lib/ledger";
+import { generateZatcaDocuments } from "@/lib/zatca/generate";
+import { submitInvoiceForClearance } from "@/lib/zatca/submit";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
@@ -308,4 +310,43 @@ export async function issueCreditNote(formData: FormData) {
 
   revalidatePath(`/finance/invoices/${invoiceId}`);
   revalidatePath("/finance");
+}
+
+// ZATCA (Saudi e-invoicing) — see src/lib/zatca/ for the actual document
+// generation/submission logic these two thin wrappers call. Both refuse
+// quietly (return without erroring) the same way every other guard in
+// this file does when the invoice isn't in scope or the underlying
+// function reports it can't proceed — the invoice detail page reads
+// invoice.zatcaStatus/zatcaErrorMessage afterward to show what happened.
+export async function generateZatcaInvoiceDocuments(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+  if (!(await invoiceInScope(id, effectiveSiteId(user)))) return;
+
+  const result = await generateZatcaDocuments(id);
+  if (result.ok) {
+    await logAudit({ module: "Billing", recordId: id, afterValue: "ZATCA QR/XML generated", reasonCode: "ZATCA_GENERATED" });
+  }
+  revalidatePath(`/finance/invoices/${id}`);
+}
+
+export async function submitZatcaInvoiceForClearance(formData: FormData) {
+  const user = await getCurrentUser();
+  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+  if (!(await invoiceInScope(id, effectiveSiteId(user)))) return;
+
+  const result = await submitInvoiceForClearance(id);
+  await logAudit({
+    module: "Billing",
+    recordId: id,
+    afterValue: result.ok ? "ZATCA clearance accepted" : `ZATCA clearance failed: ${result.reason}`,
+    reasonCode: result.ok ? "ZATCA_CLEARED" : "ZATCA_CLEARANCE_FAILED",
+  });
+  revalidatePath(`/finance/invoices/${id}`);
 }
