@@ -5,7 +5,8 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { addComponent, deleteComponent, setMixStatus, updateMixDesign } from "../actions";
-import { estimateCo2eKg } from "@/lib/carbon";
+import { estimateCo2eKg, CO2E_FACTOR_KG_PER_KG } from "@/lib/carbon";
+import { PrintButton } from "@/components/PrintButton";
 
 export default async function MixDesignDetailPage({
   params,
@@ -49,9 +50,27 @@ export default async function MixDesignDetailPage({
     0,
   );
 
+  // Per-material breakdown for the printable carbon disclosure section
+  // below — same numbers the KPI card above sums, just shown per line
+  // with which factor was actually used and where it came from, since a
+  // real disclosure document has to show its work, not just a total.
+  const carbonBreakdown = mix.components.map((c) => {
+    const factor = c.material.co2FactorKgPerKg ?? CO2E_FACTOR_KG_PER_KG[c.material.type] ?? null;
+    const source: "supplier" | "generic" | "missing" =
+      c.material.co2FactorKgPerKg != null ? "supplier" : factor != null ? "generic" : "missing";
+    return {
+      materialName: c.material.name,
+      materialType: c.material.type,
+      massKg: c.designMassKgPerM3,
+      factor,
+      source,
+      co2Kg: factor != null ? factor * c.designMassKgPerM3 : 0,
+    };
+  });
+
   return (
     <div className="flex flex-col gap-8">
-      <header className="flex items-start justify-between gap-4">
+      <header className="no-print flex items-start justify-between gap-4">
         {editingFields ? (
           <form action={updateMixDesign} className={`${ui.card} flex flex-1 flex-wrap items-end gap-2`}>
             <input type="hidden" name="mixId" value={mix.id} />
@@ -116,7 +135,7 @@ export default async function MixDesignDetailPage({
         </form>
       </header>
 
-      <div className="grid grid-cols-4 gap-4">
+      <div className="no-print grid grid-cols-4 gap-4">
         <div className={ui.card}>
           <div className="font-mono text-xs text-ink-muted uppercase">{d.computedVolume}</div>
           <div className="mt-1 font-mono text-2xl tabular">{designVolumeM3.toFixed(3)} m³</div>
@@ -141,7 +160,7 @@ export default async function MixDesignDetailPage({
         </div>
       </div>
 
-      <div className="grid grid-cols-[1fr_320px] gap-6">
+      <div className="no-print grid grid-cols-[1fr_320px] gap-6">
         <div className={ui.card}>
           <h2 className="mb-3 font-display text-lg font-semibold">{d.componentsTitle}</h2>
           <table className={ui.table}>
@@ -263,6 +282,53 @@ export default async function MixDesignDetailPage({
             .
           </p>
         </form>
+      </div>
+
+      <div className={ui.card}>
+        <div className="mb-3 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="font-display text-lg font-semibold">{d.disclosureTitle}</h2>
+            <p className="mt-1 text-sm text-ink-muted">{d.disclosureIntro}</p>
+          </div>
+          <PrintButton label={d.printDisclosure} />
+        </div>
+        <div className="mb-3 flex items-baseline justify-between" dir="ltr">
+          <span className="font-mono text-sm font-semibold">{mix.code} — {mix.grade}</span>
+          <span className="font-mono text-xs text-ink-muted">{d.generatedOn(new Date().toLocaleDateString())}</span>
+        </div>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              <th className={ui.th}>{d.disclosureCol.material}</th>
+              <th className={ui.th}>{d.disclosureCol.type}</th>
+              <th className={ui.th}>{d.disclosureCol.mass}</th>
+              <th className={ui.th}>{d.disclosureCol.factor}</th>
+              <th className={ui.th}>{d.disclosureCol.source}</th>
+              <th className={ui.th}>{d.disclosureCol.co2}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {carbonBreakdown.map((row, i) => (
+              <tr key={i}>
+                <td className={`${ui.td} font-medium`}>{row.materialName}</td>
+                <td className={`${ui.td} font-mono text-xs`}>{dict.materialTypes[row.materialType as keyof typeof dict.materialTypes] ?? row.materialType}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{row.massKg.toFixed(1)}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{row.factor != null ? row.factor.toFixed(3) : "—"}</td>
+                <td className={ui.td}>
+                  {row.source === "supplier" ? d.sourceSupplier : row.source === "generic" ? d.sourceGeneric : d.sourceMissing}
+                </td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{row.co2Kg.toFixed(1)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td className={`${ui.td} font-semibold`} colSpan={5}>{d.disclosureTotalLabel}</td>
+              <td className={`${ui.td} font-mono tabular font-semibold`} dir="ltr">{embodiedCo2eKg.toFixed(1)}</td>
+            </tr>
+          </tfoot>
+        </table>
+        <p className="mt-3 rounded-md border border-warn/40 bg-warn-soft p-3 text-xs text-ink">{d.disclosureDisclaimer}</p>
       </div>
     </div>
   );
