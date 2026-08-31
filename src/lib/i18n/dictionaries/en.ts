@@ -1139,6 +1139,11 @@ const en: typeof ar = {
       overLabel: "over",
       underLabel: "under",
       emptyAnomalies: "No unusual deviation patterns detected.",
+      strengthAnomaliesIntro: "Statistical outliers and directional drift in cylinder-strength margin (28 days or later) per mix design — the same statistical method above, applied to quality results instead of component weight.",
+      strengthOutlierFlag: (mix: string, ticket: string, pct: number, z: number) =>
+        `${mix} on ${ticket}: strength margin ${pct > 0 ? "+" : ""}${pct.toFixed(1)}% vs target — ${Math.abs(z).toFixed(1)}x further from this mix's normal range.`,
+      strengthDriftFlag: (mix: string, direction: string, cusumPct: number) =>
+        `${mix}: strength margin has drifted steadily ${direction} its usual level (CUSUM ${cusumPct.toFixed(1)}%) — worth reviewing the mix design or curing practices.`,
       sustainabilityTitle: "Sustainability",
       co2e7d: "Estimated CO₂e, last 7 days",
       co2ePerM3: "Estimated CO₂e per m³",

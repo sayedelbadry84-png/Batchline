@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
+import { detectAnomalies, detectStrengthAnomalies, type DeviationSample, type StrengthDeviationSample } from "@/lib/anomaly";
 import { estimateCo2eKg } from "@/lib/carbon";
 import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
@@ -38,6 +38,7 @@ const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
 const WEEKS_BACK_FOR_WEEKDAY_AVG = 8;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
+const FINAL_STRENGTH_AGE_DAYS = 28; // The real acceptance age — 3/7/14-day results are early-age diagnostics, not the final result.
 const SILO_MATERIAL_TYPES = new Set(["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"]);
 const REPORT_TABS = ["overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers", "profitability"] as const;
 type ReportTab = (typeof REPORT_TABS)[number];
@@ -147,7 +148,10 @@ export default async function ReportsPage({
       where: { status: "CLOSED", ...tripPlantScopeWhere(siteId, plantId) },
       include: { drumReturn: true, batchTicket: true },
     }),
-    prisma.labResult.findMany({ where: { ...(siteId ? { testBatch: { trip: tripPlantScopeWhere(siteId, plantId) } } : {}) } }),
+    prisma.labResult.findMany({
+      where: { ...(siteId ? { testBatch: { trip: tripPlantScopeWhere(siteId, plantId) } } : {}) },
+      include: { testBatch: { include: { trip: { include: { batchTicket: { include: { mix: true } } } } } } },
+    }),
     prisma.testBatch.findMany({
       where: { ...(siteId ? { trip: tripPlantScopeWhere(siteId, plantId) } : {}) },
       include: { trip: { include: { batchTicket: { include: { mix: true } } } } },
@@ -232,6 +236,26 @@ export default async function ReportsPage({
     }
   }
   const anomalies = detectAnomalies(byMaterial);
+
+  // --- Strength anomalies: the same engine applied to cylinder-strength
+  // margin over target, one sample per mix design per final-age (28-day
+  // or later) LabResult. Early-age (3/7/14-day) results are diagnostic,
+  // not the real acceptance result — strength-prediction.ts already
+  // covers those — so they're excluded here rather than mixed into a
+  // population they'd distort. ---
+  const byMix = new Map<string, { mixCode: string; samples: StrengthDeviationSample[] }>();
+  for (const r of labResults) {
+    if (r.ageDays < FINAL_STRENGTH_AGE_DAYS) continue;
+    const mix = r.testBatch.trip.batchTicket.mix;
+    const entry = byMix.get(mix.id) ?? { mixCode: mix.code, samples: [] };
+    entry.samples.push({
+      testRef: r.testBatch.trip.batchTicket.ticketNumber,
+      testedOn: r.testedOn,
+      deviationPct: ((r.breakStrengthMpa - r.targetStrengthMpa) / r.targetStrengthMpa) * 100,
+    });
+    byMix.set(mix.id, entry);
+  }
+  const strengthAnomalies = detectStrengthAnomalies(byMix);
 
   // --- Quality ---
   const passCount = labResults.filter((r) => r.passFail === "PASS").length;
@@ -503,6 +527,28 @@ export default async function ReportsPage({
             <div className="font-mono text-2xl tabular">{fmt(slumpConformanceRate, 1, "%")}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.slumpConformance}</div>
             <div className="mt-1 text-xs text-ink-faint">{m.slumpBand(SLUMP_TOLERANCE_MM, slumpChecked.length)}</div>
+          </div>
+        </div>
+        <div className="mt-4">
+          <p className="mb-2 text-sm text-ink-muted">{m.strengthAnomaliesIntro}</p>
+          <div className="flex flex-col gap-2">
+            {strengthAnomalies.map((a, i) => (
+              <div key={i} className={`${ui.card} flex items-center justify-between gap-4 py-3`}>
+                <div>
+                  <span className={`${ui.chip} ${a.type === "OUTLIER" ? "bg-critical-soft text-critical" : "bg-warn-soft text-warn"} me-2`}>
+                    {a.type === "OUTLIER" ? m.outlierBadge : m.driftBadge}
+                  </span>
+                  <span className="text-sm">
+                    {a.type === "OUTLIER"
+                      ? m.strengthOutlierFlag(a.mixCode, a.testRef, a.deviationPct, a.zScore)
+                      : m.strengthDriftFlag(a.mixCode, a.direction === "OVER" ? m.overLabel : m.underLabel, a.cusumPct)}
+                  </span>
+                </div>
+              </div>
+            ))}
+            {strengthAnomalies.length === 0 && (
+              <div className={`${ui.card} text-sm text-ink-muted`}>{m.emptyAnomalies}</div>
+            )}
           </div>
         </div>
       </div>

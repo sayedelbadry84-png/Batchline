@@ -1132,6 +1132,11 @@ const ar = {
       overLabel: "فوق",
       underLabel: "تحت",
       emptyAnomalies: "لم يُرصد أي نمط انحراف غير معتاد.",
+      strengthAnomaliesIntro: "قيم شاذة وانحراف اتجاهي في هامش مقاومة الأسطوانات (28 يومًا فأكثر) لكل تصميم خلطة — نفس أسلوب الرصد الإحصائي أعلاه، مطبَّقًا على نتائج الجودة بدل وزن المكونات.",
+      strengthOutlierFlag: (mix: string, ticket: string, pct: number, z: number) =>
+        `${mix} في ${ticket}: هامش مقاومة ${pct > 0 ? "+" : ""}${pct.toFixed(1)}% عن المستهدف — أبعد بـ ${Math.abs(z).toFixed(1)} مرة عن النطاق المعتاد لهذه الخلطة.`,
+      strengthDriftFlag: (mix: string, direction: string, cusumPct: number) =>
+        `${mix}: هامش المقاومة ينحرف باستمرار ${direction} مستواه المعتاد (CUSUM ${cusumPct.toFixed(1)}%) — يستحق مراجعة تصميم الخلطة أو ممارسات المعالجة.`,
       sustainabilityTitle: "الاستدامة",
       co2e7d: "الكربون المقدّر (كجم مكافئ)، آخر 7 أيام",
       co2ePerM3: "الكربون المقدّر لكل م³",
