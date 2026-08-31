@@ -23,6 +23,18 @@ import {
   getProfitabilityReport,
   getQualityReport,
   getMaintenanceReport,
+  getArAgingReport,
+  getApAgingReport,
+  getCashLedgerReport,
+  getSalesPipelineReport,
+  getQuotesReport,
+  getPurchaseOrdersReport,
+  getSupplierPerformanceReport,
+  getAttendanceReport,
+  getLeaveReport,
+  getPayrollCostReport,
+  getSparePartsReport,
+  getFinishedGoodsReport,
 } from "@/lib/reportQueries";
 import {
   aggregateIncentiveResults,
@@ -36,6 +48,7 @@ import { markDrumReturnFate } from "../trips/actions";
 import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { invoiceAmountDue } from "@/lib/billing";
+import { AGING_BUCKETS } from "@/lib/aging";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
@@ -43,7 +56,10 @@ const WEEKS_BACK_FOR_WEEKDAY_AVG = 8;
 const SLUMP_TOLERANCE_MM = 25; // ASTM C94-style default for a 75-150mm target band; configurable in a later phase.
 const FINAL_STRENGTH_AGE_DAYS = 28; // The real acceptance age — 3/7/14-day results are early-age diagnostics, not the final result.
 const SILO_MATERIAL_TYPES = new Set(["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"]);
-const REPORT_TABS = ["overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers", "profitability", "quality", "maintenance"] as const;
+const REPORT_TABS = [
+  "overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers", "profitability", "quality", "maintenance",
+  "arAging", "apAging", "cashLedger", "salesPipeline", "quotes", "purchaseOrders", "supplierPerformance", "attendance", "leave", "payrollCost", "spareParts", "finishedGoods",
+] as const;
 type ReportTab = (typeof REPORT_TABS)[number];
 
 function fmt(n: number | null, digits = 1, suffix = "") {
@@ -340,6 +356,23 @@ export default async function ReportsPage({
   // No plantId narrowing — see getMaintenanceReport's own comment.
   const maintenanceData = tab === "maintenance" ? await getMaintenanceReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
 
+  // --- Finance, Sales, Purchasing, Warehouses — site-only scope, no
+  // plantId narrowing (see each query function's own comment for why). ---
+  const arAgingData = tab === "arAging" ? await getArAgingReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const apAgingData = tab === "apAging" ? await getApAgingReport({ to: rangeEnd, siteId }) : null;
+  const cashLedgerData = tab === "cashLedger" ? await getCashLedgerReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
+  const salesPipelineData = tab === "salesPipeline" ? await getSalesPipelineReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
+  const quotesData = tab === "quotes" ? await getQuotesReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
+  const purchaseOrdersData = tab === "purchaseOrders" ? await getPurchaseOrdersReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
+  const supplierPerformanceData = tab === "supplierPerformance" ? await getSupplierPerformanceReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
+  // --- Employees — scoped through Employee.plantId, so both siteId and
+  // plantId apply here, same as the production-side reports above. ---
+  const attendanceData = tab === "attendance" ? await getAttendanceReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const leaveData = tab === "leave" ? await getLeaveReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const payrollCostData = tab === "payrollCost" ? await getPayrollCostReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const sparePartsData = tab === "spareParts" ? await getSparePartsReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
+  const finishedGoodsData = tab === "finishedGoods" ? await getFinishedGoodsReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
+
   const incentivesData =
     tab === "incentives"
       ? await (async () => {
@@ -397,6 +430,18 @@ export default async function ReportsPage({
     profitability: m.tabs.profitability,
     quality: m.tabs.quality,
     maintenance: m.tabs.maintenance,
+    arAging: m.tabs.arAging,
+    apAging: m.tabs.apAging,
+    cashLedger: m.tabs.cashLedger,
+    salesPipeline: m.tabs.salesPipeline,
+    quotes: m.tabs.quotes,
+    purchaseOrders: m.tabs.purchaseOrders,
+    supplierPerformance: m.tabs.supplierPerformance,
+    attendance: m.tabs.attendance,
+    leave: m.tabs.leave,
+    payrollCost: m.tabs.payrollCost,
+    spareParts: m.tabs.spareParts,
+    finishedGoods: m.tabs.finishedGoods,
   };
 
   return (
@@ -1102,6 +1147,944 @@ export default async function ReportsPage({
                 ))}
                 {maintenanceData.rows.length === 0 && (
                   <tr><td className={ui.td} colSpan={9}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "arAging" && arAgingData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${dict.modules.finance.aging.arTitle} — ${rangeTo}\n${m.arAgingReport.invoiceCount(arAgingData.invoiceCount)}\n${m.arAgingReport.totalOutstanding(arAgingData.totalOutstanding.toFixed(2))}`}
+            filenameBase={`ar-aging-${rangeTo}`}
+            headers={["Invoice", "Customer", "Project", "Issue date", "Due date", "Bucket", "Amount due"]}
+            rows={arAgingData.rows.map((inv) => [
+              inv.invoiceNumber,
+              inv.customer.legalName,
+              inv.project?.name ?? "",
+              new Date(inv.issueDate).toISOString(),
+              new Date(inv.dueDate).toISOString(),
+              inv.bucket,
+              inv.amountDue,
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.arAgingReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{arAgingData.totalOutstanding.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.arAgingReport.totalOutstanding(arAgingData.totalOutstanding.toFixed(2))}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{arAgingData.invoiceCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.arAgingReport.invoiceCount(arAgingData.invoiceCount)}</div>
+            </div>
+            {AGING_BUCKETS.map((b) => (
+              <div key={b.key} className={ui.card}>
+                <div className="font-mono text-xl tabular">{arAgingData.byBucket[b.key].toFixed(0)}</div>
+                <div className="mt-1 text-sm text-ink-muted">{dict.modules.finance.aging.bucketLabel[b.key]}</div>
+              </div>
+            ))}
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.arAgingReport.col.invoice}</th>
+                  <th className={ui.th}>{m.arAgingReport.col.customer}</th>
+                  <th className={ui.th}>{m.arAgingReport.col.project}</th>
+                  <th className={ui.th}>{m.arAgingReport.col.dueDate}</th>
+                  <th className={ui.th}>{m.arAgingReport.col.bucket}</th>
+                  <th className={ui.th}>{m.arAgingReport.col.amountDue}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {arAgingData.rows.map((inv) => (
+                  <tr key={inv.id}>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{inv.invoiceNumber}</td>
+                    <td className={ui.td}>{inv.customer.legalName}</td>
+                    <td className={ui.td}>{inv.project?.name ?? "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(inv.dueDate).toLocaleDateString()}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${inv.bucket === "current" ? "bg-surface-alt text-ink-muted" : "bg-critical-soft text-critical"}`}>
+                        {dict.modules.finance.aging.bucketLabel[inv.bucket]}
+                      </span>
+                    </td>
+                    <td className={`${ui.td} font-mono tabular`}>{inv.amountDue.toFixed(2)} {inv.currency}</td>
+                  </tr>
+                ))}
+                {arAgingData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "apAging" && apAgingData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${dict.modules.finance.aging.apTitle} — ${rangeTo}\n${m.apAgingReport.billCount(apAgingData.billCount)}\n${m.apAgingReport.totalOutstanding(apAgingData.totalOutstanding.toFixed(2))}`}
+            filenameBase={`ap-aging-${rangeTo}`}
+            headers={["Bill", "Supplier", "PO", "Bill date", "Due date", "Bucket", "Amount due"]}
+            rows={apAgingData.rows.map((bill) => [
+              bill.billNumber,
+              bill.supplier.name,
+              bill.purchaseOrder?.poNumber ?? "",
+              new Date(bill.billDate).toISOString(),
+              new Date(bill.dueDate).toISOString(),
+              bill.bucket,
+              bill.amountDue,
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.apAgingReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{apAgingData.totalOutstanding.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.apAgingReport.totalOutstanding(apAgingData.totalOutstanding.toFixed(2))}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{apAgingData.billCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.apAgingReport.billCount(apAgingData.billCount)}</div>
+            </div>
+            {AGING_BUCKETS.map((b) => (
+              <div key={b.key} className={ui.card}>
+                <div className="font-mono text-xl tabular">{apAgingData.byBucket[b.key].toFixed(0)}</div>
+                <div className="mt-1 text-sm text-ink-muted">{dict.modules.finance.aging.bucketLabel[b.key]}</div>
+              </div>
+            ))}
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.apAgingReport.col.bill}</th>
+                  <th className={ui.th}>{m.apAgingReport.col.supplier}</th>
+                  <th className={ui.th}>{m.apAgingReport.col.po}</th>
+                  <th className={ui.th}>{m.apAgingReport.col.dueDate}</th>
+                  <th className={ui.th}>{m.apAgingReport.col.bucket}</th>
+                  <th className={ui.th}>{m.apAgingReport.col.amountDue}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {apAgingData.rows.map((bill) => (
+                  <tr key={bill.id}>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{bill.billNumber}</td>
+                    <td className={ui.td}>{bill.supplier.name}</td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{bill.purchaseOrder?.poNumber ?? "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(bill.dueDate).toLocaleDateString()}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${bill.bucket === "current" ? "bg-surface-alt text-ink-muted" : "bg-critical-soft text-critical"}`}>
+                        {dict.modules.finance.aging.bucketLabel[bill.bucket]}
+                      </span>
+                    </td>
+                    <td className={`${ui.td} font-mono tabular`}>{bill.amountDue.toFixed(2)} {bill.currency}</td>
+                  </tr>
+                ))}
+                {apAgingData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "cashLedger" && cashLedgerData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.cashLedger} ${rangeFrom} → ${rangeTo}\n${m.cashLedgerReport.totalIn(cashLedgerData.totalIn.toFixed(2))}\n${m.cashLedgerReport.totalOut(cashLedgerData.totalOut.toFixed(2))}\n${m.cashLedgerReport.net(cashLedgerData.net.toFixed(2))}`}
+            filenameBase={`cash-ledger-${rangeFrom}-${rangeTo}`}
+            headers={["Date", "Number", "Direction", "Category", "Description", "Amount", "Currency", "By", "Reconciled"]}
+            rows={cashLedgerData.rows.map((t) => [
+              new Date(t.occurredAt).toISOString(),
+              t.txnNumber,
+              t.direction,
+              t.category,
+              t.description,
+              t.amount,
+              t.currency,
+              t.createdBy.name,
+              t.reconciled ? "Yes" : "No",
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.cashLedgerReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular text-good">{cashLedgerData.totalIn.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.cashLedgerReport.totalIn(cashLedgerData.totalIn.toFixed(2))}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular text-critical">{cashLedgerData.totalOut.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.cashLedgerReport.totalOut(cashLedgerData.totalOut.toFixed(2))}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{cashLedgerData.net.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.cashLedgerReport.net(cashLedgerData.net.toFixed(2))}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <h2 className="mb-3 font-display text-base font-semibold">{m.cashLedgerReport.byCategoryTitle}</h2>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.cashLedgerReport.col.category}</th>
+                  <th className={ui.th}>{m.cashLedgerReport.col.in}</th>
+                  <th className={ui.th}>{m.cashLedgerReport.col.out}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cashLedgerData.byCategory.map((c) => (
+                  <tr key={c.category}>
+                    <td className={ui.td}>{dict.modules.finance.cash.categoryLabel[c.category as keyof typeof dict.modules.finance.cash.categoryLabel] ?? c.category}</td>
+                    <td className={`${ui.td} font-mono tabular text-good`}>{c.in.toFixed(2)}</td>
+                    <td className={`${ui.td} font-mono tabular text-critical`}>{c.out.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.cashLedgerReport.col.date}</th>
+                  <th className={ui.th}>{m.cashLedgerReport.col.number}</th>
+                  <th className={ui.th}>{m.cashLedgerReport.col.direction}</th>
+                  <th className={ui.th}>{m.cashLedgerReport.col.category}</th>
+                  <th className={ui.th}>{m.cashLedgerReport.col.description}</th>
+                  <th className={ui.th}>{m.cashLedgerReport.col.amount}</th>
+                  <th className={ui.th}>{m.cashLedgerReport.col.by}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cashLedgerData.rows.map((t) => (
+                  <tr key={t.id}>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(t.occurredAt).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.txnNumber}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${t.direction === "IN" ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}>
+                        {t.direction === "IN" ? dict.modules.finance.cash.in : dict.modules.finance.cash.out}
+                      </span>
+                    </td>
+                    <td className={ui.td}>{dict.modules.finance.cash.categoryLabel[t.category as keyof typeof dict.modules.finance.cash.categoryLabel] ?? t.category}</td>
+                    <td className={ui.td}>{t.description}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{t.amount.toFixed(2)} {t.currency}</td>
+                    <td className={ui.td}>{t.createdBy.name}</td>
+                  </tr>
+                ))}
+                {cashLedgerData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "salesPipeline" && salesPipelineData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.salesPipeline} ${rangeFrom} → ${rangeTo}\n${m.salesPipelineReport.opportunityCount(salesPipelineData.opportunityCount)}\n${salesPipelineData.winRate === null ? "" : `${m.salesPipelineReport.winRateLabel}: ${salesPipelineData.winRate.toFixed(1)}%`}`}
+            filenameBase={`sales-pipeline-${rangeFrom}-${rangeTo}`}
+            headers={["Number", "Customer/Prospect", "Mix", "Est. volume m3", "Status", "Owner", "Expected close", "Created"]}
+            rows={salesPipelineData.rows.map((o) => [
+              o.opportunityNumber,
+              o.customer?.legalName ?? o.prospectName ?? "",
+              o.mix?.code ?? "",
+              o.estimatedVolumeM3 ?? 0,
+              o.status,
+              o.owner?.name ?? "",
+              o.expectedCloseDate ? new Date(o.expectedCloseDate).toISOString() : "",
+              new Date(o.createdAt).toISOString(),
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.salesPipelineReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{salesPipelineData.opportunityCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.salesPipelineReport.opportunityCount(salesPipelineData.opportunityCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{fmt(salesPipelineData.winRate, 1, "%")}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.salesPipelineReport.winRateLabel}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{fmt(salesPipelineData.wonVolumeM3, 1, " m³")}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.salesPipelineReport.wonVolume}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{salesPipelineData.openCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.salesPipelineReport.openCount}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.salesPipelineReport.col.number}</th>
+                  <th className={ui.th}>{m.salesPipelineReport.col.customer}</th>
+                  <th className={ui.th}>{m.salesPipelineReport.col.mix}</th>
+                  <th className={ui.th}>{m.salesPipelineReport.col.volume}</th>
+                  <th className={ui.th}>{m.salesPipelineReport.col.status}</th>
+                  <th className={ui.th}>{m.salesPipelineReport.col.owner}</th>
+                  <th className={ui.th}>{m.salesPipelineReport.col.expectedClose}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {salesPipelineData.rows.map((o) => (
+                  <tr key={o.id}>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{o.opportunityNumber}</td>
+                    <td className={ui.td}>{o.customer?.legalName ?? o.prospectName ?? "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{o.mix?.code ?? "—"}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{fmt(o.estimatedVolumeM3, 1, " m³")}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${o.status === "WON" ? "bg-good-soft text-good" : o.status === "LOST" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
+                        {dict.modules.sales.statusLabel[o.status as keyof typeof dict.modules.sales.statusLabel] ?? o.status}
+                      </span>
+                    </td>
+                    <td className={ui.td}>{o.owner?.name ?? "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{o.expectedCloseDate ? new Date(o.expectedCloseDate).toLocaleDateString() : "—"}</td>
+                  </tr>
+                ))}
+                {salesPipelineData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "quotes" && quotesData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.quotes} ${rangeFrom} → ${rangeTo}\n${m.quotesReport.quoteCount(quotesData.quoteCount)}\n${quotesData.conversionRate === null ? "" : `${m.quotesReport.conversionRateLabel}: ${quotesData.conversionRate.toFixed(1)}%`}`}
+            filenameBase={`quotes-${rangeFrom}-${rangeTo}`}
+            headers={["Number", "Customer", "Prepared by", "Status", "Total", "Currency", "Valid until", "Sent"]}
+            rows={quotesData.rows.map((q) => [
+              q.quoteNumber,
+              q.customer.legalName,
+              q.preparedBy.name,
+              q.status,
+              q.total,
+              q.currency,
+              q.validUntil ? new Date(q.validUntil).toISOString() : "",
+              q.sentAt ? new Date(q.sentAt).toISOString() : "",
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.quotesReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{quotesData.quoteCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.quotesReport.quoteCount(quotesData.quoteCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{fmt(quotesData.conversionRate, 1, "%")}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.quotesReport.conversionRateLabel}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{quotesData.totalValue.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.quotesReport.totalValue}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{quotesData.acceptedValue.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.quotesReport.acceptedValue}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.quotesReport.col.number}</th>
+                  <th className={ui.th}>{m.quotesReport.col.customer}</th>
+                  <th className={ui.th}>{m.quotesReport.col.preparedBy}</th>
+                  <th className={ui.th}>{m.quotesReport.col.status}</th>
+                  <th className={ui.th}>{m.quotesReport.col.total}</th>
+                  <th className={ui.th}>{m.quotesReport.col.validUntil}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {quotesData.rows.map((q) => (
+                  <tr key={q.id}>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{q.quoteNumber}</td>
+                    <td className={ui.td}>{q.customer.legalName}</td>
+                    <td className={ui.td}>{q.preparedBy.name}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${q.status === "ACCEPTED" ? "bg-good-soft text-good" : q.status === "DECLINED" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
+                        {dict.modules.sales.quotes.statusLabel[q.status as keyof typeof dict.modules.sales.quotes.statusLabel] ?? q.status}
+                      </span>
+                    </td>
+                    <td className={`${ui.td} font-mono tabular`}>{q.total.toFixed(2)} {q.currency}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{q.validUntil ? new Date(q.validUntil).toLocaleDateString() : "—"}</td>
+                  </tr>
+                ))}
+                {quotesData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "purchaseOrders" && purchaseOrdersData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.purchaseOrders} ${rangeFrom} → ${rangeTo}\n${m.purchaseOrdersReport.orderCount(purchaseOrdersData.orderCount)}\n${m.purchaseOrdersReport.totalValue}: ${purchaseOrdersData.totalValue.toFixed(2)}`}
+            filenameBase={`purchase-orders-${rangeFrom}-${rangeTo}`}
+            headers={["Number", "Supplier", "Status", "Total", "Currency", "Order date", "Expected date", "Created by"]}
+            rows={purchaseOrdersData.rows.map((o) => [
+              o.poNumber,
+              o.supplier.name,
+              o.status,
+              o.total,
+              o.currency,
+              new Date(o.orderDate).toISOString(),
+              o.expectedDate ? new Date(o.expectedDate).toISOString() : "",
+              o.createdBy.name,
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.purchaseOrdersReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{purchaseOrdersData.orderCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.purchaseOrdersReport.orderCount(purchaseOrdersData.orderCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{purchaseOrdersData.totalValue.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.purchaseOrdersReport.totalValue}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{purchaseOrdersData.openCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.purchaseOrdersReport.openCount}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular text-critical">{purchaseOrdersData.overdueCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.purchaseOrdersReport.overdueCount}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <h2 className="mb-3 font-display text-base font-semibold">{m.purchaseOrdersReport.bySupplierTitle}</h2>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.purchaseOrdersReport.col.supplier}</th>
+                  <th className={ui.th}>{m.purchaseOrdersReport.col.number}</th>
+                  <th className={ui.th}>{m.purchaseOrdersReport.col.total}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {purchaseOrdersData.bySupplier.map((s) => (
+                  <tr key={s.supplierName}>
+                    <td className={ui.td}>{s.supplierName}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{s.orderCount}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{s.value.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.purchaseOrdersReport.col.number}</th>
+                  <th className={ui.th}>{m.purchaseOrdersReport.col.supplier}</th>
+                  <th className={ui.th}>{m.purchaseOrdersReport.col.status}</th>
+                  <th className={ui.th}>{m.purchaseOrdersReport.col.total}</th>
+                  <th className={ui.th}>{m.purchaseOrdersReport.col.orderDate}</th>
+                  <th className={ui.th}>{m.purchaseOrdersReport.col.expectedDate}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {purchaseOrdersData.rows.map((o) => (
+                  <tr key={o.id}>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{o.poNumber}</td>
+                    <td className={ui.td}>{o.supplier.name}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${o.status === "RECEIVED" ? "bg-good-soft text-good" : o.status === "CANCELLED" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
+                        {dict.modules.purchasing.orders.statusLabel[o.status as keyof typeof dict.modules.purchasing.orders.statusLabel] ?? o.status}
+                      </span>
+                    </td>
+                    <td className={`${ui.td} font-mono tabular`}>{o.total.toFixed(2)} {o.currency}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(o.orderDate).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{o.expectedDate ? new Date(o.expectedDate).toLocaleDateString() : "—"}</td>
+                  </tr>
+                ))}
+                {purchaseOrdersData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "supplierPerformance" && supplierPerformanceData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.supplierPerformance} ${rangeFrom} → ${rangeTo}\n${m.supplierPerformanceReport.supplierCount(supplierPerformanceData.supplierCount)}`}
+            filenameBase={`supplier-performance-${rangeFrom}-${rangeTo}`}
+            headers={["Supplier", "Orders", "Value", "Received", "On-time %", "Lead time (days, on file)", "Rejection rate % (on file)"]}
+            rows={supplierPerformanceData.rows.map((s) => [
+              s.supplierName,
+              s.orderCount,
+              s.totalValue,
+              s.receivedCount,
+              s.onTimeRatePct ?? "",
+              s.leadTimeDaysOnFile ?? "",
+              s.rejectionRatePct,
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.supplierPerformanceReport.intro}</p>
+          <div className={ui.card}>
+            <div className="font-mono text-2xl tabular">{supplierPerformanceData.supplierCount}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.supplierPerformanceReport.supplierCount(supplierPerformanceData.supplierCount)}</div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.supplierPerformanceReport.col.supplier}</th>
+                  <th className={ui.th}>{m.supplierPerformanceReport.col.orders}</th>
+                  <th className={ui.th}>{m.supplierPerformanceReport.col.value}</th>
+                  <th className={ui.th}>{m.supplierPerformanceReport.col.onTimeRate}</th>
+                  <th className={ui.th}>{m.supplierPerformanceReport.col.leadTime}</th>
+                  <th className={ui.th}>{m.supplierPerformanceReport.col.rejectionRate}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {supplierPerformanceData.rows.map((s) => (
+                  <tr key={s.supplierId}>
+                    <td className={ui.td}>{s.supplierName}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{s.orderCount}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{s.totalValue.toFixed(2)}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{fmt(s.onTimeRatePct, 0, "%")}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{s.leadTimeDaysOnFile ?? "—"}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{s.rejectionRatePct.toFixed(1)}%</td>
+                  </tr>
+                ))}
+                {supplierPerformanceData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "attendance" && attendanceData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.attendance} ${rangeFrom} → ${rangeTo}\n${m.attendanceReport.recordCount(attendanceData.recordCount)}\n${attendanceData.attendanceRate === null ? "" : `${m.attendanceReport.attendanceRateLabel}: ${attendanceData.attendanceRate.toFixed(1)}%`}`}
+            filenameBase={`attendance-${rangeFrom}-${rangeTo}`}
+            headers={["Employee", "Code", "Role", "Date", "Status", "Check-in", "Check-out", "Notes"]}
+            rows={attendanceData.rows.map((r) => [
+              r.employee.name,
+              r.employee.code ?? "",
+              r.employee.role,
+              new Date(r.date).toISOString(),
+              r.status,
+              r.checkInAt ? new Date(r.checkInAt).toISOString() : "",
+              r.checkOutAt ? new Date(r.checkOutAt).toISOString() : "",
+              r.notes ?? "",
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.attendanceReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{attendanceData.recordCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.attendanceReport.recordCount(attendanceData.recordCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{fmt(attendanceData.attendanceRate, 1, "%")}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.attendanceReport.attendanceRateLabel}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular text-critical">{attendanceData.absentCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.attendanceReport.absentCount(attendanceData.absentCount)}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.attendanceReport.col.employee}</th>
+                  <th className={ui.th}>{m.attendanceReport.col.role}</th>
+                  <th className={ui.th}>{m.attendanceReport.col.date}</th>
+                  <th className={ui.th}>{m.attendanceReport.col.status}</th>
+                  <th className={ui.th}>{m.attendanceReport.col.checkIn}</th>
+                  <th className={ui.th}>{m.attendanceReport.col.checkOut}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {attendanceData.rows.map((r) => (
+                  <tr key={r.id}>
+                    <td className={ui.td}>
+                      {r.employee.name}
+                      {r.employee.code && <div className="text-xs text-ink-muted" dir="ltr">{r.employee.code}</div>}
+                    </td>
+                    <td className={ui.td}>{r.employee.role}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.date).toLocaleDateString()}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${r.status === "PRESENT" ? "bg-good-soft text-good" : r.status === "ABSENT" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
+                        {dict.modules.employees.attendance.statusLabel[r.status as keyof typeof dict.modules.employees.attendance.statusLabel] ?? r.status}
+                      </span>
+                    </td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{r.checkInAt ? new Date(r.checkInAt).toLocaleTimeString() : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{r.checkOutAt ? new Date(r.checkOutAt).toLocaleTimeString() : "—"}</td>
+                  </tr>
+                ))}
+                {attendanceData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "leave" && leaveData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.leave} ${rangeFrom} → ${rangeTo}\n${m.leaveReport.requestCount(leaveData.requestCount)}\n${m.leaveReport.totalDaysApproved(leaveData.totalDaysApproved)}`}
+            filenameBase={`leave-${rangeFrom}-${rangeTo}`}
+            headers={["Number", "Employee", "Type", "Start", "End", "Days", "Status", "Approved by"]}
+            rows={leaveData.rows.map((r) => [
+              r.requestNumber,
+              r.employee.name,
+              r.type,
+              new Date(r.startDate).toISOString(),
+              new Date(r.endDate).toISOString(),
+              r.daysCount,
+              r.status,
+              r.approvedBy?.name ?? "",
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.leaveReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{leaveData.requestCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.leaveReport.requestCount(leaveData.requestCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{leaveData.approvedCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.leaveReport.approvedCount(leaveData.approvedCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{leaveData.pendingCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.leaveReport.pendingCount(leaveData.pendingCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{leaveData.totalDaysApproved}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.leaveReport.totalDaysApproved(leaveData.totalDaysApproved)}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.leaveReport.col.employee}</th>
+                  <th className={ui.th}>{m.leaveReport.col.type}</th>
+                  <th className={ui.th}>{m.leaveReport.col.start}</th>
+                  <th className={ui.th}>{m.leaveReport.col.end}</th>
+                  <th className={ui.th}>{m.leaveReport.col.days}</th>
+                  <th className={ui.th}>{m.leaveReport.col.status}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {leaveData.rows.map((r) => (
+                  <tr key={r.id}>
+                    <td className={ui.td}>{r.employee.name}</td>
+                    <td className={ui.td}>{dict.modules.employees.leave.typeLabel[r.type as keyof typeof dict.modules.employees.leave.typeLabel] ?? r.type}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.startDate).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.endDate).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.daysCount}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${r.status === "APPROVED" ? "bg-good-soft text-good" : r.status === "REJECTED" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
+                        {dict.modules.employees.leave.statusLabel[r.status as keyof typeof dict.modules.employees.leave.statusLabel] ?? r.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+                {leaveData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "payrollCost" && payrollCostData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.payrollCost} ${rangeFrom} → ${rangeTo}\n${m.payrollCostReport.lineCount(payrollCostData.lineCount)}\n${m.payrollCostReport.totalCost(payrollCostData.totalCost.toFixed(2))}`}
+            filenameBase={`payroll-cost-${rangeFrom}-${rangeTo}`}
+            headers={["Run", "Employee", "Role", "Wage type", "Wage rate", "Unpaid days", "Gross pay", "Incentive", "Employer GOSI", "Net pay"]}
+            rows={payrollCostData.rows.map((l) => [
+              l.runNumber,
+              l.employee.name,
+              l.employee.role,
+              l.wageType,
+              l.wageRate,
+              l.unpaidDays,
+              l.grossPay,
+              l.incentiveAmount,
+              l.employerGosi,
+              l.netPay,
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.payrollCostReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{payrollCostData.lineCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.lineCount(payrollCostData.lineCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{payrollCostData.totalGross.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.totalGross}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{payrollCostData.totalIncentives.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.totalIncentives}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{payrollCostData.totalEmployerGosi.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.totalEmployerGosi}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular font-semibold">{payrollCostData.totalCost.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.totalCost(payrollCostData.totalCost.toFixed(2))}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.payrollCostReport.col.run}</th>
+                  <th className={ui.th}>{m.payrollCostReport.col.employee}</th>
+                  <th className={ui.th}>{m.payrollCostReport.col.role}</th>
+                  <th className={ui.th}>{m.payrollCostReport.col.grossPay}</th>
+                  <th className={ui.th}>{m.payrollCostReport.col.incentive}</th>
+                  <th className={ui.th}>{m.payrollCostReport.col.employerGosi}</th>
+                  <th className={ui.th}>{m.payrollCostReport.col.netPay}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {payrollCostData.rows.map((l) => (
+                  <tr key={l.id}>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{l.runNumber}</td>
+                    <td className={ui.td}>{l.employee.name}</td>
+                    <td className={ui.td}>{l.employee.role}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{l.grossPay.toFixed(2)}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{l.incentiveAmount.toFixed(2)}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{l.employerGosi.toFixed(2)}</td>
+                    <td className={`${ui.td} font-mono tabular font-semibold`}>{l.netPay.toFixed(2)}</td>
+                  </tr>
+                ))}
+                {payrollCostData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "spareParts" && sparePartsData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.spareParts} ${rangeFrom} → ${rangeTo}\n${m.sparePartsReport.receiptCount(sparePartsData.receiptCount)}\n${m.sparePartsReport.issuanceCount(sparePartsData.issuanceCount)}`}
+            filenameBase={`spare-parts-${rangeFrom}-${rangeTo}`}
+            headers={["Date", "Direction", "Part code", "Part name", "Quantity", "Value", "By"]}
+            rows={[
+              ...sparePartsData.receipts.map((r) => [new Date(r.receivedAt).toISOString(), "IN", r.sparePart.code, r.sparePart.name, r.quantity, r.quantity * r.unitCost, r.receivedBy.name]),
+              ...sparePartsData.issuances.map((i) => [new Date(i.issuedAt).toISOString(), "OUT", i.sparePart.code, i.sparePart.name, i.quantity, i.lineTotal, i.issuedBy.name]),
+            ]}
+          />
+          <p className="text-sm text-ink-muted">{m.sparePartsReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{sparePartsData.receiptCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.sparePartsReport.receiptCount(sparePartsData.receiptCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{sparePartsData.issuanceCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.sparePartsReport.issuanceCount(sparePartsData.issuanceCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{sparePartsData.totalReceivedValue.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.sparePartsReport.totalReceivedValue}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{sparePartsData.totalIssuedValue.toFixed(2)}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.sparePartsReport.totalIssuedValue}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular text-critical">{sparePartsData.lowStockCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.sparePartsReport.lowStockCount(sparePartsData.lowStockCount)}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <h2 className="mb-3 font-display text-base font-semibold">{m.sparePartsReport.balanceTitle}</h2>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.sparePartsReport.col.part}</th>
+                  <th className={ui.th}>{m.sparePartsReport.col.balance}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sparePartsData.balances.map((b) => (
+                  <tr key={b.key}>
+                    <td className={ui.td}>{b.partName} <span className="font-mono text-xs text-ink-muted" dir="ltr">{b.partCode}</span></td>
+                    <td className={`${ui.td} font-mono tabular font-semibold ${b.balance <= 0 ? "text-critical" : ""}`}>{b.balance}</td>
+                  </tr>
+                ))}
+                {sparePartsData.balances.length === 0 && (
+                  <tr><td className={ui.td} colSpan={2}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "finishedGoods" && finishedGoodsData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.finishedGoods} ${rangeFrom} → ${rangeTo}\n${m.finishedGoodsReport.movementCount(finishedGoodsData.movementCount)}`}
+            filenameBase={`finished-goods-${rangeFrom}-${rangeTo}`}
+            headers={["Date", "Direction", "Product code", "Product name", "Quantity", "Site", "By", "Notes"]}
+            rows={finishedGoodsData.rows.map((mv) => [
+              new Date(mv.occurredAt).toISOString(),
+              mv.direction,
+              mv.product.code,
+              mv.product.name,
+              mv.quantity,
+              mv.site.name,
+              mv.recordedBy.name,
+              mv.notes ?? "",
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.finishedGoodsReport.intro}</p>
+          <div className="flex flex-wrap gap-4">
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{finishedGoodsData.movementCount}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.finishedGoodsReport.movementCount(finishedGoodsData.movementCount)}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular text-good">{finishedGoodsData.producedQty}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.finishedGoodsReport.producedQty}</div>
+            </div>
+            <div className={ui.card}>
+              <div className="font-mono text-2xl tabular">{finishedGoodsData.shippedQty}</div>
+              <div className="mt-1 text-sm text-ink-muted">{m.finishedGoodsReport.shippedQty}</div>
+            </div>
+          </div>
+          <div className={ui.card}>
+            <h2 className="mb-3 font-display text-base font-semibold">{m.finishedGoodsReport.balanceTitle}</h2>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.finishedGoodsReport.col.product}</th>
+                  <th className={ui.th}>{m.finishedGoodsReport.col.balance}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {finishedGoodsData.balances.map((b) => (
+                  <tr key={b.key}>
+                    <td className={ui.td}>{b.productName} <span className="font-mono text-xs text-ink-muted" dir="ltr">{b.productCode}</span></td>
+                    <td className={`${ui.td} font-mono tabular font-semibold ${b.balance <= 0 ? "text-critical" : ""}`}>{b.balance}</td>
+                  </tr>
+                ))}
+                {finishedGoodsData.balances.length === 0 && (
+                  <tr><td className={ui.td} colSpan={2}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.finishedGoodsReport.col.date}</th>
+                  <th className={ui.th}>{m.finishedGoodsReport.col.direction}</th>
+                  <th className={ui.th}>{m.finishedGoodsReport.col.product}</th>
+                  <th className={ui.th}>{m.finishedGoodsReport.col.quantity}</th>
+                  <th className={ui.th}>{m.finishedGoodsReport.col.site}</th>
+                  <th className={ui.th}>{m.finishedGoodsReport.col.by}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {finishedGoodsData.rows.map((mv) => (
+                  <tr key={mv.id}>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(mv.occurredAt).toLocaleDateString()}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${mv.direction === "IN" ? "bg-good-soft text-good" : "bg-surface-alt text-ink-muted"}`}>
+                        {dict.modules.warehouses.finishedGoods.directionLabel[mv.direction as keyof typeof dict.modules.warehouses.finishedGoods.directionLabel] ?? mv.direction}
+                      </span>
+                    </td>
+                    <td className={ui.td}>{mv.product.name} <span className="font-mono text-xs text-ink-muted" dir="ltr">{mv.product.code}</span></td>
+                    <td className={`${ui.td} font-mono tabular`}>{mv.quantity}</td>
+                    <td className={ui.td}>{mv.site.name}</td>
+                    <td className={ui.td}>{mv.recordedBy.name}</td>
+                  </tr>
+                ))}
+                {finishedGoodsData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.noRows}</span></td></tr>
                 )}
               </tbody>
             </table>

@@ -6,6 +6,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { getActiveSiteId, reservationSiteScopeWhere, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { invoiceAmountDue } from "@/lib/billing";
+import { AGING_BUCKETS, agingBucket } from "@/lib/aging";
 import { detectPoOverageFlags, detectDuplicateBillFlags } from "@/lib/anomaly";
 import { Modal } from "@/components/Modal";
 import {
@@ -18,26 +19,6 @@ import {
 import { generateInvoiceForProject } from "../billing/actions";
 
 const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation", "ledger"] as const;
-const AGING_BUCKETS = [
-  { key: "current", max: 0 },
-  { key: "d30", max: 30 },
-  { key: "d60", max: 60 },
-  { key: "d90", max: 90 },
-  { key: "over90", max: Infinity },
-] as const;
-
-// Which bucket a balance falls into, by days past its due date — not due
-// yet (or due today) is "current"; everything else buckets by how many
-// days overdue, same boundaries every AR/AP aging report in the industry
-// uses (30/60/90).
-function agingBucket(dueDate: Date, now: Date): (typeof AGING_BUCKETS)[number]["key"] {
-  const daysOverdue = Math.floor((now.getTime() - dueDate.getTime()) / 86400000);
-  if (daysOverdue <= 0) return "current";
-  if (daysOverdue <= 30) return "d30";
-  if (daysOverdue <= 60) return "d60";
-  if (daysOverdue <= 90) return "d90";
-  return "over90";
-}
 type FinanceTab = (typeof FINANCE_TABS)[number];
 const CASH_CATEGORIES = ["OPERATING_EXPENSE", "PAYROLL", "UTILITIES", "FUEL", "MAINTENANCE", "OTHER_INCOME", "OWNER_CONTRIBUTION", "OTHER"] as const;
 
