@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { withSequentialNumber } from "@/lib/sequence";
 import { postCashTransaction } from "@/lib/ledger";
 import { revalidatePath } from "next/cache";
@@ -10,9 +10,9 @@ import { activityForRole, aggregateIncentiveResults, buildSitePricingMap, getInc
 
 // Salary data is more sensitive than the rest of the Employees module
 // (which PLANT_ADMIN can already use for attendance/leave), so every
-// payroll action is gated to ADMIN specifically — the UI also hides the
-// tab from non-admins, but this is the real boundary, independent of that.
-const PAYROLL_ROLES = ["ADMIN"];
+// payroll action defaults to ADMIN-only in ACTION_ROLES.employees (see
+// src/lib/permissions.ts) — the UI also hides the tab from non-admins, but
+// this is the real boundary, independent of that.
 
 // See the same note on billing/actions.ts's own TX_OPTIONS — several
 // sequential round trips to Neon inside one interactive transaction can
@@ -72,7 +72,7 @@ async function buildIncentiveLookup(periodStart: Date, periodEnd: Date) {
 // be viewing" would silently produce an incomplete run).
 export async function generatePayrollRun(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, PAYROLL_ROLES);
+  await requireActionPermission(user, "employees", "generatePayrollRun");
 
   const periodStartRaw = String(formData.get("periodStart") ?? "");
   const periodEndRaw = String(formData.get("periodEnd") ?? "");
@@ -180,7 +180,7 @@ export async function generatePayrollRun(formData: FormData) {
 
 export async function updatePayrollLine(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, PAYROLL_ROLES);
+  await requireActionPermission(user, "employees", "updatePayrollLine");
 
   const id = String(formData.get("id") ?? "");
   const adjustment = Number(formData.get("adjustment") ?? 0);
@@ -201,7 +201,7 @@ export async function updatePayrollLine(formData: FormData) {
 
 export async function approvePayrollRun(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, PAYROLL_ROLES);
+  await requireActionPermission(user, "employees", "approvePayrollRun");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -222,7 +222,7 @@ export async function approvePayrollRun(formData: FormData) {
 // used everywhere else PO/invoice totals are grouped in this app.
 export async function markPayrollRunPaid(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, PAYROLL_ROLES);
+  await requireActionPermission(user, "employees", "markPayrollRunPaid");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -288,7 +288,7 @@ export async function markPayrollRunPaid(formData: FormData) {
 
 export async function cancelPayrollRun(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, PAYROLL_ROLES);
+  await requireActionPermission(user, "employees", "cancelPayrollRun");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;

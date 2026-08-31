@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 // Company-wide — a project isn't tied to any one plant/line (see the
@@ -11,7 +11,7 @@ import { revalidatePath } from "next/cache";
 // Reservation instead.
 export async function createProject(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "customers", "createProject");
 
   const name = String(formData.get("name") ?? "").trim();
   const customerId = String(formData.get("customerId") ?? "");
@@ -30,7 +30,7 @@ export async function createProject(formData: FormData) {
 
 export async function updateProject(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "customers", "updateProject");
 
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();

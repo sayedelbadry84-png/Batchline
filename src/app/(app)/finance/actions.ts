@@ -3,13 +3,11 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { postSupplierBill, postSupplierPayment, postCashTransaction, reverseJournalEntry } from "@/lib/ledger";
 import { revalidatePath } from "next/cache";
-
-const FINANCE_ROLES = ["ACCOUNTANT", "ADMIN"];
 
 // See the same note on billing/actions.ts's own TX_OPTIONS — several
 // sequential round trips to Neon inside one interactive transaction can
@@ -18,7 +16,7 @@ const TX_OPTIONS = { timeout: 15000 };
 
 export async function createSupplierBill(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, FINANCE_ROLES);
+  await requireActionPermission(actor, "finance", "createSupplierBill");
 
   const supplierId = String(formData.get("supplierId") ?? "");
   const purchaseOrderId = String(formData.get("purchaseOrderId") ?? "") || null;
@@ -79,7 +77,7 @@ async function recomputeBillStatus(db: Prisma.TransactionClient, supplierBillId:
 
 export async function recordSupplierPayment(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, FINANCE_ROLES);
+  await requireActionPermission(actor, "finance", "recordSupplierPayment");
 
   const supplierBillId = String(formData.get("supplierBillId") ?? "");
   const amount = Number(formData.get("amount") ?? 0);
@@ -105,7 +103,7 @@ export async function recordSupplierPayment(formData: FormData) {
 
 export async function cancelSupplierBill(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, FINANCE_ROLES);
+  await requireActionPermission(actor, "finance", "cancelSupplierBill");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -136,7 +134,7 @@ export async function cancelSupplierBill(formData: FormData) {
 
 export async function createCashTransaction(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, FINANCE_ROLES);
+  await requireActionPermission(actor, "finance", "createCashTransaction");
 
   const siteId = String(formData.get("siteId") ?? "");
   const direction = String(formData.get("direction") ?? "");
@@ -189,7 +187,7 @@ export async function createCashTransaction(formData: FormData) {
 // than a real bank-feed import.
 export async function reconcileMovement(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, FINANCE_ROLES);
+  await requireActionPermission(actor, "finance", "reconcileMovement");
 
   const kind = String(formData.get("kind") ?? "");
   const id = String(formData.get("id") ?? "");

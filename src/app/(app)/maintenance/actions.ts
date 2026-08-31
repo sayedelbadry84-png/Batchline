@@ -2,17 +2,15 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { computeLaborCost } from "@/lib/maintenance";
 import { revalidatePath } from "next/cache";
 
-const MAINTENANCE_ROLES = ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"];
-
 export async function createMaintenanceTicket(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "createTicket");
 
   const equipmentType = String(formData.get("equipmentType") ?? "");
   const equipmentId = String(formData.get("equipmentId") ?? "");
@@ -60,7 +58,7 @@ export async function createMaintenanceTicket(formData: FormData) {
 
 export async function startMaintenanceTicket(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "startTicket");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -83,7 +81,7 @@ export async function startMaintenanceTicket(formData: FormData) {
 // MaintenancePlan, that plan's own cycle advances.
 export async function completeMaintenanceTicket(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "completeTicket");
 
   const id = String(formData.get("id") ?? "");
   const resolutionNotes = String(formData.get("resolutionNotes") ?? "").trim();
@@ -124,7 +122,7 @@ export async function completeMaintenanceTicket(formData: FormData) {
 
 export async function cancelMaintenanceTicket(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "cancelTicket");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -140,7 +138,7 @@ export async function cancelMaintenanceTicket(formData: FormData) {
 
 export async function createMaintenancePlan(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "createPlan");
 
   const equipmentType = String(formData.get("equipmentType") ?? "");
   const equipmentId = String(formData.get("equipmentId") ?? "");
@@ -165,7 +163,7 @@ export async function createMaintenancePlan(formData: FormData) {
 
 export async function deactivateMaintenancePlan(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "deactivatePlan");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -181,7 +179,7 @@ export async function deactivateMaintenancePlan(formData: FormData) {
 // plan's nextDueAt (today if somehow already overdue with none set).
 export async function generateTicketFromPlan(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "generateTicketFromPlan");
 
   const planId = String(formData.get("planId") ?? "");
   if (!planId) return;
@@ -224,7 +222,7 @@ export async function generateTicketFromPlan(formData: FormData) {
 // already terminal — a ticket converts at most once.
 export async function convertTicketToOrder(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "convertToOrder");
 
   const ticketId = String(formData.get("ticketId") ?? "");
   if (!ticketId) return;
@@ -251,7 +249,7 @@ export async function convertTicketToOrder(formData: FormData) {
 
 export async function startMaintenanceOrder(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "startOrder");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -275,7 +273,7 @@ export async function startMaintenanceOrder(formData: FormData) {
 // hand-typed guess.
 export async function completeMaintenanceOrder(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "completeOrder");
 
   const id = String(formData.get("id") ?? "");
   const resolutionNotes = String(formData.get("resolutionNotes") ?? "").trim();
@@ -324,7 +322,7 @@ export async function completeMaintenanceOrder(formData: FormData) {
 
 export async function cancelMaintenanceOrder(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "cancelOrder");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -342,7 +340,7 @@ export async function cancelMaintenanceOrder(formData: FormData) {
 // technician just updates their hours instead of erroring.
 export async function addOrderTechnician(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "addTechnician");
 
   const orderId = String(formData.get("orderId") ?? "");
   const employeeId = String(formData.get("employeeId") ?? "");
@@ -364,7 +362,7 @@ export async function addOrderTechnician(formData: FormData) {
 
 export async function removeOrderTechnician(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "removeTechnician");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -382,7 +380,7 @@ export async function removeOrderTechnician(formData: FormData) {
 // generate a purchase request for what's missing" requirement.
 export async function issueSparePartToOrder(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, MAINTENANCE_ROLES);
+  await requireActionPermission(actor, "maintenance", "issueSparePart");
 
   const orderId = String(formData.get("orderId") ?? "");
   const sparePartId = String(formData.get("sparePartId") ?? "");

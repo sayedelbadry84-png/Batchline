@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { notifyRoles } from "@/lib/notify";
@@ -31,7 +31,7 @@ async function wasteMemoInScope(wasteMemoId: string, siteId: string | null): Pro
 
 export async function createTestBatch(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "quality", "createTestBatch");
 
   const tripId = String(formData.get("tripId") ?? "");
   const sampleType = String(formData.get("sampleType") ?? "CYLINDER");
@@ -59,7 +59,7 @@ export async function createTestBatch(formData: FormData) {
 
 export async function addLabResult(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "quality", "addLabResult");
 
   const testBatchId = String(formData.get("testBatchId") ?? "");
   const ageDays = Number(formData.get("ageDays") ?? 28);
@@ -112,7 +112,7 @@ export async function addLabResult(formData: FormData) {
 // startMaintenanceOrder/startMaintenanceTicket already give elsewhere.
 export async function saveCapaRecord(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(actor, "quality", "saveCapaRecord");
 
   const id = String(formData.get("id") ?? "");
   const rootCause = String(formData.get("rootCause") ?? "").trim() || null;
@@ -147,7 +147,7 @@ export async function saveCapaRecord(formData: FormData) {
 // happened or what was done about it.
 export async function closeCapaRecord(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(actor, "quality", "closeCapaRecord");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -166,7 +166,7 @@ export async function closeCapaRecord(formData: FormData) {
 
 export async function createCertificate(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "quality", "createCertificate");
 
   const mixId = String(formData.get("mixId") ?? "");
   const standardRef = String(formData.get("standardRef") ?? "").trim();
@@ -200,7 +200,7 @@ export async function createCertificate(formData: FormData) {
 
 export async function updateCertificate(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "quality", "updateCertificate");
 
   const id = String(formData.get("id") ?? "");
   const mixId = String(formData.get("mixId") ?? "");
@@ -241,7 +241,7 @@ export async function updateCertificate(formData: FormData) {
 // approval.
 export async function approveWasteMemo(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "quality", "approveWasteMemo");
 
   const id = String(formData.get("id") ?? "");
   // A written finding is mandatory — reasonCode alone is just the coarse
@@ -277,7 +277,7 @@ export async function approveWasteMemo(formData: FormData) {
 // of the audit record, not something to quietly rewrite later.
 export async function recordWasteMemoNote(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "quality", "recordWasteMemoNote");
 
   const id = String(formData.get("id") ?? "");
   const approvalNote = String(formData.get("approvalNote") ?? "").trim();

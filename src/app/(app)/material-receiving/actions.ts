@@ -2,13 +2,13 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 export async function createReceipt(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "createReceipt");
 
   const plantId = String(formData.get("plantId") ?? "");
   const supplierId = String(formData.get("supplierId") ?? "");
@@ -106,7 +106,7 @@ async function postReceiptToPurchaseOrderLine(purchaseOrderLineId: string, netWe
 // a physical fact about where the truck actually weighed in, not a typo.
 export async function updateReceipt(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "updateReceipt");
 
   const id = String(formData.get("id") ?? "");
   const supplierId = String(formData.get("supplierId") ?? "");
@@ -188,7 +188,7 @@ export async function updateReceipt(formData: FormData) {
 // back (see returnReceiptToSupplier below, which keeps the record).
 export async function deleteReceipt(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "deleteReceipt");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -232,7 +232,7 @@ export async function deleteReceipt(formData: FormData) {
 // way deleteReceipt does, if it had already landed in inventory.
 export async function returnReceiptToSupplier(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "returnReceiptToSupplier");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -275,7 +275,7 @@ export async function returnReceiptToSupplier(formData: FormData) {
 
 export async function setQcStatus(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "setQcStatus");
 
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "");

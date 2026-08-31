@@ -37,13 +37,21 @@ export default async function PermissionsPage() {
 
   const existingActionRows = await prisma.actionPermission.findMany();
   const customizedActionKeys = new Set(existingActionRows.map((r) => `${r.moduleKey}:${r.actionKey}`));
-  const actionRows = await Promise.all(
+  const actionRowsFlat = await Promise.all(
     ACTION_LIST.map(async (a) => ({
       ...a,
       roles: await getEffectiveActionRoles(a.moduleKey, a.actionKey),
       customized: customizedActionKeys.has(`${a.moduleKey}:${a.actionKey}`),
     })),
   );
+  // Grouped by department (mix-designs, reservations, production, ...
+  // quality) rather than one long flat list — same MODULE_NAV/VIEW_NAV
+  // order the module grid above already uses, so a department's actions
+  // sit together and separate from every other department's, matching how
+  // this screen's module grid is already organized by department.
+  const actionGroups = allModules
+    .map((mod) => ({ mod, rows: actionRowsFlat.filter((r) => r.moduleKey === mod.key) }))
+    .filter((g) => g.rows.length > 0);
 
   return (
     <div className="flex flex-col gap-8">
@@ -98,46 +106,53 @@ export default async function PermissionsPage() {
         <p className={ui.intro}>{m.actionsIntro}</p>
       </header>
 
-      <div className={ui.card}>
-        <table className={ui.table}>
-          <thead>
-            <tr>
-              <th className={ui.th}>{m.col.module}</th>
-              {roleKeys.map((r) => (
-                <th key={r} className={`${ui.th} text-center`}>
-                  {roleLabels[r]}
-                </th>
-              ))}
-              <th className={ui.th}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {actionRows.map(({ moduleKey, actionKey, roles, customized }) => {
-              const formId = `action-perm-${moduleKey}-${actionKey}`;
-              const label = m.actionLabel[moduleKey][actionKey as keyof (typeof m.actionLabel)[typeof moduleKey]];
-              return (
-                <tr key={`${moduleKey}:${actionKey}`}>
-                  <td className={`${ui.td} font-medium`}>
-                    {dict.nav[MODULE_NAV.find((mod) => mod.key === moduleKey)?.labelKey ?? "dashboard"]} — {label}
-                    <div className="text-xs text-ink-faint">{customized ? m.customNote : m.defaultNote}</div>
-                    <form id={formId} action={saveActionPermissions}>
-                      <input type="hidden" name="moduleKey" value={moduleKey} />
-                      <input type="hidden" name="actionKey" value={actionKey} />
-                    </form>
-                  </td>
-                  <PermissionRow
-                    formId={formId}
-                    roles={roleKeys}
-                    roleLabels={roleLabels}
-                    initialChecked={roles as string[]}
-                    saveLabel={m.save}
-                    warningLabel={m.allUncheckedWarning}
-                  />
+      <div className="flex flex-col gap-4">
+        {actionGroups.map(({ mod, rows }) => (
+          <details key={mod.key} className={ui.card}>
+            <summary className="cursor-pointer font-display text-base font-semibold">
+              {dict.nav[mod.labelKey]} <span className="font-mono text-sm font-normal text-ink-muted">({rows.length})</span>
+            </summary>
+            <table className={`${ui.table} mt-3`}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.col.module}</th>
+                  {roleKeys.map((r) => (
+                    <th key={r} className={`${ui.th} text-center`}>
+                      {roleLabels[r]}
+                    </th>
+                  ))}
+                  <th className={ui.th}></th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
+              </thead>
+              <tbody>
+                {rows.map(({ moduleKey, actionKey, roles, customized }) => {
+                  const formId = `action-perm-${moduleKey}-${actionKey}`;
+                  const label = m.actionLabel[moduleKey][actionKey as keyof (typeof m.actionLabel)[typeof moduleKey]];
+                  return (
+                    <tr key={`${moduleKey}:${actionKey}`}>
+                      <td className={`${ui.td} font-medium`}>
+                        {label}
+                        <div className="text-xs text-ink-faint">{customized ? m.customNote : m.defaultNote}</div>
+                        <form id={formId} action={saveActionPermissions}>
+                          <input type="hidden" name="moduleKey" value={moduleKey} />
+                          <input type="hidden" name="actionKey" value={actionKey} />
+                        </form>
+                      </td>
+                      <PermissionRow
+                        formId={formId}
+                        roles={roleKeys}
+                        roleLabels={roleLabels}
+                        initialChecked={roles as string[]}
+                        saveLabel={m.save}
+                        warningLabel={m.allUncheckedWarning}
+                      />
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </details>
+        ))}
       </div>
     </div>
   );

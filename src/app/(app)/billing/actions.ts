@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { parseNetDays, invoiceAmountDue } from "@/lib/billing";
 import { postInvoice, postPayment, postCreditNote, reverseJournalEntry } from "@/lib/ledger";
 import { generateZatcaDocuments } from "@/lib/zatca/generate";
@@ -47,7 +47,7 @@ async function invoiceInScope(invoiceId: string, siteId: string | null): Promise
 // merging happens — see reports/page.tsx).
 export async function generateInvoiceForProject(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "finance", "generateInvoice");
 
   const projectId = String(formData.get("projectId") ?? "");
   if (!projectId) return;
@@ -154,7 +154,7 @@ export async function generateInvoiceForProject(formData: FormData) {
 
 export async function markInvoiceSent(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "finance", "markInvoiceSent");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -180,7 +180,7 @@ export async function markInvoiceSent(formData: FormData) {
 // that is a manual step outside this pass's scope.
 export async function cancelInvoice(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "finance", "cancelInvoice");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -216,7 +216,7 @@ export async function cancelInvoice(formData: FormData) {
 
 export async function recordPayment(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "finance", "recordPayment");
 
   const invoiceId = String(formData.get("invoiceId") ?? "");
   const amount = Number(formData.get("amount") ?? 0);
@@ -263,7 +263,7 @@ export async function recordPayment(formData: FormData) {
 // credit note, and this app has no such flow.
 export async function issueCreditNote(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "finance", "issueCreditNote");
 
   const invoiceId = String(formData.get("invoiceId") ?? "");
   const amount = Number(formData.get("amount") ?? 0);
@@ -320,7 +320,7 @@ export async function issueCreditNote(formData: FormData) {
 // invoice.zatcaStatus/zatcaErrorMessage afterward to show what happened.
 export async function generateZatcaInvoiceDocuments(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "finance", "generateZatcaDocuments");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -335,7 +335,7 @@ export async function generateZatcaInvoiceDocuments(formData: FormData) {
 
 export async function submitZatcaInvoiceForClearance(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "finance", "submitZatcaClearance");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;

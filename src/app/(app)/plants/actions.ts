@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { extractYardLatLng } from "@/lib/mapLink";
 import { effectiveSiteId, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { isValidHexColor } from "@/lib/accentColor";
@@ -12,7 +12,7 @@ const PLANT_STATUSES = ["ACTIVE", "FROZEN", "DECOMMISSIONED"] as const;
 
 export async function createSite(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "plants", "createSite");
 
   const code = String(formData.get("code") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
@@ -28,7 +28,7 @@ export async function createSite(formData: FormData) {
 
 export async function updateSite(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "plants", "updateSite");
 
   const id = String(formData.get("id") ?? "");
   const code = String(formData.get("code") ?? "").trim();
@@ -62,7 +62,7 @@ export async function updateSite(formData: FormData) {
 // comment in schema.prisma for why the two are now separate.
 export async function createPlant(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "plants", "createPlant");
 
   const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -99,7 +99,7 @@ export async function createPlant(formData: FormData) {
 // changes still go through).
 export async function updatePlant(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "plants", "updatePlant");
 
   const id = String(formData.get("id") ?? "");
   const requestedSiteId = String(formData.get("siteId") ?? "");
@@ -137,7 +137,7 @@ export async function updatePlant(formData: FormData) {
 
 export async function updatePlantThresholds(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "plants", "updatePlantThresholds");
 
   const id = String(formData.get("id") ?? "");
   const drumTimerLimitMinutes = Number(formData.get("drumTimerLimitMinutes") ?? 90);
@@ -189,7 +189,7 @@ export async function updatePlantThresholds(formData: FormData) {
 // compliance fact, not an operational plant setting.
 export async function updateZatcaSettings(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "ADMIN"]);
+  await requireActionPermission(user, "plants", "updateZatcaSettings");
 
   const siteId = String(formData.get("siteId") ?? "");
   if (!siteId) return;

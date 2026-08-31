@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 // "C-00001" style — one past whatever the highest existing auto-generated
@@ -23,7 +23,7 @@ async function generateNextCustomerCode(): Promise<string> {
 
 export async function createCustomer(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "customers", "createCustomer");
 
   const legalName = String(formData.get("legalName") ?? "").trim();
   const codeInput = String(formData.get("code") ?? "").trim();
@@ -46,7 +46,7 @@ export async function createCustomer(formData: FormData) {
 
 export async function updateCustomer(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "customers", "updateCustomer");
 
   const id = String(formData.get("id") ?? "");
   const legalName = String(formData.get("legalName") ?? "").trim();

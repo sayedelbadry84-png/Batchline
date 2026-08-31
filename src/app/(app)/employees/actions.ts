@@ -3,14 +3,13 @@
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { logTransferIfChanged } from "@/lib/transferAudit";
 import { OTHER_ROLE_SENTINEL } from "@/lib/employeeRole";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 
-const HR_ROLES = ["ADMIN", "PLANT_ADMIN"];
 const LOGIN_SALT_ROUNDS = 10;
 
 // Auto-provisions a login the moment a driver or pump-crew member is
@@ -68,7 +67,7 @@ async function resolveRole(role: string, newRoleNameRaw: string): Promise<string
 
 export async function createEmployee(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ADMIN"]);
+  await requireActionPermission(user, "employees", "createEmployee");
 
   const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -133,7 +132,7 @@ export async function createEmployee(formData: FormData) {
 // in this app — no separate freeze/remove/transfer actions needed.
 export async function updateEmployee(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ADMIN"]);
+  await requireActionPermission(user, "employees", "updateEmployee");
 
   const id = String(formData.get("id") ?? "");
   const siteId = String(formData.get("siteId") ?? "");
@@ -189,7 +188,7 @@ export async function updateEmployee(formData: FormData) {
 // the same either way.
 export async function createJobTitle(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ADMIN"]);
+  await requireActionPermission(user, "employees", "createJobTitle");
 
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return;
@@ -208,7 +207,7 @@ export async function createJobTitle(formData: FormData) {
 
 export async function createPumpCrewMember(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "employees", "createPumpCrewMember");
 
   const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -241,7 +240,7 @@ export async function createPumpCrewMember(formData: FormData) {
 
 export async function updatePumpCrewMember(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "employees", "updatePumpCrewMember");
 
   const id = String(formData.get("id") ?? "");
   const siteId = String(formData.get("siteId") ?? "");
@@ -271,7 +270,7 @@ export async function updatePumpCrewMember(formData: FormData) {
 // never a duplicate, thanks to the @@unique([employeeId, date]) constraint.
 export async function recordAttendance(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, HR_ROLES);
+  await requireActionPermission(user, "employees", "recordAttendance");
 
   const employeeId = String(formData.get("employeeId") ?? "");
   const dateRaw = String(formData.get("date") ?? "");
@@ -309,7 +308,7 @@ export async function recordAttendance(formData: FormData) {
 
 export async function createLeaveRequest(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, HR_ROLES);
+  await requireActionPermission(user, "employees", "createLeaveRequest");
 
   const employeeId = String(formData.get("employeeId") ?? "");
   const type = String(formData.get("type") ?? "");
@@ -343,7 +342,7 @@ export async function createLeaveRequest(formData: FormData) {
 // recorded for those days.
 export async function approveLeaveRequest(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, HR_ROLES);
+  await requireActionPermission(user, "employees", "approveLeaveRequest");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -369,7 +368,7 @@ export async function approveLeaveRequest(formData: FormData) {
 
 export async function rejectLeaveRequest(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, HR_ROLES);
+  await requireActionPermission(user, "employees", "rejectLeaveRequest");
 
   const id = String(formData.get("id") ?? "");
   const rejectionNote = String(formData.get("rejectionNote") ?? "").trim();
@@ -386,7 +385,7 @@ export async function rejectLeaveRequest(formData: FormData) {
 
 export async function cancelLeaveRequest(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, HR_ROLES);
+  await requireActionPermission(user, "employees", "cancelLeaveRequest");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;

@@ -2,13 +2,13 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 export async function createSilo(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "createSilo");
 
   const plantId = String(formData.get("plantId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -38,7 +38,7 @@ export async function createSilo(formData: FormData) {
 
 export async function updateSilo(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "updateSilo");
 
   const id = String(formData.get("id") ?? "");
   const plantId = String(formData.get("plantId") ?? "");
@@ -72,7 +72,7 @@ export async function updateSilo(formData: FormData) {
 // production/actions.ts for how this actually changes consumption).
 export async function setSiloSharing(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "setSiloSharing");
 
   const id = String(formData.get("id") ?? "");
   const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
@@ -95,7 +95,7 @@ export async function setSiloSharing(formData: FormData) {
 
 export async function updateSiloLevel(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "updateSiloLevel");
 
   const id = String(formData.get("id") ?? "");
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
@@ -128,7 +128,7 @@ export async function updateSiloLevel(formData: FormData) {
 
 export async function createHopper(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "createHopper");
 
   const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -157,7 +157,7 @@ export async function createHopper(formData: FormData) {
 // production/actions.ts for how this actually changes consumption).
 export async function setHopperSharing(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "setHopperSharing");
 
   const id = String(formData.get("id") ?? "");
   const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
@@ -180,7 +180,7 @@ export async function setHopperSharing(formData: FormData) {
 
 export async function updateHopperLevel(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "updateHopperLevel");
 
   const id = String(formData.get("id") ?? "");
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
@@ -207,7 +207,7 @@ export async function updateHopperLevel(formData: FormData) {
 
 export async function createChemicalTank(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "createChemicalTank");
 
   const plantId = String(formData.get("plantId") ?? "");
   const materialId = String(formData.get("materialId") ?? "");
@@ -231,7 +231,7 @@ export async function createChemicalTank(formData: FormData) {
 
 export async function updateChemicalTankLevel(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "warehouses", "updateChemicalTankLevel");
 
   const id = String(formData.get("id") ?? "");
   const currentLevelLiters = Number(formData.get("currentLevelLiters") ?? 0);

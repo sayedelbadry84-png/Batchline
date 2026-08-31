@@ -2,14 +2,12 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { ACTION_ROLES } from "@/lib/permissions";
 import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
-
-const PURCHASING_ROLES = ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"];
 
 // Shared by markPurchaseOrderSent (the gate) and every PO-creation path
 // (the "does this need approvePurchaseOrder before it can be sent, so
@@ -25,7 +23,7 @@ async function poNeedsApproval(siteId: string, total: number, approvedAt: Date |
 
 export async function createPurchaseOrder(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, PURCHASING_ROLES);
+  await requireActionPermission(actor, "purchasing", "create");
 
   const supplierId = String(formData.get("supplierId") ?? "");
   const siteId = String(formData.get("siteId") ?? "");
@@ -91,7 +89,7 @@ export async function createPurchaseOrder(formData: FormData) {
 // numbers, same reasoning as Quote/updateQuote in the Sales module.
 export async function updatePurchaseOrder(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, PURCHASING_ROLES);
+  await requireActionPermission(actor, "purchasing", "update");
 
   const id = String(formData.get("id") ?? "");
   const expectedDateRaw = String(formData.get("expectedDate") ?? "");
@@ -134,7 +132,7 @@ export async function approvePurchaseOrder(formData: FormData) {
 
 export async function markPurchaseOrderSent(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, PURCHASING_ROLES);
+  await requireActionPermission(actor, "purchasing", "markSent");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -158,7 +156,7 @@ export async function markPurchaseOrderSent(formData: FormData) {
 // order retroactively would misrepresent real inventory history.
 export async function cancelPurchaseOrder(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, PURCHASING_ROLES);
+  await requireActionPermission(actor, "purchasing", "cancel");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -174,7 +172,7 @@ export async function cancelPurchaseOrder(formData: FormData) {
 
 export async function createSupplierContract(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, PURCHASING_ROLES);
+  await requireActionPermission(actor, "purchasing", "createContract");
 
   const supplierId = String(formData.get("supplierId") ?? "");
   const materialId = String(formData.get("materialId") ?? "") || null;
@@ -210,7 +208,7 @@ export async function createSupplierContract(formData: FormData) {
 
 export async function terminateSupplierContract(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, PURCHASING_ROLES);
+  await requireActionPermission(actor, "purchasing", "terminateContract");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -231,7 +229,7 @@ export async function terminateSupplierContract(formData: FormData) {
 // approval stamps instead of being overwritten in place.
 export async function renewSupplierContract(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, PURCHASING_ROLES);
+  await requireActionPermission(actor, "purchasing", "renewContract");
 
   const id = String(formData.get("id") ?? "");
   const pricePerUnit = Number(formData.get("pricePerUnit") ?? 0);
@@ -281,7 +279,7 @@ export async function renewSupplierContract(formData: FormData) {
 // createPurchaseOrder's own material-line rows already use.
 export async function createPurchaseOrderFromRequisitions(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, PURCHASING_ROLES);
+  await requireActionPermission(actor, "purchasing", "createFromSparePartRequisitions");
 
   const supplierId = String(formData.get("supplierId") ?? "");
   const siteId = String(formData.get("siteId") ?? "");
@@ -362,7 +360,7 @@ export async function createPurchaseOrderFromRequisitions(formData: FormData) {
 // means skip this row" price filtering.
 export async function createPurchaseOrderFromMaterialRequisitions(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, PURCHASING_ROLES);
+  await requireActionPermission(actor, "purchasing", "createFromMaterialRequisitions");
 
   const supplierId = String(formData.get("supplierId") ?? "");
   const siteId = String(formData.get("siteId") ?? "");

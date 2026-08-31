@@ -2,13 +2,13 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { CO2E_FACTOR_KG_PER_KG } from "@/lib/carbon";
 import { revalidatePath } from "next/cache";
 
 export async function createSupplier(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "purchasing", "createSupplier");
 
   const name = String(formData.get("name") ?? "").trim();
   const materialCatalog = String(formData.get("materialCatalog") ?? "").trim();
@@ -30,7 +30,7 @@ export async function createSupplier(formData: FormData) {
 
 export async function createMaterial(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "purchasing", "createMaterial");
 
   const supplierId = String(formData.get("supplierId") ?? "") || null;
   const name = String(formData.get("name") ?? "").trim();
@@ -56,7 +56,7 @@ export async function createMaterial(formData: FormData) {
 
 export async function updateSupplier(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "purchasing", "updateSupplier");
 
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -72,7 +72,7 @@ export async function updateSupplier(formData: FormData) {
 
 export async function updateMaterial(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "purchasing", "updateMaterial");
 
   const id = String(formData.get("id") ?? "");
   const supplierId = String(formData.get("supplierId") ?? "") || null;

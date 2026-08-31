@@ -2,12 +2,12 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 
 export async function updateIncentivePolicy(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "incentives", "updateIncentivePolicy");
 
   const siteId = String(formData.get("siteId") ?? "");
   const role = String(formData.get("role") ?? "").trim();
@@ -46,7 +46,7 @@ export async function updateIncentivePolicy(formData: FormData) {
 
 export async function updatePumpIncentivePolicy(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "incentives", "updatePumpIncentivePolicy");
 
   const siteId = String(formData.get("siteId") ?? "");
   const role = String(formData.get("role") ?? "").trim();
@@ -73,7 +73,7 @@ export async function updatePumpIncentivePolicy(formData: FormData) {
 
 export async function addPumpRateBracket(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "incentives", "addPumpRateBracket");
 
   const siteId = String(formData.get("siteId") ?? "");
   const role = String(formData.get("role") ?? "").trim();
@@ -105,7 +105,7 @@ export async function addPumpRateBracket(formData: FormData) {
 
 export async function deletePumpRateBracket(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "incentives", "deletePumpRateBracket");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -125,7 +125,7 @@ export async function deletePumpRateBracket(formData: FormData) {
 // there's only ever one row.
 export async function setFlatVolumeRate(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "incentives", "setFlatVolumeRate");
 
   const siteId = String(formData.get("siteId") ?? "");
   const role = String(formData.get("role") ?? "").trim();
@@ -159,7 +159,7 @@ export async function setFlatVolumeRate(formData: FormData) {
 // and DEFAULT_INCENTIVE_METHOD in src/lib/incentives.ts for the fallback.
 export async function setIncentiveMethod(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["ADMIN"]);
+  await requireActionPermission(user, "incentives", "setIncentiveMethod");
 
   const siteId = String(formData.get("siteId") ?? "");
   const role = String(formData.get("role") ?? "").trim();

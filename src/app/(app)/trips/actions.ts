@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { isReservationFullyDelivered } from "@/lib/reservations";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
@@ -178,7 +178,7 @@ export async function closeTripWithReturn(formData: FormData) {
 // full waste can be marked reclaimed — there's nothing left to reuse.
 export async function markDrumReturnFate(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "trips", "setDrumReturnFate");
 
   const id = String(formData.get("id") ?? "");
   const fate = String(formData.get("fate") ?? "");

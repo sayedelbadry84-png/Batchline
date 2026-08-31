@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isPlantInScope, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { logTransferIfChanged } from "@/lib/transferAudit";
 import { revalidatePath } from "next/cache";
@@ -20,7 +20,7 @@ function refresh() {
 // siteId; this resolves it down to one concrete Plant row.
 export async function createTruck(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "equipment", "createTruck");
 
   const siteId = String(formData.get("siteId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
@@ -65,7 +65,7 @@ export async function createTruck(formData: FormData) {
 
 export async function updateTruck(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "equipment", "updateTruck");
 
   const id = String(formData.get("id") ?? "");
   const siteId = String(formData.get("siteId") ?? "");
@@ -125,7 +125,7 @@ export async function updateTruck(formData: FormData) {
 // MAINTENANCE status, if the service happened during idle time).
 export async function markTruckServiced(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "equipment", "markTruckServiced");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -144,7 +144,7 @@ export async function markTruckServiced(formData: FormData) {
 // createTruck above.
 export async function createPump(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "equipment", "createPump");
 
   const siteId = String(formData.get("siteId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
@@ -193,7 +193,7 @@ export async function createPump(formData: FormData) {
 
 export async function updatePump(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "equipment", "updatePump");
 
   const id = String(formData.get("id") ?? "");
   const siteId = String(formData.get("siteId") ?? "");
@@ -250,7 +250,7 @@ export async function updatePump(formData: FormData) {
 
 export async function markPumpServiced(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "equipment", "markPumpServiced");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -265,7 +265,7 @@ export async function markPumpServiced(formData: FormData) {
 
 export async function schedulePump(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "equipment", "schedulePump");
 
   const pumpId = String(formData.get("pumpId") ?? "");
   const reservationId = String(formData.get("reservationId") ?? "");
@@ -292,7 +292,7 @@ export async function schedulePump(formData: FormData) {
 
 export async function updateAssignmentStatus(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "equipment", "updateAssignmentStatus");
 
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "");
@@ -323,7 +323,7 @@ export async function updateAssignmentStatus(formData: FormData) {
 // createTruck above.
 export async function createSupportVehicle(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "equipment", "createSupportVehicle");
 
   const siteId = String(formData.get("siteId") ?? "");
   const type = String(formData.get("type") ?? "");
@@ -365,7 +365,7 @@ export async function createSupportVehicle(formData: FormData) {
 
 export async function updateSupportVehicle(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "equipment", "updateSupportVehicle");
 
   const id = String(formData.get("id") ?? "");
   const siteId = String(formData.get("siteId") ?? "");

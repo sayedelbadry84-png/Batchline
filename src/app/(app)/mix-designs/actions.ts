@@ -2,11 +2,14 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
 export async function createMixDesign(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "mix-designs", "create");
+
   const code = String(formData.get("code") ?? "").trim();
   const grade = String(formData.get("grade") ?? "").trim();
   const exposureClass = String(formData.get("exposureClass") ?? "").trim();
@@ -26,6 +29,9 @@ export async function createMixDesign(formData: FormData) {
 }
 
 export async function updateMixDesign(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "mix-designs", "update");
+
   const mixId = String(formData.get("mixId") ?? "");
   const code = String(formData.get("code") ?? "").trim();
   const grade = String(formData.get("grade") ?? "").trim();
@@ -48,6 +54,9 @@ export async function updateMixDesign(formData: FormData) {
 }
 
 export async function addComponent(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "mix-designs", "addComponent");
+
   const mixId = String(formData.get("mixId") ?? "");
   const materialId = String(formData.get("materialId") ?? "");
   const enteredValue = Number(formData.get("designMassKgPerM3") ?? 0);
@@ -89,6 +98,9 @@ export async function addComponent(formData: FormData) {
 // it, since BatchTicket snapshots its own component targets at release
 // time (see releaseBatchTicket in production/actions.ts).
 export async function deleteComponent(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "mix-designs", "deleteComponent");
+
   const mixId = String(formData.get("mixId") ?? "");
   const materialId = String(formData.get("materialId") ?? "");
   if (!mixId || !materialId) return;
@@ -110,7 +122,7 @@ export async function deleteComponent(formData: FormData) {
 // to the role that owns quality sign-off, per the RBAC matrix.
 export async function setMixStatus(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["QUALITY_SUPERVISOR", "ADMIN"]);
+  await requireActionPermission(user, "mix-designs", "setStatus");
 
   const mixId = String(formData.get("mixId") ?? "");
   const status = String(formData.get("status") ?? "");

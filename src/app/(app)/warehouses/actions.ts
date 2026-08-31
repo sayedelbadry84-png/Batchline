@@ -2,16 +2,10 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
-import { REQUISITION_APPROVAL_ROLES } from "@/lib/permissions";
 import { revalidatePath } from "next/cache";
-
-const WAREHOUSE_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"];
-// Approving a requisition commits the company to actually buying it —
-// tighter than the general warehouse roster, same reasoning as the Sales
-// approval chains elsewhere this session.
 
 // ---------------------------------------------------------------------------
 // Spare Parts
@@ -19,7 +13,7 @@ const WAREHOUSE_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "
 
 export async function createSparePart(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, WAREHOUSE_ROLES);
+  await requireActionPermission(actor, "warehouses", "createSparePart");
 
   const code = String(formData.get("code") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
@@ -62,7 +56,7 @@ async function postReceiptToSparePartLine(purchaseOrderLineId: string, quantity:
 
 export async function receiveSparePart(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, WAREHOUSE_ROLES);
+  await requireActionPermission(actor, "warehouses", "receiveSparePart");
 
   const sparePartId = String(formData.get("sparePartId") ?? "");
   const siteId = String(formData.get("siteId") ?? "");
@@ -100,7 +94,7 @@ export async function receiveSparePart(formData: FormData) {
 
 export async function approveSparePartsRequisition(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, REQUISITION_APPROVAL_ROLES);
+  await requireActionPermission(actor, "warehouses", "approveSparePartsRequisition");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -120,7 +114,7 @@ export async function approveSparePartsRequisition(formData: FormData) {
 
 export async function rejectSparePartsRequisition(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, REQUISITION_APPROVAL_ROLES);
+  await requireActionPermission(actor, "warehouses", "rejectSparePartsRequisition");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -143,7 +137,7 @@ export async function rejectSparePartsRequisition(formData: FormData) {
 // by a person.
 export async function approveMaterialRequisition(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, REQUISITION_APPROVAL_ROLES);
+  await requireActionPermission(actor, "warehouses", "approveMaterialRequisition");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -163,7 +157,7 @@ export async function approveMaterialRequisition(formData: FormData) {
 
 export async function rejectMaterialRequisition(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, REQUISITION_APPROVAL_ROLES);
+  await requireActionPermission(actor, "warehouses", "rejectMaterialRequisition");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -186,7 +180,7 @@ export async function rejectMaterialRequisition(formData: FormData) {
 
 export async function createFinishedProduct(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, WAREHOUSE_ROLES);
+  await requireActionPermission(actor, "warehouses", "createFinishedProduct");
 
   const code = String(formData.get("code") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
@@ -205,7 +199,7 @@ export async function createFinishedProduct(formData: FormData) {
 
 export async function recordFinishedProductMovement(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, WAREHOUSE_ROLES);
+  await requireActionPermission(actor, "warehouses", "recordFinishedProductMovement");
 
   const productId = String(formData.get("productId") ?? "");
   const siteId = String(formData.get("siteId") ?? "");

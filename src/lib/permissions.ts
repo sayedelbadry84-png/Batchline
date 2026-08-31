@@ -159,7 +159,35 @@ export async function getAccessibleModules(role: string): Promise<ModuleKey[]> {
 // out of sync with each other.
 export const REQUISITION_APPROVAL_ROLES = ["ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER"];
 
+// Compiled-in defaults for every module's own action set — one entry per
+// exported Server Action across every operational module (see each
+// module's own actions.ts), grouped the same way the Permissions screen
+// groups them (mix-designs, reservations, production, ... quality, same
+// order as MODULE_NAV/VIEW_NAV). Every array here is exactly the role list
+// that action's own requireRole call used to hardcode, so turning this on
+// changes nothing on day one — an Admin's first save from /permissions is
+// the first time behavior can actually diverge from before.
+//
+// Three trip actions (advanceTrip/closeTripFull/closeTripWithReturn in
+// trips/actions.ts) are deliberately NOT here even though they're gated —
+// all three also accept DRIVER (the driver app calls straight into them),
+// and DRIVER has no checkbox on this screen (see ASSIGNABLE_ROLES' own
+// comment for why) — an Admin saving a customized role list for one of
+// those would silently drop DRIVER and lock the driver app out. They stay
+// on a plain hardcoded requireRole instead.
+const SALES_ROLES = ["SALES_REP", "SALES_SUPERVISOR", "SALES_MANAGER", "RESERVATIONS_OFFICER", "ADMIN"];
+const PURCHASING_ROLES = ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"];
+const MAINTENANCE_ROLES = ["PLANT_OPERATOR", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"];
+const WAREHOUSE_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN"];
+
 export const ACTION_ROLES = {
+  "mix-designs": {
+    create: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
+    update: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
+    addComponent: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
+    deleteComponent: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
+    setStatus: ["QUALITY_SUPERVISOR", "ADMIN"],
+  },
   reservations: {
     create: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
     edit: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
@@ -171,14 +199,190 @@ export const ACTION_ROLES = {
     manualBooking: ["PLANT_OPERATOR", "ADMIN"],
     complete: ["PLANT_OPERATOR", "ADMIN"],
     deleteTicket: ["PLANT_OPERATOR", "ADMIN"],
+    recordActuals: ["PLANT_OPERATOR", "ADMIN"],
+    recordActualField: ["PLANT_OPERATOR", "ADMIN"],
+    startTrip: ["PLANT_OPERATOR", "ADMIN"],
+    updateTripAssignment: ["PLANT_OPERATOR", "ADMIN"],
+    addTicketComponent: ["PLANT_OPERATOR", "ADMIN"],
+    deleteTicketComponent: ["PLANT_OPERATOR", "ADMIN"],
   },
-  // A deliberately narrower set than PURCHASING_ROLES (which can create/
-  // send a PO under threshold on their own) — approving one over the
-  // plant's own poApprovalThreshold is management sign-off, same
-  // segregation-of-duties reasoning as Reservation's approveFinal being
-  // narrower than create/edit.
+  equipment: {
+    createTruck: ["PLANT_OPERATOR", "ADMIN"],
+    updateTruck: ["PLANT_OPERATOR", "ADMIN"],
+    markTruckServiced: ["PLANT_OPERATOR", "ADMIN"],
+    createPump: ["PLANT_OPERATOR", "ADMIN"],
+    updatePump: ["PLANT_OPERATOR", "ADMIN"],
+    markPumpServiced: ["PLANT_OPERATOR", "ADMIN"],
+    schedulePump: ["PLANT_OPERATOR", "ADMIN"],
+    updateAssignmentStatus: ["PLANT_OPERATOR", "ADMIN"],
+    createSupportVehicle: ["PLANT_OPERATOR", "ADMIN"],
+    updateSupportVehicle: ["PLANT_OPERATOR", "ADMIN"],
+  },
+  // Projects live on the Customers screen (see the Project model comment)
+  // — folded in here rather than given its own department.
+  customers: {
+    createCustomer: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
+    updateCustomer: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
+    createProject: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
+    updateProject: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
+  },
+  // Payroll (employees/payroll/actions.ts) folded in here — same module on
+  // screen, own tab.
+  employees: {
+    createEmployee: ["ADMIN"],
+    updateEmployee: ["ADMIN"],
+    createJobTitle: ["ADMIN"],
+    createPumpCrewMember: ["PLANT_OPERATOR", "ADMIN"],
+    updatePumpCrewMember: ["PLANT_OPERATOR", "ADMIN"],
+    recordAttendance: ["ADMIN", "PLANT_ADMIN"],
+    createLeaveRequest: ["ADMIN", "PLANT_ADMIN"],
+    approveLeaveRequest: ["ADMIN", "PLANT_ADMIN"],
+    rejectLeaveRequest: ["ADMIN", "PLANT_ADMIN"],
+    cancelLeaveRequest: ["ADMIN", "PLANT_ADMIN"],
+    generatePayrollRun: ["ADMIN"],
+    updatePayrollLine: ["ADMIN"],
+    approvePayrollRun: ["ADMIN"],
+    markPayrollRunPaid: ["ADMIN"],
+    cancelPayrollRun: ["ADMIN"],
+  },
+  plants: {
+    createSite: ["PLANT_OPERATOR", "ADMIN"],
+    updateSite: ["PLANT_OPERATOR", "ADMIN"],
+    createPlant: ["PLANT_OPERATOR", "ADMIN"],
+    updatePlant: ["PLANT_OPERATOR", "ADMIN"],
+    updatePlantThresholds: ["PLANT_OPERATOR", "ADMIN"],
+    updateZatcaSettings: ["ACCOUNTANT", "ADMIN"],
+  },
+  incentives: {
+    updateIncentivePolicy: ["PLANT_OPERATOR", "ADMIN"],
+    updatePumpIncentivePolicy: ["PLANT_OPERATOR", "ADMIN"],
+    addPumpRateBracket: ["PLANT_OPERATOR", "ADMIN"],
+    deletePumpRateBracket: ["PLANT_OPERATOR", "ADMIN"],
+    setFlatVolumeRate: ["PLANT_OPERATOR", "ADMIN"],
+    setIncentiveMethod: ["ADMIN"],
+  },
+  sales: {
+    create: SALES_ROLES,
+    update: SALES_ROLES,
+    advanceStage: SALES_ROLES,
+    promoteProspect: SALES_ROLES,
+    logVisit: SALES_ROLES,
+    createQuote: SALES_ROLES,
+    updateQuote: SALES_ROLES,
+    markQuoteSent: SALES_ROLES,
+    recordQuoteResponse: SALES_ROLES,
+    convertQuoteToReservation: SALES_ROLES,
+    // Two-stage approval, role pair depends on record type — see
+    // APPROVAL_CONFIG in sales/actions.ts. Opportunity/FieldVisit go Sales
+    // Supervisor -> Sales Manager; Quote goes Sales Manager -> Plants
+    // Manager (a price offer needs the plant side's own sign-off, not just
+    // Sales', before it can reach a customer).
+    approveOpportunityInitial: ["SALES_SUPERVISOR", "ADMIN"],
+    approveOpportunityFinal: ["SALES_MANAGER", "ADMIN"],
+    approveVisitInitial: ["SALES_SUPERVISOR", "ADMIN"],
+    approveVisitFinal: ["SALES_MANAGER", "ADMIN"],
+    approveQuoteInitial: ["SALES_MANAGER", "ADMIN"],
+    approveQuoteFinal: ["PLANTS_MANAGER", "ADMIN"],
+  },
+  // Suppliers/materials (suppliers/actions.ts) folded in here — same
+  // module on screen, own tab.
   purchasing: {
+    create: PURCHASING_ROLES,
+    update: PURCHASING_ROLES,
+    markSent: PURCHASING_ROLES,
+    cancel: PURCHASING_ROLES,
+    createContract: PURCHASING_ROLES,
+    terminateContract: PURCHASING_ROLES,
+    renewContract: PURCHASING_ROLES,
+    createFromSparePartRequisitions: PURCHASING_ROLES,
+    createFromMaterialRequisitions: PURCHASING_ROLES,
+    // A deliberately narrower set than PURCHASING_ROLES (which can create/
+    // send a PO under threshold on their own) — approving one over the
+    // plant's own poApprovalThreshold is management sign-off, same
+    // segregation-of-duties reasoning as Reservation's approveFinal being
+    // narrower than create/edit.
     approve: ["ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER"],
+    createSupplier: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
+    createMaterial: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
+    updateSupplier: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
+    updateMaterial: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
+  },
+  maintenance: {
+    createTicket: MAINTENANCE_ROLES,
+    startTicket: MAINTENANCE_ROLES,
+    completeTicket: MAINTENANCE_ROLES,
+    cancelTicket: MAINTENANCE_ROLES,
+    createPlan: MAINTENANCE_ROLES,
+    deactivatePlan: MAINTENANCE_ROLES,
+    generateTicketFromPlan: MAINTENANCE_ROLES,
+    convertToOrder: MAINTENANCE_ROLES,
+    startOrder: MAINTENANCE_ROLES,
+    completeOrder: MAINTENANCE_ROLES,
+    cancelOrder: MAINTENANCE_ROLES,
+    addTechnician: MAINTENANCE_ROLES,
+    removeTechnician: MAINTENANCE_ROLES,
+    issueSparePart: MAINTENANCE_ROLES,
+  },
+  // Billing (billing/actions.ts) folded in here — same module on screen,
+  // own tab.
+  finance: {
+    createSupplierBill: ["ACCOUNTANT", "ADMIN"],
+    recordSupplierPayment: ["ACCOUNTANT", "ADMIN"],
+    cancelSupplierBill: ["ACCOUNTANT", "ADMIN"],
+    createCashTransaction: ["ACCOUNTANT", "ADMIN"],
+    reconcileMovement: ["ACCOUNTANT", "ADMIN"],
+    generateInvoice: ["ACCOUNTANT", "ADMIN"],
+    markInvoiceSent: ["ACCOUNTANT", "ADMIN"],
+    cancelInvoice: ["ACCOUNTANT", "ADMIN"],
+    recordPayment: ["ACCOUNTANT", "ADMIN"],
+    issueCreditNote: ["ACCOUNTANT", "ADMIN"],
+    generateZatcaDocuments: ["ACCOUNTANT", "ADMIN"],
+    submitZatcaClearance: ["ACCOUNTANT", "ADMIN"],
+  },
+  // Silos/hoppers/chemical tanks (silos/actions.ts) and material receiving
+  // (material-receiving/actions.ts) folded in here — same module on
+  // screen, own tabs.
+  warehouses: {
+    createSparePart: WAREHOUSE_ROLES,
+    receiveSparePart: WAREHOUSE_ROLES,
+    createFinishedProduct: WAREHOUSE_ROLES,
+    recordFinishedProductMovement: WAREHOUSE_ROLES,
+    // Approving a requisition commits the company to actually buying it —
+    // tighter than the general warehouse roster, same
+    // REQUISITION_APPROVAL_ROLES already used at these exact call sites.
+    approveSparePartsRequisition: REQUISITION_APPROVAL_ROLES,
+    rejectSparePartsRequisition: REQUISITION_APPROVAL_ROLES,
+    approveMaterialRequisition: REQUISITION_APPROVAL_ROLES,
+    rejectMaterialRequisition: REQUISITION_APPROVAL_ROLES,
+    createSilo: ["PLANT_OPERATOR", "ADMIN"],
+    updateSilo: ["PLANT_OPERATOR", "ADMIN"],
+    setSiloSharing: ["PLANT_OPERATOR", "ADMIN"],
+    updateSiloLevel: ["PLANT_OPERATOR", "ADMIN"],
+    createHopper: ["PLANT_OPERATOR", "ADMIN"],
+    setHopperSharing: ["PLANT_OPERATOR", "ADMIN"],
+    updateHopperLevel: ["PLANT_OPERATOR", "ADMIN"],
+    createChemicalTank: ["PLANT_OPERATOR", "ADMIN"],
+    updateChemicalTankLevel: ["PLANT_OPERATOR", "ADMIN"],
+    createReceipt: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
+    updateReceipt: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
+    deleteReceipt: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
+    returnReceiptToSupplier: ["QUALITY_SUPERVISOR", "ADMIN"],
+    setQcStatus: ["QUALITY_SUPERVISOR", "ADMIN"],
+  },
+  // Only markDrumReturnFate — see the comment above ACTION_ROLES for why
+  // advanceTrip/closeTripFull/closeTripWithReturn stay off this system.
+  trips: {
+    setDrumReturnFate: ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ADMIN"],
+  },
+  quality: {
+    createTestBatch: ["QUALITY_SUPERVISOR", "ADMIN"],
+    addLabResult: ["QUALITY_SUPERVISOR", "ADMIN"],
+    saveCapaRecord: ["QUALITY_SUPERVISOR", "ADMIN"],
+    closeCapaRecord: ["QUALITY_SUPERVISOR", "ADMIN"],
+    createCertificate: ["QUALITY_SUPERVISOR", "ADMIN"],
+    updateCertificate: ["QUALITY_SUPERVISOR", "ADMIN"],
+    approveWasteMemo: ["QUALITY_SUPERVISOR", "ADMIN"],
+    recordWasteMemoNote: ["QUALITY_SUPERVISOR", "ADMIN"],
   },
 } as const satisfies Record<string, Record<string, readonly string[]>>;
 

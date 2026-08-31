@@ -2,30 +2,29 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 
-const SALES_ROLES = ["SALES_REP", "SALES_SUPERVISOR", "SALES_MANAGER", "RESERVATIONS_OFFICER", "ADMIN"];
-
-// Per-record-type role pair for the two-stage approval chain — Opportunity
+// Per-record-type action key for the two-stage approval chain — Opportunity
 // and FieldVisit go Sales Supervisor -> Sales Manager, Quote goes
-// Sales Manager -> Plants Manager. See approveInitialStage/
-// approveFinalStage below for how the "senior role can approve directly,
-// skipping the junior stage" rule uses this.
+// Sales Manager -> Plants Manager (see ACTION_ROLES.sales in
+// src/lib/permissions.ts for the actual role lists). See
+// approveInitialStage/approveFinalStage below for how the "senior role can
+// approve directly, skipping the junior stage" rule uses this.
 const APPROVABLE_RECORD_TYPES = ["opportunity", "visit", "quote"] as const;
 type ApprovableRecordType = (typeof APPROVABLE_RECORD_TYPES)[number];
 
-const APPROVAL_CONFIG: Record<ApprovableRecordType, { initialRoles: string[]; finalRoles: string[] }> = {
-  opportunity: { initialRoles: ["SALES_SUPERVISOR", "ADMIN"], finalRoles: ["SALES_MANAGER", "ADMIN"] },
-  visit: { initialRoles: ["SALES_SUPERVISOR", "ADMIN"], finalRoles: ["SALES_MANAGER", "ADMIN"] },
-  quote: { initialRoles: ["SALES_MANAGER", "ADMIN"], finalRoles: ["PLANTS_MANAGER", "ADMIN"] },
+const APPROVAL_ACTION_KEY: Record<ApprovableRecordType, { initial: "approveOpportunityInitial" | "approveVisitInitial" | "approveQuoteInitial"; final: "approveOpportunityFinal" | "approveVisitFinal" | "approveQuoteFinal" }> = {
+  opportunity: { initial: "approveOpportunityInitial", final: "approveOpportunityFinal" },
+  visit: { initial: "approveVisitInitial", final: "approveVisitFinal" },
+  quote: { initial: "approveQuoteInitial", final: "approveQuoteFinal" },
 };
 
 export async function createOpportunity(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, SALES_ROLES);
+  await requireActionPermission(actor, "sales", "create");
 
   const customerId = String(formData.get("customerId") ?? "") || null;
   const prospectName = String(formData.get("prospectName") ?? "").trim() || null;
@@ -73,7 +72,7 @@ export async function createOpportunity(formData: FormData) {
 
 export async function updateOpportunity(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, SALES_ROLES);
+  await requireActionPermission(actor, "sales", "update");
 
   const id = String(formData.get("id") ?? "");
   const prospectName = String(formData.get("prospectName") ?? "").trim() || null;
@@ -118,7 +117,7 @@ export async function updateOpportunity(formData: FormData) {
 // revisited freely as the real conversation with the customer requires.
 export async function advanceOpportunityStage(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, SALES_ROLES);
+  await requireActionPermission(actor, "sales", "advanceStage");
 
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "");
@@ -151,7 +150,7 @@ export async function advanceOpportunityStage(formData: FormData) {
 // losing the opportunity's own history by re-creating it from scratch.
 export async function promoteProspectToCustomer(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, SALES_ROLES);
+  await requireActionPermission(actor, "sales", "promoteProspect");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -176,7 +175,7 @@ export async function promoteProspectToCustomer(formData: FormData) {
 
 export async function logFieldVisit(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, SALES_ROLES);
+  await requireActionPermission(actor, "sales", "logVisit");
 
   const opportunityId = String(formData.get("opportunityId") ?? "") || null;
   const customerId = String(formData.get("customerId") ?? "") || null;
@@ -233,7 +232,7 @@ export async function logFieldVisit(formData: FormData) {
 // Customer is the required step before a quote can be built for it.
 export async function createQuote(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, SALES_ROLES);
+  await requireActionPermission(actor, "sales", "createQuote");
 
   const opportunityId = String(formData.get("opportunityId") ?? "");
   const projectId = String(formData.get("projectId") ?? "") || null;
@@ -304,7 +303,7 @@ export async function createQuote(formData: FormData) {
 // nothing here touches line items or totals.
 export async function updateQuote(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, SALES_ROLES);
+  await requireActionPermission(actor, "sales", "updateQuote");
 
   const id = String(formData.get("id") ?? "");
   const validUntilRaw = String(formData.get("validUntil") ?? "");
@@ -326,7 +325,7 @@ export async function updateQuote(formData: FormData) {
 
 export async function markQuoteSent(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, SALES_ROLES);
+  await requireActionPermission(actor, "sales", "markQuoteSent");
 
   const id = String(formData.get("id") ?? "");
   if (!id) return;
@@ -363,7 +362,7 @@ export async function markQuoteSent(formData: FormData) {
 
 export async function recordQuoteResponse(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, SALES_ROLES);
+  await requireActionPermission(actor, "sales", "recordQuoteResponse");
 
   const id = String(formData.get("id") ?? "");
   const response = String(formData.get("response") ?? "");
@@ -391,7 +390,7 @@ export async function recordQuoteResponse(formData: FormData) {
 // already WAS the customer's and the sales side's sign-off.
 export async function convertQuoteLineToReservation(formData: FormData) {
   const actor = await getCurrentUser();
-  requireRole(actor, SALES_ROLES);
+  await requireActionPermission(actor, "sales", "convertQuoteToReservation");
 
   const quoteLineId = String(formData.get("quoteLineId") ?? "");
   if (!quoteLineId) return;
@@ -477,7 +476,7 @@ export async function approveInitialStage(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!APPROVABLE_RECORD_TYPES.includes(recordType as ApprovableRecordType) || !id) return;
   const type = recordType as ApprovableRecordType;
-  requireRole(actor, APPROVAL_CONFIG[type].initialRoles);
+  await requireActionPermission(actor, "sales", APPROVAL_ACTION_KEY[type].initial);
 
   const existing = await findApprovable(type, id);
   if (!existing || existing.initialApprovedAt) return;
@@ -500,7 +499,7 @@ export async function approveFinalStage(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!APPROVABLE_RECORD_TYPES.includes(recordType as ApprovableRecordType) || !id) return;
   const type = recordType as ApprovableRecordType;
-  requireRole(actor, APPROVAL_CONFIG[type].finalRoles);
+  await requireActionPermission(actor, "sales", APPROVAL_ACTION_KEY[type].final);
 
   const existing = await findApprovable(type, id);
   if (!existing || existing.finalApprovedAt) return;

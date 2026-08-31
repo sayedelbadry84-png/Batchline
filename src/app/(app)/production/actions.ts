@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
+import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { getAvailableReclaimForTruck } from "@/lib/reclaim";
@@ -258,7 +258,7 @@ export async function createManualRelease(formData: FormData) {
 
 export async function recordActuals(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "production", "recordActuals");
 
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   if (!batchTicketId) return;
@@ -305,7 +305,7 @@ export async function recordActuals(formData: FormData) {
 // recordActuals (above) still exists for the explicit bulk save/status-flip.
 export async function recordActualField(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "production", "recordActualField");
 
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   const componentId = String(formData.get("componentId") ?? "");
@@ -440,7 +440,7 @@ export async function completeBatch(formData: FormData) {
 
 export async function startTrip(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "production", "startTrip");
 
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   const truckId = String(formData.get("truckId") ?? "");
@@ -595,7 +595,7 @@ export async function startTrip(formData: FormData) {
 // reservation editor uses for its own fields.
 export async function updateTripAssignment(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "production", "updateTripAssignment");
 
   const tripId = String(formData.get("tripId") ?? "");
   const truckId = String(formData.get("truckId") ?? "");
@@ -663,7 +663,7 @@ export async function updateTripAssignment(formData: FormData) {
 // actually deducted from inventory.
 export async function addTicketComponent(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "production", "addTicketComponent");
 
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   const materialId = String(formData.get("materialId") ?? "");
@@ -696,7 +696,7 @@ export async function addTicketComponent(formData: FormData) {
 // would leave that deduction unexplained rather than undoing it.
 export async function deleteTicketComponent(formData: FormData) {
   const user = await getCurrentUser();
-  requireRole(user, ["PLANT_OPERATOR", "ADMIN"]);
+  await requireActionPermission(user, "production", "deleteTicketComponent");
 
   const id = String(formData.get("id") ?? "");
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
