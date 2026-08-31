@@ -207,6 +207,34 @@ export async function getReturnsReport({ from, to, siteId, plantId }: ReportFilt
   return { rows: returns, totalReturnedM3, wastedM3, reclaimedM3, reclaimedAndReusedM3, returnCount: returns.length, pendingFate };
 }
 
+// One row per (customer, project) pair — the same "wait / pour / total
+// cycle" breakdown a delivery-cycle analytics tool would show, computed
+// from the exact stage timestamps the driver app already records
+// (Trip.departTime/arriveTime/dischargeStart/dischargeEnd) rather than
+// anything new. A trip missing either endpoint of a given segment (an
+// older trip from before a stage was tracked, or one that skipped a
+// step) simply doesn't contribute to that segment's average — never
+// treated as zero.
+export type TripCycleBreakdownRow = {
+  customerName: string;
+  customerCode: string | null;
+  projectName: string;
+  tripCount: number;
+  avgTransitMin: number | null;
+  avgWaitMin: number | null;
+  avgPourMin: number | null;
+  avgCycleTimeMin: number | null;
+};
+
+function avgOf(values: number[]): number | null {
+  return values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+}
+
+function minutesBetween(from: Date | null, to: Date | null): number | null {
+  if (!from || !to) return null;
+  return (to.getTime() - from.getTime()) / 60000;
+}
+
 export async function getTripsReport({ from, to, siteId, plantId }: ReportFilter) {
   const trips = await prisma.trip.findMany({
     where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripPlantScopeWhere(siteId, plantId) },
@@ -216,7 +244,49 @@ export async function getTripsReport({ from, to, siteId, plantId }: ReportFilter
   const totalDeliveredM3 = trips.reduce((sum, t) => sum + (t.volumeDeliveredM3 ?? 0), 0);
   const cycleTimes = trips.filter((t) => t.dischargeEnd).map((t) => (t.dischargeEnd!.getTime() - t.batchTime.getTime()) / 60000);
   const avgCycleTimeMin = cycleTimes.length ? cycleTimes.reduce((a, b) => a + b, 0) / cycleTimes.length : null;
-  return { rows: trips, totalDeliveredM3, tripCount: trips.length, avgCycleTimeMin };
+
+  const byProjectMap = new Map<
+    string,
+    { customerName: string; customerCode: string | null; projectName: string; transit: number[]; wait: number[]; pour: number[]; cycle: number[]; count: number }
+  >();
+  for (const t of trips) {
+    const project = t.batchTicket.reservation.project;
+    const key = project.id;
+    const entry = byProjectMap.get(key) ?? {
+      customerName: project.customer.legalName,
+      customerCode: project.customer.code,
+      projectName: project.name,
+      transit: [],
+      wait: [],
+      pour: [],
+      cycle: [],
+      count: 0,
+    };
+    entry.count += 1;
+    const transitMin = minutesBetween(t.departTime, t.arriveTime);
+    const waitMin = minutesBetween(t.arriveTime, t.dischargeStart);
+    const pourMin = minutesBetween(t.dischargeStart, t.dischargeEnd);
+    const cycleMin = minutesBetween(t.batchTime, t.dischargeEnd);
+    if (transitMin != null) entry.transit.push(transitMin);
+    if (waitMin != null) entry.wait.push(waitMin);
+    if (pourMin != null) entry.pour.push(pourMin);
+    if (cycleMin != null) entry.cycle.push(cycleMin);
+    byProjectMap.set(key, entry);
+  }
+  const byProject: TripCycleBreakdownRow[] = [...byProjectMap.values()]
+    .map((e) => ({
+      customerName: e.customerName,
+      customerCode: e.customerCode,
+      projectName: e.projectName,
+      tripCount: e.count,
+      avgTransitMin: avgOf(e.transit),
+      avgWaitMin: avgOf(e.wait),
+      avgPourMin: avgOf(e.pour),
+      avgCycleTimeMin: avgOf(e.cycle),
+    }))
+    .sort((a, b) => b.tripCount - a.tripCount);
+
+  return { rows: trips, totalDeliveredM3, tripCount: trips.length, avgCycleTimeMin, byProject };
 }
 
 // Deliberately ignores the siteId/plantId scope every other report here

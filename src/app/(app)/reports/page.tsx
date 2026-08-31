@@ -1098,6 +1098,46 @@ export default async function ReportsPage({
               <div className="mt-1 text-sm text-ink-muted">{m.tripsReport.avgCycleTime(fmt(tripsData.avgCycleTimeMin, 0))}</div>
             </div>
           </div>
+
+          <div>
+            <h2 className="mb-1 font-display text-lg font-semibold">{m.tripsReport.byProjectTitle}</h2>
+            <p className="mb-3 text-sm text-ink-muted">{m.tripsReport.byProjectIntro}</p>
+            <div className={ui.card}>
+              <table className={ui.table}>
+                <thead>
+                  <tr>
+                    <th className={ui.th}>{m.tripsReport.byProjectCol.customer}</th>
+                    <th className={ui.th}>{m.tripsReport.byProjectCol.project}</th>
+                    <th className={ui.th}>{m.tripsReport.byProjectCol.trips}</th>
+                    <th className={ui.th}>{m.tripsReport.byProjectCol.transit}</th>
+                    <th className={ui.th}>{m.tripsReport.byProjectCol.wait}</th>
+                    <th className={ui.th}>{m.tripsReport.byProjectCol.pour}</th>
+                    <th className={ui.th}>{m.tripsReport.byProjectCol.cycle}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tripsData.byProject.map((r, i) => (
+                    <tr key={i}>
+                      <td className={ui.td}>
+                        {r.customerName}
+                        {r.customerCode && <span className="ms-1 font-mono text-xs text-ink-muted">({r.customerCode})</span>}
+                      </td>
+                      <td className={ui.td}>{r.projectName}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{r.tripCount}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{fmt(r.avgTransitMin, 0, " min")}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{fmt(r.avgWaitMin, 0, " min")}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{fmt(r.avgPourMin, 0, " min")}</td>
+                      <td className={`${ui.td} font-mono tabular font-medium`}>{fmt(r.avgCycleTimeMin, 0, " min")}</td>
+                    </tr>
+                  ))}
+                  {tripsData.byProject.length === 0 && (
+                    <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <div className={ui.card}>
             <table className={ui.table}>
               <thead>

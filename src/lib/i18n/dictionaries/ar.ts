@@ -1272,6 +1272,9 @@ const ar = {
         totalDelivered: (v: string) => `${v} م³ مسلَّمة`,
         tripCount: (n: number) => `${n} رحلة`,
         avgCycleTime: (v: string) => `${v} د متوسط الدورة`,
+        byProjectTitle: "دورة التسليم لكل عميل/مشروع",
+        byProjectIntro: "متوسط أوقات كل مرحلة من مراحل الرحلة (النقل، الانتظار بالموقع، التفريغ)، محسوبة من توقيتات التطبيق الميداني نفسها — مرتبة حسب عدد الرحلات.",
+        byProjectCol: { customer: "العميل", project: "المشروع", trips: "الرحلات", transit: "النقل", wait: "الانتظار بالموقع", pour: "التفريغ", cycle: "الدورة الكاملة" },
       },
       equipmentReport: {
         trucksTitle: "شاحنات الخلط",

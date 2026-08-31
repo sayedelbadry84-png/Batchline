@@ -1279,6 +1279,9 @@ const en: typeof ar = {
         totalDelivered: (v: string) => `${v} m³ delivered`,
         tripCount: (n: number) => `${n} trips`,
         avgCycleTime: (v: string) => `${v} min avg. cycle`,
+        byProjectTitle: "Delivery cycle by customer/project",
+        byProjectIntro: "Average duration of each trip stage (transit, on-site wait, pour) computed from the same driver-app timestamps — sorted by trip count.",
+        byProjectCol: { customer: "Customer", project: "Project", trips: "Trips", transit: "Transit", wait: "On-site wait", pour: "Pour", cycle: "Full cycle" },
       },
       equipmentReport: {
         trucksTitle: "Mixer trucks",
