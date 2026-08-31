@@ -1571,12 +1571,22 @@ const en: typeof ar = {
         f: {
           supplierId: "Supplier", siteId: "Plant", dueDate: "Due date", subtotal: "Subtotal (before tax)",
           taxAmount: "Tax amount", notes: "Notes", amount: "Amount", method: "Payment method", reference: "Reference",
+          purchaseOrderId: "Linked purchase order (optional)",
         },
         add: "Create bill",
         recordPayment: "Record payment",
         confirmPayment: "Confirm payment",
         cancel: "Cancel",
         empty: "No supplier bills yet.",
+        noPo: "No purchase order",
+        purchaseOrderHint: "When linked to a purchase order, the bill is automatically compared against that order's total to catch any unexplained overage.",
+        anomaliesTitle: "Payables reconciliation alerts",
+        overageBadge: "Over the PO",
+        overageFlag: (bill: string, po: string, billTotal: number, poTotal: number, pct: number) =>
+          `${bill}: ${billTotal.toFixed(2)} — ${pct.toFixed(1)}% higher than PO ${po}'s own total (${poTotal.toFixed(2)}).`,
+        duplicateBadge: "Possible duplicate",
+        duplicateFlag: (bill: string, duplicateOf: string, amount: number, days: number) =>
+          `${bill}: ${amount.toFixed(2)} — very close to bill ${duplicateOf} from the same supplier, only ${days} day(s) apart.`,
       },
       cash: {
         col: { number: "Number", date: "Date", direction: "Direction", category: "Category", amount: "Amount", description: "Description", by: "By" },

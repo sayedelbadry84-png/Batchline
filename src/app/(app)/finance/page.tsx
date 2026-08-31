@@ -6,6 +6,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { getActiveSiteId, reservationSiteScopeWhere, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { invoiceAmountDue } from "@/lib/billing";
+import { detectPoOverageFlags, detectDuplicateBillFlags } from "@/lib/anomaly";
 import { Modal } from "@/components/Modal";
 import {
   createSupplierBill,
@@ -188,17 +189,57 @@ async function PayableTab({
   payId?: string;
   baseUrl: string;
 }) {
-  const bills = await prisma.supplierBill.findMany({
-    where: siteScope,
-    orderBy: { createdAt: "desc" },
-    include: { supplier: true, payments: true },
-  });
+  const [bills, purchaseOrders] = await Promise.all([
+    prisma.supplierBill.findMany({
+      where: siteScope,
+      orderBy: { createdAt: "desc" },
+      include: { supplier: true, payments: true, purchaseOrder: true },
+    }),
+    prisma.purchaseOrder.findMany({
+      where: { ...siteScope, status: { in: ["SENT", "PARTIALLY_RECEIVED", "RECEIVED"] } },
+      orderBy: { orderDate: "desc" },
+      include: { supplier: true },
+    }),
+  ]);
+
+  // Real AP reconciliation — see src/lib/anomaly.ts's own comment on why
+  // these are two deterministic checks rather than the statistical
+  // outlier/drift engine every other anomaly surface in this app uses.
+  // A cancelled bill was never really paid out, so it's excluded here —
+  // still shown in the table below exactly as it always was, just not
+  // flagged as a live anomaly.
+  const activeBills = bills.filter((b) => b.status !== "CANCELLED");
+  const overageFlags = detectPoOverageFlags(activeBills.filter((b) => b.purchaseOrder));
+  const duplicateFlags = detectDuplicateBillFlags(activeBills);
+  const apFlagCount = overageFlags.length + duplicateFlags.length;
 
   return (
     <div className="flex flex-col gap-4">
       <div className="no-print flex justify-end">
         <Link href={`${baseUrl}&newBill=1`} className={ui.button}>+ {m.payable.newTitle}</Link>
       </div>
+
+      {apFlagCount > 0 && (
+        <div className="flex flex-col gap-2">
+          <h2 className="font-display text-base font-semibold">{m.payable.anomaliesTitle}</h2>
+          {overageFlags.map((f) => (
+            <div key={`overage-${f.billId}`} className={`${ui.card} flex items-center justify-between gap-4 py-3`}>
+              <div>
+                <span className={`${ui.chip} bg-critical-soft text-critical me-2`}>{m.payable.overageBadge}</span>
+                <span className="text-sm">{m.payable.overageFlag(f.billNumber, f.poNumber, f.billTotal, f.poTotal, f.overagePct)}</span>
+              </div>
+            </div>
+          ))}
+          {duplicateFlags.map((f) => (
+            <div key={`dup-${f.billId}`} className={`${ui.card} flex items-center justify-between gap-4 py-3`}>
+              <div>
+                <span className={`${ui.chip} bg-warn-soft text-warn me-2`}>{m.payable.duplicateBadge}</span>
+                <span className="text-sm">{m.payable.duplicateFlag(f.billNumber, f.duplicateOfBillNumber, f.amount, f.daysApart)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className={ui.card}>
         <table className={ui.table}>
@@ -260,6 +301,16 @@ async function PayableTab({
                   <option key={s.id} value={s.id}>{s.name}</option>
                 ))}
               </select>
+            </div>
+            <div>
+              <label className={ui.label}>{m.payable.f.purchaseOrderId}</label>
+              <select name="purchaseOrderId" defaultValue="" className={ui.select}>
+                <option value="">{m.payable.noPo}</option>
+                {purchaseOrders.map((po) => (
+                  <option key={po.id} value={po.id}>{po.poNumber} — {po.supplier.name} ({po.total.toFixed(2)} {po.currency})</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-ink-muted">{m.payable.purchaseOrderHint}</p>
             </div>
             <div>
               <label className={ui.label}>{m.payable.f.siteId}</label>

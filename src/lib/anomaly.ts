@@ -221,3 +221,105 @@ export function detectStrengthAnomalies(
   }
   return flags;
 }
+
+// --- Supplier-bill anomalies (accounts payable) — a different shape of
+// check than the two above: not an outlier/drift over a time series (a
+// bill's own total has no natural "target" to deviate from — it varies
+// legitimately with however much was actually ordered), but the same
+// underlying goal real AP review already does by hand: does this bill
+// match what was actually approved, and does it look like the same
+// charge landed twice? Two independent, deterministic checks rather than
+// coreDetect's statistics:
+//
+// 1. PO_OVERAGE — a bill linked to a PurchaseOrder whose total
+//    meaningfully exceeds that PO's own approved total. Only ever fires
+//    for a bill that's actually linked to a PO (see createSupplierBill /
+//    the payable tab's create form) — an ad-hoc bill with no PO on file
+//    has nothing to compare against, and isn't flagged as if it were
+//    wrong just for lacking one.
+// 2. DUPLICATE — two bills from the same supplier, within a tight
+//    tolerance of each other's amount, close together in time — the
+//    classic shape of an accidental double-entry or a supplier
+//    resubmitting the same invoice.
+
+const PO_OVERAGE_THRESHOLD_PCT = 5;
+const DUPLICATE_AMOUNT_TOLERANCE_PCT = 1;
+const DUPLICATE_WINDOW_DAYS = 14;
+
+export type BillOverageFlag = {
+  type: "PO_OVERAGE";
+  billId: string;
+  billNumber: string;
+  poNumber: string;
+  billTotal: number;
+  poTotal: number;
+  overagePct: number;
+};
+
+export function detectPoOverageFlags(
+  bills: { id: string; billNumber: string; total: number; purchaseOrder: { poNumber: string; total: number } | null }[],
+): BillOverageFlag[] {
+  const flags: BillOverageFlag[] = [];
+  for (const b of bills) {
+    if (!b.purchaseOrder || b.purchaseOrder.total <= 0) continue;
+    const overagePct = ((b.total - b.purchaseOrder.total) / b.purchaseOrder.total) * 100;
+    if (overagePct > PO_OVERAGE_THRESHOLD_PCT) {
+      flags.push({
+        type: "PO_OVERAGE",
+        billId: b.id,
+        billNumber: b.billNumber,
+        poNumber: b.purchaseOrder.poNumber,
+        billTotal: b.total,
+        poTotal: b.purchaseOrder.total,
+        overagePct,
+      });
+    }
+  }
+  return flags;
+}
+
+export type DuplicateBillFlag = {
+  type: "DUPLICATE";
+  billId: string;
+  billNumber: string;
+  duplicateOfBillId: string;
+  duplicateOfBillNumber: string;
+  amount: number;
+  daysApart: number;
+};
+
+export function detectDuplicateBillFlags(
+  bills: { id: string; billNumber: string; supplierId: string; total: number; billDate: Date }[],
+): DuplicateBillFlag[] {
+  const flags: DuplicateBillFlag[] = [];
+  const bySupplier = new Map<string, typeof bills>();
+  for (const b of bills) {
+    const arr = bySupplier.get(b.supplierId) ?? [];
+    arr.push(b);
+    bySupplier.set(b.supplierId, arr);
+  }
+
+  for (const supplierBills of bySupplier.values()) {
+    const sorted = [...supplierBills].sort((a, b) => a.billDate.getTime() - b.billDate.getTime());
+    for (let i = 0; i < sorted.length; i++) {
+      if (sorted[i].total <= 0) continue;
+      for (let j = i + 1; j < sorted.length; j++) {
+        const daysApart = (sorted[j].billDate.getTime() - sorted[i].billDate.getTime()) / (1000 * 60 * 60 * 24);
+        if (daysApart > DUPLICATE_WINDOW_DAYS) break; // sorted oldest-first — nothing further out will be any closer
+        const pctDiff = (Math.abs(sorted[j].total - sorted[i].total) / sorted[i].total) * 100;
+        if (pctDiff <= DUPLICATE_AMOUNT_TOLERANCE_PCT) {
+          flags.push({
+            type: "DUPLICATE",
+            billId: sorted[j].id,
+            billNumber: sorted[j].billNumber,
+            duplicateOfBillId: sorted[i].id,
+            duplicateOfBillNumber: sorted[i].billNumber,
+            amount: sorted[j].total,
+            daysApart: Math.round(daysApart),
+          });
+        }
+      }
+    }
+  }
+  return flags;
+}

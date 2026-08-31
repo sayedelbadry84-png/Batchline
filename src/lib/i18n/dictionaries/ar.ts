@@ -1567,12 +1567,22 @@ const ar = {
         f: {
           supplierId: "المورد", siteId: "المصنع", dueDate: "تاريخ الاستحقاق", subtotal: "المبلغ قبل الضريبة",
           taxAmount: "قيمة الضريبة", notes: "ملاحظات", amount: "المبلغ", method: "طريقة الدفع", reference: "المرجع",
+          purchaseOrderId: "أمر الشراء المرتبط (اختياري)",
         },
         add: "إنشاء الفاتورة",
         recordPayment: "تسجيل دفعة",
         confirmPayment: "تأكيد الدفعة",
         cancel: "إلغاء",
         empty: "لا توجد فواتير موردين بعد.",
+        noPo: "بدون أمر شراء",
+        purchaseOrderHint: "عند الربط بأمر شراء، تُقارَن الفاتورة تلقائيًا بإجمالي الأمر لرصد أي زيادة غير مبررة.",
+        anomaliesTitle: "تنبيهات المطابقة المالية",
+        overageBadge: "زيادة عن أمر الشراء",
+        overageFlag: (bill: string, po: string, billTotal: number, poTotal: number, pct: number) =>
+          `${bill}: ${billTotal.toFixed(2)} — أعلى من إجمالي أمر الشراء ${po} (${poTotal.toFixed(2)}) بنسبة ${pct.toFixed(1)}%.`,
+        duplicateBadge: "احتمال تكرار",
+        duplicateFlag: (bill: string, duplicateOf: string, amount: number, days: number) =>
+          `${bill}: بمبلغ ${amount.toFixed(2)} — قريب جدًا من الفاتورة ${duplicateOf} لنفس المورد، بفارق ${days} يوم فقط.`,
       },
       cash: {
         col: { number: "الرقم", date: "التاريخ", direction: "الاتجاه", category: "التصنيف", amount: "المبلغ", description: "الوصف", by: "بواسطة" },
