@@ -50,12 +50,13 @@ export function Sidebar({
 }) {
   const pathname = usePathname();
   const canSee = (key: ModuleKey) => allowedModules.includes(key);
-  // One shared shape for every nav row — a filled, rounded accent pill
-  // when active instead of the old left-border stripe, matching the
-  // approved glass mockup's sidebar treatment.
+  // One shared shape for every nav row — a soft 3D button (see .nav-3d in
+  // globals.css) that lifts on hover and presses in on click, with a
+  // stronger accent-lit version for the current page. Approved from a
+  // standalone preview before landing here.
   const navItemClass = (active: boolean) =>
-    `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
-      active ? "bg-accent-soft font-medium text-ink" : "text-ink-muted hover:bg-surface-alt hover:text-ink"
+    `nav-3d flex items-center gap-3 rounded-lg px-3 py-2 text-sm ${
+      active ? "nav-3d-active font-medium text-[var(--on-accent)]" : "text-ink-muted hover:text-ink"
     }`;
 
   return (
@@ -165,13 +166,13 @@ export function Sidebar({
         </div>
         <div className="flex gap-2">
           <form action={logout} className="flex-1">
-            <button className="w-full rounded-md border border-border px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-alt hover:text-ink">
+            <button className="nav-3d-mini w-full rounded-lg px-3 py-1.5 text-xs text-ink-muted hover:text-ink">
               {nav.signOut}
             </button>
           </form>
           <form action={setLocale}>
             <input type="hidden" name="locale" value={locale === "ar" ? "en" : "ar"} />
-            <button className="rounded-md border border-border px-3 py-1.5 font-mono text-xs text-ink-muted hover:bg-surface-alt hover:text-ink">
+            <button className="nav-3d-mini rounded-lg px-3 py-1.5 font-mono text-xs text-ink-muted hover:text-ink">
               {common.switchLocale}
             </button>
           </form>
@@ -180,7 +181,7 @@ export function Sidebar({
             <button
               aria-label={common.toggleTheme}
               title={common.toggleTheme}
-              className="rounded-md border border-border px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-alt hover:text-ink"
+              className="nav-3d-mini rounded-lg px-3 py-1.5 text-xs text-ink-muted hover:text-ink"
             >
               {theme === "dark" ? common.themeLight : common.themeDark}
             </button>
