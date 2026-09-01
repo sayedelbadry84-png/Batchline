@@ -1,4 +1,3 @@
-import { Fragment } from "react";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
@@ -12,6 +11,7 @@ import { SitePlantSelect } from "@/components/SitePlantSelect";
 import { Modal } from "@/components/Modal";
 import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
+import { DeliveryGroupRow } from "./DeliveryGroupRow";
 
 // A single mixer truck load — the same hard ceiling releaseBatchTicket
 // enforces server-side, so this is display/UX only, not the real gate.
@@ -347,9 +347,11 @@ export default async function ProductionPage({
                 0,
               );
               return (
-                <Fragment key={reservation.id}>
-                  <tr className="bg-surface-alt">
-                    <td className={ui.td}></td>
+                <DeliveryGroupRow
+                  key={reservation.id}
+                  ticketCount={tickets.length}
+                  summaryCells={
+                    <>
                     <td className={ui.td}></td>
                     <td className={`${ui.td} font-medium`}>
                       {reservation.project.name}
@@ -374,7 +376,9 @@ export default async function ProductionPage({
                         {dict.status[reservation.status as keyof typeof dict.status] ?? reservation.status}
                       </span>
                     </td>
-                  </tr>
+                    </>
+                  }
+                >
                   {tickets.map((t) => (
                     <tr key={t.id}>
                       <td className={`${ui.td} font-mono text-xs tabular`}>
@@ -410,7 +414,7 @@ export default async function ProductionPage({
                       </td>
                     </tr>
                   ))}
-                </Fragment>
+                </DeliveryGroupRow>
               );
             })}
             {deliveryGroupList.length === 0 && (
