@@ -43,6 +43,7 @@ import {
   buildSitePricingMap,
   isReachBasedRole,
   INCENTIVE_ROLE_KEYS,
+  type IncentiveRoleKey,
 } from "@/lib/incentives";
 import { markDrumReturnFate } from "../trips/actions";
 import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
@@ -119,13 +120,19 @@ function ExportBar({
 export default async function ReportsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; from?: string; to?: string; site?: string; plant?: string }>;
+  searchParams: Promise<{ tab?: string; from?: string; to?: string; site?: string; plant?: string; role?: string }>;
 }) {
   const user = await requirePageAccess("reports");
   const { dict } = await getDictionary();
   const m = dict.modules.reports;
-  const { tab: tabRaw, from: fromRaw, to: toRaw, site: siteIdRaw, plant: plantIdRaw } = await searchParams;
+  const { tab: tabRaw, from: fromRaw, to: toRaw, site: siteIdRaw, plant: plantIdRaw, role: roleRaw } = await searchParams;
   const tab: ReportTab = (REPORT_TABS as readonly string[]).includes(tabRaw ?? "") ? (tabRaw as ReportTab) : "overview";
+  // Sub-tab within Worker Productivity — one job at a time (mixer driver,
+  // pump operator, ...) instead of every role blended into one table,
+  // same INCENTIVE_ROLE_KEYS the Incentives tab already groups by.
+  const workerRole: IncentiveRoleKey = (INCENTIVE_ROLE_KEYS as readonly string[]).includes(roleRaw ?? "")
+    ? (roleRaw as IncentiveRoleKey)
+    : INCENTIVE_ROLE_KEYS[0];
 
   // Every role sees only its own site, except ADMIN (restrictedSiteId ===
   // null means unrestricted) — and for ADMIN, "its own site" now means
@@ -2421,47 +2428,60 @@ export default async function ReportsPage({
         </div>
       )}
 
-      {tab === "workers" && workersData && (
+      {tab === "workers" && workersData && (() => {
+        const roleRows = workersData.rows.filter((r) => r.role === workerRole);
+        const unit = workerRole === "BULKER_DRIVER" || workerRole === "WATER_TANKER_DRIVER" ? "t" : "m³";
+        return (
         <div className="flex flex-col gap-4">
+          <div className="no-print flex flex-wrap gap-1 border-b border-border">
+            {INCENTIVE_ROLE_KEYS.map((r) => (
+              <Link
+                key={r}
+                href={`/reports?tab=workers&role=${r}${siteId ? `&site=${siteId}` : ""}${plantId ? `&plant=${plantId}` : ""}${fromRaw ? `&from=${fromRaw}` : ""}${toRaw ? `&to=${toRaw}` : ""}`}
+                className={`rounded-t-md px-3 py-1.5 text-sm ${
+                  workerRole === r ? "border-b-2 border-accent font-medium text-ink" : "text-ink-muted hover:text-ink"
+                }`}
+              >
+                {dict.modules.incentives.roleLabel[r]}
+              </Link>
+            ))}
+          </div>
           <ExportBar
             m={m}
             tab={tab}
             from={rangeFrom}
             to={rangeTo}
-            message={`${m.tabs.workers} ${rangeFrom} → ${rangeTo}\n${workersData.rows.map((r) => `${r.name} (${dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role}): ${r.count}`).join("\n")}`}
-            filenameBase={`workers-${rangeFrom}-${rangeTo}`}
-            headers={["From", "To", "Name", "Role", "Count", "Volume"]}
-            rows={workersData.rows.map((r) => [rangeFrom, rangeTo, r.name, dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role, r.count, r.volumeM3])}
+            message={`${m.tabs.workers} — ${dict.modules.incentives.roleLabel[workerRole]} ${rangeFrom} → ${rangeTo}\n${roleRows.map((r) => `${r.name}: ${r.count}`).join("\n")}`}
+            filenameBase={`workers-${workerRole.toLowerCase()}-${rangeFrom}-${rangeTo}`}
+            headers={["From", "To", "Name", "Count", "Volume"]}
+            rows={roleRows.map((r) => [rangeFrom, rangeTo, r.name, r.count, r.volumeM3])}
           />
           <div className={ui.card}>
             <table className={ui.table}>
               <thead>
                 <tr>
                   <th className={ui.th}>{m.workersReport.col.name}</th>
-                  <th className={ui.th}>{m.workersReport.col.role}</th>
                   <th className={ui.th}>{m.workersReport.col.count}</th>
                   <th className={ui.th}>{m.workersReport.col.volume}</th>
                 </tr>
               </thead>
               <tbody>
-                {workersData.rows.map((r) => (
+                {roleRows.map((r) => (
                   <tr key={r.key}>
                     <td className={`${ui.td} font-medium`}>{r.name}</td>
-                    <td className={`${ui.td} font-mono text-xs`}>{dict.modules.incentives.roleLabel[r.role as keyof typeof dict.modules.incentives.roleLabel] ?? r.role}</td>
                     <td className={`${ui.td} font-mono tabular`}>{r.count}</td>
-                    <td className={`${ui.td} font-mono tabular`}>
-                      {r.volumeM3.toFixed(1)} {r.role === "BULKER_DRIVER" || r.role === "WATER_TANKER_DRIVER" ? "t" : "m³"}
-                    </td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.volumeM3.toFixed(1)} {unit}</td>
                   </tr>
                 ))}
-                {workersData.rows.length === 0 && (
-                  <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                {roleRows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={3}><span className="text-ink-muted">{m.noRows}</span></td></tr>
                 )}
               </tbody>
             </table>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {tab === "incentives" && incentivesData && (
         <div className="flex flex-col gap-4">
