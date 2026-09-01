@@ -126,8 +126,9 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
 
       {tab === "plan" &&
         siteData.map(({ site, effectiveMethod, currency }) => (
-          <div key={site.id} className="flex flex-col gap-6">
-            <h2 className="font-display text-lg font-semibold">{site.name}</h2>
+          <details key={site.id} className={ui.card}>
+            <summary className="cursor-pointer font-display text-lg font-semibold">{site.name}</summary>
+            <div className="mt-4 flex flex-col gap-6">
             <p className="text-sm text-ink-muted">{m.planIntro}</p>
 
             {INCENTIVE_ROLE_KEYS.map((role) => {
@@ -260,7 +261,8 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
                 </div>
               );
             })}
-          </div>
+            </div>
+          </details>
         ))}
     </div>
   );
