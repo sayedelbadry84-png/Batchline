@@ -9,6 +9,7 @@ import { invoiceAmountDue } from "@/lib/billing";
 import { AGING_BUCKETS, agingBucket } from "@/lib/aging";
 import { detectPoOverageFlags, detectDuplicateBillFlags } from "@/lib/anomaly";
 import { Modal } from "@/components/Modal";
+import { ExcelExportButton } from "@/components/ExcelExportButton";
 import {
   createSupplierBill,
   recordSupplierPayment,
@@ -18,7 +19,7 @@ import {
 } from "./actions";
 import { generateInvoiceForProject } from "../billing/actions";
 
-const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation", "ledger"] as const;
+const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation", "ledger", "vat"] as const;
 type FinanceTab = (typeof FINANCE_TABS)[number];
 const CASH_CATEGORIES = ["OPERATING_EXPENSE", "PAYROLL", "END_OF_SERVICE", "UTILITIES", "FUEL", "MAINTENANCE", "OTHER_INCOME", "OWNER_CONTRIBUTION", "OTHER"] as const;
 
@@ -44,12 +45,12 @@ function fmtDate(d: Date | null): string {
 export default async function FinancePage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; newBill?: string; pay?: string; newCash?: string }>;
+  searchParams: Promise<{ tab?: string; newBill?: string; pay?: string; newCash?: string; from?: string; to?: string }>;
 }) {
   const user = await requirePageAccess("finance");
   const { dict } = await getDictionary();
   const m = dict.modules.finance;
-  const { tab: tabRaw, newBill: newBillFlag, pay: payId, newCash: newCashFlag } = await searchParams;
+  const { tab: tabRaw, newBill: newBillFlag, pay: payId, newCash: newCashFlag, from: fromRaw, to: toRaw } = await searchParams;
   const tab: FinanceTab = FINANCE_TABS.includes(tabRaw as FinanceTab) ? (tabRaw as FinanceTab) : "overview";
   const siteId = await getActiveSiteId(user);
   const siteScope = reservationSiteScopeWhere(siteId);
@@ -96,6 +97,8 @@ export default async function FinancePage({
       {tab === "reconciliation" && <ReconciliationTab m={m} dict={dict} siteScope={siteScope} />}
 
       {tab === "ledger" && <LedgerTab m={m} siteScope={siteScope} />}
+
+      {tab === "vat" && <VatReturnTab m={m} siteScope={siteScope} fromRaw={fromRaw} toRaw={toRaw} />}
     </div>
   );
 }
@@ -1012,6 +1015,159 @@ async function BillingTab({
               <tr>
                 <td className={ui.td} colSpan={3}>
                   <span className="text-ink-muted">{bm.emptyPricing}</span>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// A ZATCA VAT return summary — Batchline never files this directly (same
+// posture as the WPS/Mudad salary export and ZATCA e-invoicing: generate
+// a clearly-labeled file, a human enters the figures through the real
+// government channel). Output VAT/taxable sales come straight off
+// Invoice; a credit note's own amount is VAT-inclusive (see that
+// model's schema comment), so its subtotal/tax split is derived here
+// using the invoice's own tax rate, same math as
+// src/lib/zatca/creditNote.ts. Grouped by currency, one row per
+// currency in use — a VAT return is filed per legal entity/currency,
+// not blended across them.
+async function VatReturnTab({
+  m,
+  siteScope,
+  fromRaw,
+  toRaw,
+}: {
+  m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["finance"];
+  siteScope: Record<string, unknown>;
+  fromRaw?: string;
+  toRaw?: string;
+}) {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const defaultFrom = (() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().slice(0, 10);
+  })();
+  const rangeFrom = fromRaw || defaultFrom;
+  const rangeTo = toRaw || todayIso;
+  const rangeStart = new Date(`${rangeFrom}T00:00:00`);
+  const rangeEnd = new Date(`${rangeTo}T23:59:59`);
+  const siteId = (siteScope as { siteId?: string }).siteId;
+
+  const [invoices, creditNotes, bills] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { status: { not: "CANCELLED" }, issueDate: { gte: rangeStart, lte: rangeEnd }, ...(siteId ? { plant: { siteId } } : {}) },
+      select: { subtotal: true, taxAmount: true, currency: true },
+    }),
+    prisma.creditNote.findMany({
+      where: { createdAt: { gte: rangeStart, lte: rangeEnd }, ...(siteId ? { invoice: { plant: { siteId } } } : {}) },
+      include: { invoice: { select: { taxRatePct: true, currency: true } } },
+    }),
+    prisma.supplierBill.findMany({
+      where: { status: { not: "CANCELLED" }, billDate: { gte: rangeStart, lte: rangeEnd }, ...(siteId ? { siteId } : {}) },
+      select: { subtotal: true, taxAmount: true, currency: true },
+    }),
+  ]);
+
+  type Totals = { taxableSales: number; outputVat: number; salesCreditNotes: number; outputVatCreditNotes: number; taxablePurchases: number; inputVat: number };
+  const byCurrency = new Map<string, Totals>();
+  function bucket(currency: string): Totals {
+    let t = byCurrency.get(currency);
+    if (!t) {
+      t = { taxableSales: 0, outputVat: 0, salesCreditNotes: 0, outputVatCreditNotes: 0, taxablePurchases: 0, inputVat: 0 };
+      byCurrency.set(currency, t);
+    }
+    return t;
+  }
+  for (const inv of invoices) {
+    const t = bucket(inv.currency);
+    t.taxableSales += inv.subtotal;
+    t.outputVat += inv.taxAmount;
+  }
+  for (const cn of creditNotes) {
+    const rate = cn.invoice.taxRatePct;
+    const cnSubtotal = rate > 0 ? cn.amount / (1 + rate / 100) : cn.amount;
+    const t = bucket(cn.invoice.currency);
+    t.salesCreditNotes += cnSubtotal;
+    t.outputVatCreditNotes += cn.amount - cnSubtotal;
+  }
+  for (const b of bills) {
+    const t = bucket(b.currency);
+    t.taxablePurchases += b.subtotal;
+    t.inputVat += b.taxAmount;
+  }
+
+  const rows = Array.from(byCurrency.entries()).map(([currency, t]) => {
+    const netTaxableSales = t.taxableSales - t.salesCreditNotes;
+    const netOutputVat = t.outputVat - t.outputVatCreditNotes;
+    const netVatDue = netOutputVat - t.inputVat;
+    return { currency, ...t, netTaxableSales, netOutputVat, netVatDue };
+  });
+
+  const exportHeaders = [
+    m.vat.col.currency, m.vat.col.taxableSales, m.vat.col.salesCreditNotes, m.vat.col.netTaxableSales,
+    m.vat.col.outputVat, m.vat.col.outputVatCreditNotes, m.vat.col.netOutputVat,
+    m.vat.col.taxablePurchases, m.vat.col.inputVat, m.vat.col.netVatDue,
+  ];
+  const exportRows = rows.map((r) => [
+    r.currency, r.taxableSales.toFixed(2), r.salesCreditNotes.toFixed(2), r.netTaxableSales.toFixed(2),
+    r.outputVat.toFixed(2), r.outputVatCreditNotes.toFixed(2), r.netOutputVat.toFixed(2),
+    r.taxablePurchases.toFixed(2), r.inputVat.toFixed(2), r.netVatDue.toFixed(2),
+  ]);
+
+  return (
+    <div className="flex flex-col gap-6">
+      <p className="max-w-2xl text-sm text-ink-muted">{m.vat.intro}</p>
+
+      <form className="no-print flex flex-wrap items-end gap-3">
+        <input type="hidden" name="tab" value="vat" />
+        <div>
+          <label className={ui.label}>{m.vat.filterFrom}</label>
+          <input name="from" type="date" defaultValue={rangeFrom} className={`${ui.input} w-40`} />
+        </div>
+        <div>
+          <label className={ui.label}>{m.vat.filterTo}</label>
+          <input name="to" type="date" defaultValue={rangeTo} className={`${ui.input} w-40`} />
+        </div>
+        <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">{m.vat.apply}</button>
+        {rows.length > 0 && (
+          <div className="ms-auto">
+            <ExcelExportButton label={m.vat.exportExcel} filename={`VAT-Return-${rangeFrom}-to-${rangeTo}.xlsx`} sheetName={m.tabs.vat} headers={exportHeaders} rows={exportRows} />
+          </div>
+        )}
+      </form>
+
+      <div className={ui.card}>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              <th className={ui.th}>{m.vat.col.currency}</th>
+              <th className={ui.th}>{m.vat.col.netTaxableSales}</th>
+              <th className={ui.th}>{m.vat.col.netOutputVat}</th>
+              <th className={ui.th}>{m.vat.col.taxablePurchases}</th>
+              <th className={ui.th}>{m.vat.col.inputVat}</th>
+              <th className={ui.th}>{m.vat.col.netVatDue}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.currency}>
+                <td className={ui.td}>{r.currency}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.netTaxableSales.toLocaleString()}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.netOutputVat.toLocaleString()}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.taxablePurchases.toLocaleString()}</td>
+                <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.inputVat.toLocaleString()}</td>
+                <td className={`${ui.td} font-mono tabular font-semibold`} dir="ltr">{r.netVatDue.toLocaleString()}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td className={ui.td} colSpan={6}>
+                  <span className="text-ink-muted">{m.vat.empty}</span>
                 </td>
               </tr>
             )}
