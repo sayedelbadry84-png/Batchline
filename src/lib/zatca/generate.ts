@@ -2,8 +2,9 @@ import { randomUUID } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { getZatcaReadiness } from "./settings";
 import { buildZatcaQrPayload, zatcaTimestamp } from "./qr";
-import { buildZatcaInvoiceXml, zatcaGenesisPreviousHash } from "./invoiceXml";
+import { buildZatcaInvoiceXml } from "./invoiceXml";
 import { hashInvoiceXml } from "./sign";
+import { getNextZatcaChainPosition } from "./chain";
 
 export type ZatcaGenerateResult = { ok: true } | { ok: false; reason: "NOT_CONFIGURED" | "NO_PLANT" | "ALREADY_GENERATED" | "NOT_FOUND" };
 
@@ -25,16 +26,9 @@ export async function generateZatcaDocuments(invoiceId: string): Promise<ZatcaGe
   const readiness = await getZatcaReadiness(invoice.plant.siteId);
   if (readiness.level === "NOT_CONFIGURED") return { ok: false, reason: "NOT_CONFIGURED" };
 
-  // Hash chain: this invoice's PIH is whichever invoice at this site was
-  // most recently run through this same function — the genesis hash
-  // (ZATCA's documented placeholder) for the very first one.
-  const previous = await prisma.invoice.findFirst({
-    where: { plant: { siteId: invoice.plant.siteId }, zatcaInvoiceHash: { not: null } },
-    orderBy: { zatcaGeneratedAt: "desc" },
-    select: { zatcaInvoiceHash: true },
-  });
-  const previousInvoiceHash = previous?.zatcaInvoiceHash ?? zatcaGenesisPreviousHash();
-  const icv = (await prisma.invoice.count({ where: { plant: { siteId: invoice.plant.siteId }, zatcaInvoiceHash: { not: null } } })) + 1;
+  // Hash chain: shared across invoices AND credit notes at this site — see
+  // chain.ts for why this can't just look at the Invoice table alone.
+  const { icv, previousHash: previousInvoiceHash } = await getNextZatcaChainPosition(invoice.plant.siteId);
 
   const uuid = randomUUID();
   const qrCode = buildZatcaQrPayload({

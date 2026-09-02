@@ -7,6 +7,7 @@ import { parseNetDays, invoiceAmountDue } from "@/lib/billing";
 import { postInvoice, postPayment, postCreditNote, reverseJournalEntry } from "@/lib/ledger";
 import { generateZatcaDocuments } from "@/lib/zatca/generate";
 import { submitInvoiceForClearance } from "@/lib/zatca/submit";
+import { generateZatcaCreditNoteDocuments, submitCreditNoteForClearance } from "@/lib/zatca/creditNote";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
@@ -349,4 +350,47 @@ export async function submitZatcaInvoiceForClearance(formData: FormData) {
     reasonCode: result.ok ? "ZATCA_CLEARED" : "ZATCA_CLEARANCE_FAILED",
   });
   revalidatePath(`/finance/invoices/${id}`);
+}
+
+// Same two thin wrappers, for the credit note's own ZATCA lifecycle (see
+// src/lib/zatca/creditNote.ts) — a credit note is scoped through the
+// invoice it amends, same as issueCreditNote itself above.
+async function creditNoteInvoiceId(creditNoteId: string): Promise<string | null> {
+  const creditNote = await prisma.creditNote.findUnique({ where: { id: creditNoteId }, select: { invoiceId: true } });
+  return creditNote?.invoiceId ?? null;
+}
+
+export async function generateZatcaCreditNoteDocumentsAction(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "finance", "generateZatcaCreditNoteDocuments");
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+  const invoiceId = await creditNoteInvoiceId(id);
+  if (!invoiceId || !(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
+
+  const result = await generateZatcaCreditNoteDocuments(id);
+  if (result.ok) {
+    await logAudit({ module: "Billing", recordId: id, afterValue: "ZATCA credit note QR/XML generated", reasonCode: "ZATCA_CREDIT_NOTE_GENERATED" });
+  }
+  revalidatePath(`/finance/invoices/${invoiceId}`);
+}
+
+export async function submitZatcaCreditNoteForClearanceAction(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "finance", "submitZatcaCreditNoteClearance");
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+  const invoiceId = await creditNoteInvoiceId(id);
+  if (!invoiceId || !(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
+
+  const result = await submitCreditNoteForClearance(id);
+  await logAudit({
+    module: "Billing",
+    recordId: id,
+    afterValue: result.ok ? "ZATCA credit note clearance accepted" : `ZATCA credit note clearance failed: ${result.reason}`,
+    reasonCode: result.ok ? "ZATCA_CREDIT_NOTE_CLEARED" : "ZATCA_CREDIT_NOTE_CLEARANCE_FAILED",
+  });
+  revalidatePath(`/finance/invoices/${invoiceId}`);
 }

@@ -23,6 +23,7 @@ import { createHash } from "crypto";
 export type ZatcaInvoiceLineInput = {
   description: string;
   volumeM3: number;
+  unitCode?: string; // default "MTQ" (cubic metres) — a credit note's lump-sum line passes "C62" ("one") with volumeM3: 1
   unitPrice: number;
   lineTotal: number;
 };
@@ -42,6 +43,11 @@ export type ZatcaInvoiceInput = {
   icv: number;
   previousInvoiceHash: string;
   qrCode: string;
+  // 388 (Tax Invoice, the default) | 381 (Credit Note) | 383 (Debit Note,
+  // unused today — this app has no debit-note flow). A credit/debit note
+  // must reference the invoice it amends.
+  documentTypeCode?: "388" | "381" | "383";
+  billingReferenceInvoiceNumber?: string;
 };
 
 // ZATCA's documented convention for the very first invoice in a
@@ -70,7 +76,7 @@ export function buildZatcaInvoiceXml(input: ZatcaInvoiceInput): string {
       return `
   <cac:InvoiceLine>
     <cbc:ID>${i + 1}</cbc:ID>
-    <cbc:InvoicedQuantity unitCode="MTQ">${l.volumeM3}</cbc:InvoicedQuantity>
+    <cbc:InvoicedQuantity unitCode="${l.unitCode ?? "MTQ"}">${l.volumeM3}</cbc:InvoicedQuantity>
     <cbc:LineExtensionAmount currencyID="${input.currency}">${l.lineTotal.toFixed(2)}</cbc:LineExtensionAmount>
     <cac:TaxTotal>
       <cbc:TaxAmount currencyID="${input.currency}">${lineTaxAmount.toFixed(2)}</cbc:TaxAmount>
@@ -117,9 +123,18 @@ export function buildZatcaInvoiceXml(input: ZatcaInvoiceInput): string {
   <cbc:UUID>${input.uuid}</cbc:UUID>
   <cbc:IssueDate>${isoDate(input.issueDate)}</cbc:IssueDate>
   <cbc:IssueTime>${isoTime(input.issueDate)}</cbc:IssueTime>
-  <cbc:InvoiceTypeCode name="0100000">388</cbc:InvoiceTypeCode>
+  <cbc:InvoiceTypeCode name="0100000">${input.documentTypeCode ?? "388"}</cbc:InvoiceTypeCode>
   <cbc:DocumentCurrencyCode>${input.currency}</cbc:DocumentCurrencyCode>
-  <cbc:TaxCurrencyCode>${input.currency}</cbc:TaxCurrencyCode>
+  <cbc:TaxCurrencyCode>${input.currency}</cbc:TaxCurrencyCode>${
+    input.billingReferenceInvoiceNumber
+      ? `
+  <cac:BillingReference>
+    <cac:InvoiceDocumentReference>
+      <cbc:ID>${escapeXml(input.billingReferenceInvoiceNumber)}</cbc:ID>
+    </cac:InvoiceDocumentReference>
+  </cac:BillingReference>`
+      : ""
+  }
   <cac:AdditionalDocumentReference>
     <cbc:ID>ICV</cbc:ID>
     <cbc:UUID>${input.icv}</cbc:UUID>

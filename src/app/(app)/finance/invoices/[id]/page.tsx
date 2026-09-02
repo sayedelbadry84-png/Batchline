@@ -5,7 +5,16 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { markInvoiceSent, recordPayment, cancelInvoice, issueCreditNote, generateZatcaInvoiceDocuments, submitZatcaInvoiceForClearance } from "../../../billing/actions";
+import {
+  markInvoiceSent,
+  recordPayment,
+  cancelInvoice,
+  issueCreditNote,
+  generateZatcaInvoiceDocuments,
+  submitZatcaInvoiceForClearance,
+  generateZatcaCreditNoteDocumentsAction,
+  submitZatcaCreditNoteForClearanceAction,
+} from "../../../billing/actions";
 import { getActiveSiteId } from "@/lib/siteScope";
 import { invoiceAmountDue } from "@/lib/billing";
 import { getZatcaReadiness } from "@/lib/zatca/settings";
@@ -319,6 +328,7 @@ export default async function InvoiceDetailPage({
               <th className={ui.th}>{d.colCreditNote.notes}</th>
               <th className={ui.th}>{d.colCreditNote.issuedBy}</th>
               <th className={ui.th}>{d.colCreditNote.date}</th>
+              {zatcaReadiness.level !== "NOT_CONFIGURED" && <th className={ui.th}>{d.colCreditNote.zatca}</th>}
             </tr>
           </thead>
           <tbody>
@@ -330,11 +340,33 @@ export default async function InvoiceDetailPage({
                 <td className={`${ui.td} text-xs text-ink-muted`}>{c.notes ?? "—"}</td>
                 <td className={ui.td}>{c.issuedBy.name}</td>
                 <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(c.createdAt).toLocaleDateString()}</td>
+                {zatcaReadiness.level !== "NOT_CONFIGURED" && (
+                  <td className={ui.td}>
+                    {c.zatcaStatus ? (
+                      <div className="flex flex-col items-start gap-1">
+                        <span className={`${ui.chip} w-fit text-xs ${c.zatcaStatus === "CLEARED" ? "bg-good-soft text-good" : c.zatcaStatus === "FAILED" ? "bg-critical-soft text-critical" : "bg-warn-soft text-warn"}`}>
+                          {d.zatcaStatusLabel[c.zatcaStatus as keyof typeof d.zatcaStatusLabel] ?? c.zatcaStatus}
+                        </span>
+                        {c.zatcaStatus !== "CLEARED" && zatcaReadiness.level === "CLEARANCE_READY" && (
+                          <form action={submitZatcaCreditNoteForClearanceAction}>
+                            <input type="hidden" name="id" value={c.id} />
+                            <button type="submit" className="text-xs font-medium text-accent-strong hover:underline">{d.zatcaSubmit}</button>
+                          </form>
+                        )}
+                      </div>
+                    ) : (
+                      <form action={generateZatcaCreditNoteDocumentsAction}>
+                        <input type="hidden" name="id" value={c.id} />
+                        <button type="submit" className="text-xs font-medium text-accent-strong hover:underline">{d.zatcaGenerate}</button>
+                      </form>
+                    )}
+                  </td>
+                )}
               </tr>
             ))}
             {invoice.creditNotes.length === 0 && (
               <tr>
-                <td className={ui.td} colSpan={6}>
+                <td className={ui.td} colSpan={zatcaReadiness.level !== "NOT_CONFIGURED" ? 7 : 6}>
                   <span className="text-ink-muted">{d.emptyCreditNotes}</span>
                 </td>
               </tr>

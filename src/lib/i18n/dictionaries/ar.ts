@@ -1016,6 +1016,8 @@ const ar = {
           issueCreditNote: "إصدار إشعار دائن",
           generateZatcaDocuments: "توليد مستندات فوترة زاتكا",
           submitZatcaClearance: "إرسال فاتورة لتصديق زاتكا",
+          generateZatcaCreditNoteDocuments: "توليد مستندات زاتكا لإشعار خصم",
+          submitZatcaCreditNoteClearance: "إرسال إشعار خصم لتصديق زاتكا",
         },
         warehouses: {
           createSparePart: "إضافة قطعة غيار للكتالوج",
@@ -1199,7 +1201,7 @@ const ar = {
         methodCheque: "شيك",
         recordPayment: "تسجيل الدفعة",
         creditNotesTitle: "إشعارات الخصم",
-        colCreditNote: { number: "الرقم", amount: "المبلغ", reason: "السبب", notes: "ملاحظات", issuedBy: "أصدره", date: "التاريخ" },
+        colCreditNote: { number: "الرقم", amount: "المبلغ", reason: "السبب", notes: "ملاحظات", issuedBy: "أصدره", date: "التاريخ", zatca: "زاتكا" },
         emptyCreditNotes: "لا توجد إشعارات خصم على هذه الفاتورة بعد.",
         issueCreditNoteTitle: "إصدار إشعار خصم",
         fCreditNote: { amount: "المبلغ", reason: "السبب", notes: "ملاحظات (اختياري)" },

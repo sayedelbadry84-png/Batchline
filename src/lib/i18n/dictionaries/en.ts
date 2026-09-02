@@ -1023,6 +1023,8 @@ const en: typeof ar = {
           issueCreditNote: "Issue a credit note",
           generateZatcaDocuments: "Generate ZATCA e-invoicing documents",
           submitZatcaClearance: "Submit an invoice for ZATCA clearance",
+          generateZatcaCreditNoteDocuments: "Generate ZATCA documents for a credit note",
+          submitZatcaCreditNoteClearance: "Submit a credit note for ZATCA clearance",
         },
         warehouses: {
           createSparePart: "Add a spare part to the catalog",
@@ -1206,7 +1208,7 @@ const en: typeof ar = {
         methodCheque: "Cheque",
         recordPayment: "Record payment",
         creditNotesTitle: "Credit Notes",
-        colCreditNote: { number: "Number", amount: "Amount", reason: "Reason", notes: "Notes", issuedBy: "Issued By", date: "Date" },
+        colCreditNote: { number: "Number", amount: "Amount", reason: "Reason", notes: "Notes", issuedBy: "Issued By", date: "Date", zatca: "ZATCA" },
         emptyCreditNotes: "No credit notes on this invoice yet.",
         issueCreditNoteTitle: "Issue a credit note",
         fCreditNote: { amount: "Amount", reason: "Reason", notes: "Notes (optional)" },

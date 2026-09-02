@@ -1426,6 +1426,25 @@ model CreditNote {
   issuedById       String
   issuedBy         User     @relation(fields: [issuedById], references: [id])
   createdAt        DateTime @default(now())
+
+  // ZATCA (Saudi e-invoicing) fields — same shape and same posture as
+  // Invoice's own zatca* fields (see that model's comment): a credit note
+  // is the only legal way to amend an already-cleared invoice, so it goes
+  // through the identical QR/XML generation and Phase 2 clearance flow as
+  // one, sharing the SAME per-site ICV/PIH hash chain (see
+  // src/lib/zatca/chain.ts) rather than a separate one — ZATCA's chain
+  // covers every document type a taxpayer issues, in issuance order, not
+  // one chain per document type.
+  zatcaUuid         String?
+  zatcaInvoiceHash  String?
+  zatcaPreviousHash String?
+  zatcaQrCode       String?
+  zatcaXml          String?
+  zatcaStatus       String?
+  zatcaGeneratedAt  DateTime?
+  zatcaSubmittedAt  DateTime?
+  zatcaClearedAt    DateTime?
+  zatcaErrorMessage String?
 }
 
 // ---------------------------------------------------------------------------

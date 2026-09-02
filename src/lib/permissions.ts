@@ -344,6 +344,8 @@ export const ACTION_ROLES = {
     issueCreditNote: ["ACCOUNTANT", "ADMIN"],
     generateZatcaDocuments: ["ACCOUNTANT", "ADMIN"],
     submitZatcaClearance: ["ACCOUNTANT", "ADMIN"],
+    generateZatcaCreditNoteDocuments: ["ACCOUNTANT", "ADMIN"],
+    submitZatcaCreditNoteClearance: ["ACCOUNTANT", "ADMIN"],
   },
   // Silos/hoppers/chemical tanks (silos/actions.ts) and material receiving
   // (material-receiving/actions.ts) folded in here — same module on
