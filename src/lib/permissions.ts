@@ -244,6 +244,11 @@ export const ACTION_ROLES = {
     approvePayrollRun: ["ADMIN"],
     markPayrollRunPaid: ["ADMIN"],
     cancelPayrollRun: ["ADMIN"],
+    // Same ADMIN-only boundary as payroll — a gratuity figure is salary
+    // data too, and marking one paid is real cash leaving the ledger.
+    calculateEndOfService: ["ADMIN"],
+    cancelEndOfServiceSettlement: ["ADMIN"],
+    markEndOfServiceSettlementPaid: ["ADMIN"],
   },
   plants: {
     createSite: ["PLANT_OPERATOR", "ADMIN"],

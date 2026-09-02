@@ -20,7 +20,7 @@ import { generateInvoiceForProject } from "../billing/actions";
 
 const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation", "ledger"] as const;
 type FinanceTab = (typeof FINANCE_TABS)[number];
-const CASH_CATEGORIES = ["OPERATING_EXPENSE", "PAYROLL", "UTILITIES", "FUEL", "MAINTENANCE", "OTHER_INCOME", "OWNER_CONTRIBUTION", "OTHER"] as const;
+const CASH_CATEGORIES = ["OPERATING_EXPENSE", "PAYROLL", "END_OF_SERVICE", "UTILITIES", "FUEL", "MAINTENANCE", "OTHER_INCOME", "OWNER_CONTRIBUTION", "OTHER"] as const;
 
 const billStatusChip: Record<string, string> = {
   UNPAID: "bg-warn-soft text-warn",

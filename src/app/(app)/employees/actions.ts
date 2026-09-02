@@ -8,9 +8,15 @@ import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/sit
 import { logTransferIfChanged } from "@/lib/transferAudit";
 import { OTHER_ROLE_SENTINEL } from "@/lib/employeeRole";
 import { withSequentialNumber } from "@/lib/sequence";
+import { postCashTransaction } from "@/lib/ledger";
+import { calculateEndOfServiceEntitlement, TERMINATION_TYPES, type TerminationType } from "@/lib/endOfService";
 import { revalidatePath } from "next/cache";
 
 const LOGIN_SALT_ROUNDS = 10;
+// See the same note on billing/actions.ts's own TX_OPTIONS — several
+// sequential round trips to Neon inside one interactive transaction can
+// exceed Prisma's 5s default timeout, especially on a cold connection.
+const TX_OPTIONS = { timeout: 15000 };
 
 // Auto-provisions a login the moment a driver or pump-crew member is
 // added, instead of requiring a separate manual trip through /users
@@ -75,6 +81,7 @@ export async function createEmployee(formData: FormData) {
   const code = String(formData.get("code") ?? "").trim() || null;
   const nationalId = String(formData.get("nationalId") ?? "").trim() || null;
   const iban = String(formData.get("iban") ?? "").trim() || null;
+  const hireDateRaw = String(formData.get("hireDate") ?? "");
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
   const wageType = String(formData.get("wageType") ?? "").trim() || null;
@@ -99,6 +106,7 @@ export async function createEmployee(formData: FormData) {
       code,
       nationalId,
       iban,
+      hireDate: hireDateRaw ? new Date(hireDateRaw) : null,
       shiftPattern,
       licenseExpiry: licenseExpiryRaw ? new Date(licenseExpiryRaw) : null,
       wageType,
@@ -145,6 +153,7 @@ export async function updateEmployee(formData: FormData) {
   const code = String(formData.get("code") ?? "").trim() || null;
   const nationalId = String(formData.get("nationalId") ?? "").trim() || null;
   const iban = String(formData.get("iban") ?? "").trim() || null;
+  const hireDateRaw = String(formData.get("hireDate") ?? "");
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
   const status = String(formData.get("status") ?? "ACTIVE");
@@ -173,6 +182,7 @@ export async function updateEmployee(formData: FormData) {
       code,
       nationalId,
       iban,
+      hireDate: hireDateRaw ? new Date(hireDateRaw) : null,
       shiftPattern,
       licenseExpiry: licenseExpiryRaw ? new Date(licenseExpiryRaw) : null,
       status,
@@ -405,4 +415,140 @@ export async function cancelLeaveRequest(formData: FormData) {
 
   await logAudit({ module: "Employees", recordId: id, afterValue: "CANCELLED", reasonCode: "LEAVE_CANCELLED" });
   revalidatePath("/employees");
+}
+
+// --- End of service (مكافأة نهاية الخدمة) ----------------------------------
+// See src/lib/endOfService.ts for the actual Article 84/85 formula this
+// wraps. A DAILY-wage employee has no single monthly figure on file — the
+// same ×30 approximation payroll/actions.ts's own MONTHLY-vs-DAILY split
+// doesn't need to make (daily pay is already period-actual there), but a
+// gratuity calculation has no period to be actual over, so this is the one
+// place in the app that has to guess a monthly-equivalent from a daily
+// rate. Flagged in the UI, not hidden.
+export async function calculateEndOfServiceSettlement(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "employees", "calculateEndOfService");
+
+  const employeeId = String(formData.get("employeeId") ?? "");
+  const terminationDateRaw = String(formData.get("terminationDate") ?? "");
+  const terminationTypeRaw = String(formData.get("terminationType") ?? "");
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (!employeeId || !terminationDateRaw || !TERMINATION_TYPES.includes(terminationTypeRaw as TerminationType)) return;
+  const terminationType = terminationTypeRaw as TerminationType;
+
+  const employee = await prisma.employee.findUnique({ where: { id: employeeId } });
+  if (!employee || !employee.hireDate || !employee.wageRate || !employee.wageType) return;
+
+  const terminationDate = new Date(terminationDateRaw);
+  if (terminationDate < employee.hireDate) return;
+  const basicMonthlySalary = employee.wageType === "MONTHLY" ? employee.wageRate : employee.wageRate * 30;
+
+  const result = calculateEndOfServiceEntitlement({
+    hireDate: employee.hireDate,
+    terminationDate,
+    terminationType,
+    basicMonthlySalary,
+  });
+
+  const settlement = await withSequentialNumber(
+    "EOS",
+    () => prisma.endOfServiceSettlement.count(),
+    (settlementNumber) =>
+      prisma.endOfServiceSettlement.create({
+        data: {
+          settlementNumber,
+          employeeId,
+          hireDate: employee.hireDate!,
+          terminationDate,
+          terminationType,
+          yearsOfService: result.yearsOfService,
+          basicMonthlySalary,
+          grossEntitlement: result.grossEntitlement,
+          payableAmount: result.payableAmount,
+          notes,
+          calculatedById: user!.id,
+        },
+      }),
+  );
+
+  await logAudit({
+    module: "Employees",
+    recordId: settlement.id,
+    afterValue: `${settlement.settlementNumber} — ${result.payableAmount.toFixed(2)} (${terminationType})`,
+    reasonCode: "END_OF_SERVICE_CALCULATED",
+  });
+  revalidatePath("/employees");
+}
+
+// Only ever a real record correction while nothing has been paid yet — a
+// wrong termination date/type gets cancelled and recalculated from
+// scratch, not edited in place, same "the audit record doesn't get
+// silently rewritten" reasoning as every other financial document here.
+export async function cancelEndOfServiceSettlement(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "employees", "cancelEndOfServiceSettlement");
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const settlement = await prisma.endOfServiceSettlement.findUnique({ where: { id } });
+  if (!settlement || settlement.status !== "CALCULATED") return;
+
+  await prisma.endOfServiceSettlement.update({ where: { id }, data: { status: "CANCELLED" } });
+
+  await logAudit({ module: "Employees", recordId: id, afterValue: "CANCELLED", reasonCode: "END_OF_SERVICE_CANCELLED" });
+  revalidatePath("/employees");
+}
+
+// The real point of no return — posts the payout to the site's own cash
+// ledger (same postCashTransaction/withSequentialNumber pairing every
+// other cash-moving action in this app already uses) and, since a paid
+// gratuity settlement only ever happens because the person is actually
+// leaving, flips the employee to REMOVED here rather than requiring a
+// separate manual status edit — same "the action IS the effect" shape as
+// approveLeaveRequest marking attendance ON_LEAVE.
+export async function markEndOfServiceSettlementPaid(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "employees", "markEndOfServiceSettlementPaid");
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const settlement = await prisma.endOfServiceSettlement.findUnique({
+    where: { id },
+    include: { employee: { include: { plant: true } } },
+  });
+  if (!settlement || settlement.status !== "CALCULATED") return;
+  if (settlement.payableAmount <= 0) return;
+
+  const plant = settlement.employee.plant;
+  const description = `End of service — ${settlement.employee.name} (${settlement.settlementNumber})`;
+
+  await prisma.$transaction(async (tx) => {
+    const txn = await withSequentialNumber(
+      "TXN",
+      () => tx.cashTransaction.count(),
+      (txnNumber) =>
+        tx.cashTransaction.create({
+          data: {
+            txnNumber,
+            siteId: plant.siteId,
+            direction: "OUT",
+            category: "END_OF_SERVICE",
+            amount: settlement.payableAmount,
+            currency: plant.currency,
+            description,
+            occurredAt: new Date(),
+            createdById: user!.id,
+          },
+        }),
+    );
+    await postCashTransaction(tx, { siteId: plant.siteId, currency: plant.currency, txnId: txn.id, direction: "OUT", category: "END_OF_SERVICE", amount: settlement.payableAmount, description });
+    await tx.endOfServiceSettlement.update({ where: { id }, data: { status: "PAID", paidAt: new Date() } });
+    await tx.employee.update({ where: { id: settlement.employeeId }, data: { status: "REMOVED" } });
+  }, TX_OPTIONS);
+
+  await logAudit({ module: "Employees", recordId: id, afterValue: "PAID", reasonCode: "END_OF_SERVICE_PAID" });
+  revalidatePath("/employees");
+  revalidatePath("/finance");
 }

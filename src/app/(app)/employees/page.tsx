@@ -14,10 +14,14 @@ import {
   approveLeaveRequest,
   rejectLeaveRequest,
   cancelLeaveRequest,
+  calculateEndOfServiceSettlement,
+  cancelEndOfServiceSettlement,
+  markEndOfServiceSettlementPaid,
 } from "./actions";
 import { generatePayrollRun } from "./payroll/actions";
 import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { RoleSelect } from "@/components/RoleSelect";
+import { TERMINATION_TYPES } from "@/lib/endOfService";
 
 const ADMIN_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DISPATCHER", "ADMIN"] as const;
 const EMPLOYEE_STATUSES = ["ACTIVE", "FROZEN", "REMOVED"] as const;
@@ -31,7 +35,7 @@ const LEAVE_TYPES = ["ANNUAL", "SICK", "UNPAID", "EMERGENCY", "OTHER"] as const;
 // asks for a role at all. "attendance"/"leave" are cross-role — every
 // active employee regardless of which other tab they'd show up in — so
 // they're rendered by their own branch below, same as isCrewTab already is.
-const TAB_KEYS = ["mixerDriver", "pumpOperator", "pumpAssistant", "bulkerDriver", "waterDriver", "loaderDriver", "admin", "attendance", "leave", "payroll"] as const;
+const TAB_KEYS = ["mixerDriver", "pumpOperator", "pumpAssistant", "bulkerDriver", "waterDriver", "loaderDriver", "admin", "attendance", "leave", "payroll", "endOfService"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
 const WAGE_TYPES = ["MONTHLY", "DAILY"] as const;
 
@@ -81,6 +85,7 @@ export default async function EmployeesPage({
   const isAttendanceTab = tab === "attendance";
   const isLeaveTab = tab === "leave";
   const isPayrollTab = tab === "payroll";
+  const isEndOfServiceTab = tab === "endOfService";
   const isHrTab = isAttendanceTab || isLeaveTab;
   const fixedRole = EMPLOYEE_TAB_ROLE[tab];
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
@@ -110,7 +115,7 @@ export default async function EmployeesPage({
   // ADMIN_ROLES list. A custom job title (built-in or picked via "Other"
   // on this same tab) belongs here too, or it would vanish from every
   // tab's listing the moment it's saved.
-  const employees = !isCrewTab && !isHrTab && !isPayrollTab
+  const employees = !isCrewTab && !isHrTab && !isPayrollTab && !isEndOfServiceTab
     ? await prisma.employee.findMany({
         where: {
           role: fixedRole ?? { notIn: Object.values(EMPLOYEE_TAB_ROLE) },
@@ -174,6 +179,23 @@ export default async function EmployeesPage({
       })
     : [];
 
+  // Same Admin-only boundary as payroll — a gratuity figure is salary data
+  // too. Only employees with what the formula actually needs on file
+  // (hire date, wage type/rate) are offered in the picker, so the form
+  // can't be submitted for someone the calculation would just refuse.
+  const [endOfServiceSettlements, eosEligibleEmployees] = isEndOfServiceTab
+    ? await Promise.all([
+        prisma.endOfServiceSettlement.findMany({
+          orderBy: { createdAt: "desc" },
+          include: { employee: true },
+        }),
+        prisma.employee.findMany({
+          where: { status: "ACTIVE", hireDate: { not: null }, wageRate: { not: null }, wageType: { not: null }, ...plantScopeWhere(siteId) },
+          orderBy: { name: "asc" },
+        }),
+      ])
+    : [[], []];
+
   const tabs: { key: TabKey; label: string }[] = [
     { key: "mixerDriver", label: m.tabs.mixerDriver },
     { key: "pumpOperator", label: m.tabs.pumpOperator },
@@ -185,6 +207,7 @@ export default async function EmployeesPage({
     { key: "attendance", label: m.tabs.attendance },
     { key: "leave", label: m.tabs.leave },
     ...(isAdmin ? [{ key: "payroll" as TabKey, label: m.tabs.payroll }] : []),
+    ...(isAdmin ? [{ key: "endOfService" as TabKey, label: m.tabs.endOfService }] : []),
   ];
 
   return (
@@ -599,6 +622,93 @@ export default async function EmployeesPage({
             </form>
           </div>
         ) : null
+      ) : isEndOfServiceTab ? (
+        isAdmin ? (
+          <div className="grid grid-cols-[1fr_320px] gap-6">
+            <div className={ui.card}>
+              <table className={ui.table}>
+                <thead>
+                  <tr>
+                    <th className={ui.th}>{m.eos.col.number}</th>
+                    <th className={ui.th}>{m.col.name}</th>
+                    <th className={ui.th}>{m.eos.col.terminationDate}</th>
+                    <th className={ui.th}>{m.eos.col.terminationType}</th>
+                    <th className={ui.th}>{m.eos.col.years}</th>
+                    <th className={ui.th}>{m.eos.col.payable}</th>
+                    <th className={ui.th}>{m.eos.col.status}</th>
+                    <th className={ui.th}>{dict.field.actions}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {endOfServiceSettlements.map((s) => (
+                    <tr key={s.id}>
+                      <td className={`${ui.td} font-mono text-xs`}>{s.settlementNumber}</td>
+                      <td className={`${ui.td} font-medium`}>{s.employee.name}</td>
+                      <td className={ui.td}>{new Date(s.terminationDate).toLocaleDateString("en-GB")}</td>
+                      <td className={ui.td}>{m.eos.typeLabel[s.terminationType as keyof typeof m.eos.typeLabel] ?? s.terminationType}</td>
+                      <td className={`${ui.td} font-mono tabular`}>{s.yearsOfService.toFixed(1)}</td>
+                      <td className={`${ui.td} font-mono tabular`} dir="ltr">{s.payableAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                      <td className={ui.td}>
+                        <span className={`${ui.chip} ${s.status === "PAID" ? "bg-good-soft text-good" : s.status === "CANCELLED" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
+                          {m.eos.statusLabel[s.status as keyof typeof m.eos.statusLabel] ?? s.status}
+                        </span>
+                      </td>
+                      <td className={ui.td}>
+                        {s.status === "CALCULATED" && (
+                          <div className="flex flex-col gap-1">
+                            <form action={markEndOfServiceSettlementPaid}>
+                              <input type="hidden" name="id" value={s.id} />
+                              <button className="text-xs font-medium text-good hover:underline">{m.eos.markPaid}</button>
+                            </form>
+                            <form action={cancelEndOfServiceSettlement}>
+                              <input type="hidden" name="id" value={s.id} />
+                              <button className="text-xs font-medium text-critical hover:underline">{dict.field.cancel}</button>
+                            </form>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {endOfServiceSettlements.length === 0 && (
+                    <tr><td className={ui.td} colSpan={8}><span className="text-ink-muted">{m.eos.empty}</span></td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <form action={calculateEndOfServiceSettlement} className={`${ui.card} flex flex-col gap-3`}>
+              <h2 className="font-display text-lg font-semibold">{m.eos.newTitle}</h2>
+              <div>
+                <label className={ui.label}>{m.eos.f.employeeId}</label>
+                <select name="employeeId" required className={ui.select}>
+                  <option value="" disabled>{m.eos.f.employeePlaceholder}</option>
+                  {eosEligibleEmployees.map((e) => (
+                    <option key={e.id} value={e.id}>{e.name}</option>
+                  ))}
+                </select>
+              </div>
+              {eosEligibleEmployees.length === 0 && <p className="text-xs text-ink-muted">{m.eos.noEligible}</p>}
+              <div>
+                <label className={ui.label}>{m.eos.f.terminationDate}</label>
+                <input name="terminationDate" type="date" required className={ui.input} />
+              </div>
+              <div>
+                <label className={ui.label}>{m.eos.f.terminationType}</label>
+                <select name="terminationType" required className={ui.select}>
+                  {TERMINATION_TYPES.map((t) => (
+                    <option key={t} value={t}>{m.eos.typeLabel[t]}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={ui.label}>{m.eos.f.notes}</label>
+                <input name="notes" className={ui.input} />
+              </div>
+              <p className="text-xs text-ink-muted">{m.eos.calcHint}</p>
+              <button type="submit" className={`${ui.button} mt-2`}>{m.eos.calculate}</button>
+            </form>
+          </div>
+        ) : null
       ) : (
         <div className="grid grid-cols-[1fr_320px] gap-6">
           <div className={ui.card}>
@@ -666,6 +776,15 @@ export default async function EmployeesPage({
                             <div>
                               <label className={ui.label}>{m.f.shiftPattern}</label>
                               <input name="shiftPattern" defaultValue={e.shiftPattern ?? ""} className={`${ui.input} w-32`} dir="ltr" />
+                            </div>
+                            <div>
+                              <label className={ui.label}>{m.f.hireDate}</label>
+                              <input
+                                name="hireDate"
+                                type="date"
+                                defaultValue={e.hireDate ? new Date(e.hireDate).toISOString().slice(0, 10) : ""}
+                                className={`${ui.input} w-40`}
+                              />
                             </div>
                             <div>
                               <label className={ui.label}>{m.f.licenseExpiry}</label>
@@ -817,6 +936,10 @@ export default async function EmployeesPage({
             <div>
               <label className={ui.label}>{m.f.shiftPattern}</label>
               <input name="shiftPattern" className={ui.input} placeholder="Day / 6am–6pm" dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.hireDate}</label>
+              <input name="hireDate" type="date" className={ui.input} />
             </div>
             <div>
               <label className={ui.label}>{m.f.licenseExpiry}</label>

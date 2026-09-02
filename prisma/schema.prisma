@@ -101,6 +101,7 @@ model User {
   creditNotesIssued                CreditNote[]
   payrollRunsCreated               PayrollRun[]               @relation("PayrollRunCreatedBy")
   payrollRunsApproved              PayrollRun[]               @relation("PayrollRunApprovedBy")
+  endOfServiceSettlementsCalculated EndOfServiceSettlement[]   @relation("EOSCalculatedBy")
   notifications                    Notification[]
   pushSubscriptions                PushSubscription[]
 }
@@ -656,6 +657,14 @@ model Employee {
   // WPS field.
   nationalId                 String?
   iban                       String?
+  // The employee's real-world start date — distinct from createdAt (when
+  // this row was entered into Batchline, which can postdate an employee's
+  // actual hire by years for anyone on staff before the plant went live on
+  // this system). Needed for an accurate years-of-service figure; see
+  // calculateEndOfServiceEntitlement in src/lib/endOfService.ts, which
+  // refuses to compute a gratuity amount without it rather than guessing
+  // tenure from createdAt.
+  hireDate                   DateTime?
   licenseNumber              String?
   licenseExpiry              DateTime?
   shiftPattern               String?
@@ -698,6 +707,49 @@ model Employee {
   leaveRequests             LeaveRequest[]
   maintenanceOrders         MaintenanceOrderTechnician[]
   payrollLines               PayrollLine[]
+  endOfServiceSettlements   EndOfServiceSettlement[]
+}
+
+// A Saudi end-of-service gratuity (مكافأة نهاية الخدمة) calculation for one
+// departing employee — Labor Law Articles 84-85: half a month's basic wage
+// per year of service for the first 5 years, a full month per year beyond
+// that, scaled down further when the employee is the one resigning (0%
+// under 2 years, 1/3 at 2-5, 2/3 at 5-10, full at 10+) — see the actual
+// formula in src/lib/endOfService.ts. Every figure here is snapshotted at
+// calculation time (hireDate, basic salary) so a later change to the
+// employee's own wage or a correction to their hire date never silently
+// rewrites an already-recorded settlement's numbers, same reasoning as
+// Invoice/Quote snapshotting their tax rate.
+model EndOfServiceSettlement {
+  id               String    @id @default(cuid())
+  settlementNumber String    @unique // EOS-YYYY-NNNN
+  employeeId       String
+  employee         Employee  @relation(fields: [employeeId], references: [id])
+  hireDate         DateTime
+  terminationDate  DateTime
+  // RESIGNATION, TERMINATED_BY_EMPLOYER, END_OF_CONTRACT, SPECIAL_CASE —
+  // SPECIAL_CASE covers the law's own full-award exceptions (force
+  // majeure, a woman resigning within 6 months of marriage or within 3
+  // months of childbirth, etc.), entered as a note rather than enumerated
+  // further here.
+  terminationType  String
+  yearsOfService   Float
+  basicMonthlySalary Float
+  // Full Article 84 formula result, before the resignation-tier reduction.
+  grossEntitlement Float
+  // What's actually owed, after the resignation tier (or the full amount,
+  // for every non-resignation terminationType).
+  payableAmount    Float
+  // CALCULATED (a figure on file, nothing paid yet — freely cancellable),
+  // PAID (posted to the cash ledger, see markEndOfServiceSettlementPaid —
+  // this is also the point Employee.status flips to REMOVED), CANCELLED.
+  status           String    @default("CALCULATED")
+  notes            String?
+  calculatedById   String
+  calculatedBy     User      @relation("EOSCalculatedBy", fields: [calculatedById], references: [id])
+  paidAt           DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 }
 
 model PayrollRun {
