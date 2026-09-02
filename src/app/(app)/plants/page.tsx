@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createSite, updateSite, createPlant, updatePlant, updatePlantThresholds, updateZatcaSettings } from "./actions";
+import { createSite, updateSite, createPlant, updatePlant, updatePlantThresholds, updateZatcaSettings, updateWpsSettings } from "./actions";
 import { AccentColorPicker } from "@/components/AccentColorPicker";
 
 const PLANT_STATUSES = ["ACTIVE", "FROZEN", "DECOMMISSIONED"] as const;
@@ -32,6 +32,7 @@ export default async function PlantsPage({
         include: { _count: { select: { silos: true, employees: true, batchTickets: true } } },
       },
       zatcaSettings: true,
+      wpsSettings: true,
     },
   });
   // Whether a real onboarded CSID exists — purely informational here (the
@@ -448,6 +449,28 @@ export default async function PlantsPage({
               </form>
             );
           })}
+        </div>
+      </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.wpsTitle}</h2>
+        <p className="mb-3 text-sm text-ink-muted">{m.wpsIntro}</p>
+        <div className="flex flex-col gap-3">
+          {sites.map((s) => (
+            <form
+              key={s.id}
+              action={updateWpsSettings}
+              className="flex flex-wrap items-end gap-4 border-b border-border pb-3 last:border-0 last:pb-0"
+            >
+              <input type="hidden" name="siteId" value={s.id} />
+              <div className="min-w-32 font-medium">{s.name}</div>
+              <div>
+                <label className={ui.label}>{m.wpsFEstablishmentId}</label>
+                <input name="establishmentId" defaultValue={s.wpsSettings?.establishmentId ?? ""} className="w-48 rounded-md border border-border bg-surface px-2 py-1.5 text-sm" dir="ltr" />
+              </div>
+              <button className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-surface-alt">{m.zatcaSave}</button>
+            </form>
+          ))}
         </div>
       </div>
     </div>

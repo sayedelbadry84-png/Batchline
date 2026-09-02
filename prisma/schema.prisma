@@ -187,6 +187,7 @@ model Site {
   finishedProductMovements FinishedProductMovement[]
   journalEntries           JournalEntry[]
   zatcaSettings            ZatcaSettings?
+  wpsSettings              WpsSettings?
 }
 
 // A site's ZATCA (Saudi e-invoicing) registration — one row per site,
@@ -216,6 +217,27 @@ model ZatcaSettings {
   onboardedAt     DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+}
+
+// A site's WPS (Wage Protection System) registration — same one-row-per-
+// site, non-secret-identifiers-only shape as ZatcaSettings above, since
+// establishment registration is a legal-entity fact, not a production-line
+// one. Used only to label the WPS/Mudad salary file export (see
+// WpsExportButton and employees/payroll/[id]/page.tsx) — Batchline never
+// submits to Mudad or a bank itself, only produces the file an employer
+// uploads by hand, the same posture this app already takes for ZATCA
+// documents (generated here, submitted through the real government
+// channel by a human). A site with no row here simply exports the file
+// with its establishment number left blank rather than fabricating one.
+model WpsSettings {
+  id              String   @id @default(cuid())
+  siteId          String   @unique
+  site            Site     @relation(fields: [siteId], references: [id])
+  // GOSI/MOL "Establishment Number" (رقم المنشأة) — what Mudad/the paying
+  // bank uses to match this file to the registered employer.
+  establishmentId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 }
 
 model Plant {
@@ -627,6 +649,13 @@ model Employee {
   // any number of NULLs under a unique constraint, so employees without a
   // code on file never collide.
   code                       String?   @unique
+  // Iqama/National ID and bank IBAN — needed only for the WPS/Mudad salary
+  // file export (see WpsExportButton), which rejects a record outright if
+  // either is off by a single digit. Optional, same "the export just skips
+  // whatever's missing rather than fabricating it" posture as every other
+  // WPS field.
+  nationalId                 String?
+  iban                       String?
   licenseNumber              String?
   licenseExpiry              DateTime?
   shiftPattern               String?

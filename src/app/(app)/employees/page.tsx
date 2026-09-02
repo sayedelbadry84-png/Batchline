@@ -642,6 +642,14 @@ export default async function EmployeesPage({
                               <label className={ui.label}>{m.f.code}</label>
                               <input name="code" defaultValue={e.code ?? ""} className={`${ui.input} w-28`} dir="ltr" />
                             </div>
+                            <div>
+                              <label className={ui.label}>{m.f.nationalId}</label>
+                              <input name="nationalId" defaultValue={e.nationalId ?? ""} className={`${ui.input} w-32`} dir="ltr" />
+                            </div>
+                            <div>
+                              <label className={ui.label}>{m.f.iban}</label>
+                              <input name="iban" defaultValue={e.iban ?? ""} className={`${ui.input} w-48`} dir="ltr" placeholder="SA__ ____ ____ ____ ____ ____" />
+                            </div>
                             {tab === "admin" && (
                               <div>
                                 <label className={ui.label}>{m.f.role}</label>
@@ -772,6 +780,15 @@ export default async function EmployeesPage({
             <div>
               <label className={ui.label}>{m.f.code}</label>
               <input name="code" className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.nationalId}</label>
+              <input name="nationalId" className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.f.iban}</label>
+              <input name="iban" className={ui.input} dir="ltr" placeholder="SA__ ____ ____ ____ ____ ____" />
+              <p className="mt-1 text-xs text-ink-muted">{m.f.wpsHint}</p>
             </div>
             {tab === "mixerDriver" && (
               <>

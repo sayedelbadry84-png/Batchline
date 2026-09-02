@@ -252,6 +252,7 @@ export const ACTION_ROLES = {
     updatePlant: ["PLANT_OPERATOR", "ADMIN"],
     updatePlantThresholds: ["PLANT_OPERATOR", "ADMIN"],
     updateZatcaSettings: ["ACCOUNTANT", "ADMIN"],
+    updateWpsSettings: ["ACCOUNTANT", "ADMIN"],
   },
   incentives: {
     updateIncentivePolicy: ["PLANT_OPERATOR", "ADMIN"],

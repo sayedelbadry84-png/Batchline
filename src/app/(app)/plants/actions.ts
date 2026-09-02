@@ -218,3 +218,35 @@ export async function updateZatcaSettings(formData: FormData) {
 
   revalidatePath("/plants");
 }
+
+// WPS (Wage Protection System) establishment registration for a site — see
+// WpsSettings' own schema comment. Same Accountant/Admin gate as ZATCA:
+// this is a payroll-compliance fact, not an operational plant setting.
+export async function updateWpsSettings(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "plants", "updateWpsSettings");
+
+  const siteId = String(formData.get("siteId") ?? "");
+  if (!siteId) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
+
+  const establishmentId = String(formData.get("establishmentId") ?? "").trim() || null;
+
+  const before = await prisma.wpsSettings.findUnique({ where: { siteId } });
+  await prisma.wpsSettings.upsert({
+    where: { siteId },
+    create: { siteId, establishmentId },
+    update: { establishmentId },
+  });
+
+  await logAudit({
+    module: "PlantManagement",
+    recordId: siteId,
+    field: "wpsSettings",
+    beforeValue: before?.establishmentId ?? "—",
+    afterValue: establishmentId ?? "—",
+    reasonCode: "WPS_SETTINGS_UPDATED",
+  });
+
+  revalidatePath("/plants");
+}

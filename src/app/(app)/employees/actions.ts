@@ -73,6 +73,8 @@ export async function createEmployee(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const role = await resolveRole(String(formData.get("role") ?? "").trim(), String(formData.get("newRoleName") ?? ""));
   const code = String(formData.get("code") ?? "").trim() || null;
+  const nationalId = String(formData.get("nationalId") ?? "").trim() || null;
+  const iban = String(formData.get("iban") ?? "").trim() || null;
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
   const wageType = String(formData.get("wageType") ?? "").trim() || null;
@@ -95,6 +97,8 @@ export async function createEmployee(formData: FormData) {
       name,
       role,
       code,
+      nationalId,
+      iban,
       shiftPattern,
       licenseExpiry: licenseExpiryRaw ? new Date(licenseExpiryRaw) : null,
       wageType,
@@ -139,6 +143,8 @@ export async function updateEmployee(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const role = await resolveRole(String(formData.get("role") ?? "").trim(), String(formData.get("newRoleName") ?? ""));
   const code = String(formData.get("code") ?? "").trim() || null;
+  const nationalId = String(formData.get("nationalId") ?? "").trim() || null;
+  const iban = String(formData.get("iban") ?? "").trim() || null;
   const licenseExpiryRaw = String(formData.get("licenseExpiry") ?? "");
   const shiftPattern = String(formData.get("shiftPattern") ?? "").trim();
   const status = String(formData.get("status") ?? "ACTIVE");
@@ -165,6 +171,8 @@ export async function updateEmployee(formData: FormData) {
       name,
       role,
       code,
+      nationalId,
+      iban,
       shiftPattern,
       licenseExpiry: licenseExpiryRaw ? new Date(licenseExpiryRaw) : null,
       status,

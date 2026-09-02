@@ -5,6 +5,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { PrintButton } from "@/components/PrintButton";
+import { WpsExportButton } from "@/components/WpsExportButton";
 import { updatePayrollLine, approvePayrollRun, markPayrollRunPaid, cancelPayrollRun } from "../actions";
 
 // Salary data — same ADMIN-only boundary as the payroll tab itself
@@ -19,7 +20,14 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
 
   const run = await prisma.payrollRun.findUnique({
     where: { id },
-    include: { lines: { include: { employee: true }, orderBy: { id: "asc" } }, createdBy: true, approvedBy: true },
+    include: {
+      lines: {
+        include: { employee: { include: { plant: { include: { site: { include: { wpsSettings: true } } } } } } },
+        orderBy: { id: "asc" },
+      },
+      createdBy: true,
+      approvedBy: true,
+    },
   });
   if (!run) notFound();
 
@@ -31,6 +39,33 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
   const totalEmployerGosi = run.lines.reduce((sum, l) => sum + l.employerGosi, 0);
   const totalEmployerCost = totalNet + totalEmployeeGosi + totalEmployerGosi;
   const isDraft = run.status === "DRAFT";
+
+  // WPS (Wage Protection System) salary file — one sheet per site/
+  // establishment, same "never blend across sites" boundary
+  // markPayrollRunPaid's own cash postings already use. Housing/Transport
+  // Allowance are always 0 — Batchline doesn't track a separate allowance
+  // breakdown, only one wage figure per employee — so Basic Salary here is
+  // that whole figure; Other Allowance folds in this period's incentive
+  // payout and any positive manual adjustment, Deductions folds in GOSI
+  // and any negative adjustment. Every number is exactly what this run
+  // already computed — nothing here is invented for the export.
+  const wpsHeaders = ["Employee Name", "National ID / Iqama", "IBAN", "Basic Salary", "Housing Allowance", "Transport Allowance", "Other Allowance", "Deductions", "Net Salary", "Payment Date (YYYYMMDD)"];
+  const paymentDate = run.paidAt ? new Date(run.paidAt).toISOString().slice(0, 10).replace(/-/g, "") : "";
+  const wpsSheetsBySite = new Map<string, { sheetName: string; establishmentId: string | null; rows: (string | number)[][] }>();
+  for (const l of run.lines) {
+    const site = l.employee.plant.site;
+    const entry = wpsSheetsBySite.get(site.id) ?? { sheetName: site.code, establishmentId: site.wpsSettings?.establishmentId ?? null, rows: [] };
+    const otherAllowance = l.incentiveAmount + Math.max(0, l.adjustment);
+    const deductions = l.employeeGosi + Math.max(0, -l.adjustment);
+    entry.rows.push([l.employee.name, l.employee.nationalId ?? "", l.employee.iban ?? "", l.grossPay, 0, 0, otherAllowance, deductions, l.netPay, paymentDate]);
+    wpsSheetsBySite.set(site.id, entry);
+  }
+  const wpsSheets = Array.from(wpsSheetsBySite.values()).map((s) => ({
+    sheetName: s.establishmentId ? `${s.sheetName} (${s.establishmentId})` : s.sheetName,
+    headers: wpsHeaders,
+    rows: s.rows,
+  }));
+  const wpsMissingCount = run.lines.filter((l) => !l.employee.nationalId || !l.employee.iban).length;
 
   const statusChip: Record<string, string> = {
     DRAFT: "bg-surface-alt text-ink-muted",
@@ -53,9 +88,13 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
           <span className={`${ui.chip} ${statusChip[run.status] ?? statusChip.DRAFT}`}>
             {p.statusLabel[run.status as keyof typeof p.statusLabel] ?? run.status}
           </span>
+          {!isDraft && <WpsExportButton label={p.wpsExport} filename={`WPS-${run.runNumber}.xlsx`} sheets={wpsSheets} />}
           <PrintButton label={p.print} />
         </div>
       </header>
+      {!isDraft && wpsMissingCount > 0 && (
+        <p className="no-print -mt-4 text-xs text-warn">{p.wpsMissingWarning(wpsMissingCount)}</p>
+      )}
 
       <div className="no-print flex flex-wrap gap-2">
         {isDraft && (
