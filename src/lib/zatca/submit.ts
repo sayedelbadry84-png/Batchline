@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { getZatcaReadiness } from "./settings";
+import { signInvoiceXml } from "./sign";
+import { zatcaTimestamp } from "./qr";
 
 // ZATCA's Clearance API — real-time submission required for a B2B
 // (Standard Tax Invoice) document once Phase 2 is live for this
@@ -17,16 +19,19 @@ export type ZatcaSubmitResult =
 
 // Submits this invoice's already-generated XML (see generate.ts) for
 // clearance. Refuses outright — no network call at all — unless
-// getZatcaReadiness says CLEARANCE_READY (a real CSID exists), so this
-// never pretends to have submitted something it couldn't have.
+// getZatcaReadiness says CLEARANCE_READY (a real CSID + private key
+// exist), so this never pretends to have submitted something it
+// couldn't have.
 //
-// One real gap even at CLEARANCE_READY: the XML built by invoiceXml.ts is
-// unsigned (see that file's own note) — ZATCA's clearance endpoint will
-// legitimately reject an unsigned submission. Wiring in XAdES signing
-// with the CSID private key is the next piece once there's a real
-// sandbox to validate the signature against; until then this function is
-// honest plumbing that will start working the moment signing is added,
-// not a working clearance path today.
+// Signs the invoice with sign.ts right before submitting (not at
+// generate.ts time) — generate.ts runs the moment an invoice is issued,
+// long before a real CSID may exist, so it deliberately only ever
+// produces the unsigned Phase 1 shape. Signing here, right before the
+// one thing that actually needs a signature, keeps that separation:
+// every invoice still gets its Phase 1 QR immediately, and only ever
+// pays the signing cost when a real clearance submission is about to
+// happen. The signed XML and 9-tag QR replace the stored Phase 1 ones so
+// what's on the invoice always reflects what was actually sent.
 export async function submitInvoiceForClearance(invoiceId: string): Promise<ZatcaSubmitResult> {
   const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { plant: true } });
   if (!invoice) return { ok: false, reason: "NOT_FOUND" };
@@ -36,6 +41,19 @@ export async function submitInvoiceForClearance(invoiceId: string): Promise<Zatc
 
   const readiness = await getZatcaReadiness(invoice.plant.siteId);
   if (readiness.level !== "CLEARANCE_READY") return { ok: false, reason: "NOT_CONFIGURED" };
+
+  const { signedXml, invoiceHash, qrCode } = signInvoiceXml({
+    xml: invoice.zatcaXml,
+    certificatePem: readiness.csidCert,
+    privateKeyPem: readiness.csidPrivateKey,
+    qrFields: {
+      sellerName: readiness.seller.sellerLegalName,
+      vatNumber: readiness.seller.vatNumber,
+      timestampIso: zatcaTimestamp(invoice.issueDate),
+      invoiceTotal: invoice.total,
+      vatTotal: invoice.taxAmount,
+    },
+  });
 
   const url =
     readiness.seller.environment === "PRODUCTION"
@@ -55,9 +73,9 @@ export async function submitInvoiceForClearance(invoiceId: string): Promise<Zatc
         Authorization: `Basic ${auth}`,
       },
       body: JSON.stringify({
-        invoiceHash: invoice.zatcaInvoiceHash,
+        invoiceHash,
         uuid: invoice.zatcaUuid,
-        invoice: Buffer.from(invoice.zatcaXml, "utf8").toString("base64"),
+        invoice: Buffer.from(signedXml, "utf8").toString("base64"),
       }),
     });
 
@@ -65,21 +83,36 @@ export async function submitInvoiceForClearance(invoiceId: string): Promise<Zatc
       const body = await res.text().catch(() => "");
       await prisma.invoice.update({
         where: { id: invoiceId },
-        data: { zatcaStatus: "FAILED", zatcaErrorMessage: `HTTP ${res.status}: ${body.slice(0, 500)}`, zatcaSubmittedAt: new Date() },
+        data: {
+          zatcaXml: signedXml,
+          zatcaQrCode: qrCode,
+          zatcaInvoiceHash: invoiceHash,
+          zatcaStatus: "FAILED",
+          zatcaErrorMessage: `HTTP ${res.status}: ${body.slice(0, 500)}`,
+          zatcaSubmittedAt: new Date(),
+        },
       });
       return { ok: false, reason: "API_ERROR", status: res.status, body };
     }
 
     await prisma.invoice.update({
       where: { id: invoiceId },
-      data: { zatcaStatus: "CLEARED", zatcaSubmittedAt: new Date(), zatcaClearedAt: new Date(), zatcaErrorMessage: null },
+      data: {
+        zatcaXml: signedXml,
+        zatcaQrCode: qrCode,
+        zatcaInvoiceHash: invoiceHash,
+        zatcaStatus: "CLEARED",
+        zatcaSubmittedAt: new Date(),
+        zatcaClearedAt: new Date(),
+        zatcaErrorMessage: null,
+      },
     });
     return { ok: true };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     await prisma.invoice.update({
       where: { id: invoiceId },
-      data: { zatcaStatus: "FAILED", zatcaErrorMessage: message, zatcaSubmittedAt: new Date() },
+      data: { zatcaXml: signedXml, zatcaQrCode: qrCode, zatcaInvoiceHash: invoiceHash, zatcaStatus: "FAILED", zatcaErrorMessage: message, zatcaSubmittedAt: new Date() },
     });
     return { ok: false, reason: "API_ERROR", status: 0, body: message };
   }

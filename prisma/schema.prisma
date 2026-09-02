@@ -198,10 +198,11 @@ model Site {
 // CSID certificate and private key (obtained via ZATCA's CSR -> OTP ->
 // compliance-CSID -> production-CSID flow) are never stored here or
 // anywhere in this database — they live in environment variables
-// (ZATCA_CSID_CERT / ZATCA_CSID_SECRET, see src/lib/zatca/settings.ts),
-// the same posture this app already takes for the database URL and blob
-// storage token. onboardedAt is just a human-readable "did we finish that
-// flow" marker, set manually once it has been.
+// (ZATCA_CSID_CERT / ZATCA_CSID_SECRET / ZATCA_CSID_PRIVATE_KEY, see
+// src/lib/zatca/settings.ts), the same posture this app already takes
+// for the database URL and blob storage token. onboardedAt is just a
+// human-readable "did we finish that flow" marker, set manually once it
+// has been.
 //
 // Every field here is optional — a site with no row (or an empty one)
 // simply never generates ZATCA documents; nothing is fabricated in its

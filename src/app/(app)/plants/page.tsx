@@ -39,7 +39,7 @@ export default async function PlantsPage({
   // status column), the actual gate on submitting anything to ZATCA lives
   // in src/lib/zatca/settings.ts, read fresh at submit time, not cached
   // from this page render.
-  const zatcaCsidConfigured = Boolean(process.env.ZATCA_CSID_CERT && process.env.ZATCA_CSID_SECRET);
+  const zatcaCsidConfigured = Boolean(process.env.ZATCA_CSID_CERT && process.env.ZATCA_CSID_SECRET && process.env.ZATCA_CSID_PRIVATE_KEY);
 
   return (
     <div className="flex flex-col gap-8">

@@ -8,16 +8,17 @@ import { createHash } from "crypto";
 // hash (PIH) chain, line-level and document-level tax totals, and the
 // QR/PIH AdditionalDocumentReference blocks ZATCA's own validator expects.
 //
-// What this does NOT do: XAdES digital signing or the cryptographic
-// stamp — both require the private key issued during CSID onboarding
-// (see src/lib/zatca/submit.ts), which doesn't exist until a real ZATCA
-// account is connected. The XML built here is therefore always
-// "unsigned" — genuinely useful for a Phase 1 QR-compliant invoice (QR
-// doesn't need signing), and structurally ready for Phase 2 clearance
-// once signing is layered on, but not itself proof this exact structure
-// will pass ZATCA's schema validator — that needs checking against the
-// real Fatoora simulator once sandbox access exists, this hasn't been
-// validated against it.
+// This always emits a <cac:Signature> reference block and a QR
+// AdditionalDocumentReference, structurally ready for XAdES signing —
+// but the XML this function returns is itself still unsigned: the
+// <ext:UBLExtensions> element is left empty (a marker comment) and the
+// embedded QR is the Phase 1 5-tag payload passed in. Turning this into
+// a Phase 2 CLEARANCE_READY document is src/lib/zatca/sign.ts's job (it
+// fills in <ext:UBLExtensions> and re-embeds the 9-tag QR) — see that
+// file for the signing algorithm and its own honesty caveats. Not itself
+// proof this exact structure will pass ZATCA's schema validator — that
+// needs checking against the real Fatoora simulator once sandbox access
+// exists, this hasn't been validated against it.
 
 export type ZatcaInvoiceLineInput = {
   description: string;
@@ -40,6 +41,7 @@ export type ZatcaInvoiceInput = {
   total: number;
   icv: number;
   previousInvoiceHash: string;
+  qrCode: string;
 };
 
 // ZATCA's documented convention for the very first invoice in a
@@ -107,8 +109,8 @@ export function buildZatcaInvoiceXml(input: ZatcaInvoiceInput): string {
          xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2"
          xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2">
   <ext:UBLExtensions>
-    <!-- The XAdES signature extension is inserted here once this invoice
-         is signed with an onboarded CSID — see src/lib/zatca/submit.ts. -->
+    <!-- src/lib/zatca/sign.ts replaces this whole element with the
+         XAdES signature extension once a CSID is onboarded. -->
   </ext:UBLExtensions>
   <cbc:ProfileID>reporting:1.0</cbc:ProfileID>
   <cbc:ID>${escapeXml(input.invoiceNumber)}</cbc:ID>
@@ -128,6 +130,16 @@ export function buildZatcaInvoiceXml(input: ZatcaInvoiceInput): string {
       <cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">${input.previousInvoiceHash}</cbc:EmbeddedDocumentBinaryObject>
     </cac:Attachment>
   </cac:AdditionalDocumentReference>
+  <cac:AdditionalDocumentReference>
+    <cbc:ID>QR</cbc:ID>
+    <cac:Attachment>
+      <cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">${input.qrCode}</cbc:EmbeddedDocumentBinaryObject>
+    </cac:Attachment>
+  </cac:AdditionalDocumentReference>
+  <cac:Signature>
+    <cbc:ID>urn:oasis:names:specification:ubl:signature:Invoice</cbc:ID>
+    <cbc:SignatureMethod>urn:oasis:names:specification:ubl:dsig:enveloped:xades</cbc:SignatureMethod>
+  </cac:Signature>
   <cac:AccountingSupplierParty>
     <cac:Party>
       <cac:PartyIdentification>
@@ -175,8 +187,4 @@ export function buildZatcaInvoiceXml(input: ZatcaInvoiceInput): string {
     <cbc:PayableAmount currencyID="${input.currency}">${input.total.toFixed(2)}</cbc:PayableAmount>
   </cac:LegalMonetaryTotal>${lineItems}
 </Invoice>`;
-}
-
-export function hashZatcaXml(xml: string): string {
-  return createHash("sha256").update(xml, "utf8").digest("base64");
 }

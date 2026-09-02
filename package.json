@@ -10,8 +10,10 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
+    "@fidm/x509": "^1.2.1",
     "@prisma/client": "^5.22.0",
     "@vercel/blob": "^2.8.0",
+    "@xmldom/xmldom": "^0.9.12",
     "bcryptjs": "^3.0.3",
     "exceljs": "^4.4.0",
     "leaflet": "^1.9.4",
@@ -21,7 +23,8 @@
     "react-dom": "19.2.8",
     "react-leaflet": "^5.0.0",
     "server-only": "^0.0.1",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "xmldsigjs": "^2.8.8"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

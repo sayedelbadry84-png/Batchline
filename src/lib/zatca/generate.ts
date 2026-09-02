@@ -1,8 +1,9 @@
 import { randomUUID } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { getZatcaReadiness } from "./settings";
-import { buildZatcaQrPayload } from "./qr";
-import { buildZatcaInvoiceXml, hashZatcaXml, zatcaGenesisPreviousHash } from "./invoiceXml";
+import { buildZatcaQrPayload, zatcaTimestamp } from "./qr";
+import { buildZatcaInvoiceXml, zatcaGenesisPreviousHash } from "./invoiceXml";
+import { hashInvoiceXml } from "./sign";
 
 export type ZatcaGenerateResult = { ok: true } | { ok: false; reason: "NOT_CONFIGURED" | "NO_PLANT" | "ALREADY_GENERATED" | "NOT_FOUND" };
 
@@ -36,6 +37,14 @@ export async function generateZatcaDocuments(invoiceId: string): Promise<ZatcaGe
   const icv = (await prisma.invoice.count({ where: { plant: { siteId: invoice.plant.siteId }, zatcaInvoiceHash: { not: null } } })) + 1;
 
   const uuid = randomUUID();
+  const qrCode = buildZatcaQrPayload({
+    sellerName: readiness.seller.sellerLegalName,
+    vatNumber: readiness.seller.vatNumber,
+    timestampIso: zatcaTimestamp(invoice.issueDate),
+    invoiceTotal: invoice.total,
+    vatTotal: invoice.taxAmount,
+  });
+
   const xml = buildZatcaInvoiceXml({
     invoiceNumber: invoice.invoiceNumber,
     uuid,
@@ -50,21 +59,14 @@ export async function generateZatcaDocuments(invoiceId: string): Promise<ZatcaGe
     total: invoice.total,
     icv,
     previousInvoiceHash,
-  });
-
-  const qrCode = buildZatcaQrPayload({
-    sellerName: readiness.seller.sellerLegalName,
-    vatNumber: readiness.seller.vatNumber,
-    timestampIso: invoice.issueDate.toISOString(),
-    invoiceTotal: invoice.total,
-    vatTotal: invoice.taxAmount,
+    qrCode,
   });
 
   await prisma.invoice.update({
     where: { id: invoiceId },
     data: {
       zatcaUuid: uuid,
-      zatcaInvoiceHash: hashZatcaXml(xml),
+      zatcaInvoiceHash: hashInvoiceXml(xml),
       zatcaPreviousHash: previousInvoiceHash,
       zatcaQrCode: qrCode,
       zatcaXml: xml,
