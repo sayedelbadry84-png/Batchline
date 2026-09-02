@@ -16,6 +16,7 @@ import {
   cancelSupplierBill,
   createCashTransaction,
   reconcileMovement,
+  importBankStatement,
 } from "./actions";
 import { generateInvoiceForProject } from "../billing/actions";
 
@@ -94,7 +95,7 @@ export default async function FinancePage({
 
       {tab === "aging" && <AgingTab m={m} siteScope={siteScope} />}
 
-      {tab === "reconciliation" && <ReconciliationTab m={m} dict={dict} siteScope={siteScope} />}
+      {tab === "reconciliation" && <ReconciliationTab m={m} dict={dict} siteScope={siteScope} sites={sites} />}
 
       {tab === "ledger" && <LedgerTab m={m} siteScope={siteScope} />}
 
@@ -705,15 +706,18 @@ async function ReconciliationTab({
   m,
   dict,
   siteScope,
+  sites,
 }: {
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["finance"];
   dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
   siteScope: Record<string, unknown>;
+  sites: { id: string; code: string; name: string }[];
 }) {
-  const [payments, supplierPayments, cashTransactions] = await Promise.all([
+  const [payments, supplierPayments, cashTransactions, unmatchedLines] = await Promise.all([
     prisma.payment.findMany({ where: { reconciled: false }, orderBy: { paidAt: "desc" }, include: { invoice: { include: { customer: true } } } }),
     prisma.supplierPayment.findMany({ where: { reconciled: false }, orderBy: { paidAt: "desc" }, include: { supplierBill: { include: { supplier: true } } } }),
     prisma.cashTransaction.findMany({ where: { reconciled: false, ...siteScope }, orderBy: { occurredAt: "desc" } }),
+    prisma.bankStatementLine.findMany({ where: { matchedKind: null, ...siteScope }, orderBy: { statementDate: "desc" } }),
   ]);
 
   const rows = [
@@ -758,6 +762,59 @@ async function ReconciliationTab({
             ))}
             {rows.length === 0 && (
               <tr><td className={ui.td} colSpan={5}><span className="text-ink-muted">{m.reconciliation.empty}</span></td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.reconciliation.importTitle}</h2>
+        <p className="mb-3 max-w-2xl text-xs text-ink-muted">{m.reconciliation.importHint}</p>
+        <form action={importBankStatement} encType="multipart/form-data" className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className={ui.label}>{m.reconciliation.importSite}</label>
+            <select name="siteId" required className={ui.select} defaultValue={sites.length === 1 ? sites[0].id : ""}>
+              <option value="" disabled>—</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.reconciliation.importFile}</label>
+            <input name="file" type="file" accept=".csv,text/csv" required className={ui.input} />
+          </div>
+          <button type="submit" className={ui.button}>{m.reconciliation.importButton}</button>
+        </form>
+      </div>
+
+      <div className={ui.card}>
+        <h2 className="mb-1 font-display text-lg font-semibold">{m.reconciliation.unmatchedTitle}</h2>
+        <p className="mb-3 max-w-2xl text-xs text-ink-muted">{m.reconciliation.unmatchedHint}</p>
+        <table className={ui.table}>
+          <thead>
+            <tr>
+              <th className={ui.th}>{m.reconciliation.col.date}</th>
+              <th className={ui.th}>{m.reconciliation.col.direction}</th>
+              <th className={ui.th}>{m.reconciliation.col.description}</th>
+              <th className={ui.th}>{m.reconciliation.col.amount}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {unmatchedLines.map((l) => (
+              <tr key={l.id}>
+                <td className={ui.td}>{fmtDate(l.statementDate)}</td>
+                <td className={ui.td}>
+                  <span className={`${ui.chip} ${l.direction === "IN" ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}>
+                    {l.direction === "IN" ? m.cash.in : m.cash.out}
+                  </span>
+                </td>
+                <td className={ui.td}>{l.description}{l.reference ? ` — ${l.reference}` : ""}</td>
+                <td className={`${ui.td} font-mono`}>{l.amount.toFixed(2)}</td>
+              </tr>
+            ))}
+            {unmatchedLines.length === 0 && (
+              <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.reconciliation.unmatchedEmpty}</span></td></tr>
             )}
           </tbody>
         </table>

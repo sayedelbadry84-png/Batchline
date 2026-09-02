@@ -337,6 +337,7 @@ export const ACTION_ROLES = {
     cancelSupplierBill: ["ACCOUNTANT", "ADMIN"],
     createCashTransaction: ["ACCOUNTANT", "ADMIN"],
     reconcileMovement: ["ACCOUNTANT", "ADMIN"],
+    importBankStatement: ["ACCOUNTANT", "ADMIN"],
     generateInvoice: ["ACCOUNTANT", "ADMIN"],
     markInvoiceSent: ["ACCOUNTANT", "ADMIN"],
     cancelInvoice: ["ACCOUNTANT", "ADMIN"],

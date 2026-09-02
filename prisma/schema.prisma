@@ -79,6 +79,7 @@ model User {
   maintenanceTicketsReported       MaintenanceTicket[]       @relation("MaintenanceReportedBy")
   maintenanceTicketsAssigned       MaintenanceTicket[]       @relation("MaintenanceAssignedTo")
   cashTransactionsCreated          CashTransaction[]         @relation("CashTransactionCreatedBy")
+  bankStatementLinesImported       BankStatementLine[]       @relation("BankStatementLineImportedBy")
   opportunityInitialApprovals      Opportunity[]             @relation("OpportunityInitialApproval")
   opportunityFinalApprovals        Opportunity[]             @relation("OpportunityFinalApproval")
   fieldVisitInitialApprovals       FieldVisit[]              @relation("FieldVisitInitialApproval")
@@ -189,6 +190,7 @@ model Site {
   journalEntries           JournalEntry[]
   zatcaSettings            ZatcaSettings?
   wpsSettings              WpsSettings?
+  bankStatementLines       BankStatementLine[]
 }
 
 // A site's ZATCA (Saudi e-invoicing) registration — one row per site,
@@ -1400,9 +1402,10 @@ model Payment {
   paidAt       DateTime  @default(now())
   method       String? // CASH, BANK_TRANSFER, CHEQUE
   reference    String?
-  // Manual bank reconciliation — see the Finance module's own section
-  // comment (near SupplierBill) for why this is a hand-matched flag
-  // rather than a real bank-feed import.
+  // Set either by hand or by BankStatementLine's auto-matcher against an
+  // imported bank statement CSV (see src/lib/bankReconciliation.ts) —
+  // there's still no live bank-feed API, so this flips true the moment a
+  // match is confident, not the moment money actually clears.
   reconciled   Boolean   @default(false)
   reconciledAt DateTime?
   createdAt    DateTime  @default(now())
@@ -2073,6 +2076,32 @@ model CashTransaction {
   createdById  String
   createdBy    User      @relation("CashTransactionCreatedBy", fields: [createdById], references: [id])
   createdAt    DateTime  @default(now())
+}
+
+// One row per line in an uploaded bank statement CSV (see
+// src/lib/bankReconciliation.ts for the parser and auto-match rules).
+// Kept as its own record — not just a transient upload — so an
+// unmatched line stays visible: a bank line with nothing in the books to
+// match is exactly the kind of discrepancy reconciliation exists to
+// surface, not something to silently drop once the file's been read.
+// matchedKind/matchedId point at whichever of Payment/SupplierPayment/
+// CashTransaction the auto-matcher (or a human) linked it to — same
+// three-kind shape reconcileMovement's own `kind` param already uses.
+model BankStatementLine {
+  id            String    @id @default(cuid())
+  siteId        String
+  site          Site      @relation(fields: [siteId], references: [id])
+  statementDate DateTime
+  direction     String // IN, OUT
+  amount        Float
+  description   String
+  reference     String?
+  matchedKind   String? // payment, supplierPayment, cashTransaction
+  matchedId     String?
+  matchedAt     DateTime?
+  importedById  String
+  importedBy    User      @relation("BankStatementLineImportedBy", fields: [importedById], references: [id])
+  importedAt    DateTime  @default(now())
 }
 
 // ---------------------------------------------------------------------------

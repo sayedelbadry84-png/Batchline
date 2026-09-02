@@ -7,6 +7,7 @@ import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { postSupplierBill, postSupplierPayment, postCashTransaction, reverseJournalEntry } from "@/lib/ledger";
+import { parseBankStatementCsv, matchBankStatementLines, type ReconciliationCandidate } from "@/lib/bankReconciliation";
 import { revalidatePath } from "next/cache";
 
 // See the same note on billing/actions.ts's own TX_OPTIONS — several
@@ -182,9 +183,9 @@ export async function createCashTransaction(formData: FormData) {
 }
 
 // One shared reconcile action for all three money-movement kinds — a
-// manual "I matched this against the bank statement" flag, see the
-// Finance schema section comment for why this is hand-matched rather
-// than a real bank-feed import.
+// manual "I matched this against the bank statement" flag. See
+// importBankStatement below for the other way this gets set: an
+// unambiguous auto-match against an imported bank statement CSV.
 export async function reconcileMovement(formData: FormData) {
   const actor = await getCurrentUser();
   await requireActionPermission(actor, "finance", "reconcileMovement");
@@ -205,5 +206,73 @@ export async function reconcileMovement(formData: FormData) {
   }
 
   await logAudit({ module: "Finance", recordId: id, afterValue: `${kind} reconciled`, reasonCode: "BANK_RECONCILED" });
+  revalidatePath("/finance");
+}
+
+// Imports a bank statement CSV, records every line (matched or not — an
+// unmatched line is itself useful information, see BankStatementLine's
+// schema comment), and auto-reconciles whichever lines have exactly one
+// unambiguous candidate (see src/lib/bankReconciliation.ts for the
+// matching rule). Everything else is left for reconcileMovement's
+// existing manual flow.
+export async function importBankStatement(formData: FormData) {
+  const actor = await getCurrentUser();
+  await requireActionPermission(actor, "finance", "importBankStatement");
+
+  const siteId = String(formData.get("siteId") ?? "");
+  const file = formData.get("file");
+  if (!siteId || !isSiteInScope(siteId, effectiveSiteId(actor)) || !(file instanceof File) || file.size === 0) return;
+
+  const text = await file.text();
+  const { lines, errors } = parseBankStatementCsv(text);
+  if (lines.length === 0) return;
+
+  const [payments, supplierPayments, cashTransactions] = await Promise.all([
+    prisma.payment.findMany({ where: { reconciled: false, invoice: { plant: { siteId } } }, select: { id: true, amount: true, paidAt: true } }),
+    prisma.supplierPayment.findMany({ where: { reconciled: false, supplierBill: { siteId } }, select: { id: true, amount: true, paidAt: true } }),
+    prisma.cashTransaction.findMany({ where: { reconciled: false, siteId }, select: { id: true, amount: true, occurredAt: true, direction: true } }),
+  ]);
+
+  const candidates: ReconciliationCandidate[] = [
+    ...payments.map((p) => ({ kind: "payment" as const, id: p.id, date: p.paidAt, direction: "IN" as const, amount: p.amount })),
+    ...supplierPayments.map((p) => ({ kind: "supplierPayment" as const, id: p.id, date: p.paidAt, direction: "OUT" as const, amount: p.amount })),
+    ...cashTransactions.map((t) => ({ kind: "cashTransaction" as const, id: t.id, date: t.occurredAt, direction: t.direction as "IN" | "OUT", amount: t.amount })),
+  ];
+
+  const matched = matchBankStatementLines(lines, candidates);
+  const now = new Date();
+
+  await prisma.$transaction(async (tx) => {
+    for (const { line, match } of matched) {
+      await tx.bankStatementLine.create({
+        data: {
+          siteId,
+          statementDate: line.date,
+          direction: line.amount >= 0 ? "IN" : "OUT",
+          amount: Math.abs(line.amount),
+          description: line.description,
+          reference: line.reference || null,
+          importedById: actor!.id,
+          ...(match
+            ? { matchedKind: match.kind, matchedId: match.id, matchedAt: now }
+            : {}),
+        },
+      });
+
+      if (match) {
+        if (match.kind === "payment") await tx.payment.update({ where: { id: match.id }, data: { reconciled: true, reconciledAt: now } });
+        else if (match.kind === "supplierPayment") await tx.supplierPayment.update({ where: { id: match.id }, data: { reconciled: true, reconciledAt: now } });
+        else await tx.cashTransaction.update({ where: { id: match.id }, data: { reconciled: true, reconciledAt: now } });
+      }
+    }
+  }, TX_OPTIONS);
+
+  const matchedCount = matched.filter((m) => m.match).length;
+  await logAudit({
+    module: "Finance",
+    recordId: siteId,
+    afterValue: `Imported ${lines.length} bank statement lines, ${matchedCount} auto-matched, ${lines.length - matchedCount} unmatched, ${errors.length} rows skipped`,
+    reasonCode: "BANK_STATEMENT_IMPORTED",
+  });
   revalidatePath("/finance");
 }
