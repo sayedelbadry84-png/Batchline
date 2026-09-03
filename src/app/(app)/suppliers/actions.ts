@@ -21,10 +21,14 @@ export async function createSupplier(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const materialCatalog = String(formData.get("materialCatalog") ?? "").trim();
   const leadTimeDays = Number(formData.get("leadTimeDays") ?? 0) || null;
+  const address = String(formData.get("address") ?? "").trim() || null;
+  const contactMethod = String(formData.get("contactMethod") ?? "").trim() || null;
   if (!name) return;
 
   const supplier = await prisma.supplier.create({
-    data: { name, materialCatalog, leadTimeDays },
+    // approvedOn is the register's own "Date on" — set to the moment this
+    // supplier is actually added, never backdated (see schema comment).
+    data: { name, materialCatalog, leadTimeDays, address, contactMethod, approvedOn: new Date() },
   });
 
   await logAudit({ module: "Suppliers", recordId: supplier.id, afterValue: name, reasonCode: "SUPPLIER_CREATED" });
@@ -70,9 +74,11 @@ export async function updateSupplier(formData: FormData) {
   const name = String(formData.get("name") ?? "").trim();
   const materialCatalog = String(formData.get("materialCatalog") ?? "").trim();
   const leadTimeDays = Number(formData.get("leadTimeDays") ?? 0) || null;
+  const address = String(formData.get("address") ?? "").trim() || null;
+  const contactMethod = String(formData.get("contactMethod") ?? "").trim() || null;
   if (!id || !name) return;
 
-  await prisma.supplier.update({ where: { id }, data: { name, materialCatalog, leadTimeDays } });
+  await prisma.supplier.update({ where: { id }, data: { name, materialCatalog, leadTimeDays, address, contactMethod } });
 
   await logAudit({ module: "Suppliers", recordId: id, afterValue: name, reasonCode: "SUPPLIER_UPDATED" });
   revalidatePath("/purchasing");
@@ -152,6 +158,44 @@ export async function createSupplierEvaluation(formData: FormData) {
     recordId: evaluation.id,
     afterValue: `${category} (${weightedScorePct.toFixed(1)}%)`,
     reasonCode: "SUPPLIER_EVALUATION_CREATED",
+  });
+  revalidatePath("/purchasing");
+}
+
+// Certified Suppliers' Register (F/QM/008/2/1) status flip — "Date off"
+// when discontinuing, cleared on reactivation (approvedOn/"Date on" is left
+// as originally set, not refreshed). Discontinuing requires a written
+// reason on file, same "no note, no status change" discipline as CAPA
+// close, waste memo approval, and the incoming-inspection finding.
+export async function setSupplierStatus(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "purchasing", "setSupplierStatus");
+
+  const id = String(formData.get("id") ?? "");
+  const status = String(formData.get("status") ?? "");
+  const note = String(formData.get("note") ?? "").trim();
+  if (!id || (status !== "ACTIVE" && status !== "DISCONTINUED")) return;
+  if (status === "DISCONTINUED" && !note) return;
+
+  const supplier = await prisma.supplier.findUnique({ where: { id } });
+  if (!supplier) return;
+
+  await prisma.supplier.update({
+    where: { id },
+    data: {
+      status,
+      discontinuedOn: status === "DISCONTINUED" ? new Date() : null,
+      notes: note || supplier.notes,
+    },
+  });
+
+  await logAudit({
+    module: "Suppliers",
+    recordId: id,
+    field: "status",
+    beforeValue: supplier.status,
+    afterValue: status,
+    reasonCode: status === "DISCONTINUED" ? "SUPPLIER_DISCONTINUED" : "SUPPLIER_REACTIVATED",
   });
   revalidatePath("/purchasing");
 }

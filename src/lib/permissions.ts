@@ -313,6 +313,7 @@ export const ACTION_ROLES = {
     updateSupplier: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
     updateMaterial: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
     createSupplierEvaluation: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
+    setSupplierStatus: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
   },
   maintenance: {
     createTicket: MAINTENANCE_ROLES,

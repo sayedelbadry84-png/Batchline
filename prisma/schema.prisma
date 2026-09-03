@@ -500,13 +500,25 @@ model Customer {
 }
 
 model Supplier {
-  id               String   @id @default(cuid())
+  id               String    @id @default(cuid())
   name             String
   materialCatalog  String?
   leadTimeDays     Int?
-  rejectionRatePct Float    @default(0)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  rejectionRatePct Float     @default(0)
+  // The Certified Suppliers' Register (F/QM/008/2/1) — address, contact
+  // method, and an explicit "Date on" / "Date off" pair marking when a
+  // supplier was approved and, if it later stopped being used, when. Not
+  // backfilled for suppliers already on file — approvedOn/discontinuedOn
+  // populate going forward from setSupplierStatus/createSupplier, same
+  // "don't fabricate history" rule as everywhere else this session.
+  address          String?
+  contactMethod    String?
+  status           String    @default("ACTIVE") // ACTIVE, DISCONTINUED
+  approvedOn       DateTime?
+  discontinuedOn   DateTime?
+  notes            String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   materials            Material[]
   materialReceipts     MaterialReceipt[]

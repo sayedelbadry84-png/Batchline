@@ -18,7 +18,7 @@ import {
   createPurchaseOrderFromMaterialRequisitions,
 } from "./actions";
 import { resolvePlantIdForSite } from "@/lib/siteScope";
-import { createSupplier, createMaterial, updateSupplier, updateMaterial, createSupplierEvaluation } from "../suppliers/actions";
+import { createSupplier, createMaterial, updateSupplier, updateMaterial, createSupplierEvaluation, setSupplierStatus } from "../suppliers/actions";
 
 const PURCHASING_TABS = ["orders", "contracts", "suppliers"] as const;
 type PurchasingTab = (typeof PURCHASING_TABS)[number];
@@ -27,6 +27,11 @@ const categoryChip: Record<string, string> = {
   A: "bg-good-soft text-good",
   B: "bg-warn-soft text-warn",
   C: "bg-critical-soft text-critical",
+};
+
+const supplierStatusChip: Record<string, string> = {
+  ACTIVE: "bg-good-soft text-good",
+  DISCONTINUED: "bg-critical-soft text-critical",
 };
 
 const poStatusChip: Record<string, string> = {
@@ -650,6 +655,7 @@ async function SuppliersTab({
                 <th className={ui.th}>{sm.col.leadTime}</th>
                 <th className={ui.th}>{sm.col.materials}</th>
                 <th className={ui.th}>{sm.col.category}</th>
+                <th className={ui.th}>{sm.col.status}</th>
                 <th className={ui.th}>{dict.field.actions}</th>
               </tr>
             </thead>
@@ -657,7 +663,7 @@ async function SuppliersTab({
               {suppliers.map((s) =>
                 editSupplierId === s.id ? (
                   <tr key={s.id}>
-                    <td className={ui.td} colSpan={6}>
+                    <td className={ui.td} colSpan={7}>
                       <form action={updateSupplier} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={s.id} />
                         <div>
@@ -671,6 +677,14 @@ async function SuppliersTab({
                         <div>
                           <label className={ui.label}>{sm.f.leadTime}</label>
                           <input name="leadTimeDays" type="number" defaultValue={s.leadTimeDays ?? undefined} className={`${ui.input} w-24`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{sm.f.address}</label>
+                          <input name="address" defaultValue={s.address ?? ""} className={`${ui.input} w-44`} />
+                        </div>
+                        <div>
+                          <label className={ui.label}>{sm.f.contactMethod}</label>
+                          <input name="contactMethod" defaultValue={s.contactMethod ?? ""} className={`${ui.input} w-44`} />
                         </div>
                         <button className={ui.button}>{dict.field.save}</button>
                         <Link href={baseUrl} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
@@ -695,6 +709,34 @@ async function SuppliersTab({
                       )}
                     </td>
                     <td className={ui.td}>
+                      <span className={`${ui.chip} ${supplierStatusChip[s.status] ?? ""}`}>{sm.status[s.status as keyof typeof sm.status] ?? s.status}</span>
+                      <div className="mt-1 text-xs text-ink-faint">
+                        {s.status === "DISCONTINUED" && s.discontinuedOn
+                          ? sm.discontinuedOn(new Date(s.discontinuedOn).toLocaleDateString())
+                          : s.approvedOn
+                            ? sm.approvedOn(new Date(s.approvedOn).toLocaleDateString())
+                            : null}
+                      </div>
+                      {s.status === "ACTIVE" ? (
+                        <form action={setSupplierStatus} className="mt-1 flex flex-col gap-1">
+                          <input type="hidden" name="id" value={s.id} />
+                          <input type="hidden" name="status" value="DISCONTINUED" />
+                          <textarea name="note" required rows={2} placeholder={sm.discontinueNotePlaceholder} className="w-40 rounded-md border border-border bg-surface px-2 py-1 text-xs" />
+                          <button className="rounded-md border border-critical bg-critical-soft px-2 py-1 text-xs text-critical hover:opacity-80">
+                            {sm.discontinue}
+                          </button>
+                        </form>
+                      ) : (
+                        <form action={setSupplierStatus} className="mt-1">
+                          <input type="hidden" name="id" value={s.id} />
+                          <input type="hidden" name="status" value="ACTIVE" />
+                          <button className="rounded-md border border-good bg-good-soft px-2 py-1 text-xs text-good hover:opacity-80">
+                            {sm.reactivate}
+                          </button>
+                        </form>
+                      )}
+                    </td>
+                    <td className={ui.td}>
                       <Link href={`${baseUrl}&editSupplier=${s.id}`} className="text-xs font-medium text-accent-strong hover:underline">
                         {dict.field.edit}
                       </Link>
@@ -704,7 +746,7 @@ async function SuppliersTab({
               )}
               {suppliers.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={6}>
+                  <td className={ui.td} colSpan={7}>
                     <span className="text-ink-muted">{sm.empty}</span>
                   </td>
                 </tr>
@@ -726,6 +768,14 @@ async function SuppliersTab({
           <div>
             <label className={ui.label}>{sm.f.leadTime}</label>
             <input name="leadTimeDays" type="number" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.f.address}</label>
+            <input name="address" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.f.contactMethod}</label>
+            <input name="contactMethod" className={ui.input} placeholder="+966 5x xxx xxxx" />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
             {sm.add}
