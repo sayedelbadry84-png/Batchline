@@ -107,11 +107,15 @@ export async function issueSparePart(formData: FormData) {
   const quantity = Number(formData.get("quantity") ?? 0);
   const reason = String(formData.get("reason") ?? "");
   const notes = String(formData.get("notes") ?? "").trim() || null;
-  // Required only for MAINTENANCE — a part logged as maintenance use has
-  // to say which job it went to; every other reason has nothing to link.
+  // Both required only for MAINTENANCE — a part logged as maintenance use
+  // has to say which job it went to and which unit it went into; every
+  // other reason has nothing to link.
   const maintenanceOrderId = String(formData.get("maintenanceOrderId") ?? "") || null;
+  const equipmentType = String(formData.get("equipmentType") ?? "") || null;
+  const equipmentId = String(formData.get("equipmentId") ?? "") || null;
+  const equipmentLabel = String(formData.get("equipmentLabel") ?? "").trim() || null;
   if (!sparePartId || !siteId || !quantity || quantity <= 0 || !reason) return;
-  if (reason === "MAINTENANCE" && !maintenanceOrderId) return;
+  if (reason === "MAINTENANCE" && (!maintenanceOrderId || !equipmentType || !equipmentId || !equipmentLabel)) return;
   if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
 
   const sparePart = await prisma.sparePart.findUnique({ where: { id: sparePartId } });
@@ -135,7 +139,7 @@ export async function issueSparePart(formData: FormData) {
     () => prisma.sparePartIssuance.count(),
     (issuanceNumber) =>
       prisma.sparePartIssuance.create({
-        data: { issuanceNumber, sparePartId, siteId, quantity, unitCost, reason, maintenanceOrderId, notes, issuedById: actor!.id },
+        data: { issuanceNumber, sparePartId, siteId, quantity, unitCost, reason, maintenanceOrderId, equipmentType, equipmentId, equipmentLabel, notes, issuedById: actor!.id },
       }),
   );
 

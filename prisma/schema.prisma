@@ -1943,6 +1943,14 @@ model SparePartIssuance {
   // auto-raised-shortfall path. Left null for every other reason.
   maintenanceOrderId String?
   maintenanceOrder   MaintenanceOrder? @relation(fields: [maintenanceOrderId], references: [id])
+  // Also required when reason is MAINTENANCE — which specific unit the
+  // part actually went into. Same flattened polymorphic shape as
+  // MaintenanceTicket.equipmentType/Id/Label (see that model's own
+  // comment): equipment is spread across Truck/Pump/Silo/Hopper/
+  // SupportVehicle with no single table to hold a real FK against.
+  equipmentType  String?
+  equipmentId    String?
+  equipmentLabel String?
   notes          String?
   issuedById     String
   issuedBy       User              @relation(fields: [issuedById], references: [id])

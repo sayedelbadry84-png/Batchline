@@ -3,6 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { getDictionary } from "@/lib/i18n";
 import { getActiveSiteId } from "@/lib/siteScope";
+import { getEquipmentOptions } from "@/lib/equipmentRegistry";
+import { EquipmentPicker } from "@/components/EquipmentPicker";
 import type { CurrentUser } from "@/lib/session";
 import { createSparePart, receiveSparePart, issueSparePart, approveSparePartsRequisition, rejectSparePartsRequisition } from "./actions";
 
@@ -84,6 +86,7 @@ export async function SparePartsTab({
     orderBy: { createdAt: "desc" },
     take: 100,
   });
+  const equipmentOptions = await getEquipmentOptions(siteId);
 
   // Derived balance — receipts minus issuances, same convention as the
   // Raw Materials Stock Ledger tab.
@@ -317,6 +320,7 @@ export async function SparePartsTab({
                 <th className={ui.th}>{m.colIssuance.quantity}</th>
                 <th className={ui.th}>{m.colIssuance.reason}</th>
                 <th className={ui.th}>{m.colIssuance.order}</th>
+                <th className={ui.th}>{m.colIssuance.equipment}</th>
                 <th className={ui.th}>{m.colIssuance.issuedBy}</th>
                 <th className={ui.th}>{m.colIssuance.date}</th>
               </tr>
@@ -338,12 +342,13 @@ export async function SparePartsTab({
                       <span className="text-xs text-ink-muted">—</span>
                     )}
                   </td>
+                  <td className={ui.td}>{i.equipmentLabel ? `${dict.modules.maintenance.equipmentTypeLabel[i.equipmentType as keyof typeof dict.modules.maintenance.equipmentTypeLabel] ?? i.equipmentType} — ${i.equipmentLabel}` : "—"}</td>
                   <td className={ui.td}>{i.issuedBy.name}</td>
                   <td className={ui.td}>{fmtDate(i.issuedAt)}</td>
                 </tr>
               ))}
               {directIssuances.length === 0 && (
-                <tr><td className={ui.td} colSpan={8}><span className="text-ink-muted">{m.emptyIssuances}</span></td></tr>
+                <tr><td className={ui.td} colSpan={9}><span className="text-ink-muted">{m.emptyIssuances}</span></td></tr>
               )}
             </tbody>
           </table>
@@ -383,6 +388,16 @@ export async function SparePartsTab({
               ))}
             </select>
             <p className="mt-1 text-xs text-ink-muted">{m.f3.maintenanceOrderHint}</p>
+          </div>
+          <div>
+            <label className={ui.label}>{m.f3.equipmentId}</label>
+            <EquipmentPicker
+              options={equipmentOptions}
+              placeholder={dict.modules.maintenance.tickets.f.equipmentPlaceholder}
+              typeLabels={dict.modules.maintenance.equipmentTypeLabel}
+              required={false}
+            />
+            <p className="mt-1 text-xs text-ink-muted">{m.f3.equipmentHint}</p>
           </div>
           <div>
             <label className={ui.label}>{m.f3.unitCost}</label>

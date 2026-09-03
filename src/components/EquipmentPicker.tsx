@@ -15,17 +15,19 @@ export function EquipmentPicker({
   options,
   placeholder,
   typeLabels,
+  required = true,
 }: {
   options: EquipmentOption[];
   placeholder: string;
   typeLabels: Record<string, string>;
+  required?: boolean;
 }) {
   const [selected, setSelected] = useState<EquipmentOption | null>(null);
 
   return (
     <>
       <select
-        required
+        required={required}
         value={selected ? `${selected.type}::${selected.id}` : ""}
         onChange={(e) => {
           const [type, id] = e.target.value.split("::");
