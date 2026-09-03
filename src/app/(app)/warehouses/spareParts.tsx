@@ -52,7 +52,7 @@ export async function SparePartsTab({
     }),
     prisma.sparePartIssuance.findMany({
       where: { ...(siteId ? { siteId } : {}) },
-      include: { sparePart: true, site: true, issuedBy: true },
+      include: { sparePart: true, site: true, issuedBy: true, maintenanceOrder: true },
       orderBy: { issuedAt: "desc" },
       take: 30,
     }),
@@ -73,6 +73,17 @@ export async function SparePartsTab({
     orderBy: { purchaseOrder: { orderDate: "desc" } },
   });
   const openPoLines = openPoLinesRaw as (typeof openPoLinesRaw[number] & { sparePart: NonNullable<typeof openPoLinesRaw[number]["sparePart"]>; orderedQty: number; receivedQty: number })[];
+
+  // Picker for the issuance form's "which job was this for" field, shown
+  // when the reason is MAINTENANCE — every order at this site, not just
+  // open ones, since a part can reasonably get logged against a job
+  // shortly after it's marked complete.
+  const maintenanceOrders = await prisma.maintenanceOrder.findMany({
+    where: siteId ? { ticket: { siteId } } : {},
+    include: { ticket: true },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+  });
 
   // Derived balance — receipts minus issuances, same convention as the
   // Raw Materials Stock Ledger tab.
@@ -305,6 +316,7 @@ export async function SparePartsTab({
                 <th className={ui.th}>{m.colIssuance.plant}</th>
                 <th className={ui.th}>{m.colIssuance.quantity}</th>
                 <th className={ui.th}>{m.colIssuance.reason}</th>
+                <th className={ui.th}>{m.colIssuance.order}</th>
                 <th className={ui.th}>{m.colIssuance.issuedBy}</th>
                 <th className={ui.th}>{m.colIssuance.date}</th>
               </tr>
@@ -317,12 +329,21 @@ export async function SparePartsTab({
                   <td className={ui.td}>{i.site.code}</td>
                   <td className={`${ui.td} font-mono tabular`}>{i.quantity}</td>
                   <td className={ui.td}>{m.reasonLabel[i.reason as keyof typeof m.reasonLabel] ?? i.reason}</td>
+                  <td className={ui.td}>
+                    {i.maintenanceOrder ? (
+                      <Link href={`/maintenance/orders/${i.maintenanceOrder.id}`} className="text-xs text-accent-strong hover:underline">
+                        {i.maintenanceOrder.orderNumber}
+                      </Link>
+                    ) : (
+                      <span className="text-xs text-ink-muted">—</span>
+                    )}
+                  </td>
                   <td className={ui.td}>{i.issuedBy.name}</td>
                   <td className={ui.td}>{fmtDate(i.issuedAt)}</td>
                 </tr>
               ))}
               {directIssuances.length === 0 && (
-                <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.emptyIssuances}</span></td></tr>
+                <tr><td className={ui.td} colSpan={8}><span className="text-ink-muted">{m.emptyIssuances}</span></td></tr>
               )}
             </tbody>
           </table>
@@ -352,6 +373,16 @@ export async function SparePartsTab({
             <select name="reason" required className={ui.select}>
               {Object.entries(m.reasonLabel).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
             </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.f3.maintenanceOrderId}</label>
+            <select name="maintenanceOrderId" defaultValue="" className={ui.select}>
+              <option value="">{dict.field.none}</option>
+              {maintenanceOrders.map((o) => (
+                <option key={o.id} value={o.id}>{o.orderNumber} — {o.ticket.equipmentLabel}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-ink-muted">{m.f3.maintenanceOrderHint}</p>
           </div>
           <div>
             <label className={ui.label}>{m.f3.unitCost}</label>

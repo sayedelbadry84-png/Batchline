@@ -1823,9 +1823,10 @@ model MaintenanceOrder {
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
 
-  technicians  MaintenanceOrderTechnician[]
-  parts        MaintenanceOrderPart[]
-  requisitions SparePartsRequisition[]
+  technicians       MaintenanceOrderTechnician[]
+  parts             MaintenanceOrderPart[]
+  requisitions      SparePartsRequisition[]
+  directIssuances   SparePartIssuance[]
 }
 
 // Real HR roster, not a User account or a separate crew-roster table like
@@ -1926,19 +1927,26 @@ model SparePartReceipt {
 // just MaintenanceOrderPart, or the two paths would silently disagree
 // about how much stock is actually left.
 model SparePartIssuance {
-  id             String    @id @default(cuid())
-  issuanceNumber String    @unique // SPI-YYYY-NNNN
+  id             String            @id @default(cuid())
+  issuanceNumber String            @unique // SPI-YYYY-NNNN
   sparePartId    String
-  sparePart      SparePart @relation(fields: [sparePartId], references: [id])
+  sparePart      SparePart         @relation(fields: [sparePartId], references: [id])
   siteId         String
-  site           Site      @relation(fields: [siteId], references: [id])
+  site           Site              @relation(fields: [siteId], references: [id])
   quantity       Float
   unitCost       Float
   reason         String // MAINTENANCE, SALE, DAMAGED, OTHER
+  // Required (enforced in issueSparePart, warehouses/actions.ts) when
+  // reason is MAINTENANCE — a part logged as maintenance use needs to
+  // say which job it went to, same traceability
+  // SparePartsRequisition.maintenanceOrderId already gives the
+  // auto-raised-shortfall path. Left null for every other reason.
+  maintenanceOrderId String?
+  maintenanceOrder   MaintenanceOrder? @relation(fields: [maintenanceOrderId], references: [id])
   notes          String?
   issuedById     String
-  issuedBy       User      @relation(fields: [issuedById], references: [id])
-  issuedAt       DateTime  @default(now())
+  issuedBy       User              @relation(fields: [issuedById], references: [id])
+  issuedAt       DateTime          @default(now())
 }
 
 // The "auto-generate a purchase request for what's missing" piece — created
