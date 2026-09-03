@@ -4,7 +4,7 @@ import { ui } from "@/lib/ui";
 import { getDictionary } from "@/lib/i18n";
 import { getActiveSiteId } from "@/lib/siteScope";
 import type { CurrentUser } from "@/lib/session";
-import { createSparePart, receiveSparePart, approveSparePartsRequisition, rejectSparePartsRequisition } from "./actions";
+import { createSparePart, receiveSparePart, issueSparePart, approveSparePartsRequisition, rejectSparePartsRequisition } from "./actions";
 
 const requisitionStatusChip: Record<string, string> = {
   PENDING_APPROVAL: "bg-warn-soft text-warn",
@@ -33,7 +33,7 @@ export async function SparePartsTab({
   const m = dict.modules.warehouses.spareParts;
   const siteId = await getActiveSiteId(user);
 
-  const [spareParts, sitesForPicker, suppliers, receipts, allReceiptTotals, orderParts, requisitions] = await Promise.all([
+  const [spareParts, sitesForPicker, suppliers, receipts, allReceiptTotals, orderParts, directIssuances, allDirectIssuanceTotals, requisitions] = await Promise.all([
     prisma.sparePart.findMany({ include: { defaultSupplier: true }, orderBy: { name: "asc" } }),
     prisma.site.findMany({ where: siteId ? { id: siteId } : {}, orderBy: { code: "asc" }, select: { id: true, code: true, name: true } }),
     prisma.supplier.findMany({ orderBy: { name: "asc" } }),
@@ -50,6 +50,13 @@ export async function SparePartsTab({
     prisma.maintenanceOrderPart.findMany({
       include: { sparePart: true, order: { include: { ticket: { select: { siteId: true } } } } },
     }),
+    prisma.sparePartIssuance.findMany({
+      where: { ...(siteId ? { siteId } : {}) },
+      include: { sparePart: true, site: true, issuedBy: true },
+      orderBy: { issuedAt: "desc" },
+      take: 30,
+    }),
+    prisma.sparePartIssuance.findMany({ select: { sparePartId: true, siteId: true, quantity: true } }),
     prisma.sparePartsRequisition.findMany({
       where: { ...(siteId ? { siteId } : {}) },
       include: { sparePart: true, site: true, requestedBy: true, maintenanceOrder: { include: { ticket: true } } },
@@ -78,6 +85,10 @@ export async function SparePartsTab({
   for (const p of orderParts) {
     const key = `${p.sparePartId}::${p.order.ticket.siteId}`;
     outQty.set(key, (outQty.get(key) ?? 0) + p.quantity);
+  }
+  for (const i of allDirectIssuanceTotals) {
+    const key = `${i.sparePartId}::${i.siteId}`;
+    outQty.set(key, (outQty.get(key) ?? 0) + i.quantity);
   }
   const balanceKeys = new Set([...inQty.keys(), ...outQty.keys()]);
   const siteByIdAll = new Map((await prisma.site.findMany({ select: { id: true, code: true, name: true } })).map((s) => [s.id, s]));
@@ -280,6 +291,78 @@ export async function SparePartsTab({
             <input name="serialNumbers" className={ui.input} dir="ltr" />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>{m.receive}</button>
+        </form>
+      </div>
+
+      <div className="grid grid-cols-[1fr_320px] gap-6">
+        <div className={ui.card}>
+          <h2 className="mb-3 font-display text-lg font-semibold">{m.issuancesTitle}</h2>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th className={ui.th}>{m.colIssuance.number}</th>
+                <th className={ui.th}>{m.colIssuance.part}</th>
+                <th className={ui.th}>{m.colIssuance.plant}</th>
+                <th className={ui.th}>{m.colIssuance.quantity}</th>
+                <th className={ui.th}>{m.colIssuance.reason}</th>
+                <th className={ui.th}>{m.colIssuance.issuedBy}</th>
+                <th className={ui.th}>{m.colIssuance.date}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {directIssuances.map((i) => (
+                <tr key={i.id}>
+                  <td className={`${ui.td} font-mono text-xs`}>{i.issuanceNumber}</td>
+                  <td className={ui.td}>{i.sparePart.name}</td>
+                  <td className={ui.td}>{i.site.code}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{i.quantity}</td>
+                  <td className={ui.td}>{m.reasonLabel[i.reason as keyof typeof m.reasonLabel] ?? i.reason}</td>
+                  <td className={ui.td}>{i.issuedBy.name}</td>
+                  <td className={ui.td}>{fmtDate(i.issuedAt)}</td>
+                </tr>
+              ))}
+              {directIssuances.length === 0 && (
+                <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.emptyIssuances}</span></td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <form action={issueSparePart} className={`${ui.card} flex flex-col gap-3`}>
+          <h2 className="font-display text-lg font-semibold">{m.issueTitle}</h2>
+          <div>
+            <label className={ui.label}>{m.f3.sparePartId}</label>
+            <select name="sparePartId" required className={ui.select}>
+              <option value="" disabled>{m.f3.sparePartId}</option>
+              {spareParts.map((sp) => <option key={sp.id} value={sp.id}>{sp.code} — {sp.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.f3.siteId}</label>
+            <select name="siteId" required className={ui.select}>
+              {sitesForPicker.map((s) => <option key={s.id} value={s.id}>{s.code} — {s.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.f3.quantity}</label>
+            <input name="quantity" type="number" step="0.01" min="0.01" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.f3.reason}</label>
+            <select name="reason" required className={ui.select}>
+              {Object.entries(m.reasonLabel).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.f3.unitCost}</label>
+            <input name="unitCost" type="number" step="0.01" min="0" className={ui.input} />
+            <p className="mt-1 text-xs text-ink-muted">{m.f3.unitCostHint}</p>
+          </div>
+          <div>
+            <label className={ui.label}>{m.f3.notes}</label>
+            <input name="notes" className={ui.input} />
+          </div>
+          <button type="submit" className={`${ui.button} mt-2`}>{m.issue}</button>
         </form>
       </div>
 

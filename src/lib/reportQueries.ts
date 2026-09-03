@@ -820,12 +820,14 @@ export async function getPayrollCostReport({ from, to, siteId, plantId }: Report
 // Spare-parts receipts and issuances within the period, plus each touched
 // part's all-time balance as of `to` — same derivation the Warehouses
 // module's own Spare Parts tab uses (sum of SparePartReceipt.quantity minus
-// sum of MaintenanceOrderPart.quantity, keyed by sparePartId+site; see that
-// tab's own comment), computed here rather than imported since the tab's
-// version isn't date-ranged. No plantId: spare parts are a site-level
-// warehouse, not per-line.
+// sum of MaintenanceOrderPart.quantity minus sum of
+// SparePartIssuance.quantity — a part can leave the shelf against a
+// maintenance order OR as a direct warehouse issuance, both count —
+// keyed by sparePartId+site; see that tab's own comment), computed here
+// rather than imported since the tab's version isn't date-ranged. No
+// plantId: spare parts are a site-level warehouse, not per-line.
 export async function getSparePartsReport({ from, to, siteId }: Pick<ReportFilter, "from" | "to" | "siteId">) {
-  const [receipts, issuances, allReceiptsForBalance, allIssuancesForBalance] = await Promise.all([
+  const [receipts, orderIssuances, directIssuances, allReceiptsForBalance, allOrderIssuancesForBalance, allDirectIssuancesForBalance] = await Promise.all([
     prisma.sparePartReceipt.findMany({
       where: { receivedAt: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
       include: { sparePart: true, site: { select: { name: true } }, supplier: { select: { name: true } }, receivedBy: { select: { name: true } } },
@@ -836,30 +838,48 @@ export async function getSparePartsReport({ from, to, siteId }: Pick<ReportFilte
       include: { sparePart: true, order: { include: { ticket: { select: { siteId: true } } } }, issuedBy: { select: { name: true } } },
       orderBy: { issuedAt: "asc" },
     }),
+    prisma.sparePartIssuance.findMany({
+      where: { issuedAt: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+      include: { sparePart: true, site: { select: { name: true } }, issuedBy: { select: { name: true } } },
+      orderBy: { issuedAt: "asc" },
+    }),
     prisma.sparePartReceipt.findMany({ select: { sparePartId: true, siteId: true, quantity: true } }),
     prisma.maintenanceOrderPart.findMany({ select: { sparePartId: true, quantity: true, order: { select: { ticket: { select: { siteId: true } } } } } }),
+    prisma.sparePartIssuance.findMany({ select: { sparePartId: true, siteId: true, quantity: true } }),
   ]);
-  const issuancesInScope = siteId ? issuances.filter((i) => i.order.ticket.siteId === siteId) : issuances;
+  const orderIssuancesInScope = siteId ? orderIssuances.filter((i) => i.order.ticket.siteId === siteId) : orderIssuances;
 
   const inQty = new Map<string, number>();
   for (const r of allReceiptsForBalance) inQty.set(`${r.sparePartId}::${r.siteId}`, (inQty.get(`${r.sparePartId}::${r.siteId}`) ?? 0) + r.quantity);
   const outQty = new Map<string, number>();
-  for (const p of allIssuancesForBalance) {
+  for (const p of allOrderIssuancesForBalance) {
     const key = `${p.sparePartId}::${p.order.ticket.siteId}`;
     outQty.set(key, (outQty.get(key) ?? 0) + p.quantity);
   }
-  const touchedKeys = new Set([...receipts.map((r) => `${r.sparePartId}::${r.siteId}`), ...issuancesInScope.map((i) => `${i.sparePartId}::${i.order.ticket.siteId}`)]);
+  for (const i of allDirectIssuancesForBalance) {
+    const key = `${i.sparePartId}::${i.siteId}`;
+    outQty.set(key, (outQty.get(key) ?? 0) + i.quantity);
+  }
+  const touchedKeys = new Set([
+    ...receipts.map((r) => `${r.sparePartId}::${r.siteId}`),
+    ...orderIssuancesInScope.map((i) => `${i.sparePartId}::${i.order.ticket.siteId}`),
+    ...directIssuances.map((i) => `${i.sparePartId}::${i.siteId}`),
+  ]);
   const balances = Array.from(touchedKeys, (key) => {
     const [sparePartId] = key.split("::");
-    const part = receipts.find((r) => r.sparePartId === sparePartId)?.sparePart ?? issuancesInScope.find((i) => i.sparePartId === sparePartId)?.sparePart;
+    const part =
+      receipts.find((r) => r.sparePartId === sparePartId)?.sparePart ??
+      orderIssuancesInScope.find((i) => i.sparePartId === sparePartId)?.sparePart ??
+      directIssuances.find((i) => i.sparePartId === sparePartId)?.sparePart;
     return { key, partCode: part?.code ?? sparePartId, partName: part?.name ?? "", balance: (inQty.get(key) ?? 0) - (outQty.get(key) ?? 0) };
   }).sort((a, b) => a.partCode.localeCompare(b.partCode));
 
   const totalReceivedValue = receipts.reduce((sum, r) => sum + r.quantity * r.unitCost, 0);
-  const totalIssuedValue = issuancesInScope.reduce((sum, i) => sum + i.lineTotal, 0);
+  const totalIssuedValue = orderIssuancesInScope.reduce((sum, i) => sum + i.lineTotal, 0) + directIssuances.reduce((sum, i) => sum + i.quantity * i.unitCost, 0);
+  const issuanceCount = orderIssuancesInScope.length + directIssuances.length;
   const lowStockCount = balances.filter((b) => b.balance <= 0).length;
 
-  return { receipts, issuances: issuancesInScope, balances, receiptCount: receipts.length, issuanceCount: issuancesInScope.length, totalReceivedValue, totalIssuedValue, lowStockCount };
+  return { receipts, issuances: orderIssuancesInScope, directIssuances, balances, receiptCount: receipts.length, issuanceCount, totalReceivedValue, totalIssuedValue, lowStockCount };
 }
 
 // The Finished Goods equivalent of the Spare Parts report above — IN

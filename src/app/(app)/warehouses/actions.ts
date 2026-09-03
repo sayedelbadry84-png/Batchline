@@ -92,6 +92,50 @@ export async function receiveSparePart(formData: FormData) {
   revalidatePath("/purchasing");
 }
 
+// A direct issuance straight from the warehouse — not tied to a
+// MaintenanceOrder (see issueSparePartToOrder in maintenance/actions.ts
+// for that path). Refuses outright rather than partially issuing when
+// stock is short: unlike the order-linked path, there's no work order to
+// auto-raise a shortfall requisition against, so a partial issue here
+// would just be a confusing half-fulfilled record.
+export async function issueSparePart(formData: FormData) {
+  const actor = await getCurrentUser();
+  await requireActionPermission(actor, "warehouses", "issueSparePart");
+
+  const sparePartId = String(formData.get("sparePartId") ?? "");
+  const siteId = String(formData.get("siteId") ?? "");
+  const quantity = Number(formData.get("quantity") ?? 0);
+  const reason = String(formData.get("reason") ?? "");
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (!sparePartId || !siteId || !quantity || quantity <= 0 || !reason) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
+
+  const sparePart = await prisma.sparePart.findUnique({ where: { id: sparePartId } });
+  if (!sparePart) return;
+  const unitCost = Number(formData.get("unitCost") ?? 0) || sparePart.lastUnitCost || 0;
+
+  const [receivedAgg, orderIssuedAgg, directIssuedAgg] = await Promise.all([
+    prisma.sparePartReceipt.aggregate({ where: { sparePartId, siteId }, _sum: { quantity: true } }),
+    prisma.maintenanceOrderPart.aggregate({ where: { sparePartId, order: { ticket: { siteId } } }, _sum: { quantity: true } }),
+    prisma.sparePartIssuance.aggregate({ where: { sparePartId, siteId }, _sum: { quantity: true } }),
+  ]);
+  const available = (receivedAgg._sum.quantity ?? 0) - (orderIssuedAgg._sum.quantity ?? 0) - (directIssuedAgg._sum.quantity ?? 0);
+  if (quantity > available) return;
+
+  const issuance = await withSequentialNumber(
+    "SPI",
+    () => prisma.sparePartIssuance.count(),
+    (issuanceNumber) =>
+      prisma.sparePartIssuance.create({
+        data: { issuanceNumber, sparePartId, siteId, quantity, unitCost, reason, notes, issuedById: actor!.id },
+      }),
+  );
+
+  await logAudit({ module: "Warehouses", recordId: issuance.id, afterValue: `${issuance.issuanceNumber} — ${sparePart.name} × ${quantity} (${reason})`, reasonCode: "SPARE_PART_ISSUED" });
+  revalidatePath("/warehouses");
+  revalidatePath("/maintenance");
+}
+
 export async function approveSparePartsRequisition(formData: FormData) {
   const actor = await getCurrentUser();
   await requireActionPermission(actor, "warehouses", "approveSparePartsRequisition");

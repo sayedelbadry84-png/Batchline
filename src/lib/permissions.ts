@@ -354,6 +354,7 @@ export const ACTION_ROLES = {
   warehouses: {
     createSparePart: WAREHOUSE_ROLES,
     receiveSparePart: WAREHOUSE_ROLES,
+    issueSparePart: WAREHOUSE_ROLES,
     createFinishedProduct: WAREHOUSE_ROLES,
     recordFinishedProductMovement: WAREHOUSE_ROLES,
     // Approving a requisition commits the company to actually buying it —

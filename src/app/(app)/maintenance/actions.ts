@@ -396,11 +396,16 @@ export async function issueSparePartToOrder(formData: FormData) {
   const unitCost = Number(formData.get("unitCost") ?? 0) || sparePart.lastUnitCost || 0;
 
   const siteId = order.ticket.siteId;
-  const [receivedAgg, issuedAgg] = await Promise.all([
+  // Availability has to net out BOTH ways stock leaves — an order-linked
+  // issuance here and a direct warehouse issuance (see issueSparePart in
+  // warehouses/actions.ts) — or the two paths would silently disagree
+  // about how much is actually left on the shelf.
+  const [receivedAgg, orderIssuedAgg, directIssuedAgg] = await Promise.all([
     prisma.sparePartReceipt.aggregate({ where: { sparePartId, siteId }, _sum: { quantity: true } }),
     prisma.maintenanceOrderPart.aggregate({ where: { sparePartId, order: { ticket: { siteId } } }, _sum: { quantity: true } }),
+    prisma.sparePartIssuance.aggregate({ where: { sparePartId, siteId }, _sum: { quantity: true } }),
   ]);
-  const available = (receivedAgg._sum.quantity ?? 0) - (issuedAgg._sum.quantity ?? 0);
+  const available = (receivedAgg._sum.quantity ?? 0) - (orderIssuedAgg._sum.quantity ?? 0) - (directIssuedAgg._sum.quantity ?? 0);
   const issueQty = Math.max(0, Math.min(available, quantity));
   const shortfall = quantity - issueQty;
 

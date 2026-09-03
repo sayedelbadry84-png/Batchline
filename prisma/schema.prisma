@@ -92,6 +92,7 @@ model User {
   maintenanceOrdersCreated         MaintenanceOrder[]
   maintenanceOrderPartsIssued      MaintenanceOrderPart[]
   sparePartReceiptsReceived        SparePartReceipt[]
+  sparePartIssuancesIssued         SparePartIssuance[]
   sparePartsRequisitionsRequested  SparePartsRequisition[]   @relation("SPRRequestedBy")
   sparePartsRequisitionsApproved   SparePartsRequisition[]   @relation("SPRApprovedBy")
   materialRequisitionsRequested    MaterialRequisition[]     @relation("MTRRequestedBy")
@@ -191,6 +192,7 @@ model Site {
   zatcaSettings            ZatcaSettings?
   wpsSettings              WpsSettings?
   bankStatementLines       BankStatementLine[]
+  sparePartIssuances       SparePartIssuance[]
 }
 
 // A site's ZATCA (Saudi e-invoicing) registration — one row per site,
@@ -1864,10 +1866,10 @@ model MaintenanceOrderPart {
 // Spare Parts warehouse — the Maintenance module's own inventory, distinct
 // from Material (bulk raw concrete ingredients only). Stock balance is
 // always derived (sum of SparePartReceipt.quantity minus sum of
-// MaintenanceOrderPart.quantity, scoped by sparePartId+site) rather than
-// stored, same convention the existing Stock Ledger report already uses for
-// Material — no running-balance column to keep consistent under concurrent
-// writes.
+// MaintenanceOrderPart.quantity minus sum of SparePartIssuance.quantity,
+// scoped by sparePartId+site) rather than stored, same convention the
+// existing Stock Ledger report already uses for Material — no
+// running-balance column to keep consistent under concurrent writes.
 // ---------------------------------------------------------------------------
 
 model SparePart {
@@ -1886,6 +1888,7 @@ model SparePart {
 
   receipts           SparePartReceipt[]
   orderParts         MaintenanceOrderPart[]
+  issuances          SparePartIssuance[]
   requisitions       SparePartsRequisition[]
   purchaseOrderLines PurchaseOrderLine[]
 }
@@ -1911,6 +1914,31 @@ model SparePartReceipt {
   receivedById        String
   receivedBy          User               @relation(fields: [receivedById], references: [id])
   receivedAt          DateTime           @default(now())
+}
+
+// A direct issuance of stock straight from the warehouse — general use,
+// a sale, damage/write-off, or any other reason a part leaves the shelf
+// without going through a formal MaintenanceOrder (see
+// MaintenanceOrderPart for that path instead, and issueSparePartToOrder
+// in maintenance/actions.ts). Both are "issued" for balance purposes —
+// every place that derives a spare part's on-hand balance from
+// SparePartReceipt minus issuances must subtract this model too, not
+// just MaintenanceOrderPart, or the two paths would silently disagree
+// about how much stock is actually left.
+model SparePartIssuance {
+  id             String    @id @default(cuid())
+  issuanceNumber String    @unique // SPI-YYYY-NNNN
+  sparePartId    String
+  sparePart      SparePart @relation(fields: [sparePartId], references: [id])
+  siteId         String
+  site           Site      @relation(fields: [siteId], references: [id])
+  quantity       Float
+  unitCost       Float
+  reason         String // MAINTENANCE, SALE, DAMAGED, OTHER
+  notes          String?
+  issuedById     String
+  issuedBy       User      @relation(fields: [issuedById], references: [id])
+  issuedAt       DateTime  @default(now())
 }
 
 // The "auto-generate a purchase request for what's missing" piece — created
