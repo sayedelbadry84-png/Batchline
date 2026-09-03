@@ -36,17 +36,26 @@ export async function destroySession() {
 }
 
 // A password has verified but the account also needs a TOTP code — this
-// cookie carries just the user id across the redirect to /login/verify.
-// Deliberately a SEPARATE cookie from SESSION_COOKIE, and never written to
-// the Session table, so nothing else in the app could ever mistake a
-// pending-2FA state for an actual logged-in session. Short-lived on
-// purpose: the user either finishes 2FA within 5 minutes or starts over.
+// cookie carries an opaque, server-generated PendingTwoFactor row id across
+// the redirect to /login/verify, NEVER the user id itself: httpOnly only
+// keeps JS from reading it, it doesn't stop a client from handcrafting an
+// arbitrary cookie value in a raw request, so if the cookie's value were the
+// user id directly, anyone who knew or guessed a valid user id could skip
+// the password step entirely and start attempting TOTP codes for that
+// account. A random cuid the client never chooses closes that off. Kept in
+// its own table rather than the Session table so nothing else in the app
+// could ever mistake a pending-2FA state for an actual logged-in session.
+// Short-lived on purpose: the user either finishes 2FA within 5 minutes or
+// starts over.
 const PENDING_2FA_COOKIE = "batchline_pending_2fa";
 const PENDING_2FA_TTL_MS = 5 * 60 * 1000;
 
 export async function setPending2faUser(userId: string) {
+  const pending = await prisma.pendingTwoFactor.create({
+    data: { userId, expiresAt: new Date(Date.now() + PENDING_2FA_TTL_MS) },
+  });
   const store = await cookies();
-  store.set(PENDING_2FA_COOKIE, userId, {
+  store.set(PENDING_2FA_COOKIE, pending.id, {
     path: "/",
     httpOnly: true,
     sameSite: "lax",
@@ -57,11 +66,26 @@ export async function setPending2faUser(userId: string) {
 
 export async function getPending2faUserId(): Promise<string | null> {
   const store = await cookies();
-  return store.get(PENDING_2FA_COOKIE)?.value ?? null;
+  const token = store.get(PENDING_2FA_COOKIE)?.value;
+  if (!token) return null;
+
+  const pending = await prisma.pendingTwoFactor.findUnique({ where: { id: token } });
+  if (!pending) return null;
+
+  if (pending.expiresAt < new Date()) {
+    await prisma.pendingTwoFactor.delete({ where: { id: token } }).catch(() => {});
+    return null;
+  }
+
+  return pending.userId;
 }
 
 export async function clearPending2fa() {
   const store = await cookies();
+  const token = store.get(PENDING_2FA_COOKIE)?.value;
+  if (token) {
+    await prisma.pendingTwoFactor.deleteMany({ where: { id: token } });
+  }
   store.delete(PENDING_2FA_COOKIE);
 }
 
@@ -79,6 +103,15 @@ export async function getCurrentUser() {
   if (!session) return null;
 
   if (session.expiresAt < new Date()) {
+    await prisma.session.delete({ where: { id: token } }).catch(() => {});
+    return null;
+  }
+
+  // A session created while the account was ACTIVE stays valid for up to
+  // SESSION_TTL_MS even after an admin disables/freezes the user — without
+  // this check, revoking access only takes effect once the session
+  // naturally expires (up to 7 days later), not immediately.
+  if (session.user.status !== "ACTIVE") {
     await prisma.session.delete({ where: { id: token } }).catch(() => {});
     return null;
   }

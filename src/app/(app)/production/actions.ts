@@ -120,45 +120,64 @@ async function releaseTicketForReservation(reservationId: string, requestedVolum
   });
   if (!reservation) return null;
 
-  const remaining = await getRemainingVolumeM3(reservationId, reservation.requestedVolumeM3);
-  const volumeM3 = Math.min(requestedVolume, remaining);
-  if (volumeM3 <= 0) return null;
+  // The remaining-volume read and the ticket create used to be two separate
+  // round trips with no lock between them — two concurrent releases for the
+  // same reservation could both read the same "remaining" figure and both
+  // create a ticket, together dispatching more than was ever requested.
+  // Serializable makes Postgres detect that read-write conflict and abort
+  // one of the two competing transactions.
+  let ticket;
+  try {
+    ticket = await prisma.$transaction(
+      async (tx) => {
+        const remaining = await getRemainingVolumeM3(reservationId, reservation.requestedVolumeM3, tx);
+        const volumeM3 = Math.min(requestedVolume, remaining);
+        if (volumeM3 <= 0) throw new Error("NO_REMAINING_VOLUME");
 
-  // ticketNumber is globally unique (one company-wide sequence, not
-  // per-plant) — it used to be counted per plantId while the column
-  // itself has no per-plant scoping, so the FIRST ticket at any second
-  // plant always collided with "BT-<year>-0001" from the first one ever
-  // used. See withSequentialNumber's own comment for the full story.
-  const ticket = await withSequentialNumber(
-    "BT",
-    () => prisma.batchTicket.count(),
-    (ticketNumber) =>
-      prisma.batchTicket.create({
-        data: {
-          reservationId,
-          mixId: reservation.mixId,
-          plantId,
-          ticketNumber,
-          volumeM3,
-          status: "RELEASED",
-          components: {
-            create: reservation.mix.components.map((c) => ({
-              materialId: c.materialId,
-              targetMassKg: c.designMassKgPerM3 * volumeM3,
-            })),
-          },
-        },
-      }),
-  );
+        // ticketNumber is globally unique (one company-wide sequence, not
+        // per-plant) — it used to be counted per plantId while the column
+        // itself has no per-plant scoping, so the FIRST ticket at any
+        // second plant always collided with "BT-<year>-0001" from the
+        // first one ever used. See withSequentialNumber's own comment for
+        // the full story.
+        const created = await withSequentialNumber(
+          "BT",
+          () => tx.batchTicket.count(),
+          (ticketNumber) =>
+            tx.batchTicket.create({
+              data: {
+                reservationId,
+                mixId: reservation.mixId,
+                plantId,
+                ticketNumber,
+                volumeM3,
+                status: "RELEASED",
+                components: {
+                  create: reservation.mix.components.map((c) => ({
+                    materialId: c.materialId,
+                    targetMassKg: c.designMassKgPerM3 * volumeM3,
+                  })),
+                },
+              },
+            }),
+        );
 
-  if (reservation.status !== "IN_PRODUCTION") {
-    await prisma.reservation.update({ where: { id: reservationId }, data: { status: "IN_PRODUCTION" } });
+        if (reservation.status !== "IN_PRODUCTION") {
+          await tx.reservation.update({ where: { id: reservationId }, data: { status: "IN_PRODUCTION" } });
+        }
+
+        return created;
+      },
+      { ...TX_OPTIONS, isolationLevel: "Serializable" },
+    );
+  } catch {
+    return null;
   }
 
   await logAudit({
     module: "Production",
     recordId: ticket.id,
-    afterValue: `${ticket.ticketNumber} — ${volumeM3} m3`,
+    afterValue: `${ticket.ticketNumber} — ${ticket.volumeM3} m3`,
     reasonCode: "BATCH_RELEASED",
   });
 
@@ -276,6 +295,16 @@ export async function recordActuals(formData: FormData) {
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   if (!batchTicketId) return;
 
+  // Same COMPLETE boundary recordActualField already enforces (line ~337
+  // below) — this bulk sibling was missing it entirely. Without this guard,
+  // saving readings on an already-COMPLETE ticket flips it back to
+  // BATCHING, which clears completeBatch's own `status === "COMPLETE"`
+  // guard and lets a resubmit deduct the same materials from inventory a
+  // second time.
+  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId } });
+  if (!ticket || ticket.status === "COMPLETE") return;
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
+
   const components = await prisma.batchComponentActual.findMany({
     where: { batchTicketId },
     include: { material: true },
@@ -290,7 +319,10 @@ export async function recordActuals(formData: FormData) {
 
     const moisturePct = AGGREGATE_TYPES.has(c.material.type) && rawMoisture !== null ? Number(rawMoisture) : null;
     const enteredMass = Number(rawActual);
-    if (!Number.isFinite(enteredMass)) continue;
+    // A negative weighed mass (typo, scale glitch) would later be summed
+    // into `currentLevelTons - massTons` in completeBatch and INCREASE the
+    // silo/hopper reading instead of decreasing it.
+    if (!Number.isFinite(enteredMass) || enteredMass < 0) continue;
 
     await prisma.batchComponentActual.update({
       where: { id: c.id },
@@ -328,13 +360,14 @@ export async function recordActualField(formData: FormData) {
   if (field !== "actual" && field !== "moisture") return;
 
   const value = Number(rawValue);
-  if (!Number.isFinite(value)) return;
+  if (!Number.isFinite(value) || value < 0) return;
 
   const component = await prisma.batchComponentActual.findUnique({
     where: { id: componentId },
     include: { batchTicket: true },
   });
   if (!component || component.batchTicketId !== batchTicketId || component.batchTicket.status === "COMPLETE") return;
+  if (!(await isPlantInScope(component.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   await prisma.batchComponentActual.update({
     where: { id: componentId },
@@ -363,6 +396,7 @@ export async function completeBatch(formData: FormData) {
 
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   if (!batchTicketId) return;
+  const shortageOverrideNote = String(formData.get("shortageOverrideNote") ?? "").trim() || null;
 
   const ticket = await prisma.batchTicket.findUnique({
     where: { id: batchTicketId },
@@ -373,6 +407,36 @@ export async function completeBatch(formData: FormData) {
   });
   if (!ticket || ticket.status === "COMPLETE") return;
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
+
+  // Would deducting this component take its store below zero? Completing
+  // used to clamp at 0 silently (Math.max(0, current - usage)), hiding a
+  // real physical shortfall — the mixer ran with less material than the
+  // recipe called for, with no record anywhere that it happened. Same
+  // "no note, no [consequential change]" rule as CAPA/waste-memo/incoming-
+  // inspection elsewhere: a shortage still completes, but only with a
+  // written override reason, and that reason is what gets audited.
+  const shortages: string[] = [];
+  for (const c of ticket.components) {
+    const massKg = c.actualMassKg ?? c.targetMassKg;
+    const massTons = massKg / 1000;
+    if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
+      const silo = await findMatchingSilo(prisma, ticket.plantId, ticket.plant.siteId, c.material.type);
+      if (silo && silo.currentLevelTons < massTons) shortages.push(`${c.material.name}: ${silo.currentLevelTons.toFixed(2)}t on hand, ${massTons.toFixed(2)}t needed`);
+    } else if (AGGREGATE_TYPES.has(c.material.type)) {
+      const hopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" });
+      if (hopper && hopper.currentLevelTons < massTons) shortages.push(`${c.material.name}: ${hopper.currentLevelTons.toFixed(2)}t on hand, ${massTons.toFixed(2)}t needed`);
+    } else if (c.material.type === "WATER") {
+      const waterHopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
+      if (waterHopper && waterHopper.currentLevelTons < massTons) shortages.push(`${c.material.name}: ${waterHopper.currentLevelTons.toFixed(2)}t on hand, ${massTons.toFixed(2)}t needed`);
+    } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
+      const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
+      if (tank) {
+        const liters = massKg / c.material.specificGravity;
+        if (tank.currentLevelLiters < liters) shortages.push(`${c.material.name}: ${tank.currentLevelLiters.toFixed(0)}L on hand, ${liters.toFixed(0)}L needed`);
+      }
+    }
+  }
+  if (shortages.length > 0 && !shortageOverrideNote) return;
 
   // Auto-requisition checks (maybeAutoRequisitionMaterial) fire their own
   // notification side effect and aren't part of the inventory/status write
@@ -467,8 +531,17 @@ export async function completeBatch(formData: FormData) {
     recordId: batchTicketId,
     field: "status",
     afterValue: "COMPLETE",
-    reasonCode: "BATCH_COMPLETE_INVENTORY_DEDUCTED",
+    reasonCode: shortages.length > 0 ? "BATCH_COMPLETE_WITH_SHORTAGE_OVERRIDE" : "BATCH_COMPLETE_INVENTORY_DEDUCTED",
   });
+  if (shortages.length > 0) {
+    await logAudit({
+      module: "Production",
+      recordId: batchTicketId,
+      field: "shortageOverrideNote",
+      afterValue: `${shortageOverrideNote} — ${shortages.join("; ")}`,
+      reasonCode: "BATCH_SHORTAGE_OVERRIDDEN",
+    });
+  }
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);
@@ -491,9 +564,26 @@ export async function startTrip(formData: FormData) {
 
   const ticket = await prisma.batchTicket.findUnique({
     where: { id: batchTicketId },
-    include: { reservation: true, components: true },
+    include: { reservation: true, components: { include: { material: true } }, plant: true },
   });
   if (!ticket) return;
+  // The page only ever renders this form once the ticket is COMPLETE (see
+  // production/[id]/page.tsx's showAssignForm) — re-checked here server-side
+  // for the same reason every other "the picker already filtered this"
+  // check in the app is re-verified against a crafted/stale request. This
+  // also fixes a real sequencing bug: completeBatch deducts inventory using
+  // each component's PRE-reclaim target mass; only requiring COMPLETE
+  // before dispatch guarantees that deduction has already happened by the
+  // time the reclaim credit-back below runs, so the two stay consistent.
+  if (ticket.status !== "COMPLETE") return;
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
+
+  const truck = await prisma.truck.findUnique({ where: { id: truckId }, include: { plant: true } });
+  if (!truck || truck.status === "OUT_OF_SERVICE" || truck.status === "MAINTENANCE") return;
+  if (truck.plant.siteId !== ticket.plant.siteId) return;
+
+  const driver = await prisma.employee.findUnique({ where: { id: driverId } });
+  if (!driver || driver.status !== "ACTIVE" || driver.role !== "DRIVER") return;
 
   // Pump crew/unit only apply when the reservation was booked for pump
   // delivery — ignore anything submitted for a chute delivery so a stray
@@ -579,11 +669,48 @@ export async function startTrip(formData: FormData) {
 
         if (availableReclaim && reclaimedVolumeM3) {
           const freshFraction = 1 - reclaimedVolumeM3 / ticket.volumeM3;
+          const reclaimedFraction = 1 - freshFraction;
+          // completeBatch (required to have already run — see the
+          // ticket.status === "COMPLETE" check above) deducted every
+          // component's FULL pre-reclaim mass from inventory, since reclaim
+          // for this specific truck wasn't known yet at completion time.
+          // Now that it is, credit back the reclaimed share of whatever was
+          // actually deducted (actualMassKg if weighed, else targetMassKg —
+          // the same fallback completeBatch itself uses) to the same
+          // silo/hopper/tank it came from, so the ledger matches the fresh
+          // material genuinely drawn for this load.
           for (const c of ticket.components) {
+            const deductedMassKg = c.actualMassKg ?? c.targetMassKg;
+            const creditMassKg = deductedMassKg * reclaimedFraction;
+
             await tx.batchComponentActual.update({
               where: { id: c.id },
               data: { targetMassKg: c.targetMassKg * freshFraction },
             });
+
+            if (creditMassKg <= 0) continue;
+            const creditTons = creditMassKg / 1000;
+            if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
+              const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.material.type);
+              if (silo) await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + creditTons } });
+            } else if (AGGREGATE_TYPES.has(c.material.type)) {
+              const hopper = await findMatchingHopper(
+                tx,
+                ticket.plantId,
+                ticket.plant.siteId,
+                c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
+              );
+              if (hopper) await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + creditTons } });
+            } else if (c.material.type === "WATER") {
+              const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
+              if (waterHopper) await tx.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: waterHopper.currentLevelTons + creditTons } });
+            } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
+              const tank = await tx.chemicalTank.findFirst({ where: { plantId: ticket.plantId, materialId: c.materialId } });
+              if (tank) {
+                const creditLiters = creditMassKg / c.material.specificGravity;
+                await tx.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: tank.currentLevelLiters + creditLiters } });
+              }
+            }
           }
           await tx.drumReturn.update({
             where: { id: availableReclaim.drumReturnId },

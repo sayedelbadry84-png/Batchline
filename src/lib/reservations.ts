@@ -1,5 +1,8 @@
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import { reservationSiteScopeWhere } from "@/lib/siteScope";
+
+type Db = Prisma.TransactionClient | typeof prisma;
 
 const VOLUME_EPSILON_M3 = 0.01;
 
@@ -30,16 +33,20 @@ export function sumAcceptedVolumeM3(tickets: { volumeM3: number; trip?: { volume
  * release form, the Reservations progress display, and the
  * fully-delivered check below can't drift out of sync with each other.
  */
-export async function getReleasedVolumeM3(reservationId: string): Promise<number> {
-  const tickets = await prisma.batchTicket.findMany({
+// Accepts an optional transaction client (defaulting to the plain
+// singleton) so a caller that needs the read and the ticket-create it
+// gates to be atomic — see releaseTicketForReservation in
+// production/actions.ts — can pass its own `tx` through.
+export async function getReleasedVolumeM3(reservationId: string, db: Db = prisma): Promise<number> {
+  const tickets = await db.batchTicket.findMany({
     where: { reservationId, status: { not: "CANCELLED" } },
     select: { volumeM3: true, trip: { select: { volumeDeliveredM3: true } } },
   });
   return sumAcceptedVolumeM3(tickets);
 }
 
-export async function getRemainingVolumeM3(reservationId: string, requestedVolumeM3: number): Promise<number> {
-  const released = await getReleasedVolumeM3(reservationId);
+export async function getRemainingVolumeM3(reservationId: string, requestedVolumeM3: number, db: Db = prisma): Promise<number> {
+  const released = await getReleasedVolumeM3(reservationId, db);
   return Math.max(0, requestedVolumeM3 - released);
 }
 

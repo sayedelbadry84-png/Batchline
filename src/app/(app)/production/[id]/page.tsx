@@ -270,15 +270,22 @@ export default async function BatchTicketPage({
       )}
 
       {ticket.status !== "COMPLETE" && (
-        <form action={completeBatch} className={`${ui.card} flex items-center justify-between`}>
+        <form action={completeBatch} className={`${ui.card} flex flex-col gap-3`}>
           <input type="hidden" name="batchTicketId" value={ticket.id} />
-          <div>
-            <h2 className="font-display text-lg font-semibold">{d.completeTitle}</h2>
-            <p className="text-sm text-ink-muted">{d.completeIntro}</p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="font-display text-lg font-semibold">{d.completeTitle}</h2>
+              <p className="text-sm text-ink-muted">{d.completeIntro}</p>
+            </div>
+            <button type="submit" className={ui.button}>
+              {d.completeButton}
+            </button>
           </div>
-          <button type="submit" className={ui.button}>
-            {d.completeButton}
-          </button>
+          <div>
+            <label className={ui.label}>{d.shortageOverrideNote}</label>
+            <textarea name="shortageOverrideNote" rows={2} placeholder={d.shortageOverrideNotePlaceholder} className={`${ui.input} w-full`} />
+            <p className="mt-1 text-xs text-ink-muted">{d.shortageOverrideNoteHint}</p>
+          </div>
         </form>
       )}
 

@@ -91,6 +91,10 @@ export async function closeTripWithReturn(formData: FormData) {
   });
   if (!trip || trip.status === "CLOSED") return;
   if (!(await isPlantInScope(trip.batchTicket.plantId, effectiveSiteId(user)))) return;
+  // A truck can't return more concrete than the ticket loaded it with — an
+  // unbounded value here (typo, or a bad-faith over-claim) would flow
+  // straight into disposition math and the customer's billing reduction.
+  if (returnedVolumeM3 > trip.batchTicket.volumeM3) return;
 
   const now = new Date();
   const minutesSinceBatch = Math.round((now.getTime() - trip.batchTime.getTime()) / 60000);

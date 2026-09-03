@@ -66,6 +66,7 @@ model User {
 
   auditEvents                       AuditEvent[]
   sessions                          Session[]
+  pendingTwoFactors                 PendingTwoFactor[]
   reservationInitialApprovals       Reservation[]             @relation("ReservationInitialApproval")
   reservationFinalApprovals         Reservation[]             @relation("ReservationFinalApproval")
   reservationClosures               Reservation[]             @relation("ReservationClosedBy")
@@ -119,6 +120,19 @@ model User {
 }
 
 model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+// The password step has passed but TOTP hasn't yet — the cookie only ever
+// carries this row's own unguessable id, never the userId itself, so a
+// client can't just set batchline_pending_2fa to an arbitrary known/guessed
+// user id and start attempting TOTP codes for someone else's account
+// without ever having their password.
+model PendingTwoFactor {
   id        String   @id @default(cuid())
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
