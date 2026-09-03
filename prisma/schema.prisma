@@ -21,8 +21,8 @@ datasource db {
 // are enforced in application code: ADMIN, PLANT_OPERATOR, QUALITY_SUPERVISOR,
 // ACCOUNTANT, DRIVER, CUSTOMER.
 model User {
-  id                  String    @id @default(cuid())
-  email               String    @unique
+  id                  String          @id @default(cuid())
+  email               String          @unique
   name                String
   passwordHash        String
   role                String
@@ -31,25 +31,25 @@ model User {
   // so retiring the seeded demo accounts doesn't reveal which emails were
   // ever real. Deliberately not a delete: Session/AuditEvent rows still
   // reference the user.
-  status              String    @default("ACTIVE")
+  status              String          @default("ACTIVE")
   plantId             String?
-  plant               Plant?    @relation(fields: [plantId], references: [id])
+  plant               Plant?          @relation(fields: [plantId], references: [id])
   // Links a DRIVER-role account to their Employee record, so the driver app
   // resolves "my trips" from the logged-in session instead of a picker.
-  employeeId          String?           @unique
-  employee            Employee?         @relation(fields: [employeeId], references: [id])
+  employeeId          String?         @unique
+  employee            Employee?       @relation(fields: [employeeId], references: [id])
   // Same idea as employeeId above, but for a PUMP_OPERATOR-role account —
   // PumpCrewMember is a separate roster from Employee (see that model's
   // own comment), so it needs its own link rather than reusing employeeId.
-  pumpCrewMemberId    String?           @unique
-  pumpCrewMember      PumpCrewMember?   @relation(fields: [pumpCrewMemberId], references: [id])
+  pumpCrewMemberId    String?         @unique
+  pumpCrewMember      PumpCrewMember? @relation(fields: [pumpCrewMemberId], references: [id])
   // Brute-force lockout: failedLoginAttempts resets to 0 on any successful
   // login; once it reaches the threshold in login.ts, lockedUntil is set a
   // fixed window into the future and every login attempt is rejected with
   // the same generic error as a wrong password, until that window passes —
   // deliberately not a distinct error, so a locked account isn't a way to
   // fingerprint which emails exist in the system.
-  failedLoginAttempts Int       @default(0)
+  failedLoginAttempts Int             @default(0)
   lockedUntil         DateTime?
   // TOTP two-factor (RFC 6238), hand-rolled on Node's built-in crypto — no
   // external auth service, no SMS provider. totpSecret is the CONFIRMED
@@ -60,61 +60,61 @@ model User {
   // user never actually saved into their app.
   totpSecret          String?
   totpTempSecret      String?
-  totpEnabled         Boolean   @default(false)
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  totpEnabled         Boolean         @default(false)
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
 
-  auditEvents                      AuditEvent[]
-  sessions                         Session[]
-  reservationInitialApprovals      Reservation[]             @relation("ReservationInitialApproval")
-  reservationFinalApprovals        Reservation[]             @relation("ReservationFinalApproval")
-  reservationClosures              Reservation[]             @relation("ReservationClosedBy")
-  apiKeysCreated                   ApiKey[]
-  wasteMemoApprovals               WasteIncidentMemo[]       @relation("WasteMemoApproval")
-  salesOpportunitiesOwned          Opportunity[]             @relation("OpportunityOwner")
-  fieldVisitsLogged                FieldVisit[]              @relation("FieldVisitVisitedBy")
-  quotesPrepared                   Quote[]                   @relation("QuotePreparedBy")
-  purchaseOrdersCreated            PurchaseOrder[]           @relation("PurchaseOrderCreatedBy")
+  auditEvents                       AuditEvent[]
+  sessions                          Session[]
+  reservationInitialApprovals       Reservation[]             @relation("ReservationInitialApproval")
+  reservationFinalApprovals         Reservation[]             @relation("ReservationFinalApproval")
+  reservationClosures               Reservation[]             @relation("ReservationClosedBy")
+  apiKeysCreated                    ApiKey[]
+  wasteMemoApprovals                WasteIncidentMemo[]       @relation("WasteMemoApproval")
+  salesOpportunitiesOwned           Opportunity[]             @relation("OpportunityOwner")
+  fieldVisitsLogged                 FieldVisit[]              @relation("FieldVisitVisitedBy")
+  quotesPrepared                    Quote[]                   @relation("QuotePreparedBy")
+  purchaseOrdersCreated             PurchaseOrder[]           @relation("PurchaseOrderCreatedBy")
   purchaseOrdersApproved            PurchaseOrder[]           @relation("PurchaseOrderApprovedBy")
-  maintenanceTicketsReported       MaintenanceTicket[]       @relation("MaintenanceReportedBy")
-  maintenanceTicketsAssigned       MaintenanceTicket[]       @relation("MaintenanceAssignedTo")
-  cashTransactionsCreated          CashTransaction[]         @relation("CashTransactionCreatedBy")
-  bankStatementLinesImported       BankStatementLine[]       @relation("BankStatementLineImportedBy")
-  calibrationRecords               CalibrationRecord[]
-  internalAuditsAsAuditor          InternalAudit[]            @relation("InternalAuditAuditor")
-  internalAuditsCreated            InternalAudit[]            @relation("InternalAuditCreatedBy")
-  auditFindingsResponsible         InternalAuditFinding[]     @relation("AuditFindingResponsible")
-  auditFindingsClosed              InternalAuditFinding[]     @relation("AuditFindingClosedBy")
-  controlledDocumentsCreated       ControlledDocument[]
-  trainingSessionsCreated          TrainingSession[]
-  materialReceiptsInspected        MaterialReceipt[]
-  supplierEvaluations              SupplierEvaluation[]
-  opportunityInitialApprovals      Opportunity[]             @relation("OpportunityInitialApproval")
-  opportunityFinalApprovals        Opportunity[]             @relation("OpportunityFinalApproval")
-  fieldVisitInitialApprovals       FieldVisit[]              @relation("FieldVisitInitialApproval")
-  fieldVisitFinalApprovals         FieldVisit[]              @relation("FieldVisitFinalApproval")
-  quoteInitialApprovals            Quote[]                   @relation("QuoteInitialApproval")
-  quoteFinalApprovals              Quote[]                   @relation("QuoteFinalApproval")
-  attendanceRecordsRecorded        AttendanceRecord[]        @relation("AttendanceRecordedBy")
-  leaveRequestsRequested           LeaveRequest[]            @relation("LeaveRequestedBy")
-  leaveRequestsApproved            LeaveRequest[]            @relation("LeaveApprovedBy")
-  maintenanceOrdersCreated         MaintenanceOrder[]
-  maintenanceOrderPartsIssued      MaintenanceOrderPart[]
-  sparePartReceiptsReceived        SparePartReceipt[]
-  sparePartIssuancesIssued         SparePartIssuance[]
-  sparePartsRequisitionsRequested  SparePartsRequisition[]   @relation("SPRRequestedBy")
-  sparePartsRequisitionsApproved   SparePartsRequisition[]   @relation("SPRApprovedBy")
-  materialRequisitionsRequested    MaterialRequisition[]     @relation("MTRRequestedBy")
-  materialRequisitionsApproved     MaterialRequisition[]     @relation("MTRApprovedBy")
-  capaResponsibleFor               CapaRecord[]               @relation("CapaResponsible")
-  capaClosed                       CapaRecord[]               @relation("CapaClosedBy")
-  finishedProductMovementsRecorded FinishedProductMovement[]
-  creditNotesIssued                CreditNote[]
-  payrollRunsCreated               PayrollRun[]               @relation("PayrollRunCreatedBy")
-  payrollRunsApproved              PayrollRun[]               @relation("PayrollRunApprovedBy")
-  endOfServiceSettlementsCalculated EndOfServiceSettlement[]   @relation("EOSCalculatedBy")
-  notifications                    Notification[]
-  pushSubscriptions                PushSubscription[]
+  maintenanceTicketsReported        MaintenanceTicket[]       @relation("MaintenanceReportedBy")
+  maintenanceTicketsAssigned        MaintenanceTicket[]       @relation("MaintenanceAssignedTo")
+  cashTransactionsCreated           CashTransaction[]         @relation("CashTransactionCreatedBy")
+  bankStatementLinesImported        BankStatementLine[]       @relation("BankStatementLineImportedBy")
+  calibrationRecords                CalibrationRecord[]
+  internalAuditsAsAuditor           InternalAudit[]           @relation("InternalAuditAuditor")
+  internalAuditsCreated             InternalAudit[]           @relation("InternalAuditCreatedBy")
+  auditFindingsResponsible          InternalAuditFinding[]    @relation("AuditFindingResponsible")
+  auditFindingsClosed               InternalAuditFinding[]    @relation("AuditFindingClosedBy")
+  controlledDocumentsCreated        ControlledDocument[]
+  trainingSessionsCreated           TrainingSession[]
+  materialReceiptsInspected         MaterialReceipt[]
+  supplierEvaluations               SupplierEvaluation[]
+  opportunityInitialApprovals       Opportunity[]             @relation("OpportunityInitialApproval")
+  opportunityFinalApprovals         Opportunity[]             @relation("OpportunityFinalApproval")
+  fieldVisitInitialApprovals        FieldVisit[]              @relation("FieldVisitInitialApproval")
+  fieldVisitFinalApprovals          FieldVisit[]              @relation("FieldVisitFinalApproval")
+  quoteInitialApprovals             Quote[]                   @relation("QuoteInitialApproval")
+  quoteFinalApprovals               Quote[]                   @relation("QuoteFinalApproval")
+  attendanceRecordsRecorded         AttendanceRecord[]        @relation("AttendanceRecordedBy")
+  leaveRequestsRequested            LeaveRequest[]            @relation("LeaveRequestedBy")
+  leaveRequestsApproved             LeaveRequest[]            @relation("LeaveApprovedBy")
+  maintenanceOrdersCreated          MaintenanceOrder[]
+  maintenanceOrderPartsIssued       MaintenanceOrderPart[]
+  sparePartReceiptsReceived         SparePartReceipt[]
+  sparePartIssuancesIssued          SparePartIssuance[]
+  sparePartsRequisitionsRequested   SparePartsRequisition[]   @relation("SPRRequestedBy")
+  sparePartsRequisitionsApproved    SparePartsRequisition[]   @relation("SPRApprovedBy")
+  materialRequisitionsRequested     MaterialRequisition[]     @relation("MTRRequestedBy")
+  materialRequisitionsApproved      MaterialRequisition[]     @relation("MTRApprovedBy")
+  capaResponsibleFor                CapaRecord[]              @relation("CapaResponsible")
+  capaClosed                        CapaRecord[]              @relation("CapaClosedBy")
+  finishedProductMovementsRecorded  FinishedProductMovement[]
+  creditNotesIssued                 CreditNote[]
+  payrollRunsCreated                PayrollRun[]              @relation("PayrollRunCreatedBy")
+  payrollRunsApproved               PayrollRun[]              @relation("PayrollRunApprovedBy")
+  endOfServiceSettlementsCalculated EndOfServiceSettlement[]  @relation("EOSCalculatedBy")
+  notifications                     Notification[]
+  pushSubscriptions                 PushSubscription[]
 }
 
 model Session {
@@ -158,15 +158,15 @@ model LoginAttempt {
 // gain; every "site"/"plant" identifier in code still means exactly what
 // it always did, it's only what the screen prints that changed.
 model Site {
-  id        String   @id @default(cuid())
+  id          String   @id @default(cuid())
   // Short, human-assigned business code ("S1", "CAI") — distinct from the
   // internal id, which nobody reads or types. What every other model's
   // "which site" filters and every report's site-scoping key off of
   // conceptually, even though the actual DB relation is still by id.
-  code      String   @unique
-  name      String
-  city      String
-  country   String?
+  code        String   @unique
+  name        String
+  city        String
+  country     String?
   // Optional brand color ("#rrggbb") — when set, the whole app's accent
   // hue (buttons, links, chips, glow) switches to this plant/company's
   // own color for anyone viewing this site, in both light and dark theme
@@ -175,8 +175,8 @@ model Site {
   // as globals.css already defines it — nothing changes for a site that
   // never sets one.
   accentColor String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   plants                   Plant[]
   reservations             Reservation[]
@@ -423,20 +423,20 @@ model MixDesign {
 }
 
 model Material {
-  id              String    @id @default(cuid())
-  name            String
-  type            String // CEMENT, FLY_ASH, SAND, COARSE_AGGREGATE, ADMIXTURE, WATER
-  brand           String?
-  specificGravity Float?
-  absorptionPct   Float?
-  supplierId      String?
-  supplier        Supplier? @relation(fields: [supplierId], references: [id])
+  id               String    @id @default(cuid())
+  name             String
+  type             String // CEMENT, FLY_ASH, SAND, COARSE_AGGREGATE, ADMIXTURE, WATER
+  brand            String?
+  specificGravity  Float?
+  absorptionPct    Float?
+  supplierId       String?
+  supplier         Supplier? @relation(fields: [supplierId], references: [id])
   // Manually-maintained standard cost (currency per kg) — not derived from
   // any actual receipt (MaterialReceipt carries no cost field; a receipt
   // can exist with or without a real PO behind it). Used by
   // getProfitabilityReport to price consumed mass; null means "no cost
   // data for this material yet", surfaced there rather than treated as 0.
-  lastUnitCost    Float?
+  lastUnitCost     Float?
   // kg of embodied CO2e per kg of this material — same "manually
   // maintained, null means no data yet, never fabricated" shape as
   // lastUnitCost above. Prefilled from CO2E_FACTOR_KG_PER_KG (a standard
@@ -446,8 +446,8 @@ model Material {
   // prefers this per-material figure and only falls back to the generic
   // table when it's null.
   co2FactorKgPerKg Float?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   mixComponents      MixComponent[]
   batchActuals       BatchComponentActual[]
@@ -529,21 +529,21 @@ model Supplier {
 // Scores are entered per-evaluation, not recomputed from live data, since
 // the real form is a periodic (yearly) human review, not a live metric.
 model SupplierEvaluation {
-  id                      String   @id @default(cuid())
-  evaluationNumber        String   @unique // SEV-YYYY-NNNN
-  supplierId              String
-  supplier                Supplier @relation(fields: [supplierId], references: [id])
-  periodYear              Int
-  specComplianceScorePct  Float // 0-100, weight 40%
-  shelfLifeScorePct       Float // 0-100, weight 20%
-  onTimeDeliveryScorePct  Float // 0-100, weight 20%
-  weightedScorePct        Float // computed server-side, see createSupplierEvaluation
-  category                String // A, B, C — computed server-side from weightedScorePct
-  notes                   String?
-  evaluatedById           String
-  evaluatedBy             User     @relation(fields: [evaluatedById], references: [id])
-  evaluatedAt             DateTime @default(now())
-  createdAt               DateTime @default(now())
+  id                     String   @id @default(cuid())
+  evaluationNumber       String   @unique // SEV-YYYY-NNNN
+  supplierId             String
+  supplier               Supplier @relation(fields: [supplierId], references: [id])
+  periodYear             Int
+  specComplianceScorePct Float // 0-100, weight 40%
+  shelfLifeScorePct      Float // 0-100, weight 20%
+  onTimeDeliveryScorePct Float // 0-100, weight 20%
+  weightedScorePct       Float // computed server-side, see createSupplierEvaluation
+  category               String // A, B, C — computed server-side from weightedScorePct
+  notes                  String?
+  evaluatedById          String
+  evaluatedBy            User     @relation(fields: [evaluatedById], references: [id])
+  evaluatedAt            DateTime @default(now())
+  createdAt              DateTime @default(now())
 }
 
 // A customer's job site — company-wide, not tied to any one plant/line.
@@ -750,7 +750,7 @@ model Employee {
   attendanceRecords         AttendanceRecord[]
   leaveRequests             LeaveRequest[]
   maintenanceOrders         MaintenanceOrderTechnician[]
-  payrollLines               PayrollLine[]
+  payrollLines              PayrollLine[]
   endOfServiceSettlements   EndOfServiceSettlement[]
   trainingAttendances       TrainingAttendance[]
 }
@@ -766,35 +766,35 @@ model Employee {
 // rewrites an already-recorded settlement's numbers, same reasoning as
 // Invoice/Quote snapshotting their tax rate.
 model EndOfServiceSettlement {
-  id               String    @id @default(cuid())
-  settlementNumber String    @unique // EOS-YYYY-NNNN
-  employeeId       String
-  employee         Employee  @relation(fields: [employeeId], references: [id])
-  hireDate         DateTime
-  terminationDate  DateTime
+  id                 String    @id @default(cuid())
+  settlementNumber   String    @unique // EOS-YYYY-NNNN
+  employeeId         String
+  employee           Employee  @relation(fields: [employeeId], references: [id])
+  hireDate           DateTime
+  terminationDate    DateTime
   // RESIGNATION, TERMINATED_BY_EMPLOYER, END_OF_CONTRACT, SPECIAL_CASE —
   // SPECIAL_CASE covers the law's own full-award exceptions (force
   // majeure, a woman resigning within 6 months of marriage or within 3
   // months of childbirth, etc.), entered as a note rather than enumerated
   // further here.
-  terminationType  String
-  yearsOfService   Float
+  terminationType    String
+  yearsOfService     Float
   basicMonthlySalary Float
   // Full Article 84 formula result, before the resignation-tier reduction.
-  grossEntitlement Float
+  grossEntitlement   Float
   // What's actually owed, after the resignation tier (or the full amount,
   // for every non-resignation terminationType).
-  payableAmount    Float
+  payableAmount      Float
   // CALCULATED (a figure on file, nothing paid yet — freely cancellable),
   // PAID (posted to the cash ledger, see markEndOfServiceSettlementPaid —
   // this is also the point Employee.status flips to REMOVED), CANCELLED.
-  status           String    @default("CALCULATED")
-  notes            String?
-  calculatedById   String
-  calculatedBy     User      @relation("EOSCalculatedBy", fields: [calculatedById], references: [id])
-  paidAt           DateTime?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  status             String    @default("CALCULATED")
+  notes              String?
+  calculatedById     String
+  calculatedBy       User      @relation("EOSCalculatedBy", fields: [calculatedById], references: [id])
+  paidAt             DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 }
 
 model PayrollRun {
@@ -816,28 +816,28 @@ model PayrollRun {
 }
 
 model PayrollLine {
-  id           String     @id @default(cuid())
-  payrollRunId String
-  payrollRun   PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
-  employeeId   String
-  employee     Employee   @relation(fields: [employeeId], references: [id])
+  id              String     @id @default(cuid())
+  payrollRunId    String
+  payrollRun      PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  employeeId      String
+  employee        Employee   @relation(fields: [employeeId], references: [id])
   // wageType/wageRate snapshotted from Employee at generation time, so a
   // later change to the employee's rate never reshapes an already-generated
   // (or already-paid) run.
-  wageType     String
-  wageRate     Float
-  periodDays   Int
+  wageType        String
+  wageRate        Float
+  periodDays      Int
   // ABSENT attendance days + UNPAID approved leave days overlapping the
   // period — see generatePayrollRun for the exact query.
-  unpaidDays   Float
-  grossPay     Float
+  unpaidDays      Float
+  grossPay        Float
   // GOSI computed off grossPay at generation time, at whatever rate was
   // effective for the employee then (see generatePayrollRun). employeeGosi
   // is deducted into netPay below; employerGosi is the company's own
   // additional cost — never deducted from the employee, but real cash cost
   // (see markPayrollRunPaid, which folds both into the posted transaction).
-  employeeGosi Float      @default(0)
-  employerGosi Float      @default(0)
+  employeeGosi    Float      @default(0)
+  employerGosi    Float      @default(0)
   // Pulled automatically from src/lib/incentives.ts for the same period,
   // for the three incentive roles backed by a real Employee record
   // (MIXER_DRIVER, BULKER_DRIVER, WATER_TANKER_DRIVER — see
@@ -847,12 +847,12 @@ model PayrollLine {
   // a payroll line. Added to netPay below, same as employeeGosi is
   // subtracted from it — not editable directly (adjustment is still the
   // manual override for anything this doesn't cover).
-  incentiveAmount Float   @default(0)
+  incentiveAmount Float      @default(0)
   // Manual +/- (bonus or extra deduction), editable only while the run is
   // DRAFT.
-  adjustment   Float      @default(0)
-  netPay       Float
-  notes        String?
+  adjustment      Float      @default(0)
+  netPay          Float
+  notes           String?
 
   @@unique([payrollRunId, employeeId])
 }
@@ -985,18 +985,18 @@ model MaterialReceipt {
 // ---------------------------------------------------------------------------
 
 model Truck {
-  id                String    @id @default(cuid())
-  plantId           String
-  plant             Plant     @relation(fields: [plantId], references: [id])
-  code              String
-  drumCapacityM3    Float
-  maxAgitationRpm   Float?
-  gpsDeviceId       String?
+  id                      String    @id @default(cuid())
+  plantId                 String
+  plant                   Plant     @relation(fields: [plantId], references: [id])
+  code                    String
+  drumCapacityM3          Float
+  maxAgitationRpm         Float?
+  gpsDeviceId             String?
   // Registration details — optional since older/imported records may not
   // have them on file yet; nothing downstream depends on these being set.
-  year              Int?
-  chassisNumber     String?
-  plateNumber       String?
+  year                    Int?
+  chassisNumber           String?
+  plateNumber             String?
   // Regulatory compliance dates — same optional/informational role as the
   // registration fields above. licenseValidFrom is purely informational
   // (when the vehicle license became valid); the other two are real
@@ -1012,20 +1012,20 @@ model Truck {
   // Pre-fills the driver field when this truck is picked to start a trip
   // (see startTrip/updateTripAssignment) — still just a default, not a
   // lock: the operator can always pick someone else for that specific trip.
-  defaultDriverId   String?
-  defaultDriver     Employee? @relation(fields: [defaultDriverId], references: [id])
-  status            String    @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
+  defaultDriverId         String?
+  defaultDriver           Employee? @relation(fields: [defaultDriverId], references: [id])
+  status                  String    @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
   // Populated by the GPS telematics webhook (see /api/telematics/ping).
-  lastLat           Float?
-  lastLng           Float?
-  lastPingAt        DateTime?
+  lastLat                 Float?
+  lastLng                 Float?
+  lastPingAt              DateTime?
   // Reset by the "mark serviced" action — trips since this date (via
   // Trip.batchTime) feed the due-for-inspection flag in
   // src/lib/maintenance.ts. Null means "never recorded," which counts
   // every trip ever as "since last maintenance."
-  lastMaintenanceAt DateTime?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  lastMaintenanceAt       DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
 
   trips Trip[]
 }
@@ -1069,36 +1069,36 @@ model BatchComponentActual {
 }
 
 model Trip {
-  id                   String          @id @default(cuid())
-  batchTicketId        String          @unique
-  batchTicket          BatchTicket     @relation(fields: [batchTicketId], references: [id])
-  truckId              String
-  truck                Truck           @relation(fields: [truckId], references: [id])
-  driverId             String
-  driver               Employee        @relation(fields: [driverId], references: [id])
+  id                String          @id @default(cuid())
+  batchTicketId     String          @unique
+  batchTicket       BatchTicket     @relation(fields: [batchTicketId], references: [id])
+  truckId           String
+  truck             Truck           @relation(fields: [truckId], references: [id])
+  driverId          String
+  driver            Employee        @relation(fields: [driverId], references: [id])
   // Only set when the reservation's delivery method is PUMP — the specific
   // pump unit and crew placing this load, as distinct from the pump
   // booking calendar (PumpAssignment), which schedules a pump against a
   // reservation for billing hours rather than recording who ran it.
-  pumpId               String?
-  pump                 Pump?           @relation(fields: [pumpId], references: [id])
+  pumpId            String?
+  pump              Pump?           @relation(fields: [pumpId], references: [id])
   // Free-text name is still the field every read path renders — picking a
   // crew member below just fills it from PumpCrewMember.name at write time
   // (see startTrip), so a trip can still name someone off-roster without
   // forcing every operator into master data on day one.
-  pumpOperatorName     String?
-  pumpAssistantName    String?
-  pumpOperatorId       String?
-  pumpOperatorCrew     PumpCrewMember? @relation("PumpOperatorCrew", fields: [pumpOperatorId], references: [id])
-  pumpAssistantId      String?
-  pumpAssistantCrew    PumpCrewMember? @relation("PumpAssistantCrew", fields: [pumpAssistantId], references: [id])
-  status               String          @default("LOADING") // LOADING, IN_TRANSIT, ON_SITE, DISCHARGING, CLOSED
-  batchTime            DateTime        @default(now())
-  departTime           DateTime?
-  arriveTime           DateTime?
-  dischargeStart       DateTime?
-  dischargeEnd         DateTime?
-  volumeDeliveredM3    Float?
+  pumpOperatorName  String?
+  pumpAssistantName String?
+  pumpOperatorId    String?
+  pumpOperatorCrew  PumpCrewMember? @relation("PumpOperatorCrew", fields: [pumpOperatorId], references: [id])
+  pumpAssistantId   String?
+  pumpAssistantCrew PumpCrewMember? @relation("PumpAssistantCrew", fields: [pumpAssistantId], references: [id])
+  status            String          @default("LOADING") // LOADING, IN_TRANSIT, ON_SITE, DISCHARGING, CLOSED
+  batchTime         DateTime        @default(now())
+  departTime        DateTime?
+  arriveTime        DateTime?
+  dischargeStart    DateTime?
+  dischargeEnd      DateTime?
+  volumeDeliveredM3 Float?
   // How much of THIS ticket's own volume was fulfilled by topping up
   // reclaimed material already in the truck's drum, rather than freshly
   // batched — set by startTrip when the chosen truck has an unconsumed
@@ -1106,22 +1106,22 @@ model Trip {
   // Never reduces BatchTicket.volumeM3 itself — the customer is still
   // billed/ticketed for the full amount; only the component target
   // masses drawn from inventory shrink by this much.
-  reclaimedVolumeM3    Float?
+  reclaimedVolumeM3 Float?
   // Driver-app delivery confirmation photo — a real Vercel Blob URL (see
   // src/lib/blob.ts and uploadDeliveryPhoto in src/app/driver/actions.ts),
   // not a data: URI stored in the row.
-  deliveryPhotoUrl     String?
-  deliverySignedBy     String?
-  deliverySignedAt     DateTime?
-  createdAt            DateTime        @default(now())
-  updatedAt            DateTime        @updatedAt
+  deliveryPhotoUrl  String?
+  deliverySignedBy  String?
+  deliverySignedAt  DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
 
   drumReturn         DrumReturn?
   // The (different, earlier) DrumReturn this trip itself consumed by
   // topping up a truck's leftover reclaimed material — opposite side of
   // DrumReturn.consumedInTripId above. Distinct from `drumReturn`, which
   // is whatever THIS trip returns when IT closes.
-  consumedDrumReturn DrumReturn?  @relation("ReclaimConsumedInTrip")
+  consumedDrumReturn DrumReturn?       @relation("ReclaimConsumedInTrip")
   testBatches        TestBatch[]
   invoiceLine        InvoiceLine?
   delayReports       TripDelayReport[]
@@ -1138,7 +1138,7 @@ model TripDelayReport {
   id         String   @id @default(cuid())
   tripId     String
   trip       Trip     @relation(fields: [tripId], references: [id])
-  reason     String   // TRAFFIC, BREAKDOWN, WEATHER, ACCIDENT, OTHER
+  reason     String // TRAFFIC, BREAKDOWN, WEATHER, ACCIDENT, OTHER
   note       String?
   reportedAt DateTime @default(now())
 
@@ -1210,17 +1210,26 @@ model WasteIncidentMemo {
 // ---------------------------------------------------------------------------
 
 model TestBatch {
-  id              String    @id @default(cuid())
-  tripId          String
-  trip            Trip      @relation(fields: [tripId], references: [id])
-  sampleType      String    @default("CYLINDER") // CYLINDER, CUBE, SLUMP_ONLY
-  sampleTime      DateTime  @default(now())
-  slumpMeasuredMm Float?
-  airContentPct   Float?
-  concreteTempC   Float?
-  sampledById     String?
-  sampledBy       Employee? @relation(fields: [sampledById], references: [id])
-  createdAt       DateTime  @default(now())
+  id                    String    @id @default(cuid())
+  tripId                String
+  trip                  Trip      @relation(fields: [tripId], references: [id])
+  sampleType            String    @default("CYLINDER") // CYLINDER, CUBE, SLUMP_ONLY
+  sampleTime            DateTime  @default(now())
+  slumpMeasuredMm       Float?
+  airContentPct         Float?
+  concreteTempC         Float?
+  // The Quality Plan's other three soft-concrete/workability tests
+  // (P/QM/006 §"Concrete Tests"), listed alongside slump above. Its own
+  // English column mistranslates "اختبار عامل الدمك" (Compaction Factor
+  // Test) as "Blood Agent Test" — a phonetic mixup of "الدمك" (compaction)
+  // with "دم" (blood) in the source document itself, not a real bleeding
+  // test — compactionFactorRatio below is the real compaction-factor test.
+  concreteFlowMm        Float? // Concrete Flow Test (mm)
+  compactionFactorRatio Float? // Compaction Factor Test (ratio, typically 0.80-0.98)
+  vbTimeSeconds         Float? // Reshaping Test / V-B (Vebe) consistometer time (seconds)
+  sampledById           String?
+  sampledBy             Employee? @relation(fields: [sampledById], references: [id])
+  createdAt             DateTime  @default(now())
 
   labResults LabResult[]
 }
@@ -1250,22 +1259,22 @@ model LabResult {
 // both rootCause and correctiveAction are actually on file (same "the
 // reason must be written" precedent as WasteIncidentMemo.approvalNote).
 model CapaRecord {
-  id               String     @id @default(cuid())
-  capaNumber       String     @unique // CAPA-YYYY-NNNN
-  labResultId      String     @unique
-  labResult        LabResult  @relation(fields: [labResultId], references: [id])
-  status           String     @default("OPEN") // OPEN, IN_PROGRESS, CLOSED
+  id               String    @id @default(cuid())
+  capaNumber       String    @unique // CAPA-YYYY-NNNN
+  labResultId      String    @unique
+  labResult        LabResult @relation(fields: [labResultId], references: [id])
+  status           String    @default("OPEN") // OPEN, IN_PROGRESS, CLOSED
   rootCause        String?
   correctiveAction String?
   preventiveAction String?
   responsibleId    String?
-  responsible      User?      @relation("CapaResponsible", fields: [responsibleId], references: [id])
+  responsible      User?     @relation("CapaResponsible", fields: [responsibleId], references: [id])
   dueDate          DateTime?
   closedAt         DateTime?
   closedById       String?
-  closedBy         User?      @relation("CapaClosedBy", fields: [closedById], references: [id])
-  createdAt        DateTime   @default(now())
-  updatedAt        DateTime   @updatedAt
+  closedBy         User?     @relation("CapaClosedBy", fields: [closedById], references: [id])
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 }
 
 model ComplianceCertificate {
@@ -1293,25 +1302,25 @@ model ComplianceCertificate {
 // ---------------------------------------------------------------------------
 
 model CalibratedInstrument {
-  id                        String    @id @default(cuid())
-  code                      String    @unique // asset tag / instrument number
+  id                        String   @id @default(cuid())
+  code                      String   @unique // asset tag / instrument number
   name                      String
   manufacturer              String?
   model                     String?
   serialNumber              String?
   location                  String? // e.g. "Batching plant scale — Line 1", "QC lab"
   siteId                    String?
-  site                      Site?     @relation(fields: [siteId], references: [id])
+  site                      Site?    @relation(fields: [siteId], references: [id])
   calibrationIntervalMonths Int? // used only to suggest the next-due date on the record form; the actual due date always lives on the latest CalibrationRecord
   // ACTIVE, WITHDRAWN (auto-set the moment a calibration comes back
   // OUT_OF_TOLERANCE — see recordCalibration in quality/actions.ts — and
   // auto-cleared the moment a later one comes back PASSED), OUT_OF_SERVICE
   // (a human call, e.g. retired equipment)
-  status                    String    @default("ACTIVE")
-  createdAt                 DateTime  @default(now())
-  updatedAt                 DateTime  @updatedAt
+  status                    String   @default("ACTIVE")
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
 
-  calibrations              CalibrationRecord[]
+  calibrations CalibrationRecord[]
 }
 
 model CalibrationRecord {
@@ -1365,7 +1374,7 @@ model InternalAudit {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  findings       InternalAuditFinding[]
+  findings InternalAuditFinding[]
 }
 
 model InternalAuditFinding {
@@ -1431,8 +1440,8 @@ model ControlledDocument {
 // ---------------------------------------------------------------------------
 
 model TrainingSession {
-  id            String   @id @default(cuid())
-  sessionNumber String   @unique // TRN-YYYY-NNNN
+  id            String    @id @default(cuid())
+  sessionNumber String    @unique // TRN-YYYY-NNNN
   programName   String
   trainerName   String?
   location      String?
@@ -1441,10 +1450,10 @@ model TrainingSession {
   durationHours Float?
   notes         String?
   createdById   String
-  createdBy     User     @relation(fields: [createdById], references: [id])
-  createdAt     DateTime @default(now())
+  createdBy     User      @relation(fields: [createdById], references: [id])
+  createdAt     DateTime  @default(now())
 
-  attendances   TrainingAttendance[]
+  attendances TrainingAttendance[]
 }
 
 model TrainingAttendance {
@@ -1463,18 +1472,18 @@ model TrainingAttendance {
 // ---------------------------------------------------------------------------
 
 model Pump {
-  id                 String          @id @default(cuid())
-  plantId            String
-  plant              Plant           @relation(fields: [plantId], references: [id])
-  code               String
-  pumpType           String // BOOM, LINE, STATIONARY
-  reachM             Float?
-  hourlyRate         Float
-  standbyRate        Float?
+  id                      String          @id @default(cuid())
+  plantId                 String
+  plant                   Plant           @relation(fields: [plantId], references: [id])
+  code                    String
+  pumpType                String // BOOM, LINE, STATIONARY
+  reachM                  Float?
+  hourlyRate              Float
+  standbyRate             Float?
   // Registration details, same optional/informational role as on Truck.
-  year               Int?
-  chassisNumber      String?
-  plateNumber        String?
+  year                    Int?
+  chassisNumber           String?
+  plateNumber             String?
   // Regulatory compliance dates — same shape as Truck's own.
   licenseValidFrom        DateTime?
   periodicInspectionDueAt DateTime?
@@ -1486,15 +1495,15 @@ model Pump {
   // Pre-fill the operator/assistant fields when this pump is picked to
   // start a pump-delivery trip — still just defaults, always overridable
   // for that specific trip (see startTrip/updateTripAssignment).
-  defaultOperatorId  String?
-  defaultOperator    PumpCrewMember? @relation("PumpDefaultOperator", fields: [defaultOperatorId], references: [id])
-  defaultAssistantId String?
-  defaultAssistant   PumpCrewMember? @relation("PumpDefaultAssistant", fields: [defaultAssistantId], references: [id])
-  status             String          @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
+  defaultOperatorId       String?
+  defaultOperator         PumpCrewMember? @relation("PumpDefaultOperator", fields: [defaultOperatorId], references: [id])
+  defaultAssistantId      String?
+  defaultAssistant        PumpCrewMember? @relation("PumpDefaultAssistant", fields: [defaultAssistantId], references: [id])
+  status                  String          @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
   // Same due-for-inspection mechanism as Truck.lastMaintenanceAt.
-  lastMaintenanceAt  DateTime?
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
+  lastMaintenanceAt       DateTime?
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
 
   assignments PumpAssignment[]
   trips       Trip[]
@@ -1584,13 +1593,13 @@ model Invoice {
   // fabricated in their place. zatcaStatus is GENERATED (documents built,
   // not yet sent — Phase 1 QR compliance already met at this point),
   // CLEARED (Phase 2: accepted by ZATCA's clearance API), or FAILED.
-  zatcaUuid        String?
+  zatcaUuid         String?
   // SHA256 of this invoice's own generated XML, and the prior CLEARED
   // invoice's own zatcaInvoiceHash — ZATCA requires each invoice to chain
   // to the one before it (Previous Invoice Hash), the same tamper-evidence
   // idea as a blockchain, so an invoice can't be quietly inserted or
   // altered after the fact.
-  zatcaInvoiceHash String?
+  zatcaInvoiceHash  String?
   zatcaPreviousHash String?
   // Base64 TLV payload — Phase 1's 5-tag shape (seller name, VAT number,
   // timestamp, total, VAT total). Phase 2 extends this to 9 tags once a
@@ -1911,31 +1920,31 @@ model PurchaseOrder {
 // not a DB constraint, matching how this codebase already validates
 // required-ness elsewhere (e.g. Quote.opportunityId).
 model PurchaseOrderLine {
-  id                String                 @id @default(cuid())
-  purchaseOrderId   String
-  purchaseOrder     PurchaseOrder          @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
-  materialId        String?
-  material          Material?              @relation(fields: [materialId], references: [id])
-  orderedMassKg     Float?
+  id                        String                 @id @default(cuid())
+  purchaseOrderId           String
+  purchaseOrder             PurchaseOrder          @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  materialId                String?
+  material                  Material?              @relation(fields: [materialId], references: [id])
+  orderedMassKg             Float?
   // Incremented as MaterialReceipt rows post against this line (see
   // receiveAgainstPurchaseOrder in purchasing/actions.ts) — what
   // PurchaseOrder.status's PARTIALLY_RECEIVED/RECEIVED derives from, and
   // what the PO detail screen shows as "still open."
-  receivedMassKg    Float?                 @default(0)
-  sparePartId       String?
-  sparePart         SparePart?             @relation(fields: [sparePartId], references: [id])
-  orderedQty        Float?
-  receivedQty       Float?                 @default(0)
+  receivedMassKg            Float?                 @default(0)
+  sparePartId               String?
+  sparePart                 SparePart?             @relation(fields: [sparePartId], references: [id])
+  orderedQty                Float?
+  receivedQty               Float?                 @default(0)
   // Back-relation to whichever SparePartsRequisition this line fulfills
   // (the FK — purchaseOrderLineId — lives on SparePartsRequisition itself)
   // — routes the requisition's status to ORDERED once the PO is created
   // (see createPurchaseOrder).
-  sourceRequisition SparePartsRequisition?
+  sourceRequisition         SparePartsRequisition?
   // Same back-relation, for the raw-material equivalent (see
   // MaterialRequisition below and completeBatch in production/actions.ts).
   sourceMaterialRequisition MaterialRequisition?
-  unitPrice         Float
-  lineTotal         Float
+  unitPrice                 Float
+  lineTotal                 Float
 
   receipts          MaterialReceipt[]
   sparePartReceipts SparePartReceipt[]
@@ -2050,10 +2059,10 @@ model MaintenanceOrder {
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
 
-  technicians       MaintenanceOrderTechnician[]
-  parts             MaintenanceOrderPart[]
-  requisitions      SparePartsRequisition[]
-  directIssuances   SparePartIssuance[]
+  technicians     MaintenanceOrderTechnician[]
+  parts           MaintenanceOrderPart[]
+  requisitions    SparePartsRequisition[]
+  directIssuances SparePartIssuance[]
 }
 
 // Real HR roster, not a User account or a separate crew-roster table like
@@ -2154,15 +2163,15 @@ model SparePartReceipt {
 // just MaintenanceOrderPart, or the two paths would silently disagree
 // about how much stock is actually left.
 model SparePartIssuance {
-  id             String            @id @default(cuid())
-  issuanceNumber String            @unique // SPI-YYYY-NNNN
-  sparePartId    String
-  sparePart      SparePart         @relation(fields: [sparePartId], references: [id])
-  siteId         String
-  site           Site              @relation(fields: [siteId], references: [id])
-  quantity       Float
-  unitCost       Float
-  reason         String // MAINTENANCE, SALE, DAMAGED, OTHER
+  id                 String            @id @default(cuid())
+  issuanceNumber     String            @unique // SPI-YYYY-NNNN
+  sparePartId        String
+  sparePart          SparePart         @relation(fields: [sparePartId], references: [id])
+  siteId             String
+  site               Site              @relation(fields: [siteId], references: [id])
+  quantity           Float
+  unitCost           Float
+  reason             String // MAINTENANCE, SALE, DAMAGED, OTHER
   // Required (enforced in issueSparePart, warehouses/actions.ts) when
   // reason is MAINTENANCE — a part logged as maintenance use needs to
   // say which job it went to, same traceability
@@ -2175,13 +2184,13 @@ model SparePartIssuance {
   // MaintenanceTicket.equipmentType/Id/Label (see that model's own
   // comment): equipment is spread across Truck/Pump/Silo/Hopper/
   // SupportVehicle with no single table to hold a real FK against.
-  equipmentType  String?
-  equipmentId    String?
-  equipmentLabel String?
-  notes          String?
-  issuedById     String
-  issuedBy       User              @relation(fields: [issuedById], references: [id])
-  issuedAt       DateTime          @default(now())
+  equipmentType      String?
+  equipmentId        String?
+  equipmentLabel     String?
+  notes              String?
+  issuedById         String
+  issuedBy           User              @relation(fields: [issuedById], references: [id])
+  issuedAt           DateTime          @default(now())
 }
 
 // The "auto-generate a purchase request for what's missing" piece — created
@@ -2595,14 +2604,14 @@ model IncentiveMethod {
 // registration details and a default driver. `type` is what the Equipment
 // screen's tabs filter on.
 model SupportVehicle {
-  id              String    @id @default(cuid())
-  plantId         String
-  plant           Plant     @relation(fields: [plantId], references: [id])
-  type            String // BULKER, WATER_TANKER, LOADER
-  code            String
-  year            Int?
-  chassisNumber   String?
-  plateNumber     String?
+  id                      String    @id @default(cuid())
+  plantId                 String
+  plant                   Plant     @relation(fields: [plantId], references: [id])
+  type                    String // BULKER, WATER_TANKER, LOADER
+  code                    String
+  year                    Int?
+  chassisNumber           String?
+  plateNumber             String?
   // Regulatory compliance dates — same shape as Truck/Pump's own.
   licenseValidFrom        DateTime?
   periodicInspectionDueAt DateTime?
@@ -2611,11 +2620,11 @@ model SupportVehicle {
   // Equipment screen's own expiryFlag the same way once it approaches/
   // passes, not just informational like licenseValidFrom.
   insurancePolicyExpiry   DateTime?
-  defaultDriverId String?
-  defaultDriver   Employee? @relation(fields: [defaultDriverId], references: [id])
-  status          String    @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  defaultDriverId         String?
+  defaultDriver           Employee? @relation(fields: [defaultDriverId], references: [id])
+  status                  String    @default("ACTIVE") // ACTIVE, IDLE, MAINTENANCE, OUT_OF_SERVICE
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
 }
 
 // A revocable, scoped credential for a machine-to-machine caller (a GPS
@@ -2726,19 +2735,19 @@ model Account {
 // follows — a plant's own Trial Balance is filtered by both, same as
 // every other financial report.
 model JournalEntry {
-  id          String   @id @default(cuid())
-  entryNumber String   @unique // JE-YYYY-NNNN
-  siteId      String
-  site        Site     @relation(fields: [siteId], references: [id])
-  currency    String
+  id             String   @id @default(cuid())
+  entryNumber    String   @unique // JE-YYYY-NNNN
+  siteId         String
+  site           Site     @relation(fields: [siteId], references: [id])
+  currency       String
   // Which real event caused this posting, and its id — the same "why does
   // this number exist" traceability logAudit already gives every other
   // write in this app, e.g. sourceModule "Billing", sourceRecordId the
   // Invoice's own id.
   sourceModule   String
   sourceRecordId String
-  memo        String?
-  postedAt    DateTime @default(now())
+  memo           String?
+  postedAt       DateTime @default(now())
 
   lines JournalLine[]
 
@@ -2761,8 +2770,8 @@ model JournalLine {
   // them, it can ask Postgres to do the summing directly (see LedgerTab in
   // finance/page.tsx), which stays fast regardless of how many years of
   // journal entries have piled up.
-  siteId   String
-  currency String
+  siteId         String
+  currency       String
 
   @@index([siteId, currency, accountId])
 }

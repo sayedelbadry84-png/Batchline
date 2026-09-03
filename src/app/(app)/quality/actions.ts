@@ -38,13 +38,26 @@ export async function createTestBatch(formData: FormData) {
   const slumpMeasuredMm = Number(formData.get("slumpMeasuredMm") ?? 0) || null;
   const airContentPct = Number(formData.get("airContentPct") ?? 0) || null;
   const concreteTempC = Number(formData.get("concreteTempC") ?? 0) || null;
+  const concreteFlowMm = Number(formData.get("concreteFlowMm") ?? 0) || null;
+  const compactionFactorRatio = Number(formData.get("compactionFactorRatio") ?? 0) || null;
+  const vbTimeSeconds = Number(formData.get("vbTimeSeconds") ?? 0) || null;
   const sampledById = String(formData.get("sampledById") ?? "") || null;
 
   if (!tripId) return;
   if (!(await tripInScope(tripId, effectiveSiteId(user)))) return;
 
   const testBatch = await prisma.testBatch.create({
-    data: { tripId, sampleType, slumpMeasuredMm, airContentPct, concreteTempC, sampledById },
+    data: {
+      tripId,
+      sampleType,
+      slumpMeasuredMm,
+      airContentPct,
+      concreteTempC,
+      concreteFlowMm,
+      compactionFactorRatio,
+      vbTimeSeconds,
+      sampledById,
+    },
   });
 
   await logAudit({

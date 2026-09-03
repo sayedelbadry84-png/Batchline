@@ -241,6 +241,9 @@ export default async function QualityPage({
                 <div className="font-mono text-xs text-ink-muted tabular" dir="ltr">
                   {tb.slumpMeasuredMm != null && <div>{m.slump(tb.slumpMeasuredMm)}</div>}
                   {tb.airContentPct != null && <div>{m.air(tb.airContentPct)}</div>}
+                  {tb.concreteFlowMm != null && <div>{m.flow(tb.concreteFlowMm)}</div>}
+                  {tb.compactionFactorRatio != null && <div>{m.compactionFactor(tb.compactionFactorRatio)}</div>}
+                  {tb.vbTimeSeconds != null && <div>{m.vbTime(tb.vbTimeSeconds)}</div>}
                   {tb.concreteTempC != null && (
                     <div className={maxTempExceeded ? "font-semibold text-critical" : ""}>{tb.concreteTempC}°C</div>
                   )}
@@ -369,6 +372,18 @@ export default async function QualityPage({
           <div>
             <label className={ui.label}>{m.fSample.temp}</label>
             <input name="concreteTempC" type="number" step="0.1" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.fSample.flow}</label>
+            <input name="concreteFlowMm" type="number" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.fSample.compactionFactor}</label>
+            <input name="compactionFactorRatio" type="number" step="0.01" min="0" max="1" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.fSample.vbTime}</label>
+            <input name="vbTimeSeconds" type="number" step="0.1" className={ui.input} />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
             {m.logSample}
