@@ -81,6 +81,10 @@ model User {
   cashTransactionsCreated          CashTransaction[]         @relation("CashTransactionCreatedBy")
   bankStatementLinesImported       BankStatementLine[]       @relation("BankStatementLineImportedBy")
   calibrationRecords               CalibrationRecord[]
+  internalAuditsAsAuditor          InternalAudit[]            @relation("InternalAuditAuditor")
+  internalAuditsCreated            InternalAudit[]            @relation("InternalAuditCreatedBy")
+  auditFindingsResponsible         InternalAuditFinding[]     @relation("AuditFindingResponsible")
+  auditFindingsClosed              InternalAuditFinding[]     @relation("AuditFindingClosedBy")
   opportunityInitialApprovals      Opportunity[]             @relation("OpportunityInitialApproval")
   opportunityFinalApprovals        Opportunity[]             @relation("OpportunityFinalApproval")
   fieldVisitInitialApprovals       FieldVisit[]              @relation("FieldVisitInitialApproval")
@@ -1283,6 +1287,61 @@ model CalibrationRecord {
   calibratedById       String
   calibratedBy         User                 @relation(fields: [calibratedById], references: [id])
   createdAt            DateTime             @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Internal audits — ISO 9001:2015 clause 9.2. The real QMS names three
+// distinct controlled documents for this (schedule, per-clause checklist,
+// summary report) plus an auditor-certification roster; this covers the
+// schedule/report lifecycle and its findings. Findings deliberately get
+// their OWN model rather than being folded into CapaRecord: CapaRecord is
+// tightly coupled to a LabResult today (every existing CAPA screen reads
+// straight through capa.labResult.testBatch...), and retrofitting it to
+// be optional-source would touch a lot of already-working code for a
+// gain that's mostly conceptual — an audit finding needs the same shape
+// (root cause / corrective action / responsible / due date / close gate)
+// but not literally the same table.
+// ---------------------------------------------------------------------------
+
+model InternalAudit {
+  id             String    @id @default(cuid())
+  auditNumber    String    @unique // AUD-YYYY-NNNN
+  department     String
+  processAudited String? // which process/area this audit covers
+  isoClauseScope String? // which ISO 9001 clauses this audit's checklist covers
+  auditorId      String
+  auditor        User      @relation("InternalAuditAuditor", fields: [auditorId], references: [id])
+  scheduledDate  DateTime
+  startedAt      DateTime?
+  completedAt    DateTime?
+  status         String    @default("SCHEDULED") // SCHEDULED, IN_PROGRESS, COMPLETED, CANCELLED
+  areasFoundGood String? // mirrors the real report's own "areas found good" field
+  observations   String? // problems encountered / recommendations — required to mark COMPLETED
+  createdById    String
+  createdBy      User      @relation("InternalAuditCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  findings       InternalAuditFinding[]
+}
+
+model InternalAuditFinding {
+  id               String        @id @default(cuid())
+  findingNumber    String        @unique // AF-YYYY-NNNN
+  auditId          String
+  audit            InternalAudit @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  isoClauseRef     String?
+  description      String
+  classification   String // MAJOR, MINOR, OBSERVATION
+  correctiveAction String?
+  responsibleId    String?
+  responsible      User?         @relation("AuditFindingResponsible", fields: [responsibleId], references: [id])
+  dueDate          DateTime?
+  status           String        @default("OPEN") // OPEN, IN_PROGRESS, CLOSED
+  closedAt         DateTime?
+  closedById       String?
+  closedBy         User?         @relation("AuditFindingClosedBy", fields: [closedById], references: [id])
+  createdAt        DateTime      @default(now())
 }
 
 // ---------------------------------------------------------------------------

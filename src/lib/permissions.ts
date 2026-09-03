@@ -395,6 +395,12 @@ export const ACTION_ROLES = {
     recordWasteMemoNote: ["QUALITY_SUPERVISOR", "ADMIN"],
     createInstrument: ["QUALITY_SUPERVISOR", "ADMIN"],
     recordCalibration: ["QUALITY_SUPERVISOR", "ADMIN"],
+    scheduleInternalAudit: ["QUALITY_SUPERVISOR", "ADMIN"],
+    startInternalAudit: ["QUALITY_SUPERVISOR", "ADMIN"],
+    completeInternalAudit: ["QUALITY_SUPERVISOR", "ADMIN"],
+    addAuditFinding: ["QUALITY_SUPERVISOR", "ADMIN"],
+    saveAuditFinding: ["QUALITY_SUPERVISOR", "ADMIN"],
+    closeAuditFinding: ["QUALITY_SUPERVISOR", "ADMIN"],
   },
 } as const satisfies Record<string, Record<string, readonly string[]>>;
 

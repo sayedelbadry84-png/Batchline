@@ -14,6 +14,7 @@ import {
   closeCapaRecord,
   createInstrument,
   recordCalibration,
+  scheduleInternalAudit,
 } from "./actions";
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
 import { getActiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
@@ -47,7 +48,7 @@ const ISSUING_BODY_OPTIONS = [
   "Standards Australia",
 ] as const;
 
-const QUALITY_TABS = ["testing", "certificates", "calibration"] as const;
+const QUALITY_TABS = ["testing", "certificates", "calibration", "audits"] as const;
 type QualityTab = (typeof QUALITY_TABS)[number];
 
 export default async function QualityPage({
@@ -62,6 +63,7 @@ export default async function QualityPage({
   const tab: QualityTab = QUALITY_TABS.includes(tabRaw as QualityTab) ? (tabRaw as QualityTab) : "testing";
   const siteId = await getActiveSiteId(user);
   const isCalibrationTab = tab === "calibration";
+  const isAuditsTab = tab === "audits";
 
   const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos, unfinishedWasteMemos, openCapaRecords, qualityUsers] = await Promise.all([
     prisma.testBatch.findMany({
@@ -135,6 +137,13 @@ export default async function QualityPage({
         prisma.site.findMany({ where: siteId ? { id: siteId } : {}, orderBy: { code: "asc" }, select: { id: true, code: true, name: true } }),
       ])
     : [[], []];
+
+  const internalAudits = isAuditsTab
+    ? await prisma.internalAudit.findMany({
+        orderBy: { scheduledDate: "desc" },
+        include: { auditor: true, findings: true },
+      })
+    : [];
 
   // Train the early-vs-final strength regression from every test batch that
   // already has both an early-age and a 28-day-or-later result on file —
@@ -793,6 +802,82 @@ export default async function QualityPage({
             <button type="submit" className={`${ui.button} mt-2`}>{m.calibration.recordButton}</button>
           </form>
         </div>
+      </div>
+      )}
+
+      {tab === "audits" && (
+      <div className="grid grid-cols-[1fr_320px] gap-6">
+        <div className={ui.card}>
+          <h2 className="mb-3 font-display text-lg font-semibold">{m.audits.listTitle}</h2>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th className={ui.th}>{m.audits.col.number}</th>
+                <th className={ui.th}>{m.audits.col.department}</th>
+                <th className={ui.th}>{m.audits.col.auditor}</th>
+                <th className={ui.th}>{m.audits.col.scheduledDate}</th>
+                <th className={ui.th}>{m.audits.col.status}</th>
+                <th className={ui.th}>{m.audits.col.findings}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {internalAudits.map((a) => {
+                const openFindings = a.findings.filter((f) => f.status !== "CLOSED").length;
+                return (
+                  <tr key={a.id}>
+                    <td className={`${ui.td} font-mono text-xs`}>
+                      <Link href={`/quality/audits/${a.id}`} className="font-medium text-accent-strong hover:underline">{a.auditNumber}</Link>
+                    </td>
+                    <td className={ui.td}>{a.department}</td>
+                    <td className={ui.td}>{a.auditor.name}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(a.scheduledDate).toLocaleDateString()}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${a.status === "COMPLETED" ? "bg-good-soft text-good" : a.status === "CANCELLED" ? "bg-critical-soft text-critical" : a.status === "IN_PROGRESS" ? "bg-warn-soft text-warn" : "bg-surface-alt text-ink-muted"}`}>
+                        {m.audits.statusLabel[a.status as keyof typeof m.audits.statusLabel] ?? a.status}
+                      </span>
+                    </td>
+                    <td className={ui.td}>
+                      {a.findings.length === 0 ? <span className="text-ink-muted">—</span> : (
+                        <span className={openFindings > 0 ? "font-semibold text-critical" : ""}>{a.findings.length}{openFindings > 0 ? ` (${openFindings} ${m.audits.open})` : ""}</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {internalAudits.length === 0 && (
+                <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.audits.empty}</span></td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <form action={scheduleInternalAudit} className={`${ui.card} flex flex-col gap-3`}>
+          <h2 className="font-display text-lg font-semibold">{m.audits.newTitle}</h2>
+          <div>
+            <label className={ui.label}>{m.audits.f.department}</label>
+            <input name="department" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.audits.f.processAudited}</label>
+            <input name="processAudited" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.audits.f.isoClauseScope}</label>
+            <input name="isoClauseScope" className={ui.input} placeholder={m.audits.f.isoClauseScopePlaceholder} dir="ltr" />
+          </div>
+          <div>
+            <label className={ui.label}>{m.audits.f.auditorId}</label>
+            <select name="auditorId" required className={ui.select}>
+              <option value="" disabled>{m.audits.f.auditorId}</option>
+              {qualityUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.audits.f.scheduledDate}</label>
+            <input name="scheduledDate" type="date" required className={ui.input} />
+          </div>
+          <button type="submit" className={`${ui.button} mt-2`}>{m.audits.schedule}</button>
+        </form>
       </div>
       )}
 
