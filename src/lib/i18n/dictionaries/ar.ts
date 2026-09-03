@@ -553,6 +553,8 @@ const ar = {
       noPoQty: "لا توجد كمية أمر شراء",
       pass: "قبول", hold: "تعليق", reject: "رفض",
       postedToInventory: "أُدرِج في المخزون",
+      inspectionNotesPlaceholder: "نتيجة الفحص — مطلوبة",
+      inspectedBy: (name: string, date: string) => `فحصها ${name} — ${date}`,
       empty: "لا توجد شحنات مستلمة بعد.",
       captureTitle: "تسجيل بطاقة ميزان الجسر",
       f: {

@@ -87,6 +87,7 @@ model User {
   auditFindingsClosed              InternalAuditFinding[]     @relation("AuditFindingClosedBy")
   controlledDocumentsCreated       ControlledDocument[]
   trainingSessionsCreated          TrainingSession[]
+  materialReceiptsInspected        MaterialReceipt[]
   opportunityInitialApprovals      Opportunity[]             @relation("OpportunityInitialApproval")
   opportunityFinalApprovals        Opportunity[]             @relation("OpportunityFinalApproval")
   fieldVisitInitialApprovals       FieldVisit[]              @relation("FieldVisitInitialApproval")
@@ -921,6 +922,15 @@ model MaterialReceipt {
   netWeightKg         Float
   moisturePct         Float?
   qcStatus            String             @default("PENDING") // PENDING, PASSED, HELD, REJECTED
+  // The real incoming-inspection procedure (P/QM/008/2-1) requires a
+  // written inspection finding distinct from the receiving-desk
+  // weighing above — who inspected it, when, and what they found — set
+  // together by setQcStatus (material-receiving/actions.ts) the moment
+  // qcStatus first moves off PENDING, never fabricated or backfilled.
+  inspectedById       String?
+  inspectedBy         User?              @relation(fields: [inspectedById], references: [id])
+  inspectionDate      DateTime?
+  inspectionNotes     String?
   postedToInventory   Boolean            @default(false)
   destinationSiloId   String?
   destinationSilo     Silo?              @relation(fields: [destinationSiloId], references: [id])

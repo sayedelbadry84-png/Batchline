@@ -44,6 +44,7 @@ export async function RawMaterialsReceivingTab({
         destinationHopper: true,
         driver: true,
         plant: { include: { site: true } },
+        inspectedBy: true,
       },
     }),
     prisma.site.findMany({
@@ -203,32 +204,36 @@ export async function RawMaterialsReceivingTab({
                   </td>
                   <td className={ui.td}>
                     <span className={`${ui.chip} ${qcChip[r.qcStatus] ?? ""}`}>{dict.status[r.qcStatus as keyof typeof dict.status] ?? r.qcStatus}</span>
+                    {r.inspectedBy && (
+                      <div className="mt-1 max-w-[16rem] text-xs text-ink-faint">
+                        {m.inspectedBy(r.inspectedBy.name, new Date(r.inspectionDate!).toLocaleDateString())}
+                        {r.inspectionNotes && <div className="italic">“{r.inspectionNotes}”</div>}
+                      </div>
+                    )}
                   </td>
                   <td className={ui.td}>
                     {r.qcStatus !== "PASSED" && r.qcStatus !== "REJECTED" && r.qcStatus !== "RETURNED" && (
-                      <div className="flex flex-wrap gap-1">
-                        <form action={setQcStatus}>
-                          <input type="hidden" name="id" value={r.id} />
-                          <input type="hidden" name="status" value="PASSED" />
-                          <button className="rounded-md border border-good bg-good-soft px-2 py-1 text-xs text-good hover:opacity-80">
+                      <form action={setQcStatus} className="flex flex-col gap-1">
+                        <input type="hidden" name="id" value={r.id} />
+                        <textarea
+                          name="inspectionNotes"
+                          required
+                          rows={2}
+                          placeholder={m.inspectionNotesPlaceholder}
+                          className="w-48 rounded-md border border-border bg-surface px-2 py-1 text-xs"
+                        />
+                        <div className="flex flex-wrap gap-1">
+                          <button name="status" value="PASSED" className="rounded-md border border-good bg-good-soft px-2 py-1 text-xs text-good hover:opacity-80">
                             {m.pass}
                           </button>
-                        </form>
-                        <form action={setQcStatus}>
-                          <input type="hidden" name="id" value={r.id} />
-                          <input type="hidden" name="status" value="HELD" />
-                          <button className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt">
+                          <button name="status" value="HELD" className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt">
                             {m.hold}
                           </button>
-                        </form>
-                        <form action={setQcStatus}>
-                          <input type="hidden" name="id" value={r.id} />
-                          <input type="hidden" name="status" value="REJECTED" />
-                          <button className="rounded-md border border-critical bg-critical-soft px-2 py-1 text-xs text-critical hover:opacity-80">
+                          <button name="status" value="REJECTED" className="rounded-md border border-critical bg-critical-soft px-2 py-1 text-xs text-critical hover:opacity-80">
                             {m.reject}
                           </button>
-                        </form>
-                      </div>
+                        </div>
+                      </form>
                     )}
                     {r.qcStatus === "PASSED" && (
                       <span className="text-xs text-ink-faint">{m.postedToInventory}</span>

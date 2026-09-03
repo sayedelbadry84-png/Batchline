@@ -273,13 +273,19 @@ export async function returnReceiptToSupplier(formData: FormData) {
   revalidatePath("/");
 }
 
+// The real incoming-inspection procedure (P/QM/008/2-1) requires a
+// written inspection finding before a delivery is accepted or rejected —
+// not just the receiving-desk weighing setQcStatus already had. No note,
+// no status change, same "no note, no approval" discipline the Quality
+// module already uses for CAPA/waste memos/audit findings.
 export async function setQcStatus(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "warehouses", "setQcStatus");
 
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "");
-  if (!id || !status) return;
+  const inspectionNotes = String(formData.get("inspectionNotes") ?? "").trim();
+  if (!id || !status || !inspectionNotes) return;
 
   const receipt = await prisma.materialReceipt.findUnique({ where: { id } });
   if (!receipt) return;
@@ -290,7 +296,13 @@ export async function setQcStatus(formData: FormData) {
   await prisma.$transaction(async (tx) => {
     await tx.materialReceipt.update({
       where: { id },
-      data: { qcStatus: status, postedToInventory: shouldPost ? true : receipt.postedToInventory },
+      data: {
+        qcStatus: status,
+        postedToInventory: shouldPost ? true : receipt.postedToInventory,
+        inspectedById: user!.id,
+        inspectionDate: new Date(),
+        inspectionNotes,
+      },
     });
 
     if (shouldPost) {

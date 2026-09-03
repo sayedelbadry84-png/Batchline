@@ -554,6 +554,8 @@ const en: typeof ar = {
       noPoQty: "no PO qty",
       pass: "Pass", hold: "Hold", reject: "Reject",
       postedToInventory: "posted to inventory",
+      inspectionNotesPlaceholder: "Inspection finding — required",
+      inspectedBy: (name: string, date: string) => `Inspected by ${name} — ${date}`,
       empty: "No deliveries received yet.",
       captureTitle: "Capture weighbridge ticket",
       f: {
