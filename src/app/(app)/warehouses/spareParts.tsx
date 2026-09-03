@@ -4,7 +4,7 @@ import { ui } from "@/lib/ui";
 import { getDictionary } from "@/lib/i18n";
 import { getActiveSiteId } from "@/lib/siteScope";
 import { getEquipmentOptions } from "@/lib/equipmentRegistry";
-import { EquipmentPicker } from "@/components/EquipmentPicker";
+import { MaintenanceOrderAndEquipmentFields } from "./MaintenanceOrderAndEquipmentFields";
 import type { CurrentUser } from "@/lib/session";
 import { createSparePart, receiveSparePart, issueSparePart, approveSparePartsRequisition, rejectSparePartsRequisition } from "./actions";
 
@@ -379,26 +379,17 @@ export async function SparePartsTab({
               {Object.entries(m.reasonLabel).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
             </select>
           </div>
-          <div>
-            <label className={ui.label}>{m.f3.maintenanceOrderId}</label>
-            <select name="maintenanceOrderId" defaultValue="" className={ui.select}>
-              <option value="">{dict.field.none}</option>
-              {maintenanceOrders.map((o) => (
-                <option key={o.id} value={o.id}>{o.orderNumber} — {o.ticket.equipmentLabel}</option>
-              ))}
-            </select>
-            <p className="mt-1 text-xs text-ink-muted">{m.f3.maintenanceOrderHint}</p>
-          </div>
-          <div>
-            <label className={ui.label}>{m.f3.equipmentId}</label>
-            <EquipmentPicker
-              options={equipmentOptions}
-              placeholder={dict.modules.maintenance.tickets.f.equipmentPlaceholder}
-              typeLabels={dict.modules.maintenance.equipmentTypeLabel}
-              required={false}
-            />
-            <p className="mt-1 text-xs text-ink-muted">{m.f3.equipmentHint}</p>
-          </div>
+          <MaintenanceOrderAndEquipmentFields
+            orders={maintenanceOrders.map((o) => ({ id: o.id, orderNumber: o.orderNumber, equipmentType: o.ticket.equipmentType, equipmentId: o.ticket.equipmentId, equipmentLabel: o.ticket.equipmentLabel }))}
+            equipmentOptions={equipmentOptions}
+            orderLabel={m.f3.maintenanceOrderId}
+            orderHint={m.f3.maintenanceOrderHint}
+            orderNone={dict.field.none}
+            equipmentLabel={m.f3.equipmentId}
+            equipmentHint={m.f3.equipmentHint}
+            equipmentPlaceholder={dict.modules.maintenance.tickets.f.equipmentPlaceholder}
+            equipmentTypeLabels={dict.modules.maintenance.equipmentTypeLabel}
+          />
           <div>
             <label className={ui.label}>{m.f3.unitCost}</label>
             <input name="unitCost" type="number" step="0.01" min="0" className={ui.input} />
