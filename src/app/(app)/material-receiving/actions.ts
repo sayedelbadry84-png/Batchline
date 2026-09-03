@@ -291,19 +291,29 @@ export async function setQcStatus(formData: FormData) {
   if (!receipt) return;
   if (!(await isPlantInScope(receipt.plantId, effectiveSiteId(user)))) return;
 
-  const shouldPost = status === "PASSED" && !receipt.postedToInventory;
+  const shouldPost = await prisma.$transaction(async (tx) => {
+    // Claim "not yet posted" atomically via the update's own WHERE clause,
+    // instead of deciding shouldPost from a read taken before the
+    // transaction — two concurrent PASS submissions for the same receipt
+    // used to both see postedToInventory:false and both credit the silo/
+    // hopper. Postgres's row lock on the matching UPDATE serializes this:
+    // only the first writer can still match postedToInventory: false —
+    // the second's updateMany then matches zero rows.
+    const claim =
+      status === "PASSED"
+        ? await tx.materialReceipt.updateMany({
+            where: { id, postedToInventory: false },
+            data: { qcStatus: status, postedToInventory: true, inspectedById: user!.id, inspectionDate: new Date(), inspectionNotes },
+          })
+        : { count: 0 };
+    const shouldPost = claim.count > 0;
 
-  await prisma.$transaction(async (tx) => {
-    await tx.materialReceipt.update({
-      where: { id },
-      data: {
-        qcStatus: status,
-        postedToInventory: shouldPost ? true : receipt.postedToInventory,
-        inspectedById: user!.id,
-        inspectionDate: new Date(),
-        inspectionNotes,
-      },
-    });
+    if (!shouldPost) {
+      await tx.materialReceipt.update({
+        where: { id },
+        data: { qcStatus: status, inspectedById: user!.id, inspectionDate: new Date(), inspectionNotes },
+      });
+    }
 
     if (shouldPost) {
       const netTons = receipt.netWeightKg / 1000;
@@ -325,6 +335,8 @@ export async function setQcStatus(formData: FormData) {
         }
       }
     }
+
+    return shouldPost;
   });
 
   await logAudit({

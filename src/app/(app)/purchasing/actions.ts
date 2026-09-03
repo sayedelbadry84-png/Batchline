@@ -123,6 +123,7 @@ export async function approvePurchaseOrder(formData: FormData) {
 
   const po = await prisma.purchaseOrder.findUnique({ where: { id } });
   if (!po || po.status !== "DRAFT" || po.approvedAt) return;
+  if (!isSiteInScope(po.siteId, effectiveSiteId(actor))) return;
 
   await prisma.purchaseOrder.update({ where: { id }, data: { approvedAt: new Date(), approvedById: actor!.id } });
 
@@ -139,6 +140,7 @@ export async function markPurchaseOrderSent(formData: FormData) {
 
   const po = await prisma.purchaseOrder.findUnique({ where: { id } });
   if (!po || po.status !== "DRAFT") return;
+  if (!isSiteInScope(po.siteId, effectiveSiteId(actor))) return;
 
   // A PO at/above its own plant's poApprovalThreshold can't go out
   // without approvePurchaseOrder first — a plant that never sets a
@@ -163,6 +165,7 @@ export async function cancelPurchaseOrder(formData: FormData) {
 
   const po = await prisma.purchaseOrder.findUnique({ where: { id } });
   if (!po || !["DRAFT", "SENT"].includes(po.status)) return;
+  if (!isSiteInScope(po.siteId, effectiveSiteId(actor))) return;
 
   await prisma.purchaseOrder.update({ where: { id }, data: { status: "CANCELLED" } });
 

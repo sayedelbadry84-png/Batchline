@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
-import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
+import { effectiveSiteId, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
@@ -36,6 +36,21 @@ async function wasteMemoInScope(wasteMemoId: string, siteId: string | null): Pro
   const memo = await prisma.wasteIncidentMemo.findUnique({ where: { id: wasteMemoId }, select: { batchTicket: { select: { plantId: true } } } });
   if (!memo) return false;
   return isPlantInScope(memo.batchTicket.plantId, siteId);
+}
+
+// CapaRecord has no siteId/plantId column of its own — it's only ever
+// reached via labResult -> testBatch -> trip -> batchTicket -> plant, the
+// same chain testBatchInScope above already walks for the record that
+// auto-opens a CAPA (addLabResult). saveCapaRecord/closeCapaRecord used to
+// skip this entirely, since a CapaRecord row itself has nothing to check.
+async function capaInScope(capaId: string, siteId: string | null): Promise<boolean> {
+  if (siteId === null) return true;
+  const capa = await prisma.capaRecord.findUnique({
+    where: { id: capaId },
+    select: { labResult: { select: { testBatch: { select: { trip: { select: { batchTicket: { select: { plantId: true } } } } } } } } },
+  });
+  if (!capa) return false;
+  return isPlantInScope(capa.labResult.testBatch.trip.batchTicket.plantId, siteId);
 }
 
 export async function createTestBatch(formData: FormData) {
@@ -85,10 +100,16 @@ export async function addLabResult(formData: FormData) {
 
   const testBatchId = String(formData.get("testBatchId") ?? "");
   const ageDays = Number(formData.get("ageDays") ?? 28);
-  const breakStrengthMpa = Number(formData.get("breakStrengthMpa") ?? 0);
+  // Not `Number(... ?? 0)` — a cylinder that broke at a genuine 0 MPa (never
+  // set, crumbled) is a real, worst-case result, and `!breakStrengthMpa`
+  // would treat it identically to a blank field, silently dropping the
+  // whole submission (no FAIL, no auto-opened CAPA) for exactly the result
+  // this form most needs to catch.
+  const breakStrengthMpaRaw = String(formData.get("breakStrengthMpa") ?? "").trim();
+  const breakStrengthMpa = breakStrengthMpaRaw === "" ? NaN : Number(breakStrengthMpaRaw);
   const targetStrengthMpa = Number(formData.get("targetStrengthMpa") ?? 0);
 
-  if (!testBatchId || !breakStrengthMpa || !targetStrengthMpa) return;
+  if (!testBatchId || !Number.isFinite(breakStrengthMpa) || !targetStrengthMpa) return;
   if (!(await testBatchInScope(testBatchId, effectiveSiteId(user)))) return;
 
   const passFail = breakStrengthMpa >= targetStrengthMpa ? "PASS" : "FAIL";
@@ -146,6 +167,7 @@ export async function saveCapaRecord(formData: FormData) {
 
   const capa = await prisma.capaRecord.findUnique({ where: { id } });
   if (!capa || capa.status === "CLOSED") return;
+  if (!(await capaInScope(id, effectiveSiteId(actor)))) return;
 
   await prisma.capaRecord.update({
     where: { id },
@@ -176,6 +198,7 @@ export async function closeCapaRecord(formData: FormData) {
 
   const capa = await prisma.capaRecord.findUnique({ where: { id } });
   if (!capa || capa.status === "CLOSED" || !capa.rootCause || !capa.correctiveAction) return;
+  if (!(await capaInScope(id, effectiveSiteId(actor)))) return;
 
   await prisma.capaRecord.update({
     where: { id },
@@ -340,6 +363,7 @@ export async function createInstrument(formData: FormData) {
   const siteId = String(formData.get("siteId") ?? "") || null;
   const calibrationIntervalMonths = Number(formData.get("calibrationIntervalMonths") ?? 0) || null;
   if (!code || !name) return;
+  if (siteId && !isSiteInScope(siteId, effectiveSiteId(user))) return;
 
   const instrument = await prisma.calibratedInstrument.create({
     data: { code, name, manufacturer, model, serialNumber, location, siteId, calibrationIntervalMonths },
@@ -371,6 +395,7 @@ export async function recordCalibration(formData: FormData) {
 
   const instrument = await prisma.calibratedInstrument.findUnique({ where: { id: instrumentId } });
   if (!instrument) return;
+  if (instrument.siteId && !isSiteInScope(instrument.siteId, effectiveSiteId(user))) return;
 
   const record = await withSequentialNumber(
     "CAL",

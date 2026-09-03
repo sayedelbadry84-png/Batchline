@@ -335,10 +335,14 @@ export function computeMaterialLabTestResults(testType: MaterialLabTestType, for
       const clayReading1 = num(formData, "clayReading1");
       const sandReading2 = num(formData, "sandReading2");
       const clayReading2 = num(formData, "clayReading2");
-      if (sandReading1 == null || !clayReading1) return null;
-      const se1 = (sandReading1 / clayReading1) * 100;
-      const se2 = sandReading2 != null && clayReading2 ? (sandReading2 / clayReading2) * 100 : undefined;
-      const average = se2 != null ? (se1 + se2) / 2 : se1;
+      // `== null`, not truthiness — clayReading1 of 0 is a real entered
+      // value, not a missing field; `!clayReading1` used to treat the two
+      // identically and silently drop the ENTIRE test submission (not just
+      // this one field) whenever a trial reading came out to 0.
+      if (sandReading1 == null || clayReading1 == null) return null;
+      const se1 = clayReading1 !== 0 ? (sandReading1 / clayReading1) * 100 : undefined;
+      const se2 = sandReading2 != null && clayReading2 != null && clayReading2 !== 0 ? (sandReading2 / clayReading2) * 100 : undefined;
+      const average = se1 != null && se2 != null ? (se1 + se2) / 2 : (se1 ?? se2);
       return { inputs: { sandReading1, clayReading1, sandReading2, clayReading2 }, computed: { se1, se2, average } };
     }
     case "AGGREGATE_IMPACT_VALUE": {

@@ -1,6 +1,7 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
@@ -17,6 +18,13 @@ import { redirect } from "next/navigation";
 // the Batchline design spec — only aggregates carry surface moisture).
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
+// See the same note on billing/actions.ts's own TX_OPTIONS — completeBatch's
+// per-component silo/hopper/tank lookups+updates are several sequential
+// round trips to Neon, which can comfortably exceed Prisma's 5s default
+// interactive-transaction timeout, especially on a cold connection. 15s
+// gives real headroom without masking a genuinely broken/looping query.
+const TX_OPTIONS = { timeout: 15000 };
+
 // A hopper's aggregate/water heap, or a cement silo, can be shared by
 // every production line at one SITE (Hopper/Silo.sharedAcrossPlants) —
 // prefer a match at the ticket's own line, but fall back to a shared one
@@ -24,16 +32,21 @@ const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 // scoped by siteId, not global: two unrelated sites' stock must never
 // cross-contaminate just because both happen to have a hopper flagged
 // shared.
-async function findMatchingHopper(plantId: string, siteId: string, aggregateTypeWhere: { equals: string } | { startsWith: string }) {
-  const own = await prisma.hopper.findFirst({ where: { plantId, aggregateType: aggregateTypeWhere } });
+async function findMatchingHopper(
+  db: Prisma.TransactionClient | typeof prisma,
+  plantId: string,
+  siteId: string,
+  aggregateTypeWhere: { equals: string } | { startsWith: string },
+) {
+  const own = await db.hopper.findFirst({ where: { plantId, aggregateType: aggregateTypeWhere } });
   if (own) return own;
-  return prisma.hopper.findFirst({ where: { sharedAcrossPlants: true, aggregateType: aggregateTypeWhere, plant: { siteId } } });
+  return db.hopper.findFirst({ where: { sharedAcrossPlants: true, aggregateType: aggregateTypeWhere, plant: { siteId } } });
 }
 
-async function findMatchingSilo(plantId: string, siteId: string, materialType: string) {
-  const own = await prisma.silo.findFirst({ where: { plantId, materialType } });
+async function findMatchingSilo(db: Prisma.TransactionClient | typeof prisma, plantId: string, siteId: string, materialType: string) {
+  const own = await db.silo.findFirst({ where: { plantId, materialType } });
   if (own) return own;
-  return prisma.silo.findFirst({ where: { sharedAcrossPlants: true, materialType, plant: { siteId } } });
+  return db.silo.findFirst({ where: { sharedAcrossPlants: true, materialType, plant: { siteId } } });
 }
 
 // Raw-material counterpart to issueSparePartToOrder's shortfall handling —
@@ -359,69 +372,95 @@ export async function completeBatch(formData: FormData) {
     },
   });
   if (!ticket || ticket.status === "COMPLETE") return;
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
+
+  // Auto-requisition checks (maybeAutoRequisitionMaterial) fire their own
+  // notification side effect and aren't part of the inventory/status write
+  // itself — collected here and run once the transaction below has
+  // actually committed, rather than inside it.
+  const requisitionChecks: Array<() => Promise<void>> = [];
 
   // Deduct actual (or target, if never weighed) mass from the matching
   // silo, hopper, or chemical tank — the same inventory the Silos screen
-  // and dashboard alerts read.
-  for (const c of ticket.components) {
-    const massKg = c.actualMassKg ?? c.targetMassKg;
-    const massTons = massKg / 1000;
+  // and dashboard alerts read. The whole loop plus the final status flip
+  // run as one transaction: previously each update committed independently
+  // and only the status flip at the end marked the ticket COMPLETE, so a
+  // failure partway through the loop (e.g. the 3rd component's update
+  // throws) left the first two materials already deducted but the ticket
+  // still not COMPLETE — a retry would then re-run the whole loop and
+  // double-deduct the materials that succeeded the first time.
+  await prisma.$transaction(async (tx) => {
+    for (const c of ticket.components) {
+      const massKg = c.actualMassKg ?? c.targetMassKg;
+      const massTons = massKg / 1000;
 
-    if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-      const silo = await findMatchingSilo(ticket.plantId, ticket.plant.siteId, c.material.type);
-      if (silo) {
-        const newLevelTons = Math.max(0, silo.currentLevelTons - massTons);
-        await prisma.silo.update({ where: { id: silo.id }, data: { currentLevelTons: newLevelTons } });
-        await maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, silo.capacityTons, silo.minThresholdPct, (tons) => tons * 1000);
-      }
-    } else if (AGGREGATE_TYPES.has(c.material.type)) {
-      const hopper = await findMatchingHopper(
-        ticket.plantId,
-        ticket.plant.siteId,
-        c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
-      );
-      if (hopper) {
-        const newLevelTons = Math.max(0, hopper.currentLevelTons - massTons);
-        await prisma.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: newLevelTons } });
-        await maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, hopper.capacityTons, hopper.minThresholdPct, (tons) => tons * 1000);
-      }
-    } else if (c.material.type === "WATER") {
-      // Reuses Hopper (a plain tonnage heap) rather than a new model — a
-      // plant that meters bulk water registers a Hopper with
-      // aggregateType "WATER"; one that doesn't just has no match here,
-      // same silent no-op as any other unregistered destination.
-      const waterHopper = await findMatchingHopper(ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
-      if (waterHopper) {
-        const newLevelTons = Math.max(0, waterHopper.currentLevelTons - massTons);
-        await prisma.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: newLevelTons } });
-        await maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, waterHopper.capacityTons, waterHopper.minThresholdPct, (tons) => tons * 1000);
-      }
-    } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
-      // Batched mass is always stored in kg (see addComponent in
-      // mix-designs/actions.ts) — convert back to liters, the unit a
-      // chemical tank is actually metered in.
-      const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
-      if (tank) {
-        const liters = massKg / c.material.specificGravity;
-        const newLevelLiters = Math.max(0, tank.currentLevelLiters - liters);
-        await prisma.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: newLevelLiters } });
-        const specificGravity = c.material.specificGravity;
-        await maybeAutoRequisitionMaterial(
-          c.materialId,
+      if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
+        const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.material.type);
+        if (silo) {
+          const newLevelTons = Math.max(0, silo.currentLevelTons - massTons);
+          await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: newLevelTons } });
+          requisitionChecks.push(() =>
+            maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, silo.capacityTons, silo.minThresholdPct, (tons) => tons * 1000),
+          );
+        }
+      } else if (AGGREGATE_TYPES.has(c.material.type)) {
+        const hopper = await findMatchingHopper(
+          tx,
+          ticket.plantId,
           ticket.plant.siteId,
-          newLevelLiters,
-          tank.capacityLiters ?? 0,
-          tank.minThresholdPct,
-          (liters) => liters * specificGravity,
+          c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
         );
+        if (hopper) {
+          const newLevelTons = Math.max(0, hopper.currentLevelTons - massTons);
+          await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: newLevelTons } });
+          requisitionChecks.push(() =>
+            maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, hopper.capacityTons, hopper.minThresholdPct, (tons) => tons * 1000),
+          );
+        }
+      } else if (c.material.type === "WATER") {
+        // Reuses Hopper (a plain tonnage heap) rather than a new model — a
+        // plant that meters bulk water registers a Hopper with
+        // aggregateType "WATER"; one that doesn't just has no match here,
+        // same silent no-op as any other unregistered destination.
+        const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
+        if (waterHopper) {
+          const newLevelTons = Math.max(0, waterHopper.currentLevelTons - massTons);
+          await tx.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: newLevelTons } });
+          requisitionChecks.push(() =>
+            maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, waterHopper.capacityTons, waterHopper.minThresholdPct, (tons) => tons * 1000),
+          );
+        }
+      } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
+        // Batched mass is always stored in kg (see addComponent in
+        // mix-designs/actions.ts) — convert back to liters, the unit a
+        // chemical tank is actually metered in.
+        const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
+        if (tank) {
+          const liters = massKg / c.material.specificGravity;
+          const newLevelLiters = Math.max(0, tank.currentLevelLiters - liters);
+          await tx.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: newLevelLiters } });
+          const specificGravity = c.material.specificGravity;
+          requisitionChecks.push(() =>
+            maybeAutoRequisitionMaterial(
+              c.materialId,
+              ticket.plant.siteId,
+              newLevelLiters,
+              tank.capacityLiters ?? 0,
+              tank.minThresholdPct,
+              (liters) => liters * specificGravity,
+            ),
+          );
+        }
       }
     }
-  }
 
-  await prisma.batchTicket.update({
-    where: { id: batchTicketId },
-    data: { status: "COMPLETE", batchCompletedAt: new Date() },
-  });
+    await tx.batchTicket.update({
+      where: { id: batchTicketId },
+      data: { status: "COMPLETE", batchCompletedAt: new Date() },
+    });
+  }, TX_OPTIONS);
+
+  for (const check of requisitionChecks) await check();
 
   await logAudit({
     module: "Production",
@@ -455,12 +494,6 @@ export async function startTrip(formData: FormData) {
     include: { reservation: true, components: true },
   });
   if (!ticket) return;
-
-  // Re-check server-side rather than trusting the picker only offered
-  // free trucks — a second tab or a stale page could still submit a truck
-  // that picked up another open trip in the meantime.
-  const truckBusy = await prisma.trip.findFirst({ where: { truckId, status: { not: "CLOSED" } } });
-  if (truckBusy) return;
 
   // Pump crew/unit only apply when the reservation was booked for pump
   // delivery — ignore anything submitted for a chute delivery so a stray
@@ -514,39 +547,57 @@ export async function startTrip(formData: FormData) {
   const availableReclaim = await getAvailableReclaimForTruck(truckId, ticket.mixId);
   const reclaimedVolumeM3 = availableReclaim ? Math.min(availableReclaim.volumeM3, ticket.volumeM3) : null;
 
-  const trip = await prisma.$transaction(async (tx) => {
-    const created = await tx.trip.create({
-      data: {
-        batchTicketId,
-        truckId,
-        driverId,
-        pumpId,
-        pumpOperatorName,
-        pumpAssistantName,
-        pumpOperatorId,
-        pumpAssistantId,
-        status: "LOADING",
-        batchTime: ticket.batchCompletedAt ?? new Date(),
-        reclaimedVolumeM3,
-      },
-    });
+  // Serializable: the plain findFirst-then-create this used to be let two
+  // concurrent "start trip" submissions for the same truck both read "not
+  // busy" before either commit, assigning the same truck to two open trips
+  // at once. Under Serializable isolation, Postgres detects the read-write
+  // conflict between the two transactions and aborts one with P2034 — that
+  // one falls through to the silent-return below, same as every other
+  // rejected submission in this action, and the caller just needs to retry.
+  let trip;
+  try {
+    trip = await prisma.$transaction(
+      async (tx) => {
+        const truckBusy = await tx.trip.findFirst({ where: { truckId, status: { not: "CLOSED" } } });
+        if (truckBusy) throw new Error("TRUCK_BUSY");
 
-    if (availableReclaim && reclaimedVolumeM3) {
-      const freshFraction = 1 - reclaimedVolumeM3 / ticket.volumeM3;
-      for (const c of ticket.components) {
-        await tx.batchComponentActual.update({
-          where: { id: c.id },
-          data: { targetMassKg: c.targetMassKg * freshFraction },
+        const created = await tx.trip.create({
+          data: {
+            batchTicketId,
+            truckId,
+            driverId,
+            pumpId,
+            pumpOperatorName,
+            pumpAssistantName,
+            pumpOperatorId,
+            pumpAssistantId,
+            status: "LOADING",
+            batchTime: ticket.batchCompletedAt ?? new Date(),
+            reclaimedVolumeM3,
+          },
         });
-      }
-      await tx.drumReturn.update({
-        where: { id: availableReclaim.drumReturnId },
-        data: { consumedAt: new Date(), consumedInTripId: created.id },
-      });
-    }
 
-    return created;
-  });
+        if (availableReclaim && reclaimedVolumeM3) {
+          const freshFraction = 1 - reclaimedVolumeM3 / ticket.volumeM3;
+          for (const c of ticket.components) {
+            await tx.batchComponentActual.update({
+              where: { id: c.id },
+              data: { targetMassKg: c.targetMassKg * freshFraction },
+            });
+          }
+          await tx.drumReturn.update({
+            where: { id: availableReclaim.drumReturnId },
+            data: { consumedAt: new Date(), consumedInTripId: created.id },
+          });
+        }
+
+        return created;
+      },
+      { ...TX_OPTIONS, isolationLevel: "Serializable" },
+    );
+  } catch {
+    return;
+  }
 
   await logAudit({ module: "Fleet", recordId: trip.id, afterValue: "LOADING", reasonCode: "TRIP_STARTED" });
 
@@ -608,11 +659,6 @@ export async function updateTripAssignment(formData: FormData) {
   });
   if (!trip || trip.status !== "LOADING") return;
 
-  const truckBusy = await prisma.trip.findFirst({
-    where: { truckId, status: { not: "CLOSED" }, id: { not: tripId } },
-  });
-  if (truckBusy) return;
-
   const isPumpDelivery = trip.batchTicket.reservation.deliveryMethod === "PUMP";
   const pumpId = isPumpDelivery ? String(formData.get("pumpId") ?? "").trim() || null : null;
   const pumpOperatorIdInput = isPumpDelivery ? String(formData.get("pumpOperatorId") ?? "").trim() || null : null;
@@ -645,10 +691,27 @@ export async function updateTripAssignment(formData: FormData) {
     }
   }
 
-  await prisma.trip.update({
-    where: { id: tripId },
-    data: { truckId, driverId, pumpId, pumpOperatorId, pumpOperatorName, pumpAssistantId, pumpAssistantName },
-  });
+  // Same Serializable-transaction fix as startTrip above — re-checking
+  // truck-busy and writing the reassignment outside one transaction let two
+  // concurrent reassignments both see the truck as free and both take it.
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        const truckBusy = await tx.trip.findFirst({
+          where: { truckId, status: { not: "CLOSED" }, id: { not: tripId } },
+        });
+        if (truckBusy) throw new Error("TRUCK_BUSY");
+
+        await tx.trip.update({
+          where: { id: tripId },
+          data: { truckId, driverId, pumpId, pumpOperatorId, pumpOperatorName, pumpAssistantId, pumpAssistantName },
+        });
+      },
+      { ...TX_OPTIONS, isolationLevel: "Serializable" },
+    );
+  } catch {
+    return;
+  }
 
   await logAudit({ module: "Fleet", recordId: tripId, afterValue: `${truckId}/${driverId}`, reasonCode: "TRIP_ASSIGNMENT_UPDATED" });
 
@@ -741,12 +804,13 @@ export async function deleteBatchTicket(formData: FormData) {
       const massTons = massKg / 1000;
 
       if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-        const silo = await findMatchingSilo(ticket.plantId, ticket.plant.siteId, c.material.type);
+        const silo = await findMatchingSilo(prisma, ticket.plantId, ticket.plant.siteId, c.material.type);
         if (silo) {
           await prisma.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + massTons } });
         }
       } else if (AGGREGATE_TYPES.has(c.material.type)) {
         const hopper = await findMatchingHopper(
+          prisma,
           ticket.plantId,
           ticket.plant.siteId,
           c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
@@ -755,7 +819,7 @@ export async function deleteBatchTicket(formData: FormData) {
           await prisma.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + massTons } });
         }
       } else if (c.material.type === "WATER") {
-        const waterHopper = await findMatchingHopper(ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
+        const waterHopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
         if (waterHopper) {
           await prisma.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: waterHopper.currentLevelTons + massTons } });
         }

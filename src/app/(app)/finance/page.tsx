@@ -95,7 +95,7 @@ export default async function FinancePage({
 
       {tab === "aging" && <AgingTab m={m} siteScope={siteScope} />}
 
-      {tab === "reconciliation" && <ReconciliationTab m={m} dict={dict} siteScope={siteScope} sites={sites} />}
+      {tab === "reconciliation" && <ReconciliationTab m={m} dict={dict} siteScope={siteScope} siteId={siteId} sites={sites} />}
 
       {tab === "ledger" && <LedgerTab m={m} siteScope={siteScope} />}
 
@@ -119,8 +119,14 @@ async function OverviewTab({
     prisma.invoice.findMany({ where: { status: { notIn: ["DRAFT", "CANCELLED"] }, ...(siteScope.siteId ? { plant: { siteId: (siteScope as { siteId: string }).siteId } } : {}) }, select: { total: true, payments: { select: { amount: true } }, creditNotes: { select: { amount: true } } } }),
     prisma.supplierBill.findMany({ where: { status: { notIn: ["CANCELLED"] }, ...siteScope }, select: { total: true, payments: { select: { amount: true } } } }),
     prisma.cashTransaction.findMany({ where: { occurredAt: { gte: monthStart }, ...siteScope }, select: { direction: true, amount: true } }),
-    prisma.payment.findMany({ where: { paidAt: { gte: monthStart } }, select: { amount: true } }),
-    prisma.supplierPayment.findMany({ where: { paidAt: { gte: monthStart } }, select: { amount: true } }),
+    prisma.payment.findMany({
+      where: { paidAt: { gte: monthStart }, ...(siteScope.siteId ? { invoice: { plant: { siteId: (siteScope as { siteId: string }).siteId } } } : {}) },
+      select: { amount: true },
+    }),
+    prisma.supplierPayment.findMany({
+      where: { paidAt: { gte: monthStart }, ...(siteScope.siteId ? { supplierBill: { siteId: (siteScope as { siteId: string }).siteId } } : {}) },
+      select: { amount: true },
+    }),
   ]);
 
   const arOutstanding = invoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
@@ -706,16 +712,29 @@ async function ReconciliationTab({
   m,
   dict,
   siteScope,
+  siteId,
   sites,
 }: {
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["finance"];
   dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
   siteScope: Record<string, unknown>;
+  siteId: string | null;
   sites: { id: string; code: string; name: string }[];
 }) {
   const [payments, supplierPayments, cashTransactions, unmatchedLines] = await Promise.all([
-    prisma.payment.findMany({ where: { reconciled: false }, orderBy: { paidAt: "desc" }, include: { invoice: { include: { customer: true } } } }),
-    prisma.supplierPayment.findMany({ where: { reconciled: false }, orderBy: { paidAt: "desc" }, include: { supplierBill: { include: { supplier: true } } } }),
+    // Payment/SupplierPayment carry no siteId of their own — scoped via
+    // invoice.plant.siteId / supplierBill.siteId, same nested pattern
+    // OverviewTab's KPI tiles already use just above.
+    prisma.payment.findMany({
+      where: { reconciled: false, ...(siteId ? { invoice: { plant: { siteId } } } : {}) },
+      orderBy: { paidAt: "desc" },
+      include: { invoice: { include: { customer: true } } },
+    }),
+    prisma.supplierPayment.findMany({
+      where: { reconciled: false, ...(siteId ? { supplierBill: { siteId } } : {}) },
+      orderBy: { paidAt: "desc" },
+      include: { supplierBill: { include: { supplier: true } } },
+    }),
     prisma.cashTransaction.findMany({ where: { reconciled: false, ...siteScope }, orderBy: { occurredAt: "desc" } }),
     prisma.bankStatementLine.findMany({ where: { matchedKind: null, ...siteScope }, orderBy: { statementDate: "desc" } }),
   ]);

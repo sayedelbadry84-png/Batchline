@@ -157,6 +157,7 @@ export async function approveSparePartsRequisition(formData: FormData) {
 
   const requisition = await prisma.sparePartsRequisition.findUnique({ where: { id } });
   if (!requisition || requisition.status !== "PENDING_APPROVAL") return;
+  if (!isSiteInScope(requisition.siteId, effectiveSiteId(actor))) return;
 
   await prisma.sparePartsRequisition.update({
     where: { id },
@@ -177,6 +178,7 @@ export async function rejectSparePartsRequisition(formData: FormData) {
 
   const requisition = await prisma.sparePartsRequisition.findUnique({ where: { id } });
   if (!requisition || requisition.status !== "PENDING_APPROVAL") return;
+  if (!isSiteInScope(requisition.siteId, effectiveSiteId(actor))) return;
 
   await prisma.sparePartsRequisition.update({
     where: { id },
@@ -200,6 +202,7 @@ export async function approveMaterialRequisition(formData: FormData) {
 
   const requisition = await prisma.materialRequisition.findUnique({ where: { id } });
   if (!requisition || requisition.status !== "PENDING_APPROVAL") return;
+  if (!isSiteInScope(requisition.siteId, effectiveSiteId(actor))) return;
 
   await prisma.materialRequisition.update({
     where: { id },
@@ -220,6 +223,7 @@ export async function rejectMaterialRequisition(formData: FormData) {
 
   const requisition = await prisma.materialRequisition.findUnique({ where: { id } });
   if (!requisition || requisition.status !== "PENDING_APPROVAL") return;
+  if (!isSiteInScope(requisition.siteId, effectiveSiteId(actor))) return;
 
   await prisma.materialRequisition.update({
     where: { id },

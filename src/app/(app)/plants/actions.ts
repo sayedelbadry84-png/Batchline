@@ -70,7 +70,12 @@ export async function createPlant(formData: FormData) {
   const timezone = String(formData.get("timezone") ?? "Africa/Cairo").trim();
   const taxRatePct = Number(formData.get("taxRatePct") ?? 0) || 0;
   const taxLabel = String(formData.get("taxLabel") ?? "VAT").trim() || "VAT";
-  const poApprovalThreshold = Number(formData.get("poApprovalThreshold") ?? 0) || null;
+  // Not `Number(...) || null` — that collapses a deliberately-entered 0
+  // ("require approval on every PO, no matter how small") into null, which
+  // poNeedsApproval (purchasing/actions.ts) reads as "no threshold set" and
+  // silently disables approval-gating for the plant entirely.
+  const poApprovalThresholdRaw = String(formData.get("poApprovalThreshold") ?? "").trim();
+  const poApprovalThreshold = poApprovalThresholdRaw === "" ? null : Number(poApprovalThresholdRaw);
 
   if (!siteId || !name) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
@@ -108,7 +113,12 @@ export async function updatePlant(formData: FormData) {
   const timezone = String(formData.get("timezone") ?? "").trim();
   const taxRatePct = Number(formData.get("taxRatePct") ?? 0) || 0;
   const taxLabel = String(formData.get("taxLabel") ?? "VAT").trim() || "VAT";
-  const poApprovalThreshold = Number(formData.get("poApprovalThreshold") ?? 0) || null;
+  // Not `Number(...) || null` — that collapses a deliberately-entered 0
+  // ("require approval on every PO, no matter how small") into null, which
+  // poNeedsApproval (purchasing/actions.ts) reads as "no threshold set" and
+  // silently disables approval-gating for the plant entirely.
+  const poApprovalThresholdRaw = String(formData.get("poApprovalThreshold") ?? "").trim();
+  const poApprovalThreshold = poApprovalThresholdRaw === "" ? null : Number(poApprovalThresholdRaw);
   const statusRaw = String(formData.get("status") ?? "ACTIVE");
   const status = (PLANT_STATUSES as readonly string[]).includes(statusRaw) ? statusRaw : "ACTIVE";
   if (!id || !requestedSiteId || !name) return;

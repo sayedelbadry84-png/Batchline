@@ -51,7 +51,7 @@ export async function closeTripFull(formData: FormData) {
 
   const tripId = String(formData.get("tripId") ?? "");
   const trip = await prisma.trip.findUnique({ where: { id: tripId }, include: { batchTicket: true } });
-  if (!trip) return;
+  if (!trip || trip.status === "CLOSED") return;
   if (!(await isPlantInScope(trip.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   await prisma.trip.update({
@@ -89,7 +89,7 @@ export async function closeTripWithReturn(formData: FormData) {
     where: { id: tripId },
     include: { batchTicket: { include: { plant: true } } },
   });
-  if (!trip) return;
+  if (!trip || trip.status === "CLOSED") return;
   if (!(await isPlantInScope(trip.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   const now = new Date();

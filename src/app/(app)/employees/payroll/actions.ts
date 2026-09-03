@@ -81,7 +81,8 @@ export async function generatePayrollRun(formData: FormData) {
   const periodStart = new Date(`${periodStartRaw}T00:00:00`);
   const periodEnd = new Date(`${periodEndRaw}T23:59:59`);
   if (periodEnd < periodStart) return;
-  const periodDays = daysInclusive(new Date(`${periodStartRaw}T00:00:00`), new Date(`${periodEndRaw}T00:00:00`));
+  const periodEndMidnight = new Date(`${periodEndRaw}T00:00:00`);
+  const periodDays = daysInclusive(periodStart, periodEndMidnight);
 
   // Only employees with both wageType and wageRate configured are payable —
   // everyone else is silently skipped (surfaced as a count in the UI), not
@@ -109,10 +110,6 @@ export async function generatePayrollRun(formData: FormData) {
       where: { employeeId: employee.id, date: { gte: periodStart, lte: periodEnd }, status: "ABSENT" },
     });
 
-    // Full daysCount is counted on any overlap with the period — no
-    // proration for a leave that only partially crosses the period
-    // boundary. A deliberate MVP simplification, not a precise pro-rata
-    // split.
     const unpaidLeaves = await prisma.leaveRequest.findMany({
       where: {
         employeeId: employee.id,
@@ -122,7 +119,17 @@ export async function generatePayrollRun(formData: FormData) {
         endDate: { gte: periodStart },
       },
     });
-    const unpaidLeaveDays = unpaidLeaves.reduce((sum, l) => sum + l.daysCount, 0);
+    // Clip each leave to the days that actually fall inside THIS period
+    // before counting — summing the leave's full daysCount for any overlap
+    // used to deduct the entire length from every period it touched, so a
+    // 7-day leave spanning two adjacent payroll runs (e.g. Aug 28–Sep 3)
+    // was deducted as 7 days from August AND 7 days from September, 14
+    // days total for a 7-day leave.
+    const unpaidLeaveDays = unpaidLeaves.reduce((sum, l) => {
+      const clippedStart = l.startDate > periodStart ? l.startDate : periodStart;
+      const clippedEnd = l.endDate < periodEndMidnight ? l.endDate : periodEndMidnight;
+      return sum + Math.max(0, daysInclusive(clippedStart, clippedEnd));
+    }, 0);
     const unpaidDays = absentDays + unpaidLeaveDays;
 
     let grossPay: number;

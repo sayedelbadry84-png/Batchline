@@ -240,6 +240,7 @@ export async function approveReservationInitial(formData: FormData) {
 
   const reservation = await prisma.reservation.findUnique({ where: { id } });
   if (!reservation || reservation.initialApprovedAt) return;
+  if (!isSiteInScope(reservation.siteId, effectiveSiteId(user))) return;
 
   await prisma.reservation.update({
     where: { id },
@@ -268,6 +269,7 @@ export async function approveReservationFinal(formData: FormData) {
 
   const reservation = await prisma.reservation.findUnique({ where: { id } });
   if (!reservation || !reservation.initialApprovedAt || reservation.finalApprovedAt) return;
+  if (!isSiteInScope(reservation.siteId, effectiveSiteId(user))) return;
 
   // ON_HOLD is an automatic flag set at creation (see createReservation's
   // credit-limit check) — it's a "needs review" marker, not a separate
