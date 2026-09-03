@@ -299,3 +299,90 @@ export async function recordWasteMemoNote(formData: FormData) {
   revalidatePath("/quality");
   revalidatePath(`/production/${memo.batchTicketId}`);
 }
+
+// ---------------------------------------------------------------------------
+// Calibration — see the schema section comment for why this is its own
+// registry, separate from the Truck/Pump/Silo/Hopper equipment one.
+// ---------------------------------------------------------------------------
+
+export async function createInstrument(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "createInstrument");
+
+  const code = String(formData.get("code") ?? "").trim();
+  const name = String(formData.get("name") ?? "").trim();
+  const manufacturer = String(formData.get("manufacturer") ?? "").trim() || null;
+  const model = String(formData.get("model") ?? "").trim() || null;
+  const serialNumber = String(formData.get("serialNumber") ?? "").trim() || null;
+  const location = String(formData.get("location") ?? "").trim() || null;
+  const siteId = String(formData.get("siteId") ?? "") || null;
+  const calibrationIntervalMonths = Number(formData.get("calibrationIntervalMonths") ?? 0) || null;
+  if (!code || !name) return;
+
+  const instrument = await prisma.calibratedInstrument.create({
+    data: { code, name, manufacturer, model, serialNumber, location, siteId, calibrationIntervalMonths },
+  });
+
+  await logAudit({ module: "Quality", recordId: instrument.id, afterValue: `${code} — ${name}`, reasonCode: "INSTRUMENT_REGISTERED" });
+  revalidatePath("/quality");
+}
+
+// Logs a calibration event and moves the instrument's status to match —
+// OUT_OF_TOLERANCE withdraws it (the real calibration procedure requires
+// segregating/withdrawing an out-of-tolerance instrument from use), and a
+// later PASSED reinstates it automatically, so nobody needs a separate
+// "bring it back" action once it's been recalibrated and passes.
+export async function recordCalibration(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "recordCalibration");
+
+  const instrumentId = String(formData.get("instrumentId") ?? "");
+  const calibratedAtRaw = String(formData.get("calibratedAt") ?? "");
+  const nextDueAtRaw = String(formData.get("nextDueAt") ?? "");
+  const method = String(formData.get("method") ?? "").trim() || null;
+  const criteria = String(formData.get("criteria") ?? "").trim() || null;
+  const measurementResult = String(formData.get("measurementResult") ?? "").trim() || null;
+  const result = String(formData.get("result") ?? "");
+  const certificateAvailable = formData.get("certificateAvailable") === "on";
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (!instrumentId || !calibratedAtRaw || !nextDueAtRaw || !result) return;
+
+  const instrument = await prisma.calibratedInstrument.findUnique({ where: { id: instrumentId } });
+  if (!instrument) return;
+
+  const record = await withSequentialNumber(
+    "CAL",
+    () => prisma.calibrationRecord.count(),
+    (recordNumber) =>
+      prisma.calibrationRecord.create({
+        data: {
+          recordNumber,
+          instrumentId,
+          calibratedAt: new Date(calibratedAtRaw),
+          nextDueAt: new Date(nextDueAtRaw),
+          method,
+          criteria,
+          measurementResult,
+          result,
+          certificateAvailable,
+          notes,
+          calibratedById: user!.id,
+        },
+      }),
+  );
+
+  if (instrument.status !== "OUT_OF_SERVICE") {
+    await prisma.calibratedInstrument.update({
+      where: { id: instrumentId },
+      data: { status: result === "OUT_OF_TOLERANCE" ? "WITHDRAWN" : "ACTIVE" },
+    });
+  }
+
+  await logAudit({
+    module: "Quality",
+    recordId: record.id,
+    afterValue: `${record.recordNumber} — ${instrument.name} — ${result}`,
+    reasonCode: "CALIBRATION_RECORDED",
+  });
+  revalidatePath("/quality");
+}

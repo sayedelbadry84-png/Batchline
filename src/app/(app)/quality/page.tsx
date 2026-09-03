@@ -3,7 +3,18 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createTestBatch, addLabResult, createCertificate, updateCertificate, approveWasteMemo, recordWasteMemoNote, saveCapaRecord, closeCapaRecord } from "./actions";
+import {
+  createTestBatch,
+  addLabResult,
+  createCertificate,
+  updateCertificate,
+  approveWasteMemo,
+  recordWasteMemoNote,
+  saveCapaRecord,
+  closeCapaRecord,
+  createInstrument,
+  recordCalibration,
+} from "./actions";
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
 import { getActiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 
@@ -36,16 +47,21 @@ const ISSUING_BODY_OPTIONS = [
   "Standards Australia",
 ] as const;
 
+const QUALITY_TABS = ["testing", "certificates", "calibration"] as const;
+type QualityTab = (typeof QUALITY_TABS)[number];
+
 export default async function QualityPage({
   searchParams,
 }: {
-  searchParams: Promise<{ editCert?: string }>;
+  searchParams: Promise<{ tab?: string; editCert?: string }>;
 }) {
   const user = await requirePageAccess("quality");
   const { dict } = await getDictionary();
   const m = dict.modules.quality;
-  const { editCert: editCertId } = await searchParams;
+  const { tab: tabRaw, editCert: editCertId } = await searchParams;
+  const tab: QualityTab = QUALITY_TABS.includes(tabRaw as QualityTab) ? (tabRaw as QualityTab) : "testing";
   const siteId = await getActiveSiteId(user);
+  const isCalibrationTab = tab === "calibration";
 
   const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos, unfinishedWasteMemos, openCapaRecords, qualityUsers] = await Promise.all([
     prisma.testBatch.findMany({
@@ -109,6 +125,17 @@ export default async function QualityPage({
     prisma.user.findMany({ where: { role: { in: ["QUALITY_SUPERVISOR", "ADMIN"] } }, orderBy: { name: "asc" } }),
   ]);
 
+  const [instruments, sitesForPicker] = isCalibrationTab
+    ? await Promise.all([
+        prisma.calibratedInstrument.findMany({
+          where: { ...(siteId ? { siteId } : {}) },
+          orderBy: { name: "asc" },
+          include: { site: true, calibrations: { orderBy: { calibratedAt: "desc" }, take: 1, include: { calibratedBy: true } } },
+        }),
+        prisma.site.findMany({ where: siteId ? { id: siteId } : {}, orderBy: { code: "asc" }, select: { id: true, code: true, name: true } }),
+      ])
+    : [[], []];
+
   // Train the early-vs-final strength regression from every test batch that
   // already has both an early-age and a 28-day-or-later result on file —
   // this plant's own history, not a generic model.
@@ -122,6 +149,11 @@ export default async function QualityPage({
   }
   const strengthFits = fitRegressionsByAge(historicalPairs);
 
+  // Server-rendered snapshot at request time, not a re-rendering client
+  // component — see the same pattern (and rationale) in (app)/page.tsx.
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
+
   return (
     <div className="flex flex-col gap-8">
       <header>
@@ -130,6 +162,20 @@ export default async function QualityPage({
         <p className={ui.intro}>{m.intro}</p>
       </header>
 
+      <div className="flex flex-wrap gap-1 border-b border-border">
+        {QUALITY_TABS.map((t) => (
+          <Link
+            key={t}
+            href={`/quality?tab=${t}`}
+            className={`rounded-t-md px-3 py-2 text-sm ${tab === t ? "border-b-2 border-accent font-medium text-ink" : "text-ink-muted hover:text-ink"}`}
+          >
+            {m.tabs[t]}
+          </Link>
+        ))}
+      </div>
+
+      {tab === "testing" && (
+      <>
       <div className="grid grid-cols-[1fr_320px] gap-6">
         <div className="flex flex-col gap-4">
           {testBatches.map((tb) => {
@@ -442,7 +488,10 @@ export default async function QualityPage({
           </div>
         </div>
       )}
+      </>
+      )}
 
+      {tab === "certificates" && (
       <div className="grid grid-cols-[1fr_320px] gap-6">
         <div className={ui.card}>
           <h2 className="mb-3 font-display text-lg font-semibold">{m.certsTitle}</h2>
@@ -571,6 +620,181 @@ export default async function QualityPage({
           </button>
         </form>
       </div>
+      )}
+
+      {tab === "calibration" && (
+      <div className="flex flex-col gap-6">
+        <div className="grid grid-cols-[1fr_320px] gap-6">
+          <div className={ui.card}>
+            <h2 className="mb-3 font-display text-lg font-semibold">{m.calibration.instrumentsTitle}</h2>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.calibration.colInstrument.code}</th>
+                  <th className={ui.th}>{m.calibration.colInstrument.name}</th>
+                  <th className={ui.th}>{m.calibration.colInstrument.location}</th>
+                  <th className={ui.th}>{m.calibration.colInstrument.status}</th>
+                  <th className={ui.th}>{m.calibration.colInstrument.nextDue}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {instruments.map((inst) => {
+                  const lastCal = inst.calibrations[0];
+                  const overdue = lastCal && new Date(lastCal.nextDueAt).getTime() < nowMs;
+                  return (
+                    <tr key={inst.id}>
+                      <td className={`${ui.td} font-mono text-xs`} dir="ltr">{inst.code}</td>
+                      <td className={ui.td}>{inst.name}</td>
+                      <td className={ui.td}>{inst.location ?? "—"}</td>
+                      <td className={ui.td}>
+                        <span className={`${ui.chip} ${inst.status === "ACTIVE" ? "bg-good-soft text-good" : inst.status === "WITHDRAWN" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
+                          {m.calibration.instrumentStatusLabel[inst.status as keyof typeof m.calibration.instrumentStatusLabel] ?? inst.status}
+                        </span>
+                      </td>
+                      <td className={ui.td}>
+                        {lastCal ? (
+                          <span className={overdue ? "font-semibold text-critical" : ""}>{new Date(lastCal.nextDueAt).toLocaleDateString()}</span>
+                        ) : (
+                          <span className="text-ink-muted">{m.calibration.neverCalibrated}</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {instruments.length === 0 && (
+                  <tr><td className={ui.td} colSpan={5}><span className="text-ink-muted">{m.calibration.emptyInstruments}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <form action={createInstrument} className={`${ui.card} flex flex-col gap-3`}>
+            <h2 className="font-display text-lg font-semibold">{m.calibration.newInstrumentTitle}</h2>
+            <div>
+              <label className={ui.label}>{m.calibration.fInstrument.code}</label>
+              <input name="code" required className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fInstrument.name}</label>
+              <input name="name" required className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fInstrument.manufacturer}</label>
+              <input name="manufacturer" className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fInstrument.model}</label>
+              <input name="model" className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fInstrument.serialNumber}</label>
+              <input name="serialNumber" className={ui.input} dir="ltr" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fInstrument.location}</label>
+              <input name="location" className={ui.input} placeholder={m.calibration.fInstrument.locationPlaceholder} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fInstrument.siteId}</label>
+              <select name="siteId" defaultValue="" className={ui.select}>
+                <option value="">{dict.field.none}</option>
+                {sitesForPicker.map((s) => <option key={s.id} value={s.id}>{s.code} — {s.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fInstrument.calibrationIntervalMonths}</label>
+              <input name="calibrationIntervalMonths" type="number" min="1" className={ui.input} />
+            </div>
+            <button type="submit" className={`${ui.button} mt-2`}>{m.calibration.addInstrument}</button>
+          </form>
+        </div>
+
+        <div className="grid grid-cols-[1fr_320px] gap-6">
+          <div className={ui.card}>
+            <h2 className="mb-3 font-display text-lg font-semibold">{m.calibration.logTitle}</h2>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.calibration.colLog.number}</th>
+                  <th className={ui.th}>{m.calibration.colLog.instrument}</th>
+                  <th className={ui.th}>{m.calibration.colLog.calibratedAt}</th>
+                  <th className={ui.th}>{m.calibration.colLog.nextDue}</th>
+                  <th className={ui.th}>{m.calibration.colLog.result}</th>
+                  <th className={ui.th}>{m.calibration.colLog.calibratedBy}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {instruments.flatMap((inst) => inst.calibrations.map((c) => (
+                  <tr key={c.id}>
+                    <td className={`${ui.td} font-mono text-xs`}>{c.recordNumber}</td>
+                    <td className={ui.td}>{inst.name}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(c.calibratedAt).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(c.nextDueAt).toLocaleDateString()}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${c.result === "PASSED" ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}>
+                        {m.calibration.resultLabel[c.result as keyof typeof m.calibration.resultLabel] ?? c.result}
+                      </span>
+                    </td>
+                    <td className={ui.td}>{c.calibratedBy.name}</td>
+                  </tr>
+                )))}
+                {instruments.every((inst) => inst.calibrations.length === 0) && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.calibration.emptyLog}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <form action={recordCalibration} className={`${ui.card} flex flex-col gap-3`}>
+            <h2 className="font-display text-lg font-semibold">{m.calibration.recordTitle}</h2>
+            <div>
+              <label className={ui.label}>{m.calibration.fRecord.instrumentId}</label>
+              <select name="instrumentId" required className={ui.select}>
+                <option value="" disabled>{m.calibration.fRecord.instrumentId}</option>
+                {instruments.map((inst) => <option key={inst.id} value={inst.id}>{inst.code} — {inst.name}</option>)}
+              </select>
+              {instruments.length === 0 && <p className="mt-1 text-xs text-warn">{m.calibration.noInstruments}</p>}
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fRecord.calibratedAt}</label>
+              <input name="calibratedAt" type="date" required className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fRecord.nextDueAt}</label>
+              <input name="nextDueAt" type="date" required className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fRecord.method}</label>
+              <input name="method" className={ui.input} placeholder={m.calibration.fRecord.methodPlaceholder} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fRecord.criteria}</label>
+              <input name="criteria" className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fRecord.measurementResult}</label>
+              <textarea name="measurementResult" rows={2} className="w-full rounded-md border border-glass-border bg-surface px-3 py-2 text-sm text-ink outline-none focus:border-accent" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.calibration.fRecord.result}</label>
+              <select name="result" required className={ui.select}>
+                <option value="PASSED">{m.calibration.resultLabel.PASSED}</option>
+                <option value="OUT_OF_TOLERANCE">{m.calibration.resultLabel.OUT_OF_TOLERANCE}</option>
+              </select>
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input name="certificateAvailable" type="checkbox" className="h-4 w-4" />
+              {m.calibration.fRecord.certificateAvailable}
+            </label>
+            <div>
+              <label className={ui.label}>{m.calibration.fRecord.notes}</label>
+              <input name="notes" className={ui.input} />
+            </div>
+            <button type="submit" className={`${ui.button} mt-2`}>{m.calibration.recordButton}</button>
+          </form>
+        </div>
+      </div>
+      )}
 
       <datalist id="standardRefOptions">
         {STANDARD_REF_OPTIONS.map((ref) => <option key={ref} value={ref} />)}

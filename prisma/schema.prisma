@@ -80,6 +80,7 @@ model User {
   maintenanceTicketsAssigned       MaintenanceTicket[]       @relation("MaintenanceAssignedTo")
   cashTransactionsCreated          CashTransaction[]         @relation("CashTransactionCreatedBy")
   bankStatementLinesImported       BankStatementLine[]       @relation("BankStatementLineImportedBy")
+  calibrationRecords               CalibrationRecord[]
   opportunityInitialApprovals      Opportunity[]             @relation("OpportunityInitialApproval")
   opportunityFinalApprovals        Opportunity[]             @relation("OpportunityFinalApproval")
   fieldVisitInitialApprovals       FieldVisit[]              @relation("FieldVisitInitialApproval")
@@ -193,6 +194,7 @@ model Site {
   wpsSettings              WpsSettings?
   bankStatementLines       BankStatementLine[]
   sparePartIssuances       SparePartIssuance[]
+  calibratedInstruments    CalibratedInstrument[]
 }
 
 // A site's ZATCA (Saudi e-invoicing) registration — one row per site,
@@ -1229,6 +1231,58 @@ model ComplianceCertificate {
   issuingBody String
   documentUrl String?
   createdAt   DateTime  @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Calibration — the "measuring and monitoring devices used to control
+// products and processes" register a real ISO 9001:2015 QMS commits to
+// (clause 7.1.5): batching-plant scales/load cells, lab equipment
+// (compression testing machine, moisture meter), thermometers — anything
+// whose own accuracy needs periodic verification, distinct from the
+// Truck/Pump/Silo/Hopper equipment registry (src/lib/equipmentRegistry.ts),
+// which is about keeping THAT equipment running, not about whether ITS
+// OWN measurements can be trusted. Deliberately its own lightweight
+// registry rather than folded into that one.
+// ---------------------------------------------------------------------------
+
+model CalibratedInstrument {
+  id                        String    @id @default(cuid())
+  code                      String    @unique // asset tag / instrument number
+  name                      String
+  manufacturer              String?
+  model                     String?
+  serialNumber              String?
+  location                  String? // e.g. "Batching plant scale — Line 1", "QC lab"
+  siteId                    String?
+  site                      Site?     @relation(fields: [siteId], references: [id])
+  calibrationIntervalMonths Int? // used only to suggest the next-due date on the record form; the actual due date always lives on the latest CalibrationRecord
+  // ACTIVE, WITHDRAWN (auto-set the moment a calibration comes back
+  // OUT_OF_TOLERANCE — see recordCalibration in quality/actions.ts — and
+  // auto-cleared the moment a later one comes back PASSED), OUT_OF_SERVICE
+  // (a human call, e.g. retired equipment)
+  status                    String    @default("ACTIVE")
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
+
+  calibrations              CalibrationRecord[]
+}
+
+model CalibrationRecord {
+  id                   String               @id @default(cuid())
+  recordNumber         String               @unique // CAL-YYYY-NNNN
+  instrumentId         String
+  instrument           CalibratedInstrument @relation(fields: [instrumentId], references: [id])
+  calibratedAt         DateTime
+  nextDueAt            DateTime
+  method               String? // e.g. "In-house, reference weights" / "External accredited lab — SASO"
+  criteria             String? // acceptance criteria used for this event
+  measurementResult    String? // the actual readings/results text — free-form, mirrors the real report's own open-ended results field
+  result               String // PASSED, OUT_OF_TOLERANCE
+  certificateAvailable Boolean              @default(false)
+  notes                String?
+  calibratedById       String
+  calibratedBy         User                 @relation(fields: [calibratedById], references: [id])
+  createdAt            DateTime             @default(now())
 }
 
 // ---------------------------------------------------------------------------

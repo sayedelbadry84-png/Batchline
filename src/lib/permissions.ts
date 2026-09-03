@@ -393,6 +393,8 @@ export const ACTION_ROLES = {
     updateCertificate: ["QUALITY_SUPERVISOR", "ADMIN"],
     approveWasteMemo: ["QUALITY_SUPERVISOR", "ADMIN"],
     recordWasteMemoNote: ["QUALITY_SUPERVISOR", "ADMIN"],
+    createInstrument: ["QUALITY_SUPERVISOR", "ADMIN"],
+    recordCalibration: ["QUALITY_SUPERVISOR", "ADMIN"],
   },
 } as const satisfies Record<string, Record<string, readonly string[]>>;
 
