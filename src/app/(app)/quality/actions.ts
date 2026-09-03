@@ -1,12 +1,21 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
+import { computeMaterialLabTestResults, MATERIAL_LAB_TEST_TYPE_KEYS, type MaterialLabTestType } from "@/lib/materialLabTests";
+
+function dateOrNull(formData: FormData, key: string): Date | null {
+  const raw = formData.get(key);
+  if (typeof raw !== "string" || !raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 async function tripInScope(tripId: string, siteId: string | null): Promise<boolean> {
   if (siteId === null) return true;
@@ -681,5 +690,90 @@ export async function removeTrainingAttendee(formData: FormData) {
 
   await prisma.trainingAttendance.delete({ where: { id } });
   await logAudit({ module: "Quality", recordId: id, reasonCode: "TRAINING_ATTENDEE_REMOVED" });
+  revalidatePath("/quality");
+}
+
+export async function createMaterialLabTest(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "createMaterialLabTest");
+
+  const testType = String(formData.get("testType") ?? "") as MaterialLabTestType;
+  if (!MATERIAL_LAB_TEST_TYPE_KEYS.includes(testType)) return;
+
+  const materialDescription = String(formData.get("materialDescription") ?? "").trim();
+  if (!materialDescription) return;
+
+  const results = computeMaterialLabTestResults(testType, formData);
+  if (!results) return;
+
+  const supplierId = String(formData.get("supplierId") ?? "") || null;
+  const source = String(formData.get("source") ?? "").trim() || null;
+  const materialReceiptId = String(formData.get("materialReceiptId") ?? "") || null;
+  const labNumber = String(formData.get("labNumber") ?? "").trim() || null;
+  const remarks = String(formData.get("remarks") ?? "").trim() || null;
+  const sampledByName = String(formData.get("sampledByName") ?? "").trim() || null;
+  const testedByName = String(formData.get("testedByName") ?? "").trim() || null;
+  const checkedByName = String(formData.get("checkedByName") ?? "").trim() || null;
+  const statusRaw = String(formData.get("status") ?? "PENDING");
+  const status = ["PENDING", "PASSED", "FAILED"].includes(statusRaw) ? statusRaw : "PENDING";
+  const reportDate = dateOrNull(formData, "reportDate") ?? new Date();
+
+  const test = await withSequentialNumber(
+    "MLT",
+    () => prisma.materialLabTest.count(),
+    (testNumber) =>
+      prisma.materialLabTest.create({
+        data: {
+          testNumber,
+          testType,
+          materialDescription,
+          supplierId,
+          source,
+          materialReceiptId,
+          labNumber,
+          reportDate,
+          resultsJson: results as unknown as Prisma.InputJsonValue,
+          status,
+          remarks,
+          sampledByName,
+          sampledAt: dateOrNull(formData, "sampledAt"),
+          testedByName,
+          testedAt: dateOrNull(formData, "testedAt"),
+          checkedByName,
+          checkedAt: dateOrNull(formData, "checkedAt"),
+          createdById: user!.id,
+        },
+      }),
+  );
+
+  await logAudit({
+    module: "Quality",
+    recordId: test.id,
+    afterValue: `${testType} — ${materialDescription}`,
+    reasonCode: "MATERIAL_LAB_TEST_CREATED",
+  });
+  revalidatePath("/quality");
+}
+
+export async function setMaterialLabTestStatus(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "setMaterialLabTestStatus");
+
+  const id = String(formData.get("id") ?? "");
+  const status = String(formData.get("status") ?? "");
+  if (!id || !["PENDING", "PASSED", "FAILED"].includes(status)) return;
+
+  const test = await prisma.materialLabTest.findUnique({ where: { id } });
+  if (!test) return;
+
+  await prisma.materialLabTest.update({ where: { id }, data: { status } });
+  await logAudit({
+    module: "Quality",
+    recordId: id,
+    field: "status",
+    beforeValue: test.status,
+    afterValue: status,
+    reasonCode: "MATERIAL_LAB_TEST_STATUS_UPDATED",
+  });
   revalidatePath("/quality");
 }

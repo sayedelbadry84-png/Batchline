@@ -409,6 +409,8 @@ export const ACTION_ROLES = {
     createTrainingSession: ["QUALITY_SUPERVISOR", "ADMIN"],
     addTrainingAttendee: ["QUALITY_SUPERVISOR", "ADMIN"],
     removeTrainingAttendee: ["QUALITY_SUPERVISOR", "ADMIN"],
+    createMaterialLabTest: ["QUALITY_SUPERVISOR", "ADMIN"],
+    setMaterialLabTestStatus: ["QUALITY_SUPERVISOR", "ADMIN"],
   },
 } as const satisfies Record<string, Record<string, readonly string[]>>;
 

@@ -89,6 +89,7 @@ model User {
   trainingSessionsCreated           TrainingSession[]
   materialReceiptsInspected         MaterialReceipt[]
   supplierEvaluations               SupplierEvaluation[]
+  materialLabTestsCreated           MaterialLabTest[]
   opportunityInitialApprovals       Opportunity[]             @relation("OpportunityInitialApproval")
   opportunityFinalApprovals         Opportunity[]             @relation("OpportunityFinalApproval")
   fieldVisitInitialApprovals        FieldVisit[]              @relation("FieldVisitInitialApproval")
@@ -528,6 +529,7 @@ model Supplier {
   defaultForSpareParts SparePart[]
   sparePartReceipts    SparePartReceipt[]
   evaluations          SupplierEvaluation[]
+  materialLabTests     MaterialLabTest[]
 }
 
 // The annual Supplier Evaluation Report (F/QM/008/2/2) — a weighted score
@@ -990,6 +992,48 @@ model MaterialReceipt {
   receivedAt          DateTime           @default(now())
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
+
+  materialLabTests MaterialLabTest[]
+}
+
+// Digitizes the QC lab's own paper test forms for received raw materials
+// (Rhino's QC-*-FRM-00x series — sieve analysis, specific gravity, clay
+// lumps, moisture content, etc.) — see src/lib/materialLabTests.ts for the
+// full per-testType field/formula catalogue. One model covers all 13 test
+// types since each is a genuinely different worksheet: resultsJson holds
+// the type-specific raw inputs plus the values computed from them (same
+// formulas the paper forms use, kept in one reviewable place rather than
+// re-derived ad hoc), never a fabricated pass/fail — a human always sets
+// `status` by reading the computed values against the spec, exactly like
+// the paper form's own REMARKS line. materialReceiptId is optional: a test
+// can stand alone (most of the source workbook's own samples have no
+// batch/receipt reference on file) or be tied to the specific delivery it
+// was drawn from.
+model MaterialLabTest {
+  id                  String           @id @default(cuid())
+  testNumber          String           @unique // MLT-YYYY-NNNN
+  testType            String
+  materialDescription String
+  supplierId          String?
+  supplier            Supplier?        @relation(fields: [supplierId], references: [id])
+  source              String?
+  materialReceiptId   String?
+  materialReceipt     MaterialReceipt? @relation(fields: [materialReceiptId], references: [id])
+  labNumber           String?
+  reportDate          DateTime         @default(now())
+  resultsJson         Json
+  status              String           @default("PENDING") // PENDING, PASSED, FAILED
+  remarks             String?
+  sampledByName       String?
+  sampledAt           DateTime?
+  testedByName        String?
+  testedAt            DateTime?
+  checkedByName       String?
+  checkedAt           DateTime?
+  createdById         String
+  createdBy           User             @relation(fields: [createdById], references: [id])
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
 }
 
 // ---------------------------------------------------------------------------

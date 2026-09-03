@@ -24,6 +24,7 @@ import {
 } from "./actions";
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
 import { getActiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
+import { MATERIAL_LAB_TEST_TYPE_KEYS } from "@/lib/materialLabTests";
 
 function daysUntil(date: Date) {
   return Math.ceil((date.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
@@ -54,8 +55,14 @@ const ISSUING_BODY_OPTIONS = [
   "Standards Australia",
 ] as const;
 
-const QUALITY_TABS = ["testing", "certificates", "calibration", "audits", "documents", "training"] as const;
+const QUALITY_TABS = ["testing", "certificates", "calibration", "audits", "documents", "training", "materialTests"] as const;
 type QualityTab = (typeof QUALITY_TABS)[number];
+
+const materialLabTestStatusChip: Record<string, string> = {
+  PENDING: "bg-surface-alt text-ink-muted",
+  PASSED: "bg-good-soft text-good",
+  FAILED: "bg-critical-soft text-critical",
+};
 
 const DOCUMENT_CATEGORY_OPTIONS = ["MANUAL", "PROCEDURE", "WORK_INSTRUCTION", "FORM"] as const;
 
@@ -74,6 +81,7 @@ export default async function QualityPage({
   const isAuditsTab = tab === "audits";
   const isDocumentsTab = tab === "documents";
   const isTrainingTab = tab === "training";
+  const isMaterialTestsTab = tab === "materialTests";
 
   const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos, unfinishedWasteMemos, openCapaRecords, qualityUsers] = await Promise.all([
     prisma.testBatch.findMany({
@@ -168,6 +176,14 @@ export default async function QualityPage({
         prisma.employee.findMany({ where: { status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" } }),
       ])
     : [[], []];
+
+  const materialLabTests = isMaterialTestsTab
+    ? await prisma.materialLabTest.findMany({
+        orderBy: { reportDate: "desc" },
+        include: { supplier: true },
+        take: 200,
+      })
+    : [];
 
   // Train the early-vs-final strength regression from every test batch that
   // already has both an early-age and a 28-day-or-later result on file —
@@ -1180,6 +1196,70 @@ export default async function QualityPage({
             </div>
             <button type="submit" className={`${ui.button} mt-2`}>{m.training.addAttendee}</button>
           </form>
+        </div>
+      </div>
+      )}
+
+      {tab === "materialTests" && (
+      <div className="flex flex-col gap-6">
+        <div className={ui.card}>
+          <h2 className="mb-1 font-display text-lg font-semibold">{m.materialTests.newTitle}</h2>
+          <p className="mb-3 text-sm text-ink-muted">{m.materialTests.newIntro}</p>
+          <div className="flex flex-wrap gap-2">
+            {MATERIAL_LAB_TEST_TYPE_KEYS.map((t) => (
+              <Link
+                key={t}
+                href={`/quality/material-tests/new?type=${t}`}
+                className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt"
+              >
+                {m.materialTests.types[t]}
+              </Link>
+            ))}
+          </div>
+        </div>
+
+        <div className={ui.card}>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th className={ui.th}>{m.materialTests.col.number}</th>
+                <th className={ui.th}>{m.materialTests.col.type}</th>
+                <th className={ui.th}>{m.materialTests.col.material}</th>
+                <th className={ui.th}>{m.materialTests.col.supplier}</th>
+                <th className={ui.th}>{m.materialTests.col.date}</th>
+                <th className={ui.th}>{m.materialTests.col.status}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {materialLabTests.map((t) => (
+                <tr key={t.id}>
+                  <td className={`${ui.td} font-mono text-xs`}>{t.testNumber}</td>
+                  <td className={ui.td}>{m.materialTests.types[t.testType as keyof typeof m.materialTests.types] ?? t.testType}</td>
+                  <td className={`${ui.td} font-medium`}>{t.materialDescription}</td>
+                  <td className={ui.td}>{t.supplier?.name ?? "—"}</td>
+                  <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(t.reportDate).toLocaleDateString()}</td>
+                  <td className={ui.td}>
+                    <span className={`${ui.chip} ${materialLabTestStatusChip[t.status] ?? ""}`}>
+                      {m.materialTests.status[t.status as keyof typeof m.materialTests.status] ?? t.status}
+                    </span>
+                  </td>
+                  <td className={ui.td}>
+                    <Link href={`/quality/material-tests/${t.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                      {m.materialTests.view}
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+              {materialLabTests.length === 0 && (
+                <tr>
+                  <td className={ui.td} colSpan={7}>
+                    <span className="text-ink-muted">{m.materialTests.empty}</span>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
       )}
