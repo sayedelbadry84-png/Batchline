@@ -529,3 +529,67 @@ export async function closeAuditFinding(formData: FormData) {
   await logAudit({ module: "Quality", recordId: id, afterValue: "CLOSED", reasonCode: "AUDIT_FINDING_CLOSED" });
   revalidatePath(`/quality/audits/${finding.auditId}`);
 }
+
+// ---------------------------------------------------------------------------
+// Document control — ISO 9001:2015 clause 7.5. See the schema section
+// comment for why this is a plain current-revision registry rather than
+// a version-history chain.
+// ---------------------------------------------------------------------------
+
+export async function createControlledDocument(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "createControlledDocument");
+
+  const code = String(formData.get("code") ?? "").trim();
+  const name = String(formData.get("name") ?? "").trim();
+  const category = String(formData.get("category") ?? "");
+  const owningDepartment = String(formData.get("owningDepartment") ?? "").trim() || null;
+  const revisionNumber = String(formData.get("revisionNumber") ?? "").trim();
+  const releaseDateRaw = String(formData.get("releaseDate") ?? "");
+  const documentUrl = String(formData.get("documentUrl") ?? "").trim() || null;
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (!code || !name || !category || !revisionNumber || !releaseDateRaw) return;
+
+  const doc = await prisma.controlledDocument.create({
+    data: { code, name, category, owningDepartment, revisionNumber, releaseDate: new Date(releaseDateRaw), documentUrl, notes, createdById: user!.id },
+  });
+
+  await logAudit({ module: "Quality", recordId: doc.id, afterValue: `${code} — ${name} (rev ${revisionNumber})`, reasonCode: "CONTROLLED_DOCUMENT_CREATED" });
+  revalidatePath("/quality");
+}
+
+export async function updateControlledDocument(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "updateControlledDocument");
+
+  const id = String(formData.get("id") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  const category = String(formData.get("category") ?? "");
+  const owningDepartment = String(formData.get("owningDepartment") ?? "").trim() || null;
+  const revisionNumber = String(formData.get("revisionNumber") ?? "").trim();
+  const releaseDateRaw = String(formData.get("releaseDate") ?? "");
+  const documentUrl = String(formData.get("documentUrl") ?? "").trim() || null;
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (!id || !name || !category || !revisionNumber || !releaseDateRaw) return;
+
+  await prisma.controlledDocument.update({
+    where: { id },
+    data: { name, category, owningDepartment, revisionNumber, releaseDate: new Date(releaseDateRaw), documentUrl, notes },
+  });
+
+  await logAudit({ module: "Quality", recordId: id, afterValue: `rev ${revisionNumber}`, reasonCode: "CONTROLLED_DOCUMENT_REVISED" });
+  revalidatePath("/quality");
+}
+
+export async function setControlledDocumentStatus(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "setControlledDocumentStatus");
+
+  const id = String(formData.get("id") ?? "");
+  const status = String(formData.get("status") ?? "");
+  if (!id || (status !== "ACTIVE" && status !== "OBSOLETE")) return;
+
+  await prisma.controlledDocument.update({ where: { id }, data: { status } });
+  await logAudit({ module: "Quality", recordId: id, afterValue: status, reasonCode: "CONTROLLED_DOCUMENT_STATUS_CHANGED" });
+  revalidatePath("/quality");
+}

@@ -401,6 +401,9 @@ export const ACTION_ROLES = {
     addAuditFinding: ["QUALITY_SUPERVISOR", "ADMIN"],
     saveAuditFinding: ["QUALITY_SUPERVISOR", "ADMIN"],
     closeAuditFinding: ["QUALITY_SUPERVISOR", "ADMIN"],
+    createControlledDocument: ["QUALITY_SUPERVISOR", "ADMIN"],
+    updateControlledDocument: ["QUALITY_SUPERVISOR", "ADMIN"],
+    setControlledDocumentStatus: ["QUALITY_SUPERVISOR", "ADMIN"],
   },
 } as const satisfies Record<string, Record<string, readonly string[]>>;
 

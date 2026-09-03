@@ -85,6 +85,7 @@ model User {
   internalAuditsCreated            InternalAudit[]            @relation("InternalAuditCreatedBy")
   auditFindingsResponsible         InternalAuditFinding[]     @relation("AuditFindingResponsible")
   auditFindingsClosed              InternalAuditFinding[]     @relation("AuditFindingClosedBy")
+  controlledDocumentsCreated       ControlledDocument[]
   opportunityInitialApprovals      Opportunity[]             @relation("OpportunityInitialApproval")
   opportunityFinalApprovals        Opportunity[]             @relation("OpportunityFinalApproval")
   fieldVisitInitialApprovals       FieldVisit[]              @relation("FieldVisitInitialApproval")
@@ -1342,6 +1343,38 @@ model InternalAuditFinding {
   closedById       String?
   closedBy         User?         @relation("AuditFindingClosedBy", fields: [closedById], references: [id])
   createdAt        DateTime      @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Document control — ISO 9001:2015 clause 7.5 (control of documented
+// information). The real QMS already has this fully worked out on paper:
+// every procedure and form carries a code (P/QM/xxx for procedures,
+// F/QM/xxx for forms), an owning department, and a revision/release
+// date — the Master List of Documents (its own controlled document) is
+// literally a registry of exactly these fields. This is that registry,
+// as a system of record instead of a paper list — one row per document,
+// its CURRENT revision (not a version-history chain: the real master
+// list itself only ever shows the current revision of each document,
+// same posture kept here).
+// ---------------------------------------------------------------------------
+
+model ControlledDocument {
+  id               String   @id @default(cuid())
+  code             String   @unique // e.g. P/QM/006, F/QM/008/2-1
+  name             String
+  category         String // MANUAL, PROCEDURE, WORK_INSTRUCTION, FORM
+  owningDepartment String?
+  // Free text, not a number — the real documents use compound revision
+  // marks like "2-4" (revision 2, amendment 4), not a plain integer.
+  revisionNumber   String
+  releaseDate      DateTime
+  status           String   @default("ACTIVE") // ACTIVE, OBSOLETE
+  documentUrl      String?
+  notes            String?
+  createdById      String
+  createdBy        User     @relation(fields: [createdById], references: [id])
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }
 
 // ---------------------------------------------------------------------------

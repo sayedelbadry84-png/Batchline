@@ -15,6 +15,9 @@ import {
   createInstrument,
   recordCalibration,
   scheduleInternalAudit,
+  createControlledDocument,
+  updateControlledDocument,
+  setControlledDocumentStatus,
 } from "./actions";
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
 import { getActiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
@@ -48,22 +51,25 @@ const ISSUING_BODY_OPTIONS = [
   "Standards Australia",
 ] as const;
 
-const QUALITY_TABS = ["testing", "certificates", "calibration", "audits"] as const;
+const QUALITY_TABS = ["testing", "certificates", "calibration", "audits", "documents"] as const;
 type QualityTab = (typeof QUALITY_TABS)[number];
+
+const DOCUMENT_CATEGORY_OPTIONS = ["MANUAL", "PROCEDURE", "WORK_INSTRUCTION", "FORM"] as const;
 
 export default async function QualityPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tab?: string; editCert?: string }>;
+  searchParams: Promise<{ tab?: string; editCert?: string; editDoc?: string }>;
 }) {
   const user = await requirePageAccess("quality");
   const { dict } = await getDictionary();
   const m = dict.modules.quality;
-  const { tab: tabRaw, editCert: editCertId } = await searchParams;
+  const { tab: tabRaw, editCert: editCertId, editDoc: editDocId } = await searchParams;
   const tab: QualityTab = QUALITY_TABS.includes(tabRaw as QualityTab) ? (tabRaw as QualityTab) : "testing";
   const siteId = await getActiveSiteId(user);
   const isCalibrationTab = tab === "calibration";
   const isAuditsTab = tab === "audits";
+  const isDocumentsTab = tab === "documents";
 
   const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos, unfinishedWasteMemos, openCapaRecords, qualityUsers] = await Promise.all([
     prisma.testBatch.findMany({
@@ -143,6 +149,10 @@ export default async function QualityPage({
         orderBy: { scheduledDate: "desc" },
         include: { auditor: true, findings: true },
       })
+    : [];
+
+  const controlledDocuments = isDocumentsTab
+    ? await prisma.controlledDocument.findMany({ orderBy: { code: "asc" } })
     : [];
 
   // Train the early-vs-final strength regression from every test batch that
@@ -877,6 +887,144 @@ export default async function QualityPage({
             <input name="scheduledDate" type="date" required className={ui.input} />
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>{m.audits.schedule}</button>
+        </form>
+      </div>
+      )}
+
+      {tab === "documents" && (
+      <div className="grid grid-cols-[1fr_320px] gap-6">
+        <div className={ui.card}>
+          <h2 className="mb-3 font-display text-lg font-semibold">{m.documents.listTitle}</h2>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th className={ui.th}>{m.documents.col.code}</th>
+                <th className={ui.th}>{m.documents.col.name}</th>
+                <th className={ui.th}>{m.documents.col.category}</th>
+                <th className={ui.th}>{m.documents.col.department}</th>
+                <th className={ui.th}>{m.documents.col.revision}</th>
+                <th className={ui.th}>{m.documents.col.releaseDate}</th>
+                <th className={ui.th}>{m.documents.col.status}</th>
+                <th className={ui.th}>{dict.field.actions}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {controlledDocuments.map((doc) => {
+                if (editDocId === doc.id) {
+                  return (
+                    <tr key={doc.id}>
+                      <td className={ui.td} colSpan={8}>
+                        <form action={updateControlledDocument} className="flex flex-wrap items-end gap-2">
+                          <input type="hidden" name="id" value={doc.id} />
+                          <div>
+                            <label className={ui.label}>{m.documents.f.name}</label>
+                            <input name="name" defaultValue={doc.name} required className={`${ui.input} w-48`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.documents.f.category}</label>
+                            <select name="category" defaultValue={doc.category} required className={`${ui.select} w-40`}>
+                              {DOCUMENT_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{m.documents.categoryLabel[c]}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.documents.f.owningDepartment}</label>
+                            <input name="owningDepartment" defaultValue={doc.owningDepartment ?? ""} className={`${ui.input} w-36`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.documents.f.revisionNumber}</label>
+                            <input name="revisionNumber" defaultValue={doc.revisionNumber} required className={`${ui.input} w-24`} dir="ltr" />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.documents.f.releaseDate}</label>
+                            <input name="releaseDate" type="date" defaultValue={new Date(doc.releaseDate).toISOString().slice(0, 10)} required className={`${ui.input} w-36`} />
+                          </div>
+                          <div>
+                            <label className={ui.label}>{m.documents.f.documentUrl}</label>
+                            <input name="documentUrl" defaultValue={doc.documentUrl ?? ""} className={`${ui.input} w-40`} dir="ltr" />
+                          </div>
+                          <button className={ui.button}>{dict.field.save}</button>
+                          <Link href="/quality?tab=documents" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
+                            {dict.field.cancel}
+                          </Link>
+                        </form>
+                      </td>
+                    </tr>
+                  );
+                }
+                return (
+                  <tr key={doc.id}>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{doc.code}</td>
+                    <td className={ui.td}>{doc.name}</td>
+                    <td className={ui.td}>{m.documents.categoryLabel[doc.category as keyof typeof m.documents.categoryLabel] ?? doc.category}</td>
+                    <td className={ui.td}>{doc.owningDepartment ?? "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs`} dir="ltr">{doc.revisionNumber}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(doc.releaseDate).toLocaleDateString()}</td>
+                    <td className={ui.td}>
+                      <span className={`${ui.chip} ${doc.status === "ACTIVE" ? "bg-good-soft text-good" : "bg-surface-alt text-ink-muted"}`}>
+                        {m.documents.statusLabel[doc.status as keyof typeof m.documents.statusLabel] ?? doc.status}
+                      </span>
+                    </td>
+                    <td className={ui.td}>
+                      <div className="flex flex-col gap-1">
+                        <Link href={`/quality?tab=documents&editDoc=${doc.id}`} className="text-xs font-medium text-accent-strong hover:underline">
+                          {m.documents.revise}
+                        </Link>
+                        <form action={setControlledDocumentStatus}>
+                          <input type="hidden" name="id" value={doc.id} />
+                          <input type="hidden" name="status" value={doc.status === "ACTIVE" ? "OBSOLETE" : "ACTIVE"} />
+                          <button className="text-xs font-medium text-ink-muted hover:underline">
+                            {doc.status === "ACTIVE" ? m.documents.markObsolete : m.documents.reactivate}
+                          </button>
+                        </form>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+              {controlledDocuments.length === 0 && (
+                <tr><td className={ui.td} colSpan={8}><span className="text-ink-muted">{m.documents.empty}</span></td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <form action={createControlledDocument} className={`${ui.card} flex flex-col gap-3`}>
+          <h2 className="font-display text-lg font-semibold">{m.documents.newTitle}</h2>
+          <div>
+            <label className={ui.label}>{m.documents.f.code}</label>
+            <input name="code" required className={ui.input} dir="ltr" placeholder="P/QM/006" />
+          </div>
+          <div>
+            <label className={ui.label}>{m.documents.f.name}</label>
+            <input name="name" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.documents.f.category}</label>
+            <select name="category" required className={ui.select}>
+              {DOCUMENT_CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{m.documents.categoryLabel[c]}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{m.documents.f.owningDepartment}</label>
+            <input name="owningDepartment" className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.documents.f.revisionNumber}</label>
+            <input name="revisionNumber" required className={ui.input} dir="ltr" placeholder="1" />
+          </div>
+          <div>
+            <label className={ui.label}>{m.documents.f.releaseDate}</label>
+            <input name="releaseDate" type="date" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{m.documents.f.documentUrl}</label>
+            <input name="documentUrl" className={ui.input} placeholder="https://…" dir="ltr" />
+          </div>
+          <div>
+            <label className={ui.label}>{m.documents.f.notes}</label>
+            <input name="notes" className={ui.input} />
+          </div>
+          <button type="submit" className={`${ui.button} mt-2`}>{m.documents.add}</button>
         </form>
       </div>
       )}
