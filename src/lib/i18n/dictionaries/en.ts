@@ -1608,6 +1608,7 @@ const en: typeof ar = {
         payrollCost: "Payroll Cost",
         spareParts: "Spare Parts",
         finishedGoods: "Finished Goods",
+        factoryPerformance: "Factory Performance",
       },
       exportCsv: "Export CSV",
       exportExcel: "Export Excel",
@@ -1774,6 +1775,13 @@ const en: typeof ar = {
         shippedQty: "Shipped/sold (out)",
         balanceTitle: "Current balances",
         col: { product: "Product", balance: "Balance", date: "Date", direction: "Direction", quantity: "Quantity", site: "Plant", by: "By" },
+      },
+      factoryPerformanceReport: {
+        intro: "Quarterly rollup of the Quality Plan's Factory Performance Analysis (P/QM/006) — production cost, sales volume, returns, customers, and workers, company/plant-wide per calendar quarter within the selected range.",
+        col: {
+          quarter: "Quarter", productionCost: "Production cost", concreteVolume: "Concrete delivered (m³)",
+          finishedGoodsShipped: "Finished goods shipped", returns: "Returns (m³)", customers: "Customers", workers: "Workers",
+        },
       },
       incentivesReport: {
         intro: "Payout by person for the selected range, split by job — see the Incentives module to change tier policies.",

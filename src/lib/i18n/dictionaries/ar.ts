@@ -1601,6 +1601,7 @@ const ar = {
         payrollCost: "تكلفة الرواتب",
         spareParts: "قطع الغيار",
         finishedGoods: "المنتجات الجانبية",
+        factoryPerformance: "أداء المصنع",
       },
       exportCsv: "تصدير CSV",
       exportExcel: "تصدير Excel",
@@ -1767,6 +1768,13 @@ const ar = {
         shippedQty: "المشحون/المباع (صادر)",
         balanceTitle: "الأرصدة الحالية",
         col: { product: "المنتج", balance: "الرصيد", date: "التاريخ", direction: "الاتجاه", quantity: "الكمية", site: "المصنع", by: "بواسطة" },
+      },
+      factoryPerformanceReport: {
+        intro: "تجميع ربع سنوي لتحليل أداء المصنع من خطة الجودة (P/QM/006) — تكاليف الإنتاج، حجم المبيعات، المرتجعات، العملاء، والعمال، على مستوى الشركة/المصنع لكل ربع سنة تقويمي ضمن الفترة المحددة.",
+        col: {
+          quarter: "الربع", productionCost: "تكاليف الإنتاج", concreteVolume: "الخرسانة المسلَّمة (م³)",
+          finishedGoodsShipped: "المنتجات الجانبية المشحونة", returns: "المرتجعات (م³)", customers: "العملاء", workers: "العمال",
+        },
       },
       incentivesReport: {
         intro: "الحافز لكل شخص خلال الفترة المحددة، مقسّمًا حسب الوظيفة — راجع وحدة الحوافز لتغيير سياسات المستويات.",

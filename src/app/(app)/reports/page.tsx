@@ -35,6 +35,7 @@ import {
   getPayrollCostReport,
   getSparePartsReport,
   getFinishedGoodsReport,
+  getFactoryPerformanceReport,
 } from "@/lib/reportQueries";
 import {
   aggregateIncentiveResults,
@@ -59,7 +60,7 @@ const FINAL_STRENGTH_AGE_DAYS = 28; // The real acceptance age — 3/7/14-day re
 const SILO_MATERIAL_TYPES = new Set(["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"]);
 const REPORT_TABS = [
   "overview", "production", "incoming", "consumption", "incentives", "returns", "trips", "equipment", "workers", "profitability", "quality", "maintenance",
-  "arAging", "apAging", "cashLedger", "salesPipeline", "quotes", "purchaseOrders", "supplierPerformance", "attendance", "leave", "payrollCost", "spareParts", "finishedGoods",
+  "arAging", "apAging", "cashLedger", "salesPipeline", "quotes", "purchaseOrders", "supplierPerformance", "attendance", "leave", "payrollCost", "spareParts", "finishedGoods", "factoryPerformance",
 ] as const;
 type ReportTab = (typeof REPORT_TABS)[number];
 
@@ -379,6 +380,7 @@ export default async function ReportsPage({
   const payrollCostData = tab === "payrollCost" ? await getPayrollCostReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
   const sparePartsData = tab === "spareParts" ? await getSparePartsReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
   const finishedGoodsData = tab === "finishedGoods" ? await getFinishedGoodsReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
+  const factoryPerformanceData = tab === "factoryPerformance" ? await getFactoryPerformanceReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
 
   const incentivesData =
     tab === "incentives"
@@ -449,6 +451,7 @@ export default async function ReportsPage({
     payrollCost: m.tabs.payrollCost,
     spareParts: m.tabs.spareParts,
     finishedGoods: m.tabs.finishedGoods,
+    factoryPerformance: m.tabs.factoryPerformance,
   };
 
   return (
@@ -2092,6 +2095,61 @@ export default async function ReportsPage({
                 ))}
                 {finishedGoodsData.rows.length === 0 && (
                   <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "factoryPerformance" && factoryPerformanceData && (
+        <div className="flex flex-col gap-4">
+          <ExportBar
+            m={m}
+            tab={tab}
+            from={rangeFrom}
+            to={rangeTo}
+            message={`${m.tabs.factoryPerformance} ${rangeFrom} → ${rangeTo}`}
+            filenameBase={`factory-performance-${rangeFrom}-${rangeTo}`}
+            headers={["Quarter", "Production cost", "Concrete volume (m³)", "Finished goods shipped", "Returns (m³)", "Customers", "Workers"]}
+            rows={factoryPerformanceData.rows.map((r) => [
+              r.label,
+              r.productionCost,
+              r.concreteVolumeM3,
+              r.finishedGoodsShippedQty,
+              r.returnedVolumeM3,
+              r.customerCount,
+              r.workerCount,
+            ])}
+          />
+          <p className="text-sm text-ink-muted">{m.factoryPerformanceReport.intro}</p>
+          <div className={ui.card}>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.factoryPerformanceReport.col.quarter}</th>
+                  <th className={ui.th}>{m.factoryPerformanceReport.col.productionCost}</th>
+                  <th className={ui.th}>{m.factoryPerformanceReport.col.concreteVolume}</th>
+                  <th className={ui.th}>{m.factoryPerformanceReport.col.finishedGoodsShipped}</th>
+                  <th className={ui.th}>{m.factoryPerformanceReport.col.returns}</th>
+                  <th className={ui.th}>{m.factoryPerformanceReport.col.customers}</th>
+                  <th className={ui.th}>{m.factoryPerformanceReport.col.workers}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {factoryPerformanceData.rows.map((r) => (
+                  <tr key={r.label}>
+                    <td className={`${ui.td} font-medium`}>{r.label}</td>
+                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.productionCost.toFixed(2)}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.concreteVolumeM3.toFixed(1)}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.finishedGoodsShippedQty}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.returnedVolumeM3.toFixed(1)}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.customerCount}</td>
+                    <td className={`${ui.td} font-mono tabular`}>{r.workerCount}</td>
+                  </tr>
+                ))}
+                {factoryPerformanceData.rows.length === 0 && (
+                  <tr><td className={ui.td} colSpan={7}><span className="text-ink-muted">{m.noRows}</span></td></tr>
                 )}
               </tbody>
             </table>

@@ -913,3 +913,56 @@ export async function getFinishedGoodsReport({ from, to, siteId }: Pick<ReportFi
 
   return { rows: movements, balances, movementCount: movements.length, producedQty, shippedQty };
 }
+
+// Factory Performance Analysis (P/QM/006 attachment) — the real paper form
+// tracks, per product, per quarter: production cost, sales volume, returns/
+// unsold quantity, customer count, and worker count. Batchline has no
+// single "product" dimension that spans both ready-mix (delivered by the
+// m³, never held as inventory) and finished goods like block (held and
+// shipped by the unit), so rather than force those into one row this
+// rolls the same five KPIs up company/plant-wide per calendar quarter,
+// reusing the existing Profitability/Production/Returns/FinishedGoods/
+// Attendance reports instead of recomputing any of their logic — a
+// convenience quarterly summary, not a compliance record, so nothing here
+// is persisted.
+export async function getFactoryPerformanceReport({ from, to, siteId, plantId }: ReportFilter) {
+  const quarters: { label: string; start: Date; end: Date }[] = [];
+  let cursor = new Date(from.getFullYear(), Math.floor(from.getMonth() / 3) * 3, 1);
+  while (cursor <= to) {
+    const quarterEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 3, 0, 23, 59, 59, 999);
+    const start = cursor.getTime() > from.getTime() ? cursor : from;
+    const end = quarterEnd.getTime() < to.getTime() ? quarterEnd : to;
+    const q = Math.floor(cursor.getMonth() / 3) + 1;
+    quarters.push({ label: `${cursor.getFullYear()} Q${q}`, start, end });
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 3, 1);
+  }
+
+  const rows = await Promise.all(
+    quarters.map(async (q) => {
+      const range = { from: q.start, to: q.end, siteId, plantId };
+      const [profitability, production, returns, finishedGoods, attendance] = await Promise.all([
+        getProfitabilityReport(range),
+        getProductionReport(range),
+        getReturnsReport(range),
+        getFinishedGoodsReport({ from: q.start, to: q.end, siteId }),
+        getAttendanceReport(range),
+      ]);
+      const customerIds = new Set(
+        production.rows.map((t) => t.reservation?.project?.customer?.id).filter((id): id is string => !!id),
+      );
+      const workerIds = new Set(attendance.rows.map((r) => r.employeeId));
+
+      return {
+        label: q.label,
+        productionCost: profitability.totalCost,
+        concreteVolumeM3: production.totalVolumeM3,
+        finishedGoodsShippedQty: finishedGoods.shippedQty,
+        returnedVolumeM3: returns.totalReturnedM3,
+        customerCount: customerIds.size,
+        workerCount: workerIds.size,
+      };
+    }),
+  );
+
+  return { rows };
+}
