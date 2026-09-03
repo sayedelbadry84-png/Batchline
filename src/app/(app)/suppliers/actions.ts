@@ -4,7 +4,15 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { CO2E_FACTOR_KG_PER_KG } from "@/lib/carbon";
+import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
+
+// Purchasing procedure P/QM/008 §7.5 banding, applied to the weighted score.
+function bandCategory(weightedScorePct: number): string {
+  if (weightedScorePct >= 95) return "A";
+  if (weightedScorePct >= 90) return "B";
+  return "C";
+}
 
 export async function createSupplier(formData: FormData) {
   const user = await getCurrentUser();
@@ -91,5 +99,59 @@ export async function updateMaterial(formData: FormData) {
   });
 
   await logAudit({ module: "Suppliers", recordId: id, afterValue: name, reasonCode: "MATERIAL_UPDATED" });
+  revalidatePath("/purchasing");
+}
+
+export async function createSupplierEvaluation(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "purchasing", "createSupplierEvaluation");
+
+  const supplierId = String(formData.get("supplierId") ?? "");
+  const periodYear = Number(formData.get("periodYear") ?? 0);
+  const specComplianceScorePct = Number(formData.get("specComplianceScorePct") ?? NaN);
+  const shelfLifeScorePct = Number(formData.get("shelfLifeScorePct") ?? NaN);
+  const onTimeDeliveryScorePct = Number(formData.get("onTimeDeliveryScorePct") ?? NaN);
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (
+    !supplierId ||
+    !periodYear ||
+    !Number.isFinite(specComplianceScorePct) ||
+    !Number.isFinite(shelfLifeScorePct) ||
+    !Number.isFinite(onTimeDeliveryScorePct)
+  )
+    return;
+
+  // Real weights 40/20/20 (see schema comment on SupplierEvaluation for why
+  // the form's own fourth line is excluded), renormalized to sum to 100.
+  const weightedScorePct =
+    specComplianceScorePct * 0.5 + shelfLifeScorePct * 0.25 + onTimeDeliveryScorePct * 0.25;
+  const category = bandCategory(weightedScorePct);
+
+  const evaluation = await withSequentialNumber(
+    "SEV",
+    () => prisma.supplierEvaluation.count(),
+    (evaluationNumber) =>
+      prisma.supplierEvaluation.create({
+        data: {
+          evaluationNumber,
+          supplierId,
+          periodYear,
+          specComplianceScorePct,
+          shelfLifeScorePct,
+          onTimeDeliveryScorePct,
+          weightedScorePct,
+          category,
+          notes,
+          evaluatedById: user!.id,
+        },
+      }),
+  );
+
+  await logAudit({
+    module: "Suppliers",
+    recordId: evaluation.id,
+    afterValue: `${category} (${weightedScorePct.toFixed(1)}%)`,
+    reasonCode: "SUPPLIER_EVALUATION_CREATED",
+  });
   revalidatePath("/purchasing");
 }

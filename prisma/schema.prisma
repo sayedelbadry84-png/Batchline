@@ -88,6 +88,7 @@ model User {
   controlledDocumentsCreated       ControlledDocument[]
   trainingSessionsCreated          TrainingSession[]
   materialReceiptsInspected        MaterialReceipt[]
+  supplierEvaluations              SupplierEvaluation[]
   opportunityInitialApprovals      Opportunity[]             @relation("OpportunityInitialApproval")
   opportunityFinalApprovals        Opportunity[]             @relation("OpportunityFinalApproval")
   fieldVisitInitialApprovals       FieldVisit[]              @relation("FieldVisitInitialApproval")
@@ -514,6 +515,35 @@ model Supplier {
   bills                SupplierBill[]
   defaultForSpareParts SparePart[]
   sparePartReceipts    SparePartReceipt[]
+  evaluations          SupplierEvaluation[]
+}
+
+// The annual Supplier Evaluation Report (F/QM/008/2/2) — a weighted score
+// per supplier, banded into the purchasing procedure's own A/B/C scale
+// (P/QM/008 §7.5: 95%+ "A very good", 90-95% "B good", below 90% "C needs
+// improvement"). The real paper form weights three criteria 40/20/20 (spec
+// compliance / shelf-life / on-time delivery) — its own fourth line is a
+// verbatim copy-paste duplicate of the shelf-life criterion, not a real
+// distinct fourth factor, so weightedScorePct here renormalizes the three
+// real weights (40/20/20 -> 50/25/25) rather than reproducing that bug.
+// Scores are entered per-evaluation, not recomputed from live data, since
+// the real form is a periodic (yearly) human review, not a live metric.
+model SupplierEvaluation {
+  id                      String   @id @default(cuid())
+  evaluationNumber        String   @unique // SEV-YYYY-NNNN
+  supplierId              String
+  supplier                Supplier @relation(fields: [supplierId], references: [id])
+  periodYear              Int
+  specComplianceScorePct  Float // 0-100, weight 40%
+  shelfLifeScorePct       Float // 0-100, weight 20%
+  onTimeDeliveryScorePct  Float // 0-100, weight 20%
+  weightedScorePct        Float // computed server-side, see createSupplierEvaluation
+  category                String // A, B, C — computed server-side from weightedScorePct
+  notes                   String?
+  evaluatedById           String
+  evaluatedBy             User     @relation(fields: [evaluatedById], references: [id])
+  evaluatedAt             DateTime @default(now())
+  createdAt               DateTime @default(now())
 }
 
 // A customer's job site — company-wide, not tied to any one plant/line.

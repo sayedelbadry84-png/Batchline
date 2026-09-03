@@ -18,10 +18,16 @@ import {
   createPurchaseOrderFromMaterialRequisitions,
 } from "./actions";
 import { resolvePlantIdForSite } from "@/lib/siteScope";
-import { createSupplier, createMaterial, updateSupplier, updateMaterial } from "../suppliers/actions";
+import { createSupplier, createMaterial, updateSupplier, updateMaterial, createSupplierEvaluation } from "../suppliers/actions";
 
 const PURCHASING_TABS = ["orders", "contracts", "suppliers"] as const;
 type PurchasingTab = (typeof PURCHASING_TABS)[number];
+
+const categoryChip: Record<string, string> = {
+  A: "bg-good-soft text-good",
+  B: "bg-warn-soft text-warn",
+  C: "bg-critical-soft text-critical",
+};
 
 const poStatusChip: Record<string, string> = {
   DRAFT: "bg-surface-alt text-ink-muted",
@@ -616,10 +622,21 @@ async function SuppliersTab({
 }) {
   const sm = dict.modules.suppliers;
 
-  const [suppliers, materials] = await Promise.all([
+  const [suppliers, materials, evaluations] = await Promise.all([
     prisma.supplier.findMany({ orderBy: { createdAt: "asc" }, include: { _count: { select: { materials: true } } } }),
     prisma.material.findMany({ orderBy: { createdAt: "asc" }, include: { supplier: true } }),
+    prisma.supplierEvaluation.findMany({
+      orderBy: { evaluatedAt: "desc" },
+      include: { supplier: true, evaluatedBy: true },
+    }),
   ]);
+
+  // First occurrence per supplier is the latest, since evaluations are
+  // already ordered by evaluatedAt desc above.
+  const latestCategoryBySupplier = new Map<string, string>();
+  for (const e of evaluations) {
+    if (!latestCategoryBySupplier.has(e.supplierId)) latestCategoryBySupplier.set(e.supplierId, e.category);
+  }
 
   return (
     <div className="flex flex-col gap-8">
@@ -632,6 +649,7 @@ async function SuppliersTab({
                 <th className={ui.th}>{sm.col.catalog}</th>
                 <th className={ui.th}>{sm.col.leadTime}</th>
                 <th className={ui.th}>{sm.col.materials}</th>
+                <th className={ui.th}>{sm.col.category}</th>
                 <th className={ui.th}>{dict.field.actions}</th>
               </tr>
             </thead>
@@ -639,7 +657,7 @@ async function SuppliersTab({
               {suppliers.map((s) =>
                 editSupplierId === s.id ? (
                   <tr key={s.id}>
-                    <td className={ui.td} colSpan={5}>
+                    <td className={ui.td} colSpan={6}>
                       <form action={updateSupplier} className="flex flex-wrap items-end gap-2">
                         <input type="hidden" name="id" value={s.id} />
                         <div>
@@ -668,6 +686,15 @@ async function SuppliersTab({
                     <td className={`${ui.td} font-mono tabular`}>{s.leadTimeDays ? `${s.leadTimeDays}d` : "—"}</td>
                     <td className={`${ui.td} font-mono tabular`}>{s._count.materials}</td>
                     <td className={ui.td}>
+                      {latestCategoryBySupplier.has(s.id) ? (
+                        <span className={`${ui.chip} ${categoryChip[latestCategoryBySupplier.get(s.id)!] ?? ""}`}>
+                          {latestCategoryBySupplier.get(s.id)}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-ink-faint">{sm.noEvaluation}</span>
+                      )}
+                    </td>
+                    <td className={ui.td}>
                       <Link href={`${baseUrl}&editSupplier=${s.id}`} className="text-xs font-medium text-accent-strong hover:underline">
                         {dict.field.edit}
                       </Link>
@@ -677,7 +704,7 @@ async function SuppliersTab({
               )}
               {suppliers.length === 0 && (
                 <tr>
-                  <td className={ui.td} colSpan={5}>
+                  <td className={ui.td} colSpan={6}>
                     <span className="text-ink-muted">{sm.empty}</span>
                   </td>
                 </tr>
@@ -862,6 +889,89 @@ async function SuppliersTab({
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>
             {sm.addMaterial}
+          </button>
+        </form>
+      </div>
+
+      <div className="grid grid-cols-[1fr_320px] gap-6">
+        <div className={ui.card}>
+          <h2 className="font-display text-lg font-semibold">{sm.evaluations.title}</h2>
+          <p className="mb-3 mt-1 text-xs text-ink-muted">{sm.evaluations.intro}</p>
+          <table className={ui.table}>
+            <thead>
+              <tr>
+                <th className={ui.th}>{sm.evaluations.col.number}</th>
+                <th className={ui.th}>{sm.evaluations.col.supplier}</th>
+                <th className={ui.th}>{sm.evaluations.col.year}</th>
+                <th className={ui.th}>{sm.evaluations.col.spec}</th>
+                <th className={ui.th}>{sm.evaluations.col.shelfLife}</th>
+                <th className={ui.th}>{sm.evaluations.col.onTime}</th>
+                <th className={ui.th}>{sm.evaluations.col.weighted}</th>
+                <th className={ui.th}>{sm.evaluations.col.category}</th>
+                <th className={ui.th}>{sm.evaluations.col.evaluatedBy}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {evaluations.map((e) => (
+                <tr key={e.id}>
+                  <td className={`${ui.td} font-mono text-xs`}>{e.evaluationNumber}</td>
+                  <td className={`${ui.td} font-medium`}>{e.supplier.name}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{e.periodYear}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{e.specComplianceScorePct}%</td>
+                  <td className={`${ui.td} font-mono tabular`}>{e.shelfLifeScorePct}%</td>
+                  <td className={`${ui.td} font-mono tabular`}>{e.onTimeDeliveryScorePct}%</td>
+                  <td className={`${ui.td} font-mono tabular`}>{e.weightedScorePct.toFixed(1)}%</td>
+                  <td className={ui.td}>
+                    <span className={`${ui.chip} ${categoryChip[e.category] ?? ""}`}>{e.category}</span>
+                  </td>
+                  <td className={ui.td}>{e.evaluatedBy.name}</td>
+                </tr>
+              ))}
+              {evaluations.length === 0 && (
+                <tr>
+                  <td className={ui.td} colSpan={9}>
+                    <span className="text-ink-muted">{sm.evaluations.empty}</span>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <form action={createSupplierEvaluation} className={`${ui.card} flex flex-col gap-3`}>
+          <h2 className="font-display text-lg font-semibold">{sm.evaluations.newTitle}</h2>
+          <div>
+            <label className={ui.label}>{sm.evaluations.f.supplier}</label>
+            <select name="supplierId" required className={ui.select}>
+              {suppliers.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={ui.label}>{sm.evaluations.f.year}</label>
+            <input name="periodYear" type="number" required defaultValue={new Date().getFullYear()} className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.evaluations.f.specComplianceScorePct}</label>
+            <input name="specComplianceScorePct" type="number" step="0.1" min="0" max="100" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.evaluations.f.shelfLifeScorePct}</label>
+            <input name="shelfLifeScorePct" type="number" step="0.1" min="0" max="100" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.evaluations.f.onTimeDeliveryScorePct}</label>
+            <input name="onTimeDeliveryScorePct" type="number" step="0.1" min="0" max="100" required className={ui.input} />
+          </div>
+          <div>
+            <label className={ui.label}>{sm.evaluations.f.notes}</label>
+            <textarea name="notes" rows={2} className={ui.input} />
+          </div>
+          <button type="submit" className={`${ui.button} mt-2`}>
+            {sm.evaluations.add}
           </button>
         </form>
       </div>
