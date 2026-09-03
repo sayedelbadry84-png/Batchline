@@ -593,3 +593,80 @@ export async function setControlledDocumentStatus(formData: FormData) {
   await logAudit({ module: "Quality", recordId: id, afterValue: status, reasonCode: "CONTROLLED_DOCUMENT_STATUS_CHANGED" });
   revalidatePath("/quality");
 }
+
+// ---------------------------------------------------------------------------
+// Employee training records — ISO 9001:2015 clause 7.2. See the schema
+// section comment for why this is one session with many attendees,
+// mirroring the real attendance-roster form directly.
+// ---------------------------------------------------------------------------
+
+export async function createTrainingSession(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "createTrainingSession");
+
+  const programName = String(formData.get("programName") ?? "").trim();
+  const trainerName = String(formData.get("trainerName") ?? "").trim() || null;
+  const location = String(formData.get("location") ?? "").trim() || null;
+  const startDateRaw = String(formData.get("startDate") ?? "");
+  const endDateRaw = String(formData.get("endDate") ?? "");
+  const durationHours = Number(formData.get("durationHours") ?? 0) || null;
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (!programName || !startDateRaw) return;
+
+  const session = await withSequentialNumber(
+    "TRN",
+    () => prisma.trainingSession.count(),
+    (sessionNumber) =>
+      prisma.trainingSession.create({
+        data: {
+          sessionNumber,
+          programName,
+          trainerName,
+          location,
+          startDate: new Date(startDateRaw),
+          endDate: endDateRaw ? new Date(endDateRaw) : null,
+          durationHours,
+          notes,
+          createdById: user!.id,
+        },
+      }),
+  );
+
+  await logAudit({ module: "Quality", recordId: session.id, afterValue: `${session.sessionNumber} — ${programName}`, reasonCode: "TRAINING_SESSION_CREATED" });
+  revalidatePath("/quality");
+}
+
+export async function addTrainingAttendee(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "addTrainingAttendee");
+
+  const sessionId = String(formData.get("sessionId") ?? "");
+  const employeeId = String(formData.get("employeeId") ?? "");
+  if (!sessionId || !employeeId) return;
+
+  const session = await prisma.trainingSession.findUnique({ where: { id: sessionId } });
+  if (!session) return;
+
+  const existing = await prisma.trainingAttendance.findUnique({ where: { sessionId_employeeId: { sessionId, employeeId } } });
+  if (existing) return;
+
+  const attendance = await prisma.trainingAttendance.create({ data: { sessionId, employeeId } });
+
+  await logAudit({ module: "Quality", recordId: attendance.id, afterValue: `${session.sessionNumber} — ${employeeId}`, reasonCode: "TRAINING_ATTENDEE_ADDED" });
+  revalidatePath("/quality");
+}
+
+export async function removeTrainingAttendee(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "removeTrainingAttendee");
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+
+  const attendance = await prisma.trainingAttendance.findUnique({ where: { id } });
+  if (!attendance) return;
+
+  await prisma.trainingAttendance.delete({ where: { id } });
+  await logAudit({ module: "Quality", recordId: id, reasonCode: "TRAINING_ATTENDEE_REMOVED" });
+  revalidatePath("/quality");
+}

@@ -18,6 +18,9 @@ import {
   createControlledDocument,
   updateControlledDocument,
   setControlledDocumentStatus,
+  createTrainingSession,
+  addTrainingAttendee,
+  removeTrainingAttendee,
 } from "./actions";
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
 import { getActiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
@@ -51,7 +54,7 @@ const ISSUING_BODY_OPTIONS = [
   "Standards Australia",
 ] as const;
 
-const QUALITY_TABS = ["testing", "certificates", "calibration", "audits", "documents"] as const;
+const QUALITY_TABS = ["testing", "certificates", "calibration", "audits", "documents", "training"] as const;
 type QualityTab = (typeof QUALITY_TABS)[number];
 
 const DOCUMENT_CATEGORY_OPTIONS = ["MANUAL", "PROCEDURE", "WORK_INSTRUCTION", "FORM"] as const;
@@ -70,6 +73,7 @@ export default async function QualityPage({
   const isCalibrationTab = tab === "calibration";
   const isAuditsTab = tab === "audits";
   const isDocumentsTab = tab === "documents";
+  const isTrainingTab = tab === "training";
 
   const [testBatches, sampleableTrips, employees, certificates, mixes, pendingWasteMemos, unfinishedWasteMemos, openCapaRecords, qualityUsers] = await Promise.all([
     prisma.testBatch.findMany({
@@ -154,6 +158,16 @@ export default async function QualityPage({
   const controlledDocuments = isDocumentsTab
     ? await prisma.controlledDocument.findMany({ orderBy: { code: "asc" } })
     : [];
+
+  const [trainingSessions, trainingEmployees] = isTrainingTab
+    ? await Promise.all([
+        prisma.trainingSession.findMany({
+          orderBy: { startDate: "desc" },
+          include: { attendances: { include: { employee: true }, orderBy: { createdAt: "asc" } } },
+        }),
+        prisma.employee.findMany({ where: { status: "ACTIVE", ...plantScopeWhere(siteId) }, orderBy: { name: "asc" } }),
+      ])
+    : [[], []];
 
   // Train the early-vs-final strength regression from every test batch that
   // already has both an early-age and a 28-day-or-later result on file —
@@ -1026,6 +1040,132 @@ export default async function QualityPage({
           </div>
           <button type="submit" className={`${ui.button} mt-2`}>{m.documents.add}</button>
         </form>
+      </div>
+      )}
+
+      {tab === "training" && (
+      <div className="flex flex-col gap-6">
+        <div className="grid grid-cols-[1fr_320px] gap-6">
+          <div className={ui.card}>
+            <h2 className="mb-3 font-display text-lg font-semibold">{m.training.sessionsTitle}</h2>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.training.colSession.number}</th>
+                  <th className={ui.th}>{m.training.colSession.program}</th>
+                  <th className={ui.th}>{m.training.colSession.trainer}</th>
+                  <th className={ui.th}>{m.training.colSession.location}</th>
+                  <th className={ui.th}>{m.training.colSession.dates}</th>
+                  <th className={ui.th}>{m.training.colSession.attendees}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trainingSessions.map((s) => (
+                  <tr key={s.id}>
+                    <td className={`${ui.td} font-mono text-xs`}>{s.sessionNumber}</td>
+                    <td className={ui.td}>{s.programName}</td>
+                    <td className={ui.td}>{s.trainerName ?? "—"}</td>
+                    <td className={ui.td}>{s.location ?? "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>
+                      {new Date(s.startDate).toLocaleDateString()}{s.endDate ? ` – ${new Date(s.endDate).toLocaleDateString()}` : ""}
+                    </td>
+                    <td className={`${ui.td} font-mono tabular`}>{s.attendances.length}</td>
+                  </tr>
+                ))}
+                {trainingSessions.length === 0 && (
+                  <tr><td className={ui.td} colSpan={6}><span className="text-ink-muted">{m.training.emptySessions}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <form action={createTrainingSession} className={`${ui.card} flex flex-col gap-3`}>
+            <h2 className="font-display text-lg font-semibold">{m.training.newSessionTitle}</h2>
+            <div>
+              <label className={ui.label}>{m.training.fSession.programName}</label>
+              <input name="programName" required className={ui.input} placeholder="ISO 9001:2015 Awareness" />
+            </div>
+            <div>
+              <label className={ui.label}>{m.training.fSession.trainerName}</label>
+              <input name="trainerName" className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.training.fSession.location}</label>
+              <input name="location" className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.training.fSession.startDate}</label>
+              <input name="startDate" type="date" required className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.training.fSession.endDate}</label>
+              <input name="endDate" type="date" className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.training.fSession.durationHours}</label>
+              <input name="durationHours" type="number" step="0.5" min="0" className={ui.input} />
+            </div>
+            <div>
+              <label className={ui.label}>{m.training.fSession.notes}</label>
+              <input name="notes" className={ui.input} />
+            </div>
+            <button type="submit" className={`${ui.button} mt-2`}>{m.training.logSession}</button>
+          </form>
+        </div>
+
+        <div className="grid grid-cols-[1fr_320px] gap-6">
+          <div className={ui.card}>
+            <h2 className="mb-3 font-display text-lg font-semibold">{m.training.attendanceTitle}</h2>
+            <table className={ui.table}>
+              <thead>
+                <tr>
+                  <th className={ui.th}>{m.training.colAttendance.employee}</th>
+                  <th className={ui.th}>{m.training.colAttendance.role}</th>
+                  <th className={ui.th}>{m.training.colAttendance.session}</th>
+                  <th className={ui.th}>{dict.field.actions}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trainingSessions.flatMap((s) => s.attendances.map((a) => (
+                  <tr key={a.id}>
+                    <td className={ui.td}>{a.employee.name}</td>
+                    <td className={ui.td}>{a.employee.role}</td>
+                    <td className={ui.td}>{s.programName} <span className="font-mono text-xs text-ink-muted">({s.sessionNumber})</span></td>
+                    <td className={ui.td}>
+                      <form action={removeTrainingAttendee}>
+                        <input type="hidden" name="id" value={a.id} />
+                        <button className="text-xs font-medium text-critical hover:underline">{m.training.remove}</button>
+                      </form>
+                    </td>
+                  </tr>
+                )))}
+                {trainingSessions.every((s) => s.attendances.length === 0) && (
+                  <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.training.emptyAttendance}</span></td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <form action={addTrainingAttendee} className={`${ui.card} flex flex-col gap-3`}>
+            <h2 className="font-display text-lg font-semibold">{m.training.addAttendeeTitle}</h2>
+            <div>
+              <label className={ui.label}>{m.training.fAttendance.sessionId}</label>
+              <select name="sessionId" required className={ui.select}>
+                <option value="" disabled>{m.training.fAttendance.sessionId}</option>
+                {trainingSessions.map((s) => <option key={s.id} value={s.id}>{s.sessionNumber} — {s.programName}</option>)}
+              </select>
+              {trainingSessions.length === 0 && <p className="mt-1 text-xs text-warn">{m.training.noSessions}</p>}
+            </div>
+            <div>
+              <label className={ui.label}>{m.training.fAttendance.employeeId}</label>
+              <select name="employeeId" required className={ui.select}>
+                <option value="" disabled>{m.training.fAttendance.employeeId}</option>
+                {trainingEmployees.map((e) => <option key={e.id} value={e.id}>{e.name} — {e.role}</option>)}
+              </select>
+            </div>
+            <button type="submit" className={`${ui.button} mt-2`}>{m.training.addAttendee}</button>
+          </form>
+        </div>
       </div>
       )}
 

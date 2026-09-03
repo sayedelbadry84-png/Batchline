@@ -86,6 +86,7 @@ model User {
   auditFindingsResponsible         InternalAuditFinding[]     @relation("AuditFindingResponsible")
   auditFindingsClosed              InternalAuditFinding[]     @relation("AuditFindingClosedBy")
   controlledDocumentsCreated       ControlledDocument[]
+  trainingSessionsCreated          TrainingSession[]
   opportunityInitialApprovals      Opportunity[]             @relation("OpportunityInitialApproval")
   opportunityFinalApprovals        Opportunity[]             @relation("OpportunityFinalApproval")
   fieldVisitInitialApprovals       FieldVisit[]              @relation("FieldVisitInitialApproval")
@@ -720,6 +721,7 @@ model Employee {
   maintenanceOrders         MaintenanceOrderTechnician[]
   payrollLines               PayrollLine[]
   endOfServiceSettlements   EndOfServiceSettlement[]
+  trainingAttendances       TrainingAttendance[]
 }
 
 // A Saudi end-of-service gratuity (مكافأة نهاية الخدمة) calculation for one
@@ -1375,6 +1377,45 @@ model ControlledDocument {
   createdBy        User     @relation(fields: [createdById], references: [id])
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Employee training records — ISO 9001:2015 clause 7.2 (competence). The
+// real QMS's own filled example is an actual ISO 9001:2015 awareness
+// session (18-19 May 2024, trainer named, 11 real attendees mostly from
+// the Laboratory department) logged on a plain attendance-roster form —
+// nothing tracked this at all in Batchline before (Employee.licenseExpiry
+// is driver's-license-only, unrelated). One session, many attendees —
+// mirrors the real roster shape directly rather than one row per
+// employee per program.
+// ---------------------------------------------------------------------------
+
+model TrainingSession {
+  id            String   @id @default(cuid())
+  sessionNumber String   @unique // TRN-YYYY-NNNN
+  programName   String
+  trainerName   String?
+  location      String?
+  startDate     DateTime
+  endDate       DateTime?
+  durationHours Float?
+  notes         String?
+  createdById   String
+  createdBy     User     @relation(fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
+
+  attendances   TrainingAttendance[]
+}
+
+model TrainingAttendance {
+  id         String          @id @default(cuid())
+  sessionId  String
+  session    TrainingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  employeeId String
+  employee   Employee        @relation(fields: [employeeId], references: [id])
+  createdAt  DateTime        @default(now())
+
+  @@unique([sessionId, employeeId])
 }
 
 // ---------------------------------------------------------------------------
