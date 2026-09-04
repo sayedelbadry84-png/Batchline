@@ -89,6 +89,30 @@ export async function createReceipt(formData: FormData) {
   if (!material) return;
   if (!(await isValidDestination(prisma, plantId, material.id, material.type, destinationSiloId, destinationHopperId))) return;
 
+  // Nothing verified that a picked purchaseOrderLineId actually belongs to
+  // this receipt's supplier/material/site at all — a stale option left
+  // selected after changing the supplier/material above it, or a crafted
+  // request, could count this delivery's weight against a completely
+  // different order (wrong supplier being paid off, wrong material's
+  // PO showing as received) with nothing to catch it.
+  if (purchaseOrderLineId) {
+    const plant = await prisma.plant.findUnique({ where: { id: plantId }, select: { siteId: true } });
+    const line = await prisma.purchaseOrderLine.findUnique({
+      where: { id: purchaseOrderLineId },
+      include: { purchaseOrder: true },
+    });
+    if (
+      !plant ||
+      !line ||
+      line.materialId !== materialId ||
+      line.purchaseOrder.supplierId !== supplierId ||
+      line.purchaseOrder.siteId !== plant.siteId ||
+      line.purchaseOrder.status === "CANCELLED"
+    ) {
+      return;
+    }
+  }
+
   const netWeightKg = grossWeightKg - tareWeightKg;
 
   // The receipt and its PO-line receivedMassKg bump commit as one unit —

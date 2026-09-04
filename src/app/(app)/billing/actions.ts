@@ -230,21 +230,32 @@ export async function recordPayment(formData: FormData) {
   if (!(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
 
   // The payment and its journal entry commit as one unit — same rationale
-  // as generateInvoiceForProject above. totalPaid is also now read INSIDE
-  // the transaction (not from the snapshot fetched above) and the whole
-  // thing runs Serializable — two payments recorded concurrently against
-  // the same invoice used to each compute totalPaid from a payments list
-  // that didn't include the other's just-created row, so an invoice that
-  // was actually fully paid by the combination could sit stuck at SENT
-  // forever. Serializable makes Postgres detect that read-write conflict
-  // and abort one of the two competing transactions instead.
+  // as generateInvoiceForProject above. amountDue is also now (re)computed
+  // INSIDE the transaction (not from the snapshot fetched above) and the
+  // whole thing runs Serializable — two payments recorded concurrently
+  // against the same invoice used to each compute totalPaid from a
+  // payments list that didn't include the other's just-created row, so an
+  // invoice that was actually fully paid by the combination could sit
+  // stuck at SENT forever. Serializable makes Postgres detect that
+  // read-write conflict and abort one of the two competing transactions
+  // instead.
+  //
+  // The amount itself was never checked against what's actually still
+  // owed — issueCreditNote already refuses to credit more than amountDue,
+  // but recordPayment had no equivalent, so a typo'd extra digit (or a
+  // second payment recorded against an invoice someone forgot was already
+  // settled) could push it well past PAID with nothing to catch it and no
+  // refund/credit-balance workflow to make sense of the overage.
   try {
     await prisma.$transaction(async (tx) => {
+      const fresh = await tx.invoice.findUnique({ where: { id: invoiceId }, include: { payments: true, creditNotes: true } });
+      if (!fresh) throw new Error("NOT_FOUND");
+      const amountDue = invoiceAmountDue(fresh);
+      if (amount > amountDue + 0.01) throw new Error("EXCEEDS_AMOUNT_DUE");
+
       const payment = await tx.payment.create({ data: { invoiceId, amount, method, reference } });
 
-      const payments = await tx.payment.findMany({ where: { invoiceId }, select: { amount: true } });
-      const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
-      if (totalPaid >= invoice.total - 0.01) {
+      if (amountDue - amount <= 0.01) {
         await tx.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
       }
 

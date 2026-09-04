@@ -20,6 +20,8 @@ export async function createSilo(formData: FormData) {
   const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
 
   if (!plantId || !name || !materialType || !capacityTons) return;
+  if (!Number.isFinite(capacityTons) || capacityTons <= 0) return;
+  if (!Number.isFinite(currentLevelTons) || currentLevelTons < 0) return;
   if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
   if (!(await isPlantActive(plantId))) return;
   // If a specific material was picked, it must actually be one of this
@@ -31,7 +33,7 @@ export async function createSilo(formData: FormData) {
   }
 
   const silo = await prisma.silo.create({
-    data: { plantId, name, materialType, materialId, capacityTons, currentLevelTons, minThresholdPct, sharedAcrossPlants },
+    data: { plantId, name, materialType, materialId, capacityTons, currentLevelTons: Math.min(currentLevelTons, capacityTons), minThresholdPct, sharedAcrossPlants },
   });
 
   await logAudit({
@@ -112,18 +114,23 @@ export async function updateSiloLevel(formData: FormData) {
 
   const id = String(formData.get("id") ?? "");
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
-  if (!id) return;
+  if (!id || !Number.isFinite(currentLevelTons) || currentLevelTons < 0) return;
 
   const before = await prisma.silo.findUnique({ where: { id } });
   if (!before || !(await isPlantInScope(before.plantId, effectiveSiteId(user)))) return;
-  await prisma.silo.update({ where: { id }, data: { currentLevelTons } });
+  // A manual reading above the silo's own registered capacity is a data-
+  // entry mistake (or a stale/wrong capacity on file), not a real physical
+  // state — clamp it the same way the atomic deduction/credit helpers in
+  // src/lib/inventoryLevels.ts already clamp their own writes.
+  const clampedLevel = Math.min(currentLevelTons, before.capacityTons);
+  await prisma.silo.update({ where: { id }, data: { currentLevelTons: clampedLevel } });
 
   await logAudit({
     module: "Silos",
     recordId: id,
     field: "currentLevelTons",
     beforeValue: String(before?.currentLevelTons ?? ""),
-    afterValue: String(currentLevelTons),
+    afterValue: String(clampedLevel),
     reasonCode: "MANUAL_LEVEL_READING",
   });
 
@@ -153,6 +160,8 @@ export async function createHopper(formData: FormData) {
   const sharedAcrossPlants = formData.get("sharedAcrossPlants") === "on";
 
   if (!siteId || !name || !aggregateType || !capacityTons) return;
+  if (!Number.isFinite(capacityTons) || capacityTons <= 0) return;
+  if (!Number.isFinite(currentLevelTons) || currentLevelTons < 0) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
   const plantId = await resolvePlantIdForSite(siteId);
   if (!plantId) return;
@@ -165,7 +174,7 @@ export async function createHopper(formData: FormData) {
   }
 
   const hopper = await prisma.hopper.create({
-    data: { plantId, name, aggregateType, materialId, capacityTons, currentLevelTons, minThresholdPct, sharedAcrossPlants },
+    data: { plantId, name, aggregateType, materialId, capacityTons, currentLevelTons: Math.min(currentLevelTons, capacityTons), minThresholdPct, sharedAcrossPlants },
   });
 
   await logAudit({ module: "Silos", recordId: hopper.id, afterValue: `${name} / ${aggregateType}`, reasonCode: "HOPPER_CREATED" });
@@ -204,18 +213,19 @@ export async function updateHopperLevel(formData: FormData) {
 
   const id = String(formData.get("id") ?? "");
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
-  if (!id) return;
+  if (!id || !Number.isFinite(currentLevelTons) || currentLevelTons < 0) return;
 
   const before = await prisma.hopper.findUnique({ where: { id } });
   if (!before || !(await isPlantInScope(before.plantId, effectiveSiteId(user)))) return;
-  await prisma.hopper.update({ where: { id }, data: { currentLevelTons } });
+  const clampedLevel = Math.min(currentLevelTons, before.capacityTons);
+  await prisma.hopper.update({ where: { id }, data: { currentLevelTons: clampedLevel } });
 
   await logAudit({
     module: "Silos",
     recordId: id,
     field: "currentLevelTons",
     beforeValue: String(before?.currentLevelTons ?? ""),
-    afterValue: String(currentLevelTons),
+    afterValue: String(clampedLevel),
     reasonCode: "MANUAL_LEVEL_READING",
   });
 
@@ -237,12 +247,15 @@ export async function createChemicalTank(formData: FormData) {
   const minThresholdPct = Number(formData.get("minThresholdPct") ?? 15);
 
   if (!plantId || !materialId || !name) return;
+  if (!Number.isFinite(currentLevelLiters) || currentLevelLiters < 0) return;
+  if (capacityLiters !== null && (!Number.isFinite(capacityLiters) || capacityLiters <= 0)) return;
   if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
 
+  const clampedLevel = capacityLiters !== null ? Math.min(currentLevelLiters, capacityLiters) : currentLevelLiters;
   const tank = await prisma.chemicalTank.upsert({
     where: { plantId_materialId: { plantId, materialId } },
-    create: { plantId, materialId, name, capacityLiters, currentLevelLiters, minThresholdPct },
-    update: { name, capacityLiters, currentLevelLiters, minThresholdPct },
+    create: { plantId, materialId, name, capacityLiters, currentLevelLiters: clampedLevel, minThresholdPct },
+    update: { name, capacityLiters, currentLevelLiters: clampedLevel, minThresholdPct },
   });
 
   await logAudit({ module: "Silos", recordId: tank.id, afterValue: name, reasonCode: "CHEMICAL_TANK_CREATED" });
@@ -255,18 +268,19 @@ export async function updateChemicalTankLevel(formData: FormData) {
 
   const id = String(formData.get("id") ?? "");
   const currentLevelLiters = Number(formData.get("currentLevelLiters") ?? 0);
-  if (!id) return;
+  if (!id || !Number.isFinite(currentLevelLiters) || currentLevelLiters < 0) return;
 
   const before = await prisma.chemicalTank.findUnique({ where: { id } });
   if (!before || !(await isPlantInScope(before.plantId, effectiveSiteId(user)))) return;
-  await prisma.chemicalTank.update({ where: { id }, data: { currentLevelLiters } });
+  const clampedLevel = before.capacityLiters != null ? Math.min(currentLevelLiters, before.capacityLiters) : currentLevelLiters;
+  await prisma.chemicalTank.update({ where: { id }, data: { currentLevelLiters: clampedLevel } });
 
   await logAudit({
     module: "Silos",
     recordId: id,
     field: "currentLevelLiters",
     beforeValue: String(before?.currentLevelLiters ?? ""),
-    afterValue: String(currentLevelLiters),
+    afterValue: String(clampedLevel),
     reasonCode: "MANUAL_TANK_READING",
   });
 
