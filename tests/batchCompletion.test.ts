@@ -389,7 +389,15 @@ test("completion vs. recordActuals (bulk): exactly one of two valid outcomes", a
 test("completion vs. addTicketComponent: exactly one of two valid outcomes", async () => {
   await resetSilo(50);
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
-  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-CEMENT-RACE", type: "CEMENT", specificGravity: null } });
+  // SILICA_FUME, not CEMENT: findMatchingSilo (storageMatching.ts) falls
+  // back to any generic, unassigned silo of the same materialType when a
+  // material has no explicit silo of its own — an intentional shared-bin
+  // feature. The fixtures' own fallbackSiloId is exactly such a generic
+  // CEMENT silo, so a CEMENT-typed orphan here would silently match it
+  // instead of proving the STORAGE_NOT_CONFIGURED path this test wants.
+  // No fixture silo of any kind exists for SILICA_FUME, so this really has
+  // no matching storage at all.
+  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-SILICA-FUME-RACE", type: "SILICA_FUME", specificGravity: null } });
   try {
     // secondMaterial has no matching silo at all — if it DOES get added
     // and completion picks it up, completion must correctly fail with
@@ -398,13 +406,6 @@ test("completion vs. addTicketComponent: exactly one of two valid outcomes", asy
       completeBatchTicket(ticketId, {}),
       claimAndAddTicketComponent(ticketId, secondMaterial.id, 500),
     ]);
-
-    // TEMPORARY DEBUG — investigating a CI-only failure of this test, to
-    // be reverted once diagnosed.
-    console.log("DEBUG completeResult", JSON.stringify(completeResult));
-    console.log("DEBUG editResult", JSON.stringify(editResult));
-    console.log("DEBUG secondMaterial row", JSON.stringify(await prisma.material.findUnique({ where: { id: secondMaterial.id } })));
-    console.log("DEBUG components after race", JSON.stringify(await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } })));
 
     if (editResult.status === "OK") {
       // The new component was added before completion's claim — completion
