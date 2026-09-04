@@ -362,7 +362,20 @@ export async function returnReceiptToSupplier(formData: FormData) {
   if (!receipt || receipt.qcStatus === "RETURNED") return;
   if (!(await isPlantInScope(receipt.plantId, effectiveSiteId(user)))) return;
 
-  await prisma.$transaction(async (tx) => {
+  // Claim the RETURNED transition atomically via the update's own WHERE
+  // clause, same as setQcStatus above — two concurrent return submissions
+  // (a double-click, a retried request) used to both read
+  // qcStatus !== "RETURNED" before either committed, both deduct the
+  // silo/hopper and reverse the PO line, and both still succeed since
+  // .update() doesn't care if it's already been done once. Only the first
+  // writer can still match this WHERE; the second claims 0 rows and no-ops.
+  const claim = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.materialReceipt.updateMany({
+      where: { id, qcStatus: { not: "RETURNED" } },
+      data: { qcStatus: "RETURNED", postedToInventory: false },
+    });
+    if (claimed.count === 0) return false;
+
     if (receipt.postedToInventory) {
       const netTons = receipt.netWeightKg / 1000;
       if (receipt.destinationSiloId) {
@@ -375,8 +388,9 @@ export async function returnReceiptToSupplier(formData: FormData) {
     // shipment sent back must stop counting toward what the PO shows as
     // received, same as if it had never arrived.
     if (receipt.purchaseOrderLineId) await reversePOLineReceipt(tx, receipt.purchaseOrderLineId, receipt.netWeightKg);
-    await tx.materialReceipt.update({ where: { id }, data: { qcStatus: "RETURNED", postedToInventory: false } });
+    return true;
   });
+  if (!claim) return;
 
   await logAudit({
     module: "MaterialReceiving",
