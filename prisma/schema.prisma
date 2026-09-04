@@ -117,6 +117,8 @@ model User {
   endOfServiceSettlementsCalculated EndOfServiceSettlement[]  @relation("EOSCalculatedBy")
   notifications                     Notification[]
   pushSubscriptions                 PushSubscription[]
+  inventoryMovementsPosted          InventoryMovement[]
+  batchTicketsReversed              BatchTicket[]             @relation("BatchTicketReversedBy")
 }
 
 model Session {
@@ -324,18 +326,19 @@ model Plant {
   createdAt                   DateTime @default(now())
   updatedAt                   DateTime @updatedAt
 
-  users            User[]
-  silos            Silo[]
-  hoppers          Hopper[]
-  employees        Employee[]
-  invoices         Invoice[]
-  trucks           Truck[]
-  batchTickets     BatchTicket[]
-  pumps            Pump[]
-  materialReceipts MaterialReceipt[]
-  pumpCrewMembers  PumpCrewMember[]
-  supportVehicles  SupportVehicle[]
-  chemicalTanks    ChemicalTank[]
+  users              User[]
+  silos              Silo[]
+  hoppers            Hopper[]
+  employees          Employee[]
+  invoices           Invoice[]
+  trucks             Truck[]
+  batchTickets       BatchTicket[]
+  pumps              Pump[]
+  materialReceipts   MaterialReceipt[]
+  pumpCrewMembers    PumpCrewMember[]
+  supportVehicles    SupportVehicle[]
+  chemicalTanks      ChemicalTank[]
+  inventoryMovements InventoryMovement[]
 }
 
 model Silo {
@@ -386,21 +389,21 @@ model Hopper {
   materialId         String?
   material           Material? @relation(fields: [materialId], references: [id])
   capacityTons       Float
-  currentLevelTons   Float    @default(0)
+  currentLevelTons   Float     @default(0)
   // Same low-stock threshold as Silo.minThresholdPct — drives the
   // dashboard alert and the auto-requisition check in completeBatch
   // (production/actions.ts), extended here so aggregate/water hoppers get
   // the same "flag it, then auto-request more" coverage cement silos
   // already had.
-  minThresholdPct    Float    @default(15)
+  minThresholdPct    Float     @default(15)
   // A yard heap multiple production lines at the same site draw from —
   // plantId above is still the "home"/organizational line, but
   // completeBatch's consumption lookup (production/actions.ts) matches a
   // shared hopper for any OTHER line's ticket at the SAME site (never a
   // different site), not just its own, once this is true.
-  sharedAcrossPlants Boolean  @default(false)
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  sharedAcrossPlants Boolean   @default(false)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   receipts MaterialReceipt[]
 }
@@ -489,6 +492,7 @@ model Material {
   requisitions       MaterialRequisition[]
   silos              Silo[]
   hoppers            Hopper[]
+  inventoryMovements InventoryMovement[]
 }
 
 model MixComponent {
@@ -1137,6 +1141,16 @@ model BatchTicket {
   batchCompletedAt DateTime?
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
+  // A completed ticket is never deleted (see reverseBatchTicket in
+  // production/actions.ts) — reversal posts opposite InventoryMovement
+  // rows and stamps these three fields instead, so the original posting
+  // history stays on file. reversedAt is the atomic claim (updateMany
+  // where reversedAt: null) that stops a second reversal from posting a
+  // second set of opposite movements.
+  reversedAt       DateTime?
+  reversedById     String?
+  reversedBy       User?       @relation("BatchTicketReversedBy", fields: [reversedById], references: [id])
+  reversalReason   String?
 
   components BatchComponentActual[]
   trip       Trip?
@@ -1144,16 +1158,64 @@ model BatchTicket {
 }
 
 model BatchComponentActual {
-  id            String      @id @default(cuid())
-  batchTicketId String
-  batchTicket   BatchTicket @relation(fields: [batchTicketId], references: [id], onDelete: Cascade)
-  materialId    String
-  material      Material    @relation(fields: [materialId], references: [id])
-  targetMassKg  Float
-  actualMassKg  Float?
-  moisturePct   Float?
+  id                  String      @id @default(cuid())
+  batchTicketId       String
+  batchTicket         BatchTicket @relation(fields: [batchTicketId], references: [id], onDelete: Cascade)
+  materialId          String
+  material            Material    @relation(fields: [materialId], references: [id])
+  targetMassKg        Float
+  actualMassKg        Float?
+  moisturePct         Float?
+  // The original design target above (targetMassKg) is never mutated by
+  // reclaim any more — startTrip credits a truck's carried-over reclaim
+  // here instead, so reports can still show design vs. reclaimed vs.
+  // fresh-drawn mass separately. See startTrip's reclaim block in
+  // production/actions.ts for how this is populated; reserving reclaim
+  // BEFORE batching (rather than crediting it back after, as today) is a
+  // deeper sequencing fix left for a later phase.
+  reclaimCreditMassKg Float       @default(0)
 
   @@unique([batchTicketId, materialId])
+}
+
+// An immutable posting ledger for every inventory-affecting event this app
+// records against a Silo/Hopper/ChemicalTank — batch completion, its
+// reversal, and a reclaimed load's credit-back today (see
+// src/lib/inventoryLedger.ts). Nothing here is ever updated or deleted by
+// application code; a correction posts a new opposite-signed row instead
+// (see reverseBatchTicket), the same never-rewrite-history posture as
+// AuditEvent. storageType/storageId and sourceType/sourceId are both
+// intentionally polymorphic (Silo/Hopper/ChemicalTank and
+// BatchTicket/Trip respectively have no shared parent table), so neither
+// carries a real FK — both are plain indexed strings.
+//
+// The unique constraint below is the actual idempotency mechanism for
+// postSiloMovement/postHopperMovement/postChemicalTankMovement: an INSERT
+// ... ON CONFLICT DO NOTHING keyed on it means a retried or duplicated
+// request for the same business event (same source, same movement type,
+// same material, same storage) posts nothing a second time and changes no
+// balance, rather than relying on a caller to remember it already ran.
+model InventoryMovement {
+  id           String   @id
+  storageType  String // SILO, HOPPER, CHEMICAL_TANK
+  storageId    String
+  materialId   String
+  material     Material @relation(fields: [materialId], references: [id])
+  quantity     Float // signed: negative = consumption, positive = credit
+  unit         String // TONS, LITERS
+  movementType String // BATCH_COMPLETION, BATCH_COMPLETION_REVERSAL, RECLAIM_CREDIT
+  sourceType   String // BatchTicket, Trip
+  sourceId     String
+  plantId      String
+  plant        Plant    @relation(fields: [plantId], references: [id])
+  siteId       String
+  actorId      String?
+  actor        User?    @relation(fields: [actorId], references: [id])
+  reason       String?
+  createdAt    DateTime @default(now())
+
+  @@unique([sourceType, sourceId, movementType, materialId, storageId])
+  @@index([storageType, storageId])
 }
 
 model Trip {
