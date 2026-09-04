@@ -104,7 +104,7 @@ export async function createReservation(formData: FormData) {
 
   const reservation = await withSequentialNumber(
     "RES",
-    () => prisma.reservation.count(),
+    (yr) => prisma.reservation.count({ where: { createdAt: yr } }),
     (reservationNumber) =>
       prisma.reservation.create({
         data: {
@@ -176,6 +176,25 @@ export async function updateReservation(formData: FormData) {
   const released = await getReleasedVolumeM3(id);
   if (requestedVolumeM3 < released) return; // can't shrink below what's already gone out
 
+  // Once any concrete has actually been produced against this booking, its
+  // project/mix/site are no longer just booking details — they're what a
+  // real batch ticket already says it was made for. Changing them here
+  // would silently rewrite that ticket's own meaning after the fact
+  // (mix design retroactively "was" a different recipe, say) instead of
+  // being the amendment/new-booking it actually is.
+  if (released > 0 && (projectId !== reservation.projectId || mixId !== reservation.mixId || siteId !== reservation.siteId)) {
+    return;
+  }
+
+  // A meaningful change to what was already signed off on — the identity
+  // fields above, or the volume itself — means the sign-off no longer
+  // covers what this booking now says. Clearing it forces a fresh
+  // approval rather than letting an edited booking keep riding on
+  // clearance that was given for something else.
+  const identityChanged = projectId !== reservation.projectId || mixId !== reservation.mixId || siteId !== reservation.siteId;
+  const volumeChanged = requestedVolumeM3 !== reservation.requestedVolumeM3;
+  const approvalsInvalidated = (identityChanged || volumeChanged) && (reservation.initialApprovedAt || reservation.finalApprovedAt);
+
   await prisma.reservation.update({
     where: { id },
     data: {
@@ -186,8 +205,20 @@ export async function updateReservation(formData: FormData) {
       pourWindowStart: new Date(pourWindowStartRaw),
       status,
       ...readPourDetails(formData),
+      ...(approvalsInvalidated
+        ? { initialApprovedAt: null, initialApprovedById: null, finalApprovedAt: null, finalApprovedById: null }
+        : {}),
     },
   });
+
+  if (approvalsInvalidated) {
+    await logAudit({
+      module: "Reservations",
+      recordId: id,
+      field: "approvals",
+      reasonCode: "RESERVATION_APPROVALS_INVALIDATED_ON_EDIT",
+    });
+  }
 
   await logAudit({
     module: "Reservations",
