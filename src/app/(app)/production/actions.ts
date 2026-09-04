@@ -323,7 +323,7 @@ export async function recordActuals(formData: FormData) {
   // guard and lets a resubmit deduct the same materials from inventory a
   // second time.
   const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId } });
-  if (!ticket || ticket.status === "COMPLETE") return;
+  if (!ticket || ticket.status === "COMPLETE" || ticket.status === "CANCELLED") return;
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
 
   const components = await prisma.batchComponentActual.findMany({
@@ -387,7 +387,7 @@ export async function recordActualField(formData: FormData) {
     where: { id: componentId },
     include: { batchTicket: true },
   });
-  if (!component || component.batchTicketId !== batchTicketId || component.batchTicket.status === "COMPLETE") return;
+  if (!component || component.batchTicketId !== batchTicketId || component.batchTicket.status === "COMPLETE" || component.batchTicket.status === "CANCELLED") return;
   if (!(await isPlantInScope(component.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   await prisma.batchComponentActual.update({
@@ -426,7 +426,7 @@ export async function completeBatch(formData: FormData) {
       plant: { include: { silos: true, hoppers: true, chemicalTanks: true } },
     },
   });
-  if (!ticket || ticket.status === "COMPLETE") return;
+  if (!ticket || ticket.status === "COMPLETE" || ticket.status === "CANCELLED") return;
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
 
   // Would deducting this component take its store below zero? Completing
@@ -474,77 +474,95 @@ export async function completeBatch(formData: FormData) {
   // throws) left the first two materials already deducted but the ticket
   // still not COMPLETE — a retry would then re-run the whole loop and
   // double-deduct the materials that succeeded the first time.
-  await prisma.$transaction(async (tx) => {
-    for (const c of ticket.components) {
-      const massKg = c.actualMassKg ?? c.targetMassKg;
-      const massTons = massKg / 1000;
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Claim the ticket atomically, first thing inside the transaction —
+      // the plain `ticket.status === "COMPLETE"` check above was read
+      // BEFORE this transaction started, so two concurrent completions of
+      // the same ticket could both pass it and both run the deduction loop
+      // below, double-consuming every component's mass for one physical
+      // batch. Postgres row-locks this UPDATE, so only the first caller's
+      // WHERE clause can still match a non-terminal status; the second's
+      // updateMany then matches zero rows, the thrown error rolls the
+      // whole transaction back, and nothing gets deducted twice. Excludes
+      // CANCELLED too (not just COMPLETE) — the schema lists it as a valid
+      // terminal status even though nothing sets it today, and a future
+      // cancel feature must not silently reopen a batch this check was
+      // meant to keep shut.
+      const claim = await tx.batchTicket.updateMany({
+        where: { id: batchTicketId, status: { notIn: ["COMPLETE", "CANCELLED"] } },
+        data: { status: "COMPLETE", batchCompletedAt: new Date() },
+      });
+      if (claim.count === 0) throw new Error("ALREADY_TERMINAL");
 
-      if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-        const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-        if (silo) {
-          const newLevelTons = Math.max(0, silo.currentLevelTons - massTons);
-          await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: newLevelTons } });
-          requisitionChecks.push(() =>
-            maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, silo.capacityTons, silo.minThresholdPct, (tons) => tons * 1000),
+      for (const c of ticket.components) {
+        const massKg = c.actualMassKg ?? c.targetMassKg;
+        const massTons = massKg / 1000;
+
+        if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
+          const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
+          if (silo) {
+            const newLevelTons = Math.max(0, silo.currentLevelTons - massTons);
+            await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: newLevelTons } });
+            requisitionChecks.push(() =>
+              maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, silo.capacityTons, silo.minThresholdPct, (tons) => tons * 1000),
+            );
+          }
+        } else if (AGGREGATE_TYPES.has(c.material.type)) {
+          const hopper = await findMatchingHopper(
+            tx,
+            ticket.plantId,
+            ticket.plant.siteId,
+            c.materialId,
+            c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
           );
-        }
-      } else if (AGGREGATE_TYPES.has(c.material.type)) {
-        const hopper = await findMatchingHopper(
-          tx,
-          ticket.plantId,
-          ticket.plant.siteId,
-          c.materialId,
-          c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
-        );
-        if (hopper) {
-          const newLevelTons = Math.max(0, hopper.currentLevelTons - massTons);
-          await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: newLevelTons } });
-          requisitionChecks.push(() =>
-            maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, hopper.capacityTons, hopper.minThresholdPct, (tons) => tons * 1000),
-          );
-        }
-      } else if (c.material.type === "WATER") {
-        // Reuses Hopper (a plain tonnage heap) rather than a new model — a
-        // plant that meters bulk water registers a Hopper with
-        // aggregateType "WATER"; one that doesn't just has no match here,
-        // same silent no-op as any other unregistered destination.
-        const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-        if (waterHopper) {
-          const newLevelTons = Math.max(0, waterHopper.currentLevelTons - massTons);
-          await tx.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: newLevelTons } });
-          requisitionChecks.push(() =>
-            maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, waterHopper.capacityTons, waterHopper.minThresholdPct, (tons) => tons * 1000),
-          );
-        }
-      } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
-        // Batched mass is always stored in kg (see addComponent in
-        // mix-designs/actions.ts) — convert back to liters, the unit a
-        // chemical tank is actually metered in.
-        const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
-        if (tank) {
-          const liters = massKg / c.material.specificGravity;
-          const newLevelLiters = Math.max(0, tank.currentLevelLiters - liters);
-          await tx.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: newLevelLiters } });
-          const specificGravity = c.material.specificGravity;
-          requisitionChecks.push(() =>
-            maybeAutoRequisitionMaterial(
-              c.materialId,
-              ticket.plant.siteId,
-              newLevelLiters,
-              tank.capacityLiters ?? 0,
-              tank.minThresholdPct,
-              (liters) => liters * specificGravity,
-            ),
-          );
+          if (hopper) {
+            const newLevelTons = Math.max(0, hopper.currentLevelTons - massTons);
+            await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: newLevelTons } });
+            requisitionChecks.push(() =>
+              maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, hopper.capacityTons, hopper.minThresholdPct, (tons) => tons * 1000),
+            );
+          }
+        } else if (c.material.type === "WATER") {
+          // Reuses Hopper (a plain tonnage heap) rather than a new model — a
+          // plant that meters bulk water registers a Hopper with
+          // aggregateType "WATER"; one that doesn't just has no match here,
+          // same silent no-op as any other unregistered destination.
+          const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
+          if (waterHopper) {
+            const newLevelTons = Math.max(0, waterHopper.currentLevelTons - massTons);
+            await tx.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: newLevelTons } });
+            requisitionChecks.push(() =>
+              maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, waterHopper.capacityTons, waterHopper.minThresholdPct, (tons) => tons * 1000),
+            );
+          }
+        } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
+          // Batched mass is always stored in kg (see addComponent in
+          // mix-designs/actions.ts) — convert back to liters, the unit a
+          // chemical tank is actually metered in.
+          const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
+          if (tank) {
+            const liters = massKg / c.material.specificGravity;
+            const newLevelLiters = Math.max(0, tank.currentLevelLiters - liters);
+            await tx.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: newLevelLiters } });
+            const specificGravity = c.material.specificGravity;
+            requisitionChecks.push(() =>
+              maybeAutoRequisitionMaterial(
+                c.materialId,
+                ticket.plant.siteId,
+                newLevelLiters,
+                tank.capacityLiters ?? 0,
+                tank.minThresholdPct,
+                (liters) => liters * specificGravity,
+              ),
+            );
+          }
         }
       }
-    }
-
-    await tx.batchTicket.update({
-      where: { id: batchTicketId },
-      data: { status: "COMPLETE", batchCompletedAt: new Date() },
-    });
-  }, TX_OPTIONS);
+    }, TX_OPTIONS);
+  } catch {
+    return;
+  }
 
   for (const check of requisitionChecks) await check();
 
@@ -884,7 +902,8 @@ export async function addTicketComponent(formData: FormData) {
   if (!batchTicketId || !materialId || !targetMassKg || targetMassKg <= 0) return;
 
   const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId } });
-  if (!ticket || ticket.status === "COMPLETE") return;
+  if (!ticket || ticket.status === "COMPLETE" || ticket.status === "CANCELLED") return;
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
 
   await prisma.batchComponentActual.upsert({
     where: { batchTicketId_materialId: { batchTicketId, materialId } },
@@ -916,7 +935,8 @@ export async function deleteTicketComponent(formData: FormData) {
   if (!id || !batchTicketId) return;
 
   const component = await prisma.batchComponentActual.findUnique({ where: { id }, include: { batchTicket: true } });
-  if (!component || component.batchTicketId !== batchTicketId || component.batchTicket.status === "COMPLETE") return;
+  if (!component || component.batchTicketId !== batchTicketId || component.batchTicket.status === "COMPLETE" || component.batchTicket.status === "CANCELLED") return;
+  if (!(await isPlantInScope(component.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   await prisma.batchComponentActual.delete({ where: { id } });
 
@@ -947,46 +967,56 @@ export async function deleteBatchTicket(formData: FormData) {
     },
   });
   if (!ticket || ticket.trip) return;
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
 
-  if (ticket.status === "COMPLETE") {
-    for (const c of ticket.components) {
-      const massKg = c.actualMassKg ?? c.targetMassKg;
-      const massTons = massKg / 1000;
+  // The reversal loop and the delete itself used to be independent writes
+  // — a failure partway through the loop (the 3rd component's update
+  // throws, say) left some materials already credited back but the
+  // ticket still on file, un-deletable a second time the same way without
+  // double-crediting what already went back. One transaction makes the
+  // whole reversal-plus-delete all-or-nothing, same as completeBatch's own
+  // deduction loop.
+  await prisma.$transaction(async (tx) => {
+    if (ticket.status === "COMPLETE") {
+      for (const c of ticket.components) {
+        const massKg = c.actualMassKg ?? c.targetMassKg;
+        const massTons = massKg / 1000;
 
-      if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-        const silo = await findMatchingSilo(prisma, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-        if (silo) {
-          await prisma.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + massTons } });
-        }
-      } else if (AGGREGATE_TYPES.has(c.material.type)) {
-        const hopper = await findMatchingHopper(
-          prisma,
-          ticket.plantId,
-          ticket.plant.siteId,
-          c.materialId,
-          c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
-        );
-        if (hopper) {
-          await prisma.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + massTons } });
-        }
-      } else if (c.material.type === "WATER") {
-        const waterHopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-        if (waterHopper) {
-          await prisma.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: waterHopper.currentLevelTons + massTons } });
-        }
-      } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
-        const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
-        if (tank) {
-          const liters = massKg / c.material.specificGravity;
-          await prisma.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: tank.currentLevelLiters + liters } });
+        if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
+          const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
+          if (silo) {
+            await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + massTons } });
+          }
+        } else if (AGGREGATE_TYPES.has(c.material.type)) {
+          const hopper = await findMatchingHopper(
+            tx,
+            ticket.plantId,
+            ticket.plant.siteId,
+            c.materialId,
+            c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
+          );
+          if (hopper) {
+            await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + massTons } });
+          }
+        } else if (c.material.type === "WATER") {
+          const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
+          if (waterHopper) {
+            await tx.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: waterHopper.currentLevelTons + massTons } });
+          }
+        } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
+          const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
+          if (tank) {
+            const liters = massKg / c.material.specificGravity;
+            await tx.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: tank.currentLevelLiters + liters } });
+          }
         }
       }
     }
-  }
 
-  // Components cascade-delete with the ticket (see BatchComponentActual's
-  // onDelete: Cascade in schema.prisma).
-  await prisma.batchTicket.delete({ where: { id } });
+    // Components cascade-delete with the ticket (see BatchComponentActual's
+    // onDelete: Cascade in schema.prisma).
+    await tx.batchTicket.delete({ where: { id } });
+  }, TX_OPTIONS);
 
   await logAudit({
     module: "Production",
