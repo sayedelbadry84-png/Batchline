@@ -9,6 +9,25 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # A real, disposable Postgres for this run only — torn down with the
+    # job. This is what makes the integration test step below safe to run
+    # unconditionally: it's never the project's real DATABASE_URL, so
+    # there's nothing for the tests' own safety guard (see
+    # tests/batchCompletion.test.ts) to refuse.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -33,3 +52,22 @@ jobs:
           DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
           DIRECT_URL: postgresql://ci:ci@localhost:5432/ci
         run: npm run build
+
+      # Applies every migration in prisma/migrations/ to the disposable
+      # service container above — the real thing the integration tests
+      # then run against, not the build step's inert placeholder.
+      - name: Apply migrations to the test database
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci_test
+          DIRECT_URL: postgresql://ci:ci@localhost:5432/ci_test
+        run: npx prisma migrate deploy
+
+      # TEST_DATABASE_URL only — DATABASE_URL is deliberately left unset
+      # for this step so the suite's own guard (it refuses to run if
+      # TEST_DATABASE_URL === DATABASE_URL) passes trivially; the test
+      # file itself redirects the app's Prisma singleton to
+      # TEST_DATABASE_URL before importing anything that constructs it.
+      - name: Integration tests
+        env:
+          TEST_DATABASE_URL: postgresql://ci:ci@localhost:5432/ci_test
+        run: npm test
