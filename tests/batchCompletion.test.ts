@@ -40,6 +40,7 @@ process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 const { PrismaClient } = await import("@prisma/client");
 const { completeBatchTicket, reverseBatchTicket } = await import("../src/lib/batchCompletion");
+const { postSiloMovement } = await import("../src/lib/inventoryLedger");
 
 const prisma = new PrismaClient();
 
@@ -57,8 +58,11 @@ let reservationId: string;
 let projectId: string;
 let customerId: string;
 let adminUserId: string;
+let truckId: string;
+let driverId: string;
 
 const ticketIds: string[] = [];
+const tripIds: string[] = [];
 
 before(async () => {
   const site = await prisma.site.create({ data: { code: `TEST-SUITE-${Date.now()}`, name: "TEST-SUITE-SITE", city: "Test", country: "Test" } });
@@ -95,15 +99,39 @@ before(async () => {
     data: { email: `test-suite-admin-${Date.now()}@example.invalid`, name: "TEST-SUITE-ADMIN", passwordHash: "not-a-real-hash", role: "ADMIN" },
   });
   adminUserId = admin.id;
+
+  // For the dispatch-related tests (CR-01) — a real Truck/Employee so a
+  // Trip row can be created directly, satisfying the same FKs startTrip
+  // itself would populate.
+  const truck = await prisma.truck.create({ data: { plantId, code: "TEST-SUITE-TRUCK", drumCapacityM3: 12 } });
+  truckId = truck.id;
+  const driver = await prisma.employee.create({ data: { plantId, name: "TEST-SUITE-DRIVER", role: "DRIVER", status: "ACTIVE" } });
+  driverId = driver.id;
 });
 
+// Immutability trigger bypass (see the migration
+// prisma/migrations/*_harden_inventory_movement/migration.sql) — this
+// suite is the ONLY caller allowed to set this, and only for its own
+// teardown; every other write in this file goes through
+// completeBatchTicket/reverseBatchTicket like real application code
+// would.
+async function deleteMovements(where: NonNullable<Parameters<typeof prisma.inventoryMovement.findMany>[0]>["where"]) {
+  await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_movement_immutability = 'on'`, prisma.inventoryMovement.deleteMany({ where })]);
+}
+
 after(async () => {
+  for (const id of tripIds) {
+    await prisma.drumReturn.deleteMany({ where: { tripId: id } });
+    await prisma.trip.delete({ where: { id } }).catch(() => {});
+  }
   for (const id of ticketIds) {
-    await prisma.inventoryMovement.deleteMany({ where: { OR: [{ sourceType: "BatchTicket", sourceId: id }, { sourceType: "Trip", sourceId: id }] } });
+    await deleteMovements({ OR: [{ sourceType: "BatchTicket", sourceId: id }, { sourceType: "Trip", sourceId: id }] });
     await prisma.batchComponentActual.deleteMany({ where: { batchTicketId: id } });
     await prisma.batchTicket.delete({ where: { id } }).catch(() => {});
   }
-  await prisma.inventoryMovement.deleteMany({ where: { OR: [{ storageId: siloId }, { storageId: fallbackSiloId }] } });
+  await deleteMovements({ OR: [{ storageId: siloId }, { storageId: fallbackSiloId }] });
+  await prisma.truck.delete({ where: { id: truckId } }).catch(() => {});
+  await prisma.employee.delete({ where: { id: driverId } }).catch(() => {});
   await prisma.reservation.delete({ where: { id: reservationId } }).catch(() => {});
   await prisma.mixDesign.delete({ where: { id: mixId } }).catch(() => {});
   await prisma.project.delete({ where: { id: projectId } }).catch(() => {});
@@ -174,17 +202,25 @@ test("concurrent completion requests create one posting only", async () => {
 });
 
 // ---- 3. Two tickets consuming the same silo produce the correct balance --
+// Genuinely concurrent (Promise.all, not sequential awaits) — this is the
+// scenario the ledger's row lock (SELECT ... FOR UPDATE in
+// src/lib/inventoryLedger.ts) exists for: two different tickets, two
+// different completions, racing the exact same storage row.
 
-test("two different tickets consuming the same silo net correctly", async () => {
+test("two different tickets consuming the same silo net correctly under real concurrency", async () => {
   await resetSilo(100);
   const ticketA = await makeTicket([{ materialId, targetMassKg: 6000 }]);
   const ticketB = await makeTicket([{ materialId, targetMassKg: 9000 }]);
 
-  const resultA = await completeBatchTicket(ticketA, {});
-  const resultB = await completeBatchTicket(ticketB, {});
+  const [resultA, resultB] = await Promise.all([completeBatchTicket(ticketA, {}), completeBatchTicket(ticketB, {})]);
   assert.equal(resultA.status, "SUCCESS");
   assert.equal(resultB.status, "SUCCESS");
-  assert.equal(await siloLevel(siloId), 85); // 100 - 6 - 9
+  assert.equal(await siloLevel(siloId), 85); // 100 - 6 - 9, never a lost update
+
+  const movementsA = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketA } });
+  const movementsB = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketB } });
+  assert.equal(movementsA.length, 1);
+  assert.equal(movementsB.length, 1);
 });
 
 // ---- 4. Insufficient stock fails clean --------------------------------
@@ -297,7 +333,199 @@ test("material consumption uses the explicitly assigned storage, not a same-type
   assert.equal(await siloLevel(fallbackSiloId), fallbackBefore); // the fallback silo is untouched
 });
 
-// ---- 10. No application code updates or deletes an InventoryMovement --
+// ---- 11. A material with no matching storage is a hard failure --------
+// (CR-02 — completeBatchTicket used to silently skip a component with no
+// matching silo/hopper/tank and still return SUCCESS.)
+
+test("a material with no configured storage fails the whole completion", async () => {
+  await resetSilo(50);
+  const admixture = await prisma.material.create({ data: { name: "TEST-SUITE-ADMIXTURE-NO-TANK", type: "ADMIXTURE", specificGravity: 1.1 } });
+  try {
+    // No ChemicalTank exists anywhere for this material — completeBatchTicket's
+    // ADMIXTURE branch does `chemicalTank.findFirst({ plantId, materialId })`
+    // with no fallback, so this can never resolve.
+    const ticketId = await makeTicket([
+      { materialId, targetMassKg: 1000 }, // resolves fine on its own
+      { materialId: admixture.id, targetMassKg: 50 }, // no tank — should fail
+    ]);
+
+    const result = await completeBatchTicket(ticketId, {});
+    assert.equal(result.status, "STORAGE_NOT_CONFIGURED");
+    if (result.status === "STORAGE_NOT_CONFIGURED") assert.match(result.material, /TEST-SUITE-ADMIXTURE-NO-TANK/);
+
+    const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
+    assert.equal(ticket.status, "RELEASED");
+    assert.equal(await siloLevel(siloId), 50); // the OTHER component's silo is untouched too — whole transaction rolled back
+
+    const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
+    assert.equal(movements.length, 0);
+  } finally {
+    await prisma.material.delete({ where: { id: admixture.id } }).catch(() => {});
+  }
+});
+
+// ---- 12. Dispatch and reversal are mutually exclusive (CR-01) ---------
+// startTrip itself (production/actions.ts) needs a session and can't be
+// called directly from here — this mirrors its actual guard exactly (a
+// fresh reversedAt/status re-check inside the same kind of Serializable
+// transaction startTrip uses) rather than testing a paraphrase of it.
+
+async function tryDispatch(ticketId: string): Promise<"OK" | "REJECTED"> {
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        const fresh = await tx.batchTicket.findUnique({ where: { id: ticketId }, select: { status: true, reversedAt: true } });
+        if (!fresh || fresh.status !== "COMPLETE" || fresh.reversedAt) throw new Error("TICKET_NOT_DISPATCHABLE");
+        const truckBusy = await tx.trip.findFirst({ where: { truckId, status: { not: "CLOSED" } } });
+        if (truckBusy) throw new Error("TRUCK_BUSY");
+        const created = await tx.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date() } });
+        tripIds.push(created.id);
+      },
+      { isolationLevel: "Serializable" },
+    );
+    return "OK";
+  } catch {
+    return "REJECTED";
+  }
+}
+
+test("a reversed ticket cannot be dispatched", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
+  assert.equal((await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test" })).status, "SUCCESS");
+
+  assert.equal(await tryDispatch(ticketId), "REJECTED");
+  const tripCount = await prisma.trip.count({ where: { batchTicketId: ticketId } });
+  assert.equal(tripCount, 0);
+});
+
+test("a dispatched ticket cannot be reversed", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
+  assert.equal(await tryDispatch(ticketId), "OK");
+
+  const result = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test" });
+  assert.equal(result.status, "INVALID_STATE");
+  const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
+  assert.equal(ticket.reversedAt, null);
+});
+
+test("concurrent reversal and dispatch on the same ticket are mutually exclusive", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
+
+  const [reversalResult, dispatchResult] = await Promise.all([
+    reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "race test" }),
+    tryDispatch(ticketId),
+  ]);
+
+  const reversed = reversalResult.status === "SUCCESS";
+  const dispatched = dispatchResult === "OK";
+  // The two must never both succeed for the same ticket — that's the
+  // actual property CR-01 requires. Exactly one of them winning is the
+  // expected, deterministic outcome (nothing else was racing either
+  // transaction), asserted explicitly rather than just "not both".
+  assert.ok(!(reversed && dispatched), "reversal and dispatch both succeeded for the same ticket");
+  assert.notEqual(reversed, dispatched, "expected exactly one of reversal/dispatch to succeed, not both or neither");
+});
+
+// ---- 13. A reversal that can't fully fit is a hard failure (CR-04) ----
+
+test("reversal fails atomically when the storage can't hold the full credit back", async () => {
+  await resetSilo(20);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 6000 }]); // 6t
+  assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
+  assert.equal(await siloLevel(siloId), 14); // 20 - 6
+
+  // Simulate real receipts filling the silo back up almost to capacity
+  // (500) in the meantime — reversing this ticket's 6t credit would need
+  // to land at 504, which can't fit.
+  await prisma.silo.update({ where: { id: siloId }, data: { currentLevelTons: 498 } });
+
+  const result = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "capacity test" });
+  assert.equal(result.status, "CAPACITY_EXCEEDED");
+
+  // Rolled back entirely — not clamped and stamped as if it succeeded.
+  assert.equal(await siloLevel(siloId), 498);
+  const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
+  assert.equal(ticket.reversedAt, null);
+  const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
+  assert.equal(movements.length, 1); // only the original completion — no reversal row was left behind
+
+  await prisma.silo.update({ where: { id: siloId }, data: { currentLevelTons: 14 } }); // restore for a clean re-check below
+  const cleanReversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "capacity test retry" });
+  assert.equal(cleanReversal.status, "SUCCESS");
+  assert.equal(await siloLevel(siloId), 20);
+});
+
+// ---- 14. Reclaim-shaped credits are idempotent -------------------------
+// startTrip's reclaim credit-back isn't a separately callable domain
+// function (it's inline in production/actions.ts), so this exercises the
+// same postSiloMovement primitive it actually calls, with the same
+// movementType/sourceType a real reclaim credit uses.
+
+test("a RECLAIM_CREDIT-shaped movement posts once even if attempted twice", async () => {
+  await resetSilo(20);
+  const fakeTripSourceId = `test-trip-${Date.now()}`;
+
+  const first = await prisma.$transaction((tx) =>
+    postSiloMovement(tx, {
+      storageId: siloId,
+      materialId,
+      quantity: 4,
+      movementType: "RECLAIM_CREDIT",
+      sourceType: "Trip",
+      sourceId: fakeTripSourceId,
+      plantId,
+      siteId,
+      actorId: adminUserId,
+    }),
+  );
+  assert.equal(first.status, "OK");
+  assert.equal(await siloLevel(siloId), 24);
+
+  const second = await prisma.$transaction((tx) =>
+    postSiloMovement(tx, {
+      storageId: siloId,
+      materialId,
+      quantity: 4,
+      movementType: "RECLAIM_CREDIT",
+      sourceType: "Trip",
+      sourceId: fakeTripSourceId,
+      plantId,
+      siteId,
+      actorId: adminUserId,
+    }),
+  );
+  assert.equal(second.status, "ALREADY_POSTED");
+  assert.equal(await siloLevel(siloId), 24); // no double credit
+
+  await deleteMovements({ sourceType: "Trip", sourceId: fakeTripSourceId });
+  await resetSilo(20);
+});
+
+// ---- 15. Immutability is enforced by the database, not just app code --
+// (HI-02 — supersedes a pure source-code scan as the authoritative proof;
+// test 16 below keeps the source scan too, as a cheap early warning.)
+
+test("the database itself rejects UPDATE and DELETE on a posted movement", async () => {
+  await resetSilo(20);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
+  const [movement] = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
+  assert.ok(movement);
+
+  await assert.rejects(() => prisma.$executeRawUnsafe(`UPDATE "InventoryMovement" SET quantity = -999 WHERE id = $1`, movement.id), /immutable/);
+  await assert.rejects(() => prisma.$executeRawUnsafe(`DELETE FROM "InventoryMovement" WHERE id = $1`, movement.id), /immutable/);
+
+  const stillThere = await prisma.inventoryMovement.findUnique({ where: { id: movement.id } });
+  assert.equal(stillThere?.quantity, movement.quantity);
+});
+
+// ---- 16. No application code updates or deletes an InventoryMovement --
 
 test("no application service calls .update() or .delete() on inventoryMovement", async () => {
   const { readFileSync, readdirSync, statSync } = await import("node:fs");
