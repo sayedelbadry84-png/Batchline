@@ -155,16 +155,23 @@ export default async function BatchTicketPage({
         </span>
       </header>
 
+      {/* Each "remove" button below submits one of these via the HTML5
+          form="delcomp-<id>" attribute rather than DOM containment — kept
+          as siblings of, not nested inside, the recordActuals form just
+          below, since a <form> can never validly contain another <form>
+          (nesting them here caused a real hydration mismatch/remount on
+          every load). */}
+      {canEditComponents &&
+        ticket.components.map((c) => (
+          <form key={c.id} id={`delcomp-${c.id}`} action={deleteTicketComponent} className="hidden">
+            <input type="hidden" name="id" value={c.id} />
+            <input type="hidden" name="batchTicketId" value={ticket.id} />
+          </form>
+        ))}
+
       <form action={recordActuals} className={ui.card}>
         <input type="hidden" name="batchTicketId" value={ticket.id} />
         <h2 className="mb-3 font-display text-lg font-semibold">{d.targetVsActual}</h2>
-        {canEditComponents &&
-          ticket.components.map((c) => (
-            <form key={c.id} id={`delcomp-${c.id}`} action={deleteTicketComponent} className="hidden">
-              <input type="hidden" name="id" value={c.id} />
-              <input type="hidden" name="batchTicketId" value={ticket.id} />
-            </form>
-          ))}
         <table className={ui.table}>
           <thead>
             <tr>
