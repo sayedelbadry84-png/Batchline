@@ -344,6 +344,17 @@ model Silo {
   plant               Plant     @relation(fields: [plantId], references: [id], onDelete: Cascade)
   name                String
   materialType        String
+  // The specific product actually loaded into this silo (e.g. one brand
+  // of OPC vs. another) — materialType alone only says "this is CEMENT",
+  // which breaks down the moment a plant has more than one cement silo,
+  // since nothing then says which specific one holds which brand. Nullable
+  // so an existing/newly-created silo that hasn't been explicitly assigned
+  // yet keeps working exactly as before (findMatchingSilo in
+  // production/actions.ts falls back to the old materialType match, but
+  // only among OTHER unassigned silos — never silently borrowing one
+  // that's been explicitly assigned to a different material).
+  materialId          String?
+  material            Material? @relation(fields: [materialId], references: [id])
   capacityTons        Float
   currentLevelTons    Float     @default(0)
   minThresholdPct     Float     @default(15)
@@ -364,11 +375,16 @@ model Silo {
 }
 
 model Hopper {
-  id                 String   @id @default(cuid())
+  id                 String    @id @default(cuid())
   plantId            String
-  plant              Plant    @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  plant              Plant     @relation(fields: [plantId], references: [id], onDelete: Cascade)
   name               String
   aggregateType      String
+  // Same explicit product assignment as Silo.materialId above, and the
+  // same nullable/backward-compatible fallback behavior in
+  // findMatchingHopper.
+  materialId         String?
+  material           Material? @relation(fields: [materialId], references: [id])
   capacityTons       Float
   currentLevelTons   Float    @default(0)
   // Same low-stock threshold as Silo.minThresholdPct — drives the
@@ -471,6 +487,8 @@ model Material {
   purchaseOrderLines PurchaseOrderLine[]
   supplierContracts  SupplierContract[]
   requisitions       MaterialRequisition[]
+  silos              Silo[]
+  hoppers            Hopper[]
 }
 
 model MixComponent {

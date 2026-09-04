@@ -38,16 +38,18 @@ export async function RawMaterialsSilosTab({
 }) {
   const m = dict.modules.silos;
 
-  const [silos, sitesForPicker, hoppers, chemicalTanks, admixtureMaterials, materialRequisitions] = await Promise.all([
-    prisma.silo.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true }, orderBy: { createdAt: "asc" } }),
+  const [silos, sitesForPicker, hoppers, chemicalTanks, admixtureMaterials, siloMaterials, hopperMaterials, materialRequisitions] = await Promise.all([
+    prisma.silo.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true, material: true }, orderBy: { createdAt: "asc" } }),
     prisma.site.findMany({
       where: { ...(siteId ? { id: siteId } : {}), plants: { some: {} } },
       orderBy: { code: "asc" },
       include: { plants: { orderBy: { name: "asc" }, select: { id: true, name: true } } },
     }),
-    prisma.hopper.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true }, orderBy: { createdAt: "asc" } }),
+    prisma.hopper.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true, material: true }, orderBy: { createdAt: "asc" } }),
     prisma.chemicalTank.findMany({ where: { ...plantScopeWhere(siteId) }, include: { plant: true, material: true }, orderBy: { createdAt: "asc" } }),
     prisma.material.findMany({ where: { type: "ADMIXTURE" }, orderBy: { name: "asc" } }),
+    prisma.material.findMany({ where: { type: { in: ["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"] } }, orderBy: { name: "asc" } }),
+    prisma.material.findMany({ where: { type: { in: ["SAND", "COARSE_AGGREGATE", "WATER"] } }, orderBy: { name: "asc" } }),
     // Auto-opened by completeBatch (production/actions.ts) when a silo/
     // hopper/tank crosses its own low-stock threshold — see
     // maybeAutoRequisitionMaterial there and MaterialRequisition's model
@@ -183,6 +185,15 @@ export async function RawMaterialsSilosTab({
                     </select>
                   </div>
                   <div>
+                    <label className={ui.label}>{m.f.material}</label>
+                    <select name="materialId" defaultValue={s.materialId ?? ""} className={`${ui.select} w-40`}>
+                      <option value="">{m.noSpecificMaterial}</option>
+                      {siloMaterials.map((mt) => (
+                        <option key={mt.id} value={mt.id}>{mt.name} — {dict.materialTypes[mt.type as keyof typeof dict.materialTypes] ?? mt.type}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
                     <label className={ui.label}>{m.f.capacity}</label>
                     <input name="capacityTons" type="number" step="0.1" defaultValue={s.capacityTons} required className={`${ui.input} w-24`} />
                   </div>
@@ -202,7 +213,7 @@ export async function RawMaterialsSilosTab({
                 <div className="w-40 shrink-0">
                   <div className="font-medium">{s.name}</div>
                   <div className="text-xs text-ink-muted">
-                    {s.plant.name} · {dict.materialTypes[s.materialType as keyof typeof dict.materialTypes] ?? s.materialType}
+                    {s.plant.name} · {s.material ? s.material.name : dict.materialTypes[s.materialType as keyof typeof dict.materialTypes] ?? s.materialType}
                     {s.sharedAcrossPlants && <span className={`${ui.chip} bg-accent-soft text-accent-strong ms-1`}>{m.sharedBadge}</span>}
                   </div>
                 </div>
@@ -271,6 +282,16 @@ export async function RawMaterialsSilosTab({
             </select>
           </div>
           <div>
+            <label className={ui.label}>{m.f.material}</label>
+            <select name="materialId" className={ui.select}>
+              <option value="">{m.noSpecificMaterial}</option>
+              {siloMaterials.map((mt) => (
+                <option key={mt.id} value={mt.id}>{mt.name} — {dict.materialTypes[mt.type as keyof typeof dict.materialTypes] ?? mt.type}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-ink-muted">{m.materialAssignHint}</p>
+          </div>
+          <div>
             <label className={ui.label}>{m.f.capacity}</label>
             <input name="capacityTons" type="number" step="0.1" required className={ui.input} />
           </div>
@@ -304,7 +325,7 @@ export async function RawMaterialsSilosTab({
                   <div className="w-40 shrink-0">
                     <div className="font-medium" dir="ltr">{h.name}</div>
                     <div className="text-xs text-ink-muted">
-                      {h.plant.name} · {h.aggregateType}
+                      {h.plant.name} · {h.material ? h.material.name : h.aggregateType}
                       {h.sharedAcrossPlants && <span className={`${ui.chip} bg-accent-soft text-accent-strong ms-1`}>{m.sharedBadge}</span>}
                     </div>
                   </div>
@@ -361,6 +382,16 @@ export async function RawMaterialsSilosTab({
                 <option value="COARSE_AGGREGATE">{dict.materialTypes.COARSE_AGGREGATE}</option>
                 <option value="WATER">{dict.materialTypes.WATER}</option>
               </select>
+            </div>
+            <div>
+              <label className={ui.label}>{m.fHopper.material}</label>
+              <select name="materialId" className={ui.select}>
+                <option value="">{m.noSpecificMaterial}</option>
+                {hopperMaterials.map((mt) => (
+                  <option key={mt.id} value={mt.id}>{mt.name} — {dict.materialTypes[mt.type as keyof typeof dict.materialTypes] ?? mt.type}</option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-ink-muted">{m.materialAssignHint}</p>
             </div>
             <div>
               <label className={ui.label}>{m.fHopper.capacity}</label>

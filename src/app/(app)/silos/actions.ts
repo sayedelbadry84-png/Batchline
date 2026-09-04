@@ -13,6 +13,7 @@ export async function createSilo(formData: FormData) {
   const plantId = String(formData.get("plantId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const materialType = String(formData.get("materialType") ?? "").trim();
+  const materialId = String(formData.get("materialId") ?? "") || null;
   const capacityTons = Number(formData.get("capacityTons") ?? 0);
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
   const minThresholdPct = Number(formData.get("minThresholdPct") ?? 15);
@@ -21,9 +22,16 @@ export async function createSilo(formData: FormData) {
   if (!plantId || !name || !materialType || !capacityTons) return;
   if (!(await isPlantInScope(plantId, effectiveSiteId(user)))) return;
   if (!(await isPlantActive(plantId))) return;
+  // If a specific material was picked, it must actually be one of this
+  // type — the dropdown only ever lists matching materials, but a
+  // crafted/stale request could send a mismatched pair otherwise.
+  if (materialId) {
+    const material = await prisma.material.findUnique({ where: { id: materialId } });
+    if (!material || material.type !== materialType) return;
+  }
 
   const silo = await prisma.silo.create({
-    data: { plantId, name, materialType, capacityTons, currentLevelTons, minThresholdPct, sharedAcrossPlants },
+    data: { plantId, name, materialType, materialId, capacityTons, currentLevelTons, minThresholdPct, sharedAcrossPlants },
   });
 
   await logAudit({
@@ -44,6 +52,7 @@ export async function updateSilo(formData: FormData) {
   const plantId = String(formData.get("plantId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const materialType = String(formData.get("materialType") ?? "").trim();
+  const materialId = String(formData.get("materialId") ?? "") || null;
   const capacityTons = Number(formData.get("capacityTons") ?? 0);
   const minThresholdPct = Number(formData.get("minThresholdPct") ?? 15);
 
@@ -51,10 +60,14 @@ export async function updateSilo(formData: FormData) {
   const siteId = effectiveSiteId(user);
   const existing = await prisma.silo.findUnique({ where: { id }, select: { plantId: true } });
   if (!existing || !(await isPlantInScope(existing.plantId, siteId)) || !(await isPlantInScope(plantId, siteId))) return;
+  if (materialId) {
+    const material = await prisma.material.findUnique({ where: { id: materialId } });
+    if (!material || material.type !== materialType) return;
+  }
 
   await prisma.silo.update({
     where: { id },
-    data: { plantId, name, materialType, capacityTons, minThresholdPct },
+    data: { plantId, name, materialType, materialId, capacityTons, minThresholdPct },
   });
 
   await logAudit({
@@ -133,6 +146,7 @@ export async function createHopper(formData: FormData) {
   const siteId = String(formData.get("siteId") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const aggregateType = String(formData.get("aggregateType") ?? "").trim();
+  const materialId = String(formData.get("materialId") ?? "") || null;
   const capacityTons = Number(formData.get("capacityTons") ?? 0);
   const currentLevelTons = Number(formData.get("currentLevelTons") ?? 0);
   const minThresholdPct = Number(formData.get("minThresholdPct") ?? 15);
@@ -143,9 +157,15 @@ export async function createHopper(formData: FormData) {
   const plantId = await resolvePlantIdForSite(siteId);
   if (!plantId) return;
   if (!(await isPlantActive(plantId))) return;
+  if (materialId) {
+    const material = await prisma.material.findUnique({ where: { id: materialId } });
+    const materialAggregateMatches =
+      aggregateType === "SAND" ? material?.type === "SAND" : aggregateType.startsWith("COARSE") ? material?.type === "COARSE_AGGREGATE" : material?.type === aggregateType;
+    if (!material || !materialAggregateMatches) return;
+  }
 
   const hopper = await prisma.hopper.create({
-    data: { plantId, name, aggregateType, capacityTons, currentLevelTons, minThresholdPct, sharedAcrossPlants },
+    data: { plantId, name, aggregateType, materialId, capacityTons, currentLevelTons, minThresholdPct, sharedAcrossPlants },
   });
 
   await logAudit({ module: "Silos", recordId: hopper.id, afterValue: `${name} / ${aggregateType}`, reasonCode: "HOPPER_CREATED" });

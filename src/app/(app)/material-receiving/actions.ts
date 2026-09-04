@@ -13,12 +13,22 @@ import { revalidatePath } from "next/cache";
 // silently credit tonnage nothing about the physical delivery supports:
 // wrong material into a silo, or wrong site's silo entirely. Mirrors the
 // same plantId-own/sharedAcrossPlants-same-site matching production's own
-// findMatchingSilo/findMatchingHopper use, and the same equals/startsWith
-// aggregate-type distinction (COARSE_AGGREGATE covers any COARSE_* hopper;
-// everything else must match exactly).
+// findMatchingSilo/findMatchingHopper use.
+//
+// A silo/hopper explicitly assigned to a specific material (Silo/
+// Hopper.materialId — see the schema comment) must match that exact
+// material, not just the general type: two cement brands are both
+// "CEMENT" but are not interchangeable, and this is exactly the case a
+// type-only check can't catch. An unassigned store (materialId: null)
+// falls back to the old type/aggregate-type check (with the same
+// equals/startsWith distinction — COARSE_AGGREGATE covers any COARSE_*
+// hopper, everything else must match exactly), so nothing already
+// working today regresses just because it hasn't been explicitly
+// assigned yet.
 async function isValidDestination(
   db: Prisma.TransactionClient | typeof prisma,
   plantId: string,
+  materialId: string,
   materialType: string,
   destinationSiloId: string | null,
   destinationHopperId: string | null,
@@ -31,7 +41,9 @@ async function isValidDestination(
 
   if (destinationSiloId) {
     const silo = await db.silo.findUnique({ where: { id: destinationSiloId }, include: { plant: true } });
-    if (!silo || silo.materialType !== materialType) return false;
+    if (!silo) return false;
+    const materialMatches = silo.materialId ? silo.materialId === materialId : silo.materialType === materialType;
+    if (!materialMatches) return false;
     return silo.plantId === plantId || (silo.sharedAcrossPlants && silo.plant.siteId === plant.siteId);
   }
 
@@ -39,7 +51,8 @@ async function isValidDestination(
   if (!hopper) return false;
   const typeMatches =
     materialType === "SAND" ? hopper.aggregateType === "SAND" : materialType === "COARSE_AGGREGATE" ? hopper.aggregateType.startsWith("COARSE") : hopper.aggregateType === materialType;
-  if (!typeMatches) return false;
+  const materialMatches = hopper.materialId ? hopper.materialId === materialId : typeMatches;
+  if (!materialMatches) return false;
   return hopper.plantId === plantId || (hopper.sharedAcrossPlants && hopper.plant.siteId === plant.siteId);
 }
 
@@ -73,7 +86,7 @@ export async function createReceipt(formData: FormData) {
 
   const material = await prisma.material.findUnique({ where: { id: materialId } });
   if (!material) return;
-  if (!(await isValidDestination(prisma, plantId, material.type, destinationSiloId, destinationHopperId))) return;
+  if (!(await isValidDestination(prisma, plantId, material.id, material.type, destinationSiloId, destinationHopperId))) return;
 
   const netWeightKg = grossWeightKg - tareWeightKg;
 
@@ -206,7 +219,7 @@ export async function updateReceipt(formData: FormData) {
 
   const material = await prisma.material.findUnique({ where: { id: materialId } });
   if (!material) return;
-  if (!(await isValidDestination(prisma, receipt.plantId, material.type, destinationSiloId, destinationHopperId))) return;
+  if (!(await isValidDestination(prisma, receipt.plantId, material.id, material.type, destinationSiloId, destinationHopperId))) return;
 
   const netWeightKg = grossWeightKg - tareWeightKg;
 

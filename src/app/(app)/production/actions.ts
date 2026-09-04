@@ -32,21 +32,42 @@ const TX_OPTIONS = { timeout: 15000 };
 // scoped by siteId, not global: two unrelated sites' stock must never
 // cross-contaminate just because both happen to have a hopper flagged
 // shared.
+//
+// A store explicitly assigned to a specific material (Hopper/
+// Silo.materialId) is always matched by that exact assignment first —
+// materialType/aggregateType alone can't tell two products of the same
+// general type apart (two cement brands, say), which is exactly the gap
+// that let completeBatch pick an arbitrary same-type silo regardless of
+// what was actually in it. The type-based match below is now a fallback
+// used ONLY among stores nobody has explicitly assigned yet
+// (materialId: null) — an explicitly-assigned store is never borrowed
+// for a different material just because the type happens to match.
 async function findMatchingHopper(
   db: Prisma.TransactionClient | typeof prisma,
   plantId: string,
   siteId: string,
+  materialId: string,
   aggregateTypeWhere: { equals: string } | { startsWith: string },
 ) {
-  const own = await db.hopper.findFirst({ where: { plantId, aggregateType: aggregateTypeWhere } });
+  const ownAssigned = await db.hopper.findFirst({ where: { plantId, materialId } });
+  if (ownAssigned) return ownAssigned;
+  const sharedAssigned = await db.hopper.findFirst({ where: { sharedAcrossPlants: true, materialId, plant: { siteId } } });
+  if (sharedAssigned) return sharedAssigned;
+
+  const own = await db.hopper.findFirst({ where: { plantId, aggregateType: aggregateTypeWhere, materialId: null } });
   if (own) return own;
-  return db.hopper.findFirst({ where: { sharedAcrossPlants: true, aggregateType: aggregateTypeWhere, plant: { siteId } } });
+  return db.hopper.findFirst({ where: { sharedAcrossPlants: true, aggregateType: aggregateTypeWhere, materialId: null, plant: { siteId } } });
 }
 
-async function findMatchingSilo(db: Prisma.TransactionClient | typeof prisma, plantId: string, siteId: string, materialType: string) {
-  const own = await db.silo.findFirst({ where: { plantId, materialType } });
+async function findMatchingSilo(db: Prisma.TransactionClient | typeof prisma, plantId: string, siteId: string, materialId: string, materialType: string) {
+  const ownAssigned = await db.silo.findFirst({ where: { plantId, materialId } });
+  if (ownAssigned) return ownAssigned;
+  const sharedAssigned = await db.silo.findFirst({ where: { sharedAcrossPlants: true, materialId, plant: { siteId } } });
+  if (sharedAssigned) return sharedAssigned;
+
+  const own = await db.silo.findFirst({ where: { plantId, materialType, materialId: null } });
   if (own) return own;
-  return db.silo.findFirst({ where: { sharedAcrossPlants: true, materialType, plant: { siteId } } });
+  return db.silo.findFirst({ where: { sharedAcrossPlants: true, materialType, materialId: null, plant: { siteId } } });
 }
 
 // Raw-material counterpart to issueSparePartToOrder's shortfall handling —
@@ -420,13 +441,13 @@ export async function completeBatch(formData: FormData) {
     const massKg = c.actualMassKg ?? c.targetMassKg;
     const massTons = massKg / 1000;
     if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-      const silo = await findMatchingSilo(prisma, ticket.plantId, ticket.plant.siteId, c.material.type);
+      const silo = await findMatchingSilo(prisma, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
       if (silo && silo.currentLevelTons < massTons) shortages.push(`${c.material.name}: ${silo.currentLevelTons.toFixed(2)}t on hand, ${massTons.toFixed(2)}t needed`);
     } else if (AGGREGATE_TYPES.has(c.material.type)) {
-      const hopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" });
+      const hopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" });
       if (hopper && hopper.currentLevelTons < massTons) shortages.push(`${c.material.name}: ${hopper.currentLevelTons.toFixed(2)}t on hand, ${massTons.toFixed(2)}t needed`);
     } else if (c.material.type === "WATER") {
-      const waterHopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
+      const waterHopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
       if (waterHopper && waterHopper.currentLevelTons < massTons) shortages.push(`${c.material.name}: ${waterHopper.currentLevelTons.toFixed(2)}t on hand, ${massTons.toFixed(2)}t needed`);
     } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
       const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
@@ -459,7 +480,7 @@ export async function completeBatch(formData: FormData) {
       const massTons = massKg / 1000;
 
       if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-        const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.material.type);
+        const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
         if (silo) {
           const newLevelTons = Math.max(0, silo.currentLevelTons - massTons);
           await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: newLevelTons } });
@@ -472,6 +493,7 @@ export async function completeBatch(formData: FormData) {
           tx,
           ticket.plantId,
           ticket.plant.siteId,
+          c.materialId,
           c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
         );
         if (hopper) {
@@ -486,7 +508,7 @@ export async function completeBatch(formData: FormData) {
         // plant that meters bulk water registers a Hopper with
         // aggregateType "WATER"; one that doesn't just has no match here,
         // same silent no-op as any other unregistered destination.
-        const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
+        const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
         if (waterHopper) {
           const newLevelTons = Math.max(0, waterHopper.currentLevelTons - massTons);
           await tx.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: newLevelTons } });
@@ -691,18 +713,19 @@ export async function startTrip(formData: FormData) {
             if (creditMassKg <= 0) continue;
             const creditTons = creditMassKg / 1000;
             if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-              const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.material.type);
+              const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
               if (silo) await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + creditTons } });
             } else if (AGGREGATE_TYPES.has(c.material.type)) {
               const hopper = await findMatchingHopper(
                 tx,
                 ticket.plantId,
                 ticket.plant.siteId,
+                c.materialId,
                 c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
               );
               if (hopper) await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + creditTons } });
             } else if (c.material.type === "WATER") {
-              const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
+              const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
               if (waterHopper) await tx.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: waterHopper.currentLevelTons + creditTons } });
             } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
               const tank = await tx.chemicalTank.findFirst({ where: { plantId: ticket.plantId, materialId: c.materialId } });
@@ -931,7 +954,7 @@ export async function deleteBatchTicket(formData: FormData) {
       const massTons = massKg / 1000;
 
       if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-        const silo = await findMatchingSilo(prisma, ticket.plantId, ticket.plant.siteId, c.material.type);
+        const silo = await findMatchingSilo(prisma, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
         if (silo) {
           await prisma.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + massTons } });
         }
@@ -940,13 +963,14 @@ export async function deleteBatchTicket(formData: FormData) {
           prisma,
           ticket.plantId,
           ticket.plant.siteId,
+          c.materialId,
           c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
         );
         if (hopper) {
           await prisma.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + massTons } });
         }
       } else if (c.material.type === "WATER") {
-        const waterHopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, { equals: "WATER" });
+        const waterHopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
         if (waterHopper) {
           await prisma.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: waterHopper.currentLevelTons + massTons } });
         }
