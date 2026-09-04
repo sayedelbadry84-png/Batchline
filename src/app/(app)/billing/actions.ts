@@ -225,25 +225,37 @@ export async function recordPayment(formData: FormData) {
   const reference = String(formData.get("reference") ?? "").trim() || null;
   if (!invoiceId || !amount || amount <= 0) return;
 
-  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { payments: true, plant: true } });
+  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { plant: true } });
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return;
   if (!(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
 
   // The payment and its journal entry commit as one unit — same rationale
-  // as generateInvoiceForProject above.
-  await prisma.$transaction(async (tx) => {
-    const payment = await tx.payment.create({ data: { invoiceId, amount, method, reference } });
+  // as generateInvoiceForProject above. totalPaid is also now read INSIDE
+  // the transaction (not from the snapshot fetched above) and the whole
+  // thing runs Serializable — two payments recorded concurrently against
+  // the same invoice used to each compute totalPaid from a payments list
+  // that didn't include the other's just-created row, so an invoice that
+  // was actually fully paid by the combination could sit stuck at SENT
+  // forever. Serializable makes Postgres detect that read-write conflict
+  // and abort one of the two competing transactions instead.
+  try {
+    await prisma.$transaction(async (tx) => {
+      const payment = await tx.payment.create({ data: { invoiceId, amount, method, reference } });
 
-    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0) + amount;
-    if (totalPaid >= invoice.total - 0.01) {
-      await tx.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
-    }
+      const payments = await tx.payment.findMany({ where: { invoiceId }, select: { amount: true } });
+      const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
+      if (totalPaid >= invoice.total - 0.01) {
+        await tx.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
+      }
 
-    // No journal entry when plantId is unset — same nullable-plantId edge
-    // case invoiceInScope already treats specially (an invoice that
-    // predates plant-scoping, or had no in-scope trips at generation time).
-    if (invoice.plant) await postPayment(tx, { siteId: invoice.plant.siteId, currency: invoice.currency, paymentId: payment.id, amount });
-  }, TX_OPTIONS);
+      // No journal entry when plantId is unset — same nullable-plantId edge
+      // case invoiceInScope already treats specially (an invoice that
+      // predates plant-scoping, or had no in-scope trips at generation time).
+      if (invoice.plant) await postPayment(tx, { siteId: invoice.plant.siteId, currency: invoice.currency, paymentId: payment.id, amount });
+    }, { ...TX_OPTIONS, isolationLevel: "Serializable" });
+  } catch {
+    return;
+  }
 
   await logAudit({
     module: "Billing",
@@ -272,35 +284,44 @@ export async function issueCreditNote(formData: FormData) {
   const notes = String(formData.get("notes") ?? "").trim() || null;
   if (!invoiceId || !amount || amount <= 0 || !reason) return;
 
-  const invoice = await prisma.invoice.findUnique({
-    where: { id: invoiceId },
-    include: { payments: true, creditNotes: true, plant: true },
-  });
+  const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { plant: true } });
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return;
   if (!(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
 
-  const amountDue = invoiceAmountDue(invoice);
-  if (amount > amountDue + 0.01) return;
+  // amountDue is now (re)computed INSIDE the transaction, from a fresh read,
+  // not the snapshot fetched above — and the whole thing runs Serializable.
+  // Two credit notes issued concurrently against the same invoice used to
+  // each check `amount > amountDue` against the same stale amountDue, so
+  // both could pass even though together they credit more than was ever
+  // due. Serializable makes Postgres detect that read-write conflict and
+  // abort one of the two competing transactions instead.
+  let creditNote;
+  try {
+    creditNote = await prisma.$transaction(async (tx) => {
+      const fresh = await tx.invoice.findUnique({ where: { id: invoiceId }, include: { payments: true, creditNotes: true } });
+      if (!fresh) throw new Error("NOT_FOUND");
+      const amountDue = invoiceAmountDue(fresh);
+      if (amount > amountDue + 0.01) throw new Error("EXCEEDS_AMOUNT_DUE");
 
-  // The credit note and its journal entry commit as one unit — same
-  // rationale as generateInvoiceForProject above.
-  const creditNote = await prisma.$transaction(async (tx) => {
-    const creditNote = await withSequentialNumber(
-      "CN",
-      () => tx.creditNote.count(),
-      (creditNoteNumber) =>
-        tx.creditNote.create({
-          data: { creditNoteNumber, invoiceId, amount, reason, notes, issuedById: user!.id },
-        }),
-    );
+      const cn = await withSequentialNumber(
+        "CN",
+        () => tx.creditNote.count(),
+        (creditNoteNumber) =>
+          tx.creditNote.create({
+            data: { creditNoteNumber, invoiceId, amount, reason, notes, issuedById: user!.id },
+          }),
+      );
 
-    if (amountDue - amount <= 0.01) {
-      await tx.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
-    }
+      if (amountDue - amount <= 0.01) {
+        await tx.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
+      }
 
-    if (invoice.plant) await postCreditNote(tx, { siteId: invoice.plant.siteId, currency: invoice.currency, creditNoteId: creditNote.id, amount });
-    return creditNote;
-  }, TX_OPTIONS);
+      if (invoice.plant) await postCreditNote(tx, { siteId: invoice.plant.siteId, currency: invoice.currency, creditNoteId: cn.id, amount });
+      return cn;
+    }, { ...TX_OPTIONS, isolationLevel: "Serializable" });
+  } catch {
+    return;
+  }
 
   await logAudit({
     module: "Billing",
