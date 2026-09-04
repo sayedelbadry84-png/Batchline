@@ -342,19 +342,21 @@ export async function approveReservationFinal(formData: FormData) {
   // successfully, so it clears the hold too; otherwise an approved
   // reservation would sit invisible to Production forever; the listing
   // there only ever shows CONFIRMED/IN_PRODUCTION (see readyReservationsRaw
-  // in production/page.tsx). But that credit check was only ever run once,
-  // at creation — clearing the hold here used to trust that stale flag
-  // outright rather than re-checking whether the customer is still over
-  // limit right now (their balance can only have grown in the meantime, or
-  // stayed the same; it never falls without a real payment being
-  // recorded). If they're still over, refuse the final approval entirely
-  // rather than silently rubber-stamping past a still-real credit problem
-  // — a real payment recorded in Finance is what should unblock this, not
-  // a click here.
-  if (reservation.status === "ON_HOLD") {
-    const outstandingBalance = await getCustomerOutstandingBalance(reservation.project.customer.id);
-    if (outstandingBalance >= reservation.project.customer.creditLimit) return;
-  }
+  // in production/page.tsx).
+  //
+  // The credit check itself used to only re-run when status was already
+  // ON_HOLD — but a reservation that started CONFIRMED (under the limit
+  // at creation) has never had its credit re-checked since, and the
+  // customer's balance can only have grown in the meantime (or stayed the
+  // same; it never falls without a real payment being recorded). Final
+  // approval is the last gate before Production can release against this
+  // booking, so it re-checks the limit unconditionally, not just for the
+  // ON_HOLD case — if they're over limit, refuse regardless of how this
+  // reservation got here, rather than silently rubber-stamping past a
+  // still-real credit problem. A real payment recorded in Finance is what
+  // should unblock this, not a click here.
+  const outstandingBalance = await getCustomerOutstandingBalance(reservation.project.customer.id);
+  if (outstandingBalance >= reservation.project.customer.creditLimit) return;
 
   await prisma.reservation.update({
     where: { id },
