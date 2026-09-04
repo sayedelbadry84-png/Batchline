@@ -159,6 +159,13 @@ export async function getAccessibleModules(role: string): Promise<ModuleKey[]> {
 // out of sync with each other.
 export const REQUISITION_APPROVAL_ROLES = ["ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER"];
 
+// Who may approve/reject a ShortageOverrideRequest (P1-04) — also used by
+// the notification engine to know who to alert when one's requested.
+// Requesting one uses the roster of `complete` instead (production.
+// requestShortageOverride below), since the whole point is letting an
+// operator who does NOT hold this authority ask for it.
+export const SHORTAGE_OVERRIDE_DECISION_ROLES = ["PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN", "ADMIN"];
+
 // Compiled-in defaults for every module's own action set — one entry per
 // exported Server Action across every operational module (see each
 // module's own actions.ts), grouped the same way the Permissions screen
@@ -199,12 +206,15 @@ export const ACTION_ROLES = {
     manualBooking: ["PLANT_OPERATOR", "ADMIN"],
     complete: ["PLANT_OPERATOR", "ADMIN"],
     // A real shortage — completing with less material than the recipe
-    // called for — needs sign-off above whoever's running the mixer, not
-    // just a typed note; anyone with `complete` used to be able to author
-    // one. Same roster as reverseBatch's own "bigger than the everyday
-    // action" posture, one notch below ADMIN-only since this is routine
-    // operational sign-off, not a financial correction.
-    overrideShortage: ["PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN", "ADMIN"],
+    // called for — needs sign-off above whoever's running the mixer
+    // (P1-04): any `complete` holder can REQUEST an override after hitting
+    // one, but only SHORTAGE_OVERRIDE_DECISION_ROLES can approve/reject it.
+    // Same roster as reverseBatch's own "bigger than the everyday action"
+    // posture, one notch below ADMIN-only since this is routine operational
+    // sign-off, not a financial correction.
+    requestShortageOverride: ["PLANT_OPERATOR", "ADMIN"],
+    approveShortageOverrideRequest: SHORTAGE_OVERRIDE_DECISION_ROLES,
+    rejectShortageOverrideRequest: SHORTAGE_OVERRIDE_DECISION_ROLES,
     deleteTicket: ["PLANT_OPERATOR", "ADMIN"],
     // Reversing a completed ticket undoes real posted inventory movements
     // — a materially bigger, rarer action than completing or deleting one,

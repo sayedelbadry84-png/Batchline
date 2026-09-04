@@ -21,7 +21,7 @@ export type RequisitionCandidate = {
 };
 
 export type CompleteBatchResult =
-  | { status: "SUCCESS"; shortages: string[]; requisitionCandidates: RequisitionCandidate[] }
+  | { status: "SUCCESS"; shortages: string[]; requisitionCandidates: RequisitionCandidate[]; consumedOverrideRequestId: string | null }
   | { status: "ALREADY_COMPLETED" }
   | { status: "INVALID_STATE" }
   | { status: "INSUFFICIENT_STOCK"; shortages: string[] }
@@ -73,10 +73,7 @@ function isP2034(e: unknown): boolean {
  * ticket changes nothing (see the ledger's own idempotency claim) beyond
  * returning ALREADY_COMPLETED.
  */
-export async function completeBatchTicket(
-  ticketId: string,
-  opts: { shortageOverrideNote?: string | null; actorId?: string | null },
-): Promise<CompleteBatchResult> {
+export async function completeBatchTicket(ticketId: string, opts: { actorId?: string | null }): Promise<CompleteBatchResult> {
   const exists = await prisma.batchTicket.findUnique({ where: { id: ticketId }, select: { id: true } });
   if (!exists) return { status: "INVALID_STATE" };
 
@@ -96,6 +93,17 @@ export async function completeBatchTicket(
           data: { status: "COMPLETE", batchCompletedAt: new Date() },
         });
         if (claim.count === 0) return { status: "ALREADY_COMPLETED" as const };
+
+        // An APPROVED, unconsumed shortage-override request tied to this
+        // exact ticket (see shortageOverrideRequests.ts) is the ONLY thing
+        // that can let this completion clamp a real shortage through — the
+        // old "type a note if you happen to hold overrideShortage"
+        // moment-of-completion path is gone (P1-04). Read inside the same
+        // transaction as the claim above so this can never race a
+        // concurrent approval/consumption of the same request.
+        const activeOverride = await tx.shortageOverrideRequest.findFirst({
+          where: { batchTicketId: ticketId, status: "APPROVED" },
+        });
 
         // The authoritative read happens AFTER the claim, inside the same
         // transaction — not before it. Reading components before the
@@ -173,8 +181,8 @@ export async function completeBatchTicket(
             plantId: ticket.plantId,
             siteId: ticket.plant.siteId,
             actorId: opts.actorId ?? null,
-            reason: opts.shortageOverrideNote ?? null,
-            allowShortage: !!opts.shortageOverrideNote,
+            reason: activeOverride?.reason ?? null,
+            allowShortage: !!activeOverride,
           });
 
           if (movement.status === "ALREADY_POSTED") continue; // a retried attempt after this exact component already landed
@@ -200,7 +208,25 @@ export async function completeBatchTicket(
           });
         }
 
-        return { status: "SUCCESS" as const, shortages, requisitionCandidates };
+        // Consume the override only if this completion actually needed it
+        // to cover a real shortage — an approval that turns out unneeded
+        // (e.g. actuals came in higher than the shortage suggested) stays
+        // available rather than being burned for nothing, but one that WAS
+        // used can never authorize a second shortage (the ticket is now
+        // COMPLETE, a terminal state, so there's no second attempt against
+        // this same ticket regardless — this guards a different request
+        // being reused, which the one-active-per-ticket constraint already
+        // rules out, so this is really just keeping the record accurate).
+        let consumedOverrideRequestId: string | null = null;
+        if (activeOverride && shortages.length > 0) {
+          await tx.shortageOverrideRequest.update({
+            where: { id: activeOverride.id },
+            data: { status: "CONSUMED", consumedAt: new Date() },
+          });
+          consumedOverrideRequestId = activeOverride.id;
+        }
+
+        return { status: "SUCCESS" as const, shortages, requisitionCandidates, consumedOverrideRequestId };
       }, TX_OPTIONS),
     );
   } catch (e) {

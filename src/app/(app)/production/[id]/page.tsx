@@ -19,6 +19,7 @@ import { AutoSaveField } from "@/components/AutoSaveField";
 import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
 import { CompleteBatchForm } from "@/components/CompleteBatchForm";
 import { ReverseBatchForm } from "@/components/ReverseBatchForm";
+import { ShortageOverridePanel } from "@/components/ShortageOverridePanel";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -32,6 +33,8 @@ export default async function BatchTicketPage({
   await requirePageAccess("production");
   const user = await getCurrentUser();
   const canReverseBatch = !!user && (await canPerformAction(user.role, "production", "reverseBatch"));
+  const canRequestShortageOverride = !!user && (await canPerformAction(user.role, "production", "requestShortageOverride"));
+  const canDecideShortageOverride = !!user && (await canPerformAction(user.role, "production", "approveShortageOverrideRequest"));
   const { id } = await params;
   const { editTrip } = await searchParams;
   const { dict } = await getDictionary();
@@ -46,6 +49,7 @@ export default async function BatchTicketPage({
         mix: { include: { components: true } },
         components: { include: { material: true } },
         trip: { include: { truck: true, driver: true, pump: true, drumReturn: { include: { wasteMemo: { include: { approvedBy: true } } } } } },
+        shortageOverrideRequests: { orderBy: { createdAt: "desc" }, take: 1, include: { requestedBy: true } },
       },
     }),
     prisma.material.findMany({ orderBy: { name: "asc" } }),
@@ -60,6 +64,15 @@ export default async function BatchTicketPage({
   // domain guard already treat it as terminal) would still show a
   // weighing/completion form that could only ever fail.
   const isTerminal = ticket.status === "COMPLETE" || ticket.status === "CANCELLED";
+  const latestOverrideRequest = ticket.shortageOverrideRequests[0]
+    ? {
+        id: ticket.shortageOverrideRequests[0].id,
+        status: ticket.shortageOverrideRequests[0].status as "PENDING" | "APPROVED" | "REJECTED" | "CONSUMED",
+        reason: ticket.shortageOverrideRequests[0].reason,
+        requestedByName: ticket.shortageOverrideRequests[0].requestedBy.name,
+        rejectionNote: ticket.shortageOverrideRequests[0].rejectionNote,
+      }
+    : null;
   const canEditComponents = !isTerminal;
   const componentMaterialIds = new Set(ticket.components.map((c) => c.materialId));
   const addableMaterials = materials.filter((mt) => !componentMaterialIds.has(mt.id));
@@ -295,25 +308,55 @@ export default async function BatchTicketPage({
             completeTitle: d.completeTitle,
             completeIntro: d.completeIntro,
             completeButton: d.completeButton,
-            shortageOverrideNote: d.shortageOverrideNote,
-            shortageOverrideNotePlaceholder: d.shortageOverrideNotePlaceholder,
-            shortageOverrideNoteHint: d.shortageOverrideNoteHint,
             errorInsufficientStock: d.errorInsufficientStock,
             errorStorageNotConfigured: d.errorStorageNotConfigured,
             errorAlreadyCompleted: d.errorAlreadyCompleted,
             errorInvalidState: d.errorInvalidState,
             errorConcurrentConflict: d.errorConcurrentConflict,
-            errorUnauthorizedOverride: d.errorUnauthorizedOverride,
             errorNotFound: d.errorNotFound,
           }}
-          showShortageField
           cardClassName={`${ui.card} flex flex-col gap-3`}
           titleClassName="font-display text-lg font-semibold"
           introClassName="text-sm text-ink-muted"
           buttonClassName={ui.button}
+        />
+      )}
+
+      {(canRequestShortageOverride || canDecideShortageOverride || latestOverrideRequest) && (
+        <ShortageOverridePanel
+          ticketId={ticket.id}
+          latestRequest={latestOverrideRequest}
+          canRequest={canRequestShortageOverride}
+          canDecide={canDecideShortageOverride}
+          isTerminal={isTerminal}
+          messages={{
+            title: d.shortageOverride.title,
+            noneHint: d.shortageOverride.noneHint,
+            requestedByPrefix: d.shortageOverride.requestedByPrefix,
+            pendingStatus: d.shortageOverride.pendingStatus,
+            approvedStatus: d.shortageOverride.approvedStatus,
+            rejectedStatus: d.shortageOverride.rejectedStatus,
+            consumedStatus: d.shortageOverride.consumedStatus,
+            requestLabel: d.shortageOverride.requestLabel,
+            requestPlaceholder: d.shortageOverride.requestPlaceholder,
+            requestButton: d.shortageOverride.requestButton,
+            approveButton: d.shortageOverride.approveButton,
+            rejectButton: d.shortageOverride.rejectButton,
+            rejectionNoteLabel: d.shortageOverride.rejectionNoteLabel,
+            rejectionNotePlaceholder: d.shortageOverride.rejectionNotePlaceholder,
+            errorNotFound: d.shortageOverride.errorNotFound,
+            errorTicketTerminal: d.shortageOverride.errorTicketTerminal,
+            errorAlreadyPending: d.shortageOverride.errorAlreadyPending,
+            errorAlreadyApproved: d.shortageOverride.errorAlreadyApproved,
+            errorNotPending: d.shortageOverride.errorNotPending,
+          }}
+          cardClassName={`${ui.card} flex flex-col gap-3`}
+          titleClassName="font-display text-lg font-semibold"
+          hintClassName="text-sm text-ink-muted"
           labelClassName={ui.label}
           inputClassName={`${ui.input} w-full`}
-          hintClassName="mt-1 text-xs text-ink-muted"
+          buttonClassName={ui.button}
+          secondaryButtonClassName={ui.button}
         />
       )}
 

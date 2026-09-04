@@ -43,6 +43,7 @@ const { completeBatchTicket, reverseBatchTicket } = await import("../src/lib/bat
 const { postSiloMovement } = await import("../src/lib/inventoryLedger");
 const { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } = await import("../src/lib/batchComponentEdits");
 const { claimTripSlot } = await import("../src/lib/tripDispatch");
+const { requestShortageOverride, approveShortageOverrideRequest, rejectShortageOverrideRequest } = await import("../src/lib/shortageOverrideRequests");
 
 const prisma = new PrismaClient();
 
@@ -249,13 +250,22 @@ test("insufficient stock fails without changing ticket, ledger, or balance", asy
 // clamps all the way to 0) and got an unhandled CHECK-constraint failure
 // (InventoryMovement_quantity_nonzero) instead of a clean SUCCESS.
 
-test("a total stockout with an authorized override succeeds and posts no zero-quantity row", async () => {
+test("a total stockout with an approved override request succeeds and posts no zero-quantity row", async () => {
   await resetSilo(0); // completely empty
   const ticketId = await makeTicket([{ materialId, targetMassKg: 5000 }]); // needs 5t, 0t on hand
 
-  const result = await completeBatchTicket(ticketId, { shortageOverrideNote: "authorized total shortage" });
+  const request = await requestShortageOverride(ticketId, { reason: "authorized total shortage", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+  const approval = await approveShortageOverrideRequest(request.requestId, adminUserId);
+  assert.equal(approval.status, "OK");
+
+  const result = await completeBatchTicket(ticketId, {});
   assert.equal(result.status, "SUCCESS");
-  if (result.status === "SUCCESS") assert.ok(result.shortages.length > 0, "expected the shortage to be reported even though completion succeeded");
+  if (result.status === "SUCCESS") {
+    assert.ok(result.shortages.length > 0, "expected the shortage to be reported even though completion succeeded");
+    assert.equal(result.consumedOverrideRequestId, request.requestId); // the approval was actually used, not left dangling
+  }
 
   const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
   assert.equal(ticket.status, "COMPLETE");
@@ -265,6 +275,10 @@ test("a total stockout with an authorized override succeeds and posts no zero-qu
   // isn't a real event, and the CHECK constraint would reject it anyway.
   const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
   assert.equal(movements.length, 0);
+
+  const consumedRequest = await prisma.shortageOverrideRequest.findUniqueOrThrow({ where: { id: request.requestId } });
+  assert.equal(consumedRequest.status, "CONSUMED");
+  assert.notEqual(consumedRequest.consumedAt, null);
 });
 
 test("insufficient stock without an override is still rejected even from a completely empty store", async () => {
@@ -275,6 +289,98 @@ test("insufficient stock without an override is still rejected even from a compl
   assert.equal(result.status, "INSUFFICIENT_STOCK");
   assert.equal((await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } })).status, "RELEASED");
   assert.equal(await siloLevel(siloId), 0);
+});
+
+// ---- 4c. P1-04 — the shortage-override request/approval workflow ------
+
+test("a request without approval doesn't let a real shortage through", async () => {
+  await resetSilo(0);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 5000 }]);
+
+  const request = await requestShortageOverride(ticketId, { reason: "waiting on manager", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+
+  const result = await completeBatchTicket(ticketId, {});
+  assert.equal(result.status, "INSUFFICIENT_STOCK"); // PENDING, not APPROVED — must not grant anything
+  assert.equal((await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } })).status, "RELEASED");
+});
+
+test("requesting again while one is already pending is refused, not duplicated", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+
+  const first = await requestShortageOverride(ticketId, { reason: "first", requestedById: adminUserId });
+  assert.equal(first.status, "OK");
+  const second = await requestShortageOverride(ticketId, { reason: "second", requestedById: adminUserId });
+  assert.equal(second.status, "ALREADY_PENDING");
+
+  const requests = await prisma.shortageOverrideRequest.findMany({ where: { batchTicketId: ticketId } });
+  assert.equal(requests.length, 1); // the DB's own partial unique index, not just the app-level check, is what actually held here
+});
+
+test("two concurrent requests for the same ticket — only one lands", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+
+  const [a, b] = await Promise.all([
+    requestShortageOverride(ticketId, { reason: "race A", requestedById: adminUserId }),
+    requestShortageOverride(ticketId, { reason: "race B", requestedById: adminUserId }),
+  ]);
+  const statuses = [a.status, b.status].sort();
+  assert.deepEqual(statuses, ["ALREADY_PENDING", "OK"]);
+
+  const requests = await prisma.shortageOverrideRequest.findMany({ where: { batchTicketId: ticketId } });
+  assert.equal(requests.length, 1);
+});
+
+test("a rejected request is no longer active — a new one can be made", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+
+  const request = await requestShortageOverride(ticketId, { reason: "first attempt", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+
+  const rejection = await rejectShortageOverrideRequest(request.requestId, adminUserId, "not enough justification");
+  assert.equal(rejection.status, "OK");
+  const rejected = await prisma.shortageOverrideRequest.findUniqueOrThrow({ where: { id: request.requestId } });
+  assert.equal(rejected.status, "REJECTED");
+  assert.equal(rejected.rejectionNote, "not enough justification");
+
+  const again = await requestShortageOverride(ticketId, { reason: "second attempt", requestedById: adminUserId });
+  assert.equal(again.status, "OK"); // REJECTED doesn't count as active — a fresh request is allowed
+});
+
+test("only one of two concurrent decisions on the same request wins", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const request = await requestShortageOverride(ticketId, { reason: "race decision", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+
+  const [approve, reject] = await Promise.all([
+    approveShortageOverrideRequest(request.requestId, adminUserId),
+    rejectShortageOverrideRequest(request.requestId, adminUserId, "trying to reject the same request"),
+  ]);
+  const statuses = [approve.status, reject.status].sort();
+  assert.deepEqual(statuses, ["NOT_PENDING", "OK"]); // whichever claimed the PENDING row first wins; the other sees it's no longer pending
+
+  const finalRequest = await prisma.shortageOverrideRequest.findUniqueOrThrow({ where: { id: request.requestId } });
+  assert.ok(finalRequest.status === "APPROVED" || finalRequest.status === "REJECTED");
+});
+
+test("an approved request for one ticket doesn't leak to a different ticket", async () => {
+  await resetSilo(0);
+  const approvedTicketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const otherTicketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+
+  const request = await requestShortageOverride(approvedTicketId, { reason: "for the first ticket only", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+  const approval = await approveShortageOverrideRequest(request.requestId, adminUserId);
+  assert.equal(approval.status, "OK");
+
+  const otherResult = await completeBatchTicket(otherTicketId, {});
+  assert.equal(otherResult.status, "INSUFFICIENT_STOCK"); // the approval is scoped to approvedTicketId, not usable here
+
+  const approvedResult = await completeBatchTicket(approvedTicketId, {});
+  assert.equal(approvedResult.status, "SUCCESS");
 });
 
 // ---- 5. A failure on one component rolls back all components ---------

@@ -11,8 +11,13 @@ import { findMatchingSilo, findMatchingHopper, AGGREGATE_TYPES } from "@/lib/sto
 import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain } from "@/lib/batchCompletion";
 import { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } from "@/lib/batchComponentEdits";
 import { claimTripSlot } from "@/lib/tripDispatch";
+import {
+  requestShortageOverride as requestShortageOverrideDomain,
+  approveShortageOverrideRequest as approveShortageOverrideRequestDomain,
+  rejectShortageOverrideRequest as rejectShortageOverrideRequestDomain,
+} from "@/lib/shortageOverrideRequests";
 import { withSequentialNumber } from "@/lib/sequence";
-import { REQUISITION_APPROVAL_ROLES, canPerformAction } from "@/lib/permissions";
+import { REQUISITION_APPROVAL_ROLES, SHORTAGE_OVERRIDE_DECISION_ROLES } from "@/lib/permissions";
 import { notify, notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -376,11 +381,10 @@ export async function recordActualField(formData: FormData) {
 
 // The typed result useActionState (see CompleteBatchForm.tsx) renders —
 // mirrors CompleteBatchResult's own status set 1:1 (src/lib/
-// batchCompletion.ts) plus a couple of wrapper-only outcomes
-// (UNAUTHORIZED_OVERRIDE, NOT_FOUND) so the UI can show an actual reason
-// instead of nothing happening, per this review's HI-05.
+// batchCompletion.ts) plus NOT_FOUND (wrapper-only) so the UI can show an
+// actual reason instead of nothing happening, per this review's HI-05.
 export type CompleteBatchActionState = {
-  status: "SUCCESS" | "ALREADY_COMPLETED" | "INVALID_STATE" | "INSUFFICIENT_STOCK" | "CONCURRENT_CONFLICT" | "STORAGE_NOT_CONFIGURED" | "UNAUTHORIZED_OVERRIDE" | "NOT_FOUND";
+  status: "SUCCESS" | "ALREADY_COMPLETED" | "INVALID_STATE" | "INSUFFICIENT_STOCK" | "CONCURRENT_CONFLICT" | "STORAGE_NOT_CONFIGURED" | "NOT_FOUND";
   detail?: string;
 } | null;
 
@@ -393,36 +397,27 @@ export type CompleteBatchActionState = {
 // always produced, PLUS a returned state useActionState can render (see
 // CompleteBatchForm.tsx) — previously every non-SUCCESS status was a
 // silent return with nothing shown to the operator.
+//
+// P1-04: this no longer accepts a shortageOverrideNote field at all — a
+// shortage can only be pushed through by an APPROVED
+// ShortageOverrideRequest tied to this exact ticket, which
+// completeBatchTicket itself looks up and (if actually needed) consumes.
+// See requestShortageOverride/approveShortageOverrideRequest/
+// rejectShortageOverrideRequest below for that workflow.
 export async function completeBatch(_prevState: CompleteBatchActionState, formData: FormData): Promise<CompleteBatchActionState> {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "complete");
 
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   if (!batchTicketId) return { status: "NOT_FOUND" };
-  let shortageOverrideNote = String(formData.get("shortageOverrideNote") ?? "").trim() || null;
 
   const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId }, select: { plantId: true } });
   if (!ticket) return { status: "NOT_FOUND" };
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
 
-  // A shortage override needs its own sign-off, not just whoever can
-  // complete a batch at all (HI-04) — an unauthorized note is dropped
-  // rather than trusted, so completion still attempts the normal
-  // (non-override) path first: if there's no real shortage, it succeeds
-  // exactly as if the note had never been typed. Only report
-  // UNAUTHORIZED_OVERRIDE (rather than a plain INSUFFICIENT_STOCK, which
-  // wouldn't explain that an override WAS attempted but refused) if it
-  // turns out there really was a shortage and this note would have
-  // covered it.
-  const noteDroppedForPermission = !!shortageOverrideNote && !(await canPerformAction(user!.role, "production", "overrideShortage"));
-  if (noteDroppedForPermission) shortageOverrideNote = null;
-
-  const result = await completeBatchTicket(batchTicketId, { shortageOverrideNote, actorId: user!.id });
+  const result = await completeBatchTicket(batchTicketId, { actorId: user!.id });
   if (result.status !== "SUCCESS") {
-    if (result.status === "INSUFFICIENT_STOCK") {
-      if (noteDroppedForPermission) return { status: "UNAUTHORIZED_OVERRIDE" };
-      return { status: "INSUFFICIENT_STOCK", detail: result.shortages.join("; ") };
-    }
+    if (result.status === "INSUFFICIENT_STOCK") return { status: "INSUFFICIENT_STOCK", detail: result.shortages.join("; ") };
     if (result.status === "STORAGE_NOT_CONFIGURED") return { status: "STORAGE_NOT_CONFIGURED", detail: result.material };
     return { status: result.status };
   }
@@ -437,14 +432,14 @@ export async function completeBatch(_prevState: CompleteBatchActionState, formDa
     recordId: batchTicketId,
     field: "status",
     afterValue: "COMPLETE",
-    reasonCode: result.shortages.length > 0 ? "BATCH_COMPLETE_WITH_SHORTAGE_OVERRIDE" : "BATCH_COMPLETE_INVENTORY_DEDUCTED",
+    reasonCode: result.consumedOverrideRequestId ? "BATCH_COMPLETE_WITH_SHORTAGE_OVERRIDE" : "BATCH_COMPLETE_INVENTORY_DEDUCTED",
   });
-  if (result.shortages.length > 0) {
+  if (result.consumedOverrideRequestId) {
     await logAudit({
       module: "Production",
       recordId: batchTicketId,
-      field: "shortageOverrideNote",
-      afterValue: `${shortageOverrideNote} — ${result.shortages.join("; ")}`,
+      field: "shortageOverrideRequestId",
+      afterValue: `${result.consumedOverrideRequestId} — ${result.shortages.join("; ")}`,
       reasonCode: "BATCH_SHORTAGE_OVERRIDDEN",
     });
   }
@@ -455,6 +450,106 @@ export async function completeBatch(_prevState: CompleteBatchActionState, formDa
   revalidatePath("/warehouses");
   revalidatePath("/");
   return { status: "SUCCESS" };
+}
+
+// ---------------------------------------------------------------------
+// P1-04 — shortage override request/approval workflow
+// ---------------------------------------------------------------------
+// Domain logic lives in src/lib/shortageOverrideRequests.ts (pure, no
+// session/formData access, callable from tests directly) — same split as
+// completeBatchTicket/reverseBatchTicket above. These wrappers only do
+// permission/scope checks, call the domain service, and turn the typed
+// result into an audit trail, notifications, and a useActionState-shaped
+// return.
+
+export type RequestShortageOverrideActionState = {
+  status: "OK" | "NOT_FOUND" | "TICKET_TERMINAL" | "ALREADY_PENDING" | "ALREADY_APPROVED";
+} | null;
+
+// Anyone who can complete a batch can request an override after hitting a
+// real shortage — the roster is deliberately the same as `complete`, not
+// `overrideShortage`, since the whole point of this workflow is letting an
+// operator who does NOT hold override authority ask for it instead of
+// silently being stuck.
+export async function requestShortageOverride(_prevState: RequestShortageOverrideActionState, formData: FormData): Promise<RequestShortageOverrideActionState> {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "production", "requestShortageOverride");
+
+  const batchTicketId = String(formData.get("batchTicketId") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim();
+  if (!batchTicketId || !reason) return { status: "NOT_FOUND" };
+
+  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId }, select: { plantId: true, ticketNumber: true } });
+  if (!ticket) return { status: "NOT_FOUND" };
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
+
+  const result = await requestShortageOverrideDomain(batchTicketId, { reason, requestedById: user!.id });
+  if (result.status === "OK") {
+    await logAudit({ module: "Production", recordId: batchTicketId, field: "shortageOverrideRequestId", afterValue: result.requestId, reasonCode: "SHORTAGE_OVERRIDE_REQUESTED" });
+    await notifyRoles(SHORTAGE_OVERRIDE_DECISION_ROLES, {
+      module: "Production",
+      title: `Shortage override requested — ${ticket.ticketNumber}`,
+      body: reason,
+      link: `/production/${batchTicketId}`,
+    });
+    revalidatePath(`/production/${batchTicketId}`);
+    revalidatePath("/production");
+  }
+  return { status: result.status };
+}
+
+export type DecideShortageOverrideActionState = { status: "OK" | "NOT_FOUND" | "NOT_PENDING" } | null;
+
+export async function approveShortageOverrideRequest(_prevState: DecideShortageOverrideActionState, formData: FormData): Promise<DecideShortageOverrideActionState> {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "production", "approveShortageOverrideRequest");
+
+  const requestId = String(formData.get("requestId") ?? "");
+  if (!requestId) return { status: "NOT_FOUND" };
+
+  const request = await prisma.shortageOverrideRequest.findUnique({ where: { id: requestId }, include: { batchTicket: { select: { plantId: true, ticketNumber: true } } } });
+  if (!request) return { status: "NOT_FOUND" };
+  if (!(await isPlantInScope(request.batchTicket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
+
+  const result = await approveShortageOverrideRequestDomain(requestId, user!.id);
+  if (result.status === "OK") {
+    await logAudit({ module: "Production", recordId: request.batchTicketId, field: "shortageOverrideRequestId", afterValue: requestId, reasonCode: "SHORTAGE_OVERRIDE_APPROVED" });
+    await notify([request.requestedById], {
+      module: "Production",
+      title: `Shortage override approved — ${request.batchTicket.ticketNumber}`,
+      link: `/production/${request.batchTicketId}`,
+    });
+    revalidatePath(`/production/${request.batchTicketId}`);
+    revalidatePath("/production");
+  }
+  return { status: result.status };
+}
+
+export async function rejectShortageOverrideRequest(_prevState: DecideShortageOverrideActionState, formData: FormData): Promise<DecideShortageOverrideActionState> {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "production", "rejectShortageOverrideRequest");
+
+  const requestId = String(formData.get("requestId") ?? "");
+  const rejectionNote = String(formData.get("rejectionNote") ?? "").trim();
+  if (!requestId || !rejectionNote) return { status: "NOT_FOUND" };
+
+  const request = await prisma.shortageOverrideRequest.findUnique({ where: { id: requestId }, include: { batchTicket: { select: { plantId: true, ticketNumber: true } } } });
+  if (!request) return { status: "NOT_FOUND" };
+  if (!(await isPlantInScope(request.batchTicket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
+
+  const result = await rejectShortageOverrideRequestDomain(requestId, user!.id, rejectionNote);
+  if (result.status === "OK") {
+    await logAudit({ module: "Production", recordId: request.batchTicketId, field: "shortageOverrideRequestId", afterValue: `${requestId} — ${rejectionNote}`, reasonCode: "SHORTAGE_OVERRIDE_REJECTED" });
+    await notify([request.requestedById], {
+      module: "Production",
+      title: `Shortage override rejected — ${request.batchTicket.ticketNumber}`,
+      body: rejectionNote,
+      link: `/production/${request.batchTicketId}`,
+    });
+    revalidatePath(`/production/${request.batchTicketId}`);
+    revalidatePath("/production");
+  }
+  return { status: result.status };
 }
 
 export async function startTrip(formData: FormData) {

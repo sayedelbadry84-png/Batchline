@@ -119,6 +119,8 @@ model User {
   pushSubscriptions                 PushSubscription[]
   inventoryMovementsPosted          InventoryMovement[]
   batchTicketsReversed              BatchTicket[]             @relation("BatchTicketReversedBy")
+  shortageOverrideRequestsMade      ShortageOverrideRequest[] @relation("ShortageOverrideRequestedBy")
+  shortageOverrideRequestsDecided   ShortageOverrideRequest[] @relation("ShortageOverrideApprovedBy")
 }
 
 model Session {
@@ -1162,9 +1164,10 @@ model BatchTicket {
   reversedBy       User?       @relation("BatchTicketReversedBy", fields: [reversedById], references: [id])
   reversalReason   String?
 
-  components BatchComponentActual[]
-  trip       Trip?
-  wasteMemos WasteIncidentMemo[]
+  components               BatchComponentActual[]
+  trip                     Trip?
+  wasteMemos               WasteIncidentMemo[]
+  shortageOverrideRequests ShortageOverrideRequest[]
 }
 
 model BatchComponentActual {
@@ -1186,6 +1189,37 @@ model BatchComponentActual {
   reclaimCreditMassKg Float       @default(0)
 
   @@unique([batchTicketId, materialId])
+}
+
+// Replaces the old "type a note, hope you also happen to hold
+// overrideShortage" moment-of-completion flow: a real request/approval
+// workflow (P1-04), same PENDING/APPROVED/REJECTED shape as LeaveRequest.
+// Anyone who can complete a batch can request one after hitting a real
+// shortage; only an overrideShortage holder can approve or reject it.
+// completeBatchTicket (batchCompletion.ts) looks for an APPROVED,
+// unconsumed request tied to the ticket it's completing and, only if the
+// completion actually needs it to cover a real shortage, marks it CONSUMED
+// in the same transaction — so an approval that turns out to be unneeded
+// (the shortage didn't materialize, e.g. actuals came in higher after all)
+// stays available rather than being burned for nothing, but a used one can
+// never authorize a second shortage.
+model ShortageOverrideRequest {
+  id            String      @id @default(cuid())
+  batchTicketId String
+  batchTicket   BatchTicket @relation(fields: [batchTicketId], references: [id])
+  reason        String
+  status        String      @default("PENDING") // PENDING, APPROVED, REJECTED, CONSUMED
+  requestedById String
+  requestedBy   User        @relation("ShortageOverrideRequestedBy", fields: [requestedById], references: [id])
+  approvedById  String?
+  approvedBy    User?       @relation("ShortageOverrideApprovedBy", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+  rejectionNote String?
+  consumedAt    DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([batchTicketId, status])
 }
 
 // An immutable posting ledger for every inventory-affecting event this app

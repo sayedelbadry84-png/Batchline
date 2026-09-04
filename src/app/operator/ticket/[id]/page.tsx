@@ -9,6 +9,8 @@ import { AutoSaveField } from "@/components/AutoSaveField";
 import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
 import { OfflineSyncBanner } from "@/components/OfflineSyncBanner";
 import { CompleteBatchForm } from "@/components/CompleteBatchForm";
+import { ShortageOverridePanel } from "@/components/ShortageOverridePanel";
+import { canPerformAction } from "@/lib/permissions";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -34,6 +36,7 @@ export default async function OperatorTicketPage({
       mix: { include: { components: true } },
       components: { include: { material: true } },
       trip: { include: { truck: true, driver: true, pump: true, drumReturn: { include: { wasteMemo: { include: { approvedBy: true } } } } } },
+      shortageOverrideRequests: { orderBy: { createdAt: "desc" }, take: 1, include: { requestedBy: true } },
     },
   });
   if (!ticket) notFound();
@@ -41,6 +44,17 @@ export default async function OperatorTicketPage({
   // Same terminal-state guard every write path already enforces — see
   // production/[id]/page.tsx's own isTerminal for the full reasoning.
   const isTerminal = ticket.status === "COMPLETE" || ticket.status === "CANCELLED";
+  const canRequestShortageOverride = await canPerformAction(user.role, "production", "requestShortageOverride");
+  const canDecideShortageOverride = await canPerformAction(user.role, "production", "approveShortageOverrideRequest");
+  const latestOverrideRequest = ticket.shortageOverrideRequests[0]
+    ? {
+        id: ticket.shortageOverrideRequests[0].id,
+        status: ticket.shortageOverrideRequests[0].status as "PENDING" | "APPROVED" | "REJECTED" | "CONSUMED",
+        reason: ticket.shortageOverrideRequests[0].reason,
+        requestedByName: ticket.shortageOverrideRequests[0].requestedBy.name,
+        rejectionNote: ticket.shortageOverrideRequests[0].rejectionNote,
+      }
+    : null;
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
 
@@ -194,25 +208,55 @@ export default async function OperatorTicketPage({
             completeTitle: d.completeTitle,
             completeIntro: d.completeIntro,
             completeButton: d.completeButton,
-            shortageOverrideNote: d.shortageOverrideNote,
-            shortageOverrideNotePlaceholder: d.shortageOverrideNotePlaceholder,
-            shortageOverrideNoteHint: d.shortageOverrideNoteHint,
             errorInsufficientStock: d.errorInsufficientStock,
             errorStorageNotConfigured: d.errorStorageNotConfigured,
             errorAlreadyCompleted: d.errorAlreadyCompleted,
             errorInvalidState: d.errorInvalidState,
             errorConcurrentConflict: d.errorConcurrentConflict,
-            errorUnauthorizedOverride: d.errorUnauthorizedOverride,
             errorNotFound: d.errorNotFound,
           }}
-          showShortageField={false}
           cardClassName="flex flex-col gap-2 rounded-xl border border-border bg-surface p-4 shadow-sm"
           titleClassName="font-display text-base font-semibold"
           introClassName="text-xs text-ink-muted"
           buttonClassName="rounded-md bg-accent py-2.5 text-sm font-medium text-white"
+        />
+      )}
+
+      {(canRequestShortageOverride || canDecideShortageOverride || latestOverrideRequest) && (
+        <ShortageOverridePanel
+          ticketId={ticket.id}
+          latestRequest={latestOverrideRequest}
+          canRequest={canRequestShortageOverride}
+          canDecide={canDecideShortageOverride}
+          isTerminal={isTerminal}
+          messages={{
+            title: d.shortageOverride.title,
+            noneHint: d.shortageOverride.noneHint,
+            requestedByPrefix: d.shortageOverride.requestedByPrefix,
+            pendingStatus: d.shortageOverride.pendingStatus,
+            approvedStatus: d.shortageOverride.approvedStatus,
+            rejectedStatus: d.shortageOverride.rejectedStatus,
+            consumedStatus: d.shortageOverride.consumedStatus,
+            requestLabel: d.shortageOverride.requestLabel,
+            requestPlaceholder: d.shortageOverride.requestPlaceholder,
+            requestButton: d.shortageOverride.requestButton,
+            approveButton: d.shortageOverride.approveButton,
+            rejectButton: d.shortageOverride.rejectButton,
+            rejectionNoteLabel: d.shortageOverride.rejectionNoteLabel,
+            rejectionNotePlaceholder: d.shortageOverride.rejectionNotePlaceholder,
+            errorNotFound: d.shortageOverride.errorNotFound,
+            errorTicketTerminal: d.shortageOverride.errorTicketTerminal,
+            errorAlreadyPending: d.shortageOverride.errorAlreadyPending,
+            errorAlreadyApproved: d.shortageOverride.errorAlreadyApproved,
+            errorNotPending: d.shortageOverride.errorNotPending,
+          }}
+          cardClassName="flex flex-col gap-2 rounded-xl border border-border bg-surface p-4 shadow-sm"
+          titleClassName="font-display text-base font-semibold"
+          hintClassName="text-xs text-ink-muted"
           labelClassName="block text-xs font-medium text-ink-muted mb-1"
           inputClassName="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm"
-          hintClassName="mt-1 text-xs text-ink-muted"
+          buttonClassName="rounded-md bg-accent py-2.5 text-sm font-medium text-white"
+          secondaryButtonClassName="rounded-md bg-accent py-2.5 text-sm font-medium text-white"
         />
       )}
 
