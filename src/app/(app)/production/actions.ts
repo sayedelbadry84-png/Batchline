@@ -626,6 +626,10 @@ export async function startTrip(formData: FormData) {
   const truck = await prisma.truck.findUnique({ where: { id: truckId }, include: { plant: true } });
   if (!truck || truck.status === "OUT_OF_SERVICE" || truck.status === "MAINTENANCE") return;
   if (truck.plant.siteId !== ticket.plant.siteId) return;
+  // A drum physically can't carry more than its rated capacity — without
+  // this, a ticket cut for more volume than any assigned truck can hold
+  // would silently create a trip nobody can actually deliver as ordered.
+  if (ticket.volumeM3 > truck.drumCapacityM3) return;
 
   const driver = await prisma.employee.findUnique({ where: { id: driverId } });
   if (!driver || driver.status !== "ACTIVE" || driver.role !== "DRIVER") return;
@@ -637,12 +641,19 @@ export async function startTrip(formData: FormData) {
   const pumpId = isPumpDelivery ? String(formData.get("pumpId") ?? "").trim() || null : null;
   const pumpOperatorIdInput = isPumpDelivery ? String(formData.get("pumpOperatorId") ?? "").trim() || null : null;
   const pumpAssistantIdInput = isPumpDelivery ? String(formData.get("pumpAssistantId") ?? "").trim() || null : null;
+  // A pump-delivery reservation with no pump actually assigned is an
+  // incomplete dispatch, not a valid one — reject rather than silently
+  // starting a trip that can't be discharged.
+  if (isPumpDelivery && !pumpId) return;
 
-  // Re-check server-side, same reasoning as the truck-busy check above — the
-  // picker only labels a short-reach pump, it doesn't remove it from the list.
-  if (isPumpDelivery && pumpId && ticket.reservation.minPumpReachM != null) {
-    const pump = await prisma.pump.findUnique({ where: { id: pumpId } });
-    if (pump?.reachM != null && pump.reachM < ticket.reservation.minPumpReachM) return;
+  // Re-verify the submitted pump server-side, same reasoning as the
+  // truck checks above — a stale/crafted picker value shouldn't be
+  // trusted for existence, service status, site, or reach.
+  if (isPumpDelivery && pumpId) {
+    const pump = await prisma.pump.findUnique({ where: { id: pumpId }, include: { plant: true } });
+    if (!pump || pump.status === "OUT_OF_SERVICE" || pump.status === "MAINTENANCE") return;
+    if (pump.plant.siteId !== ticket.plant.siteId) return;
+    if (pump.reachM != null && ticket.reservation.minPumpReachM != null && pump.reachM < ticket.reservation.minPumpReachM) return;
   }
 
   // The select offers the company-wide active roster (crew can work a
@@ -695,6 +706,26 @@ export async function startTrip(formData: FormData) {
       async (tx) => {
         const truckBusy = await tx.trip.findFirst({ where: { truckId, status: { not: "CLOSED" } } });
         if (truckBusy) throw new Error("TRUCK_BUSY");
+
+        // Same double-booking risk as the truck: a pump unit or a crew
+        // member can only be actually running one trip at a time, so
+        // check each the same way — under the same Serializable
+        // transaction, so a concurrent submission can't slip both onto
+        // two open trips at once.
+        if (pumpId) {
+          const pumpBusy = await tx.trip.findFirst({ where: { pumpId, status: { not: "CLOSED" } } });
+          if (pumpBusy) throw new Error("PUMP_BUSY");
+        }
+        if (pumpOperatorId || pumpAssistantId) {
+          const crewIds = [pumpOperatorId, pumpAssistantId].filter((v): v is string => Boolean(v));
+          const crewBusy = await tx.trip.findFirst({
+            where: {
+              status: { not: "CLOSED" },
+              OR: [{ pumpOperatorId: { in: crewIds } }, { pumpAssistantId: { in: crewIds } }],
+            },
+          });
+          if (crewBusy) throw new Error("CREW_BUSY");
+        }
 
         const created = await tx.trip.create({
           data: {
