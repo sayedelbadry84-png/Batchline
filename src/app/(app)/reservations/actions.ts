@@ -99,31 +99,50 @@ export async function createReservation(formData: FormData) {
   for (const row of pumpRows) {
     if (pumpIdSet.has(row.pumpId)) return;
     pumpIdSet.add(row.pumpId);
-    if (!(await isPumpAvailable(prisma, row.pumpId, pourWindowStart))) return;
   }
 
-  const reservation = await withSequentialNumber(
-    "RES",
-    (yr) => prisma.reservation.count({ where: { createdAt: yr } }),
-    (reservationNumber) =>
-      prisma.reservation.create({
-        data: {
-          reservationNumber,
-          projectId,
-          siteId,
-          mixId,
-          requestedVolumeM3,
-          originalVolumeM3: requestedVolumeM3,
-          pourWindowStart,
-          notes,
-          status: overCreditLimit ? "ON_HOLD" : "CONFIRMED",
-          ...readPourDetails(formData),
-          pumpAssignments: pumpRows.length
-            ? { create: pumpRows.map((row) => ({ ...row, scheduledStart: pourWindowStart })) }
-            : undefined,
-        },
-      }),
-  );
+  // Serializable, and the availability check re-run INSIDE the same
+  // transaction that creates the assignments: a plain check-then-create
+  // (what this used to be) lets two concurrent bookings for the same pump
+  // and overlapping window both read "available" before either commits,
+  // double-booking it. Under Serializable, Postgres detects the
+  // read-write conflict and aborts one with P2034, which falls through to
+  // the silent-return below like every other rejected submission here.
+  let reservation;
+  try {
+    reservation = await prisma.$transaction(
+      async (tx) => {
+        for (const row of pumpRows) {
+          if (!(await isPumpAvailable(tx, row.pumpId, pourWindowStart))) throw new Error("PUMP_UNAVAILABLE");
+        }
+        return withSequentialNumber(
+          "RES",
+          (yr) => tx.reservation.count({ where: { createdAt: yr } }),
+          (reservationNumber) =>
+            tx.reservation.create({
+              data: {
+                reservationNumber,
+                projectId,
+                siteId,
+                mixId,
+                requestedVolumeM3,
+                originalVolumeM3: requestedVolumeM3,
+                pourWindowStart,
+                notes,
+                status: overCreditLimit ? "ON_HOLD" : "CONFIRMED",
+                ...readPourDetails(formData),
+                pumpAssignments: pumpRows.length
+                  ? { create: pumpRows.map((row) => ({ ...row, scheduledStart: pourWindowStart })) }
+                  : undefined,
+              },
+            }),
+        );
+      },
+      { isolationLevel: "Serializable" },
+    );
+  } catch {
+    return;
+  }
 
   await logAudit({
     module: "Reservations",

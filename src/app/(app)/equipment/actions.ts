@@ -280,12 +280,22 @@ export async function schedulePump(formData: FormData) {
   const scheduledStart = new Date(scheduledStartRaw);
   // Same double-booking check as the New Booking form's own pump rows in
   // reservations/actions.ts — this is the OTHER place a PumpAssignment
-  // gets created, so it needs the identical guard.
-  if (!(await isPumpAvailable(prisma, pumpId, scheduledStart))) return;
-
-  const assignment = await prisma.pumpAssignment.create({
-    data: { pumpId, reservationId, scheduledStart },
-  });
+  // gets created, so it needs the identical guard, re-checked inside the
+  // same Serializable transaction that creates the assignment (a plain
+  // check-then-create let two concurrent schedule calls for the same
+  // pump/window both read "available" before either committed).
+  let assignment;
+  try {
+    assignment = await prisma.$transaction(
+      async (tx) => {
+        if (!(await isPumpAvailable(tx, pumpId, scheduledStart))) throw new Error("PUMP_UNAVAILABLE");
+        return tx.pumpAssignment.create({ data: { pumpId, reservationId, scheduledStart } });
+      },
+      { isolationLevel: "Serializable" },
+    );
+  } catch {
+    return;
+  }
 
   await logAudit({
     module: "Equipment",
