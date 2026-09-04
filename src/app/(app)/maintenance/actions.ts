@@ -8,6 +8,11 @@ import { withSequentialNumber } from "@/lib/sequence";
 import { computeLaborCost } from "@/lib/maintenance";
 import { revalidatePath } from "next/cache";
 
+// Prisma's default 5s interactive-transaction timeout can be exceeded by a
+// transaction's several sequential Neon round-trips — matches the same
+// TX_OPTIONS already used in billing/finance/employees/production actions.
+const TX_OPTIONS = { timeout: 15000 };
+
 export async function createMaintenanceTicket(formData: FormData) {
   const actor = await getCurrentUser();
   await requireActionPermission(actor, "maintenance", "createTicket");
@@ -65,6 +70,7 @@ export async function startMaintenanceTicket(formData: FormData) {
 
   const ticket = await prisma.maintenanceTicket.findUnique({ where: { id } });
   if (!ticket || ticket.status !== "OPEN") return;
+  if (!isSiteInScope(ticket.siteId, effectiveSiteId(actor))) return;
 
   await prisma.maintenanceTicket.update({ where: { id }, data: { status: "IN_PROGRESS", startedAt: new Date() } });
 
@@ -85,31 +91,45 @@ export async function completeMaintenanceTicket(formData: FormData) {
 
   const id = String(formData.get("id") ?? "");
   const resolutionNotes = String(formData.get("resolutionNotes") ?? "").trim();
-  const laborCost = Number(formData.get("laborCost") ?? 0) || null;
-  const partsCost = Number(formData.get("partsCost") ?? 0) || null;
-  const downtimeHours = Number(formData.get("downtimeHours") ?? 0) || null;
+  // Read the raw string first — `Number(x ?? 0) || null` silently turns a
+  // legitimately-entered 0 (no labor charge, no downtime) into null.
+  const laborCostRaw = String(formData.get("laborCost") ?? "").trim();
+  const partsCostRaw = String(formData.get("partsCost") ?? "").trim();
+  const downtimeHoursRaw = String(formData.get("downtimeHours") ?? "").trim();
+  const laborCost = laborCostRaw === "" ? null : Number(laborCostRaw);
+  const partsCost = partsCostRaw === "" ? null : Number(partsCostRaw);
+  const downtimeHours = downtimeHoursRaw === "" ? null : Number(downtimeHoursRaw);
   if (!id || !resolutionNotes) return;
+  if ((laborCost !== null && !Number.isFinite(laborCost)) || (partsCost !== null && !Number.isFinite(partsCost)) || (downtimeHours !== null && !Number.isFinite(downtimeHours))) return;
 
   const ticket = await prisma.maintenanceTicket.findUnique({ where: { id }, include: { plan: true } });
   if (!ticket || !["OPEN", "IN_PROGRESS"].includes(ticket.status)) return;
+  if (!isSiteInScope(ticket.siteId, effectiveSiteId(actor))) return;
 
   const now = new Date();
 
-  await prisma.maintenanceTicket.update({
-    where: { id },
-    data: { status: "COMPLETED", completedAt: now, resolutionNotes, laborCost, partsCost, downtimeHours },
-  });
+  // The ticket close, the equipment's lastMaintenanceAt stamp, and the
+  // plan's cycle advance used to be three independent writes — a crash or
+  // error between them could leave the ticket COMPLETED with the equipment
+  // still showing its old maintenance date, or a plan cycle that never
+  // advances even though the work is done.
+  await prisma.$transaction(async (tx) => {
+    await tx.maintenanceTicket.update({
+      where: { id },
+      data: { status: "COMPLETED", completedAt: now, resolutionNotes, laborCost, partsCost, downtimeHours },
+    });
 
-  if (ticket.equipmentType === "TRUCK") {
-    await prisma.truck.update({ where: { id: ticket.equipmentId }, data: { lastMaintenanceAt: now } }).catch(() => {});
-  } else if (ticket.equipmentType === "PUMP") {
-    await prisma.pump.update({ where: { id: ticket.equipmentId }, data: { lastMaintenanceAt: now } }).catch(() => {});
-  }
+    if (ticket.equipmentType === "TRUCK") {
+      await tx.truck.update({ where: { id: ticket.equipmentId }, data: { lastMaintenanceAt: now } }).catch(() => {});
+    } else if (ticket.equipmentType === "PUMP") {
+      await tx.pump.update({ where: { id: ticket.equipmentId }, data: { lastMaintenanceAt: now } }).catch(() => {});
+    }
 
-  if (ticket.plan) {
-    const nextDueAt = ticket.plan.intervalDays ? new Date(now.getTime() + ticket.plan.intervalDays * 24 * 60 * 60 * 1000) : null;
-    await prisma.maintenancePlan.update({ where: { id: ticket.plan.id }, data: { lastCompletedAt: now, nextDueAt } });
-  }
+    if (ticket.plan) {
+      const nextDueAt = ticket.plan.intervalDays ? new Date(now.getTime() + ticket.plan.intervalDays * 24 * 60 * 60 * 1000) : null;
+      await tx.maintenancePlan.update({ where: { id: ticket.plan.id }, data: { lastCompletedAt: now, nextDueAt } });
+    }
+  }, TX_OPTIONS);
 
   await logAudit({
     module: "Maintenance",
@@ -129,6 +149,7 @@ export async function cancelMaintenanceTicket(formData: FormData) {
 
   const ticket = await prisma.maintenanceTicket.findUnique({ where: { id } });
   if (!ticket || ["COMPLETED", "CANCELLED"].includes(ticket.status)) return;
+  if (!isSiteInScope(ticket.siteId, effectiveSiteId(actor))) return;
 
   await prisma.maintenanceTicket.update({ where: { id }, data: { status: "CANCELLED" } });
 
@@ -168,6 +189,10 @@ export async function deactivateMaintenancePlan(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
+  const plan = await prisma.maintenancePlan.findUnique({ where: { id } });
+  if (!plan) return;
+  if (!isSiteInScope(plan.siteId, effectiveSiteId(actor))) return;
+
   await prisma.maintenancePlan.update({ where: { id }, data: { active: false } });
 
   await logAudit({ module: "Maintenance", recordId: id, afterValue: "DEACTIVATED", reasonCode: "MAINTENANCE_PLAN_DEACTIVATED" });
@@ -186,6 +211,7 @@ export async function generateTicketFromPlan(formData: FormData) {
 
   const plan = await prisma.maintenancePlan.findUnique({ where: { id: planId } });
   if (!plan || !plan.active) return;
+  if (!isSiteInScope(plan.siteId, effectiveSiteId(actor))) return;
 
   const ticket = await withSequentialNumber(
     "MT",
@@ -229,6 +255,7 @@ export async function convertTicketToOrder(formData: FormData) {
 
   const ticket = await prisma.maintenanceTicket.findUnique({ where: { id: ticketId }, include: { order: true } });
   if (!ticket || ticket.order || !["OPEN", "IN_PROGRESS"].includes(ticket.status)) return;
+  if (!isSiteInScope(ticket.siteId, effectiveSiteId(actor))) return;
 
   const order = await withSequentialNumber(
     "MO",
@@ -254,8 +281,9 @@ export async function startMaintenanceOrder(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  const order = await prisma.maintenanceOrder.findUnique({ where: { id } });
+  const order = await prisma.maintenanceOrder.findUnique({ where: { id }, include: { ticket: true } });
   if (!order || order.status !== "OPEN") return;
+  if (!isSiteInScope(order.ticket.siteId, effectiveSiteId(actor))) return;
 
   await prisma.maintenanceOrder.update({ where: { id }, data: { status: "IN_PROGRESS", startedAt: new Date() } });
 
@@ -284,32 +312,38 @@ export async function completeMaintenanceOrder(formData: FormData) {
     include: { ticket: { include: { plan: true } }, parts: true, technicians: { include: { employee: true } } },
   });
   if (!order || !["OPEN", "IN_PROGRESS"].includes(order.status)) return;
+  if (!isSiteInScope(order.ticket.siteId, effectiveSiteId(actor))) return;
 
   const now = new Date();
   const partsCost = order.parts.reduce((sum, p) => sum + p.lineTotal, 0) || null;
   const laborCost = computeLaborCost(order.technicians) || null;
-
-  await prisma.maintenanceOrder.update({
-    where: { id },
-    data: { status: "COMPLETED", completedAt: now, resolutionNotes, laborCost },
-  });
-
   const ticket = order.ticket;
-  await prisma.maintenanceTicket.update({
-    where: { id: ticket.id },
-    data: { status: "COMPLETED", completedAt: now, resolutionNotes, laborCost, partsCost },
-  });
 
-  if (ticket.equipmentType === "TRUCK") {
-    await prisma.truck.update({ where: { id: ticket.equipmentId }, data: { lastMaintenanceAt: now } }).catch(() => {});
-  } else if (ticket.equipmentType === "PUMP") {
-    await prisma.pump.update({ where: { id: ticket.equipmentId }, data: { lastMaintenanceAt: now } }).catch(() => {});
-  }
+  // Same atomicity issue as completeMaintenanceTicket — order close, ticket
+  // close, equipment stamp, and plan cycle advance were four independent
+  // writes with no all-or-nothing guarantee between them.
+  await prisma.$transaction(async (tx) => {
+    await tx.maintenanceOrder.update({
+      where: { id },
+      data: { status: "COMPLETED", completedAt: now, resolutionNotes, laborCost },
+    });
 
-  if (ticket.plan) {
-    const nextDueAt = ticket.plan.intervalDays ? new Date(now.getTime() + ticket.plan.intervalDays * 24 * 60 * 60 * 1000) : null;
-    await prisma.maintenancePlan.update({ where: { id: ticket.plan.id }, data: { lastCompletedAt: now, nextDueAt } });
-  }
+    await tx.maintenanceTicket.update({
+      where: { id: ticket.id },
+      data: { status: "COMPLETED", completedAt: now, resolutionNotes, laborCost, partsCost },
+    });
+
+    if (ticket.equipmentType === "TRUCK") {
+      await tx.truck.update({ where: { id: ticket.equipmentId }, data: { lastMaintenanceAt: now } }).catch(() => {});
+    } else if (ticket.equipmentType === "PUMP") {
+      await tx.pump.update({ where: { id: ticket.equipmentId }, data: { lastMaintenanceAt: now } }).catch(() => {});
+    }
+
+    if (ticket.plan) {
+      const nextDueAt = ticket.plan.intervalDays ? new Date(now.getTime() + ticket.plan.intervalDays * 24 * 60 * 60 * 1000) : null;
+      await tx.maintenancePlan.update({ where: { id: ticket.plan.id }, data: { lastCompletedAt: now, nextDueAt } });
+    }
+  }, TX_OPTIONS);
 
   await logAudit({
     module: "Maintenance",
@@ -327,8 +361,9 @@ export async function cancelMaintenanceOrder(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  const order = await prisma.maintenanceOrder.findUnique({ where: { id } });
+  const order = await prisma.maintenanceOrder.findUnique({ where: { id }, include: { ticket: true } });
   if (!order || ["COMPLETED", "CANCELLED"].includes(order.status)) return;
+  if (!isSiteInScope(order.ticket.siteId, effectiveSiteId(actor))) return;
 
   await prisma.maintenanceOrder.update({ where: { id }, data: { status: "CANCELLED" } });
 
@@ -344,11 +379,17 @@ export async function addOrderTechnician(formData: FormData) {
 
   const orderId = String(formData.get("orderId") ?? "");
   const employeeId = String(formData.get("employeeId") ?? "");
-  const hoursWorked = Number(formData.get("hoursWorked") ?? 0) || null;
+  // A technician can legitimately be corrected to 0 logged hours (assigned
+  // but hasn't started, or an earlier entry was wrong) — `Number(x ?? 0) ||
+  // null` would silently turn that explicit 0 into null instead.
+  const hoursWorkedRaw = String(formData.get("hoursWorked") ?? "").trim();
+  const hoursWorked = hoursWorkedRaw === "" ? null : Number(hoursWorkedRaw);
   if (!orderId || !employeeId) return;
+  if (hoursWorked !== null && !Number.isFinite(hoursWorked)) return;
 
-  const order = await prisma.maintenanceOrder.findUnique({ where: { id: orderId } });
+  const order = await prisma.maintenanceOrder.findUnique({ where: { id: orderId }, include: { ticket: true } });
   if (!order || order.status === "CANCELLED") return;
+  if (!isSiteInScope(order.ticket.siteId, effectiveSiteId(actor))) return;
 
   await prisma.maintenanceOrderTechnician.upsert({
     where: { orderId_employeeId: { orderId, employeeId } },
@@ -367,7 +408,14 @@ export async function removeOrderTechnician(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  await prisma.maintenanceOrderTechnician.delete({ where: { id } }).catch(() => {});
+  const technician = await prisma.maintenanceOrderTechnician.findUnique({
+    where: { id },
+    include: { order: { include: { ticket: true } } },
+  });
+  if (!technician) return;
+  if (!isSiteInScope(technician.order.ticket.siteId, effectiveSiteId(actor))) return;
+
+  await prisma.maintenanceOrderTechnician.delete({ where: { id } });
 
   revalidatePath("/maintenance");
 }
@@ -390,62 +438,92 @@ export async function issueSparePartToOrder(formData: FormData) {
 
   const order = await prisma.maintenanceOrder.findUnique({ where: { id: orderId }, include: { ticket: true } });
   if (!order || !["OPEN", "IN_PROGRESS"].includes(order.status)) return;
+  if (!isSiteInScope(order.ticket.siteId, effectiveSiteId(actor))) return;
 
   const sparePart = await prisma.sparePart.findUnique({ where: { id: sparePartId } });
   if (!sparePart) return;
   const unitCost = Number(formData.get("unitCost") ?? 0) || sparePart.lastUnitCost || 0;
 
   const siteId = order.ticket.siteId;
-  // Availability has to net out BOTH ways stock leaves — an order-linked
-  // issuance here and a direct warehouse issuance (see issueSparePart in
-  // warehouses/actions.ts) — or the two paths would silently disagree
-  // about how much is actually left on the shelf.
-  const [receivedAgg, orderIssuedAgg, directIssuedAgg] = await Promise.all([
-    prisma.sparePartReceipt.aggregate({ where: { sparePartId, siteId }, _sum: { quantity: true } }),
-    prisma.maintenanceOrderPart.aggregate({ where: { sparePartId, order: { ticket: { siteId } } }, _sum: { quantity: true } }),
-    prisma.sparePartIssuance.aggregate({ where: { sparePartId, siteId }, _sum: { quantity: true } }),
-  ]);
-  const available = (receivedAgg._sum.quantity ?? 0) - (orderIssuedAgg._sum.quantity ?? 0) - (directIssuedAgg._sum.quantity ?? 0);
-  const issueQty = Math.max(0, Math.min(available, quantity));
-  const shortfall = quantity - issueQty;
+  // The availability read and the issuance/requisition writes below used to
+  // be separate round trips with no lock between them — two concurrent
+  // issuances against the same limited stock could both read the same
+  // "available" figure and both succeed, together issuing more than was
+  // ever on the shelf. Serializable makes Postgres detect that read-write
+  // conflict and abort one of the two competing transactions.
+  let issueQty = 0;
+  let shortfall = 0;
+  let requisitionNumber: string | null = null;
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      // Availability has to net out BOTH ways stock leaves — an order-linked
+      // issuance here and a direct warehouse issuance (see issueSparePart in
+      // warehouses/actions.ts) — or the two paths would silently disagree
+      // about how much is actually left on the shelf.
+      const [receivedAgg, orderIssuedAgg, directIssuedAgg] = await Promise.all([
+        tx.sparePartReceipt.aggregate({ where: { sparePartId, siteId }, _sum: { quantity: true } }),
+        tx.maintenanceOrderPart.aggregate({ where: { sparePartId, order: { ticket: { siteId } } }, _sum: { quantity: true } }),
+        tx.sparePartIssuance.aggregate({ where: { sparePartId, siteId }, _sum: { quantity: true } }),
+      ]);
+      const available = (receivedAgg._sum.quantity ?? 0) - (orderIssuedAgg._sum.quantity ?? 0) - (directIssuedAgg._sum.quantity ?? 0);
+      const qty = Math.max(0, Math.min(available, quantity));
+      const short = quantity - qty;
 
-  if (issueQty > 0) {
-    await prisma.maintenanceOrderPart.create({
-      data: {
-        orderId,
-        sparePartId,
-        quantity: issueQty,
-        unitCost,
-        lineTotal: issueQty * unitCost,
-        serialNumber,
-        issuedById: actor!.id,
-      },
-    });
-    await logAudit({ module: "Maintenance", recordId: orderId, afterValue: `${sparePart.name} × ${issueQty}`, reasonCode: "SPARE_PART_ISSUED" });
-  }
-
-  if (shortfall > 0) {
-    const requisition = await withSequentialNumber(
-      "SPR",
-      () => prisma.sparePartsRequisition.count(),
-      (requisitionNumber) =>
-        prisma.sparePartsRequisition.create({
+      if (qty > 0) {
+        await tx.maintenanceOrderPart.create({
           data: {
-            requisitionNumber,
+            orderId,
             sparePartId,
-            siteId,
-            quantityNeeded: shortfall,
-            maintenanceOrderId: orderId,
-            requestedById: actor!.id,
+            quantity: qty,
+            unitCost,
+            lineTotal: qty * unitCost,
+            serialNumber,
+            issuedById: actor!.id,
           },
-        }),
-    );
-    await logAudit({
-      module: "Maintenance",
-      recordId: requisition.id,
-      afterValue: `${requisition.requisitionNumber} — ${sparePart.name} × ${shortfall}`,
-      reasonCode: "SPARE_PARTS_REQUISITION_CREATED",
-    });
+        });
+      }
+
+      let requisitionId: string | null = null;
+      let reqNumber: string | null = null;
+      if (short > 0) {
+        const requisition = await withSequentialNumber(
+          "SPR",
+          () => tx.sparePartsRequisition.count(),
+          (num) =>
+            tx.sparePartsRequisition.create({
+              data: {
+                requisitionNumber: num,
+                sparePartId,
+                siteId,
+                quantityNeeded: short,
+                maintenanceOrderId: orderId,
+                requestedById: actor!.id,
+              },
+            }),
+        );
+        requisitionId = requisition.id;
+        reqNumber = requisition.requisitionNumber;
+      }
+
+      return { qty, short, requisitionId, reqNumber };
+    }, { ...TX_OPTIONS, isolationLevel: "Serializable" });
+    issueQty = result.qty;
+    shortfall = result.short;
+    requisitionNumber = result.reqNumber;
+
+    if (issueQty > 0) {
+      await logAudit({ module: "Maintenance", recordId: orderId, afterValue: `${sparePart.name} × ${issueQty}`, reasonCode: "SPARE_PART_ISSUED" });
+    }
+    if (shortfall > 0 && result.requisitionId) {
+      await logAudit({
+        module: "Maintenance",
+        recordId: result.requisitionId,
+        afterValue: `${requisitionNumber} — ${sparePart.name} × ${shortfall}`,
+        reasonCode: "SPARE_PARTS_REQUISITION_CREATED",
+      });
+    }
+  } catch {
+    return;
   }
 
   revalidatePath("/maintenance");
