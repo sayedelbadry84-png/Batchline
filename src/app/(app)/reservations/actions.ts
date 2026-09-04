@@ -6,6 +6,7 @@ import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getReleasedVolumeM3 } from "@/lib/reservations";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { getCustomerOutstandingBalance } from "@/lib/billing";
+import { isPumpAvailable } from "@/lib/pumpSchedule";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 
@@ -86,6 +87,20 @@ export async function createReservation(formData: FormData) {
       pumpAssistantId: pumpAssistantIds[i] || null,
     }))
     .filter((row) => row.pumpId);
+
+  // Nothing before this checked that a chosen pump isn't already
+  // committed to another job around the same time — the exact same
+  // double-booking risk truck/reservation-volume races already had
+  // elsewhere, just for a pump instead. Refuses the whole booking rather
+  // than silently dropping the conflicting pump row, since a PUMP
+  // delivery method with no pump actually booked isn't a state this form
+  // should produce.
+  const pumpIdSet = new Set<string>();
+  for (const row of pumpRows) {
+    if (pumpIdSet.has(row.pumpId)) return;
+    pumpIdSet.add(row.pumpId);
+    if (!(await isPumpAvailable(prisma, row.pumpId, pourWindowStart))) return;
+  }
 
   const reservation = await withSequentialNumber(
     "RES",

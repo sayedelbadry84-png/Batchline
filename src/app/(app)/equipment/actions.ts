@@ -5,6 +5,7 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isPlantInScope, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { logTransferIfChanged } from "@/lib/transferAudit";
+import { isPumpAvailable } from "@/lib/pumpSchedule";
 import { revalidatePath } from "next/cache";
 
 function refresh() {
@@ -276,8 +277,14 @@ export async function schedulePump(formData: FormData) {
   const pumpForSchedule = await prisma.pump.findUnique({ where: { id: pumpId }, select: { plantId: true } });
   if (!pumpForSchedule || !(await isPlantInScope(pumpForSchedule.plantId, scheduleSiteId))) return;
 
+  const scheduledStart = new Date(scheduledStartRaw);
+  // Same double-booking check as the New Booking form's own pump rows in
+  // reservations/actions.ts — this is the OTHER place a PumpAssignment
+  // gets created, so it needs the identical guard.
+  if (!(await isPumpAvailable(prisma, pumpId, scheduledStart))) return;
+
   const assignment = await prisma.pumpAssignment.create({
-    data: { pumpId, reservationId, scheduledStart: new Date(scheduledStartRaw) },
+    data: { pumpId, reservationId, scheduledStart },
   });
 
   await logAudit({
