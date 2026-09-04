@@ -851,6 +851,10 @@ async function SuppliersTab({
                           <label className={ui.label}>{sm.fMaterial.co2Factor}</label>
                           <input name="co2FactorKgPerKg" type="number" step="0.001" defaultValue={mt.co2FactorKgPerKg ?? undefined} className={`${ui.input} w-24`} dir="ltr" />
                         </div>
+                        <label className="flex items-center gap-1.5 text-xs text-ink-muted">
+                          <input type="checkbox" name="notInventoryTracked" defaultChecked={!mt.inventoryTracked} />
+                          {sm.fMaterial.notInventoryTracked}
+                        </label>
                         <button className={ui.button}>{dict.field.save}</button>
                         <Link href={baseUrl} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt">
                           {dict.field.cancel}
@@ -860,7 +864,10 @@ async function SuppliersTab({
                   </tr>
                 ) : (
                   <tr key={mt.id}>
-                    <td className={`${ui.td} font-medium`}>{mt.name}</td>
+                    <td className={`${ui.td} font-medium`}>
+                      {mt.name}
+                      {!mt.inventoryTracked && <span className="ms-1.5 text-xs text-ink-muted">({sm.fMaterial.notInventoryTracked})</span>}
+                    </td>
                     <td className={`${ui.td} font-mono text-xs`}>{dict.materialTypes[mt.type as keyof typeof dict.materialTypes] ?? mt.type}</td>
                     <td className={ui.td} dir="ltr">{mt.brand || "—"}</td>
                     <td className={ui.td}>{mt.supplier?.name ?? "—"}</td>
@@ -937,6 +944,11 @@ async function SuppliersTab({
             <input name="co2FactorKgPerKg" type="number" step="0.001" className={ui.input} dir="ltr" />
             <p className="mt-1 text-xs text-ink-muted">{sm.co2FactorHint}</p>
           </div>
+          <label className="flex items-center gap-1.5 text-sm text-ink-muted">
+            <input type="checkbox" name="notInventoryTracked" />
+            {sm.fMaterial.notInventoryTracked}
+          </label>
+          <p className="text-xs text-ink-muted">{sm.notInventoryTrackedHint}</p>
           <button type="submit" className={`${ui.button} mt-2`}>
             {sm.addMaterial}
           </button>

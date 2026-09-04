@@ -35,8 +35,17 @@ export type CompleteBatchResult =
 // doesn't inventory-track in the first place (left as a no-op, same as
 // before this fix — not every BatchComponentActual row necessarily
 // represents a physically stocked material).
-function isInventoryTracked(materialType: string): boolean {
-  return ["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME", "WATER", "ADMIXTURE"].includes(materialType) || AGGREGATE_TYPES.has(materialType);
+//
+// material.inventoryTracked (schema.prisma) is a per-material override on
+// top of this — WATER defaults to tracked like every other normally-
+// stocked type, but a site that genuinely doesn't meter a specific water
+// material into inventory (municipal supply, no water hopper on file) can
+// mark THAT material untracked without affecting every other site's own
+// Water material. Checked first so an explicit "don't track this one"
+// always wins regardless of type.
+function isInventoryTracked(material: { type: string; inventoryTracked: boolean }): boolean {
+  if (!material.inventoryTracked) return false;
+  return ["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME", "WATER", "ADMIXTURE"].includes(material.type) || AGGREGATE_TYPES.has(material.type);
 }
 
 type ResolvedComponent = {
@@ -116,7 +125,7 @@ export async function completeBatchTicket(
         // whole ledger exists to close.
         const resolved: ResolvedComponent[] = [];
         for (const c of ticket.components) {
-          if (!isInventoryTracked(c.material.type)) continue;
+          if (!isInventoryTracked(c.material)) continue;
 
           const massKg = c.actualMassKg ?? c.targetMassKg;
           const massTons = massKg / 1000;

@@ -579,6 +579,29 @@ test("an ADMIXTURE with no specificGravity on file fails the whole completion", 
   }
 });
 
+// ---- 11b. A material marked inventoryTracked:false is skipped silently ----
+test("a component whose material has inventoryTracked:false is skipped, not STORAGE_NOT_CONFIGURED", async () => {
+  await resetSilo(50);
+  const untrackedWater = await prisma.material.create({ data: { name: "TEST-SUITE-UNTRACKED-WATER", type: "WATER", inventoryTracked: false } });
+  try {
+    const ticketId = await makeTicket([
+      { materialId, targetMassKg: 1000 },
+      { materialId: untrackedWater.id, targetMassKg: 200 },
+    ]);
+
+    const result = await completeBatchTicket(ticketId, {});
+    assert.equal(result.status, "SUCCESS");
+
+    assert.equal(await siloLevel(siloId), 49); // the tracked component still posted normally
+
+    const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
+    assert.equal(movements.length, 1); // only the tracked component posted a movement
+    assert.equal(movements[0].materialId, materialId);
+  } finally {
+    await prisma.material.delete({ where: { id: untrackedWater.id } }).catch(() => {});
+  }
+});
+
 // ---- 12. Dispatch and reversal are mutually exclusive (CR-01) ---------
 // startTrip itself (production/actions.ts) needs a session and can't be
 // called directly from here — this mirrors its actual guard exactly (a

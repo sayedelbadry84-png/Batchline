@@ -480,6 +480,16 @@ model Material {
   // prefers this per-material figure and only falls back to the generic
   // table when it's null.
   co2FactorKgPerKg Float?
+  // Whether completeBatchTicket (src/lib/batchCompletion.ts) requires a
+  // matching silo/hopper/tank for this specific material before letting a
+  // ticket complete. Defaults to true for every normally-stocked type
+  // (CEMENT/aggregate/WATER/ADMIXTURE) — set false for a real material a
+  // site genuinely doesn't meter into inventory (e.g. municipal water on
+  // a site with no water hopper), so that one material silently skips
+  // deduction instead of failing the whole completion with
+  // STORAGE_NOT_CONFIGURED. Deliberately per-material, not per-type: two
+  // sites can use two different Water materials, one tracked and one not.
+  inventoryTracked Boolean   @default(true)
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 

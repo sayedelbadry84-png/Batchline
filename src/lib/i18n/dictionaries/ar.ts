@@ -727,10 +727,11 @@ const ar = {
       colMaterials: { material: "المادة", type: "النوع", brand: "العلامة التجارية", supplier: "المورد", sg: "الوزن النوعي", absorption: "الامتصاص %", lastUnitCost: "التكلفة/كجم", co2Factor: "كربون كجم CO₂e/كجم" },
       emptyMaterials: "لا توجد مواد بعد.",
       newMaterialTitle: "مادة جديدة",
-      fMaterial: { supplier: "المورد", name: "الاسم", type: "النوع", brand: "العلامة التجارية", sg: "الوزن النوعي", absorption: "الامتصاص %", lastUnitCost: "التكلفة المعيارية / كجم", co2Factor: "عامل الكربون (كجم CO₂e / كجم)" },
+      fMaterial: { supplier: "المورد", name: "الاسم", type: "النوع", brand: "العلامة التجارية", sg: "الوزن النوعي", absorption: "الامتصاص %", lastUnitCost: "التكلفة المعيارية / كجم", co2Factor: "عامل الكربون (كجم CO₂e / كجم)", notInventoryTracked: "غير متتبعة في المخزون" },
       addMaterial: "إضافة مادة",
       lastUnitCostHint: "تُدخَل يدويًا — تُستخدم في تقرير الربحية لتقدير تكلفة المواد المستهلكة. اتركها فارغة إن لم تُعرف بعد.",
       co2FactorHint: "تُملأ تلقائيًا بمتوسط صناعي عام حسب نوع المادة — استبدلها برقم شهادة EPD الفعلي من موردك عند توفره.",
+      notInventoryTrackedHint: "فعّل هذا فقط لمادة لا يتتبعها الموقع مخزنيًا (مثال: مياه بلدية بلا حاوية مقاسة) — إكمال دفعة تستخدم هذه المادة لن يطلب صومعة أو حاوية أو خزان مطابق ولن يخصم من أي رصيد.",
       noEvaluation: "لم يُقيَّم بعد",
       evaluations: {
         title: "تقييم الموردين",

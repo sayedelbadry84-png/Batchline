@@ -730,10 +730,11 @@ const en: typeof ar = {
       colMaterials: { material: "Material", type: "Type", brand: "Brand", supplier: "Supplier", sg: "SG", absorption: "Absorption %", lastUnitCost: "Cost/kg", co2Factor: "CO₂e kg/kg" },
       emptyMaterials: "No materials yet.",
       newMaterialTitle: "New material",
-      fMaterial: { supplier: "Supplier", name: "Name", type: "Type", brand: "Brand", sg: "Specific gravity", absorption: "Absorption %", lastUnitCost: "Standard cost / kg", co2Factor: "Carbon factor (kg CO₂e / kg)" },
+      fMaterial: { supplier: "Supplier", name: "Name", type: "Type", brand: "Brand", sg: "Specific gravity", absorption: "Absorption %", lastUnitCost: "Standard cost / kg", co2Factor: "Carbon factor (kg CO₂e / kg)", notInventoryTracked: "Not inventory-tracked" },
       addMaterial: "Add material",
       lastUnitCostHint: "Entered manually — used by the profitability report to price consumed material. Leave blank if not known yet.",
       co2FactorHint: "Prefilled with a generic industry average for this material type — replace it with your supplier's real EPD figure once you have one.",
+      notInventoryTrackedHint: "Only turn this on for a material this site genuinely doesn't meter into inventory (e.g. municipal water with no metered tank) — completing a batch that uses it won't require a matching silo/hopper/tank and won't deduct from any balance.",
       noEvaluation: "Not yet evaluated",
       evaluations: {
         title: "Supplier evaluations",
