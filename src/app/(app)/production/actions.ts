@@ -7,6 +7,7 @@ import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { getAvailableReclaimForTruck } from "@/lib/reclaim";
+import { adjustSiloLevel, adjustHopperLevel, adjustChemicalTankLevel } from "@/lib/inventoryLevels";
 import { withSequentialNumber } from "@/lib/sequence";
 import { REQUISITION_APPROVAL_ROLES } from "@/lib/permissions";
 import { notify, notifyRoles } from "@/lib/notify";
@@ -502,11 +503,12 @@ export async function completeBatch(formData: FormData) {
         if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
           const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
           if (silo) {
-            const newLevelTons = Math.max(0, silo.currentLevelTons - massTons);
-            await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: newLevelTons } });
-            requisitionChecks.push(() =>
-              maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, silo.capacityTons, silo.minThresholdPct, (tons) => tons * 1000),
-            );
+            const newLevelTons = await adjustSiloLevel(tx, silo.id, -massTons);
+            if (newLevelTons !== null) {
+              requisitionChecks.push(() =>
+                maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, silo.capacityTons, silo.minThresholdPct, (tons) => tons * 1000),
+              );
+            }
           }
         } else if (AGGREGATE_TYPES.has(c.material.type)) {
           const hopper = await findMatchingHopper(
@@ -517,11 +519,12 @@ export async function completeBatch(formData: FormData) {
             c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
           );
           if (hopper) {
-            const newLevelTons = Math.max(0, hopper.currentLevelTons - massTons);
-            await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: newLevelTons } });
-            requisitionChecks.push(() =>
-              maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, hopper.capacityTons, hopper.minThresholdPct, (tons) => tons * 1000),
-            );
+            const newLevelTons = await adjustHopperLevel(tx, hopper.id, -massTons);
+            if (newLevelTons !== null) {
+              requisitionChecks.push(() =>
+                maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, hopper.capacityTons, hopper.minThresholdPct, (tons) => tons * 1000),
+              );
+            }
           }
         } else if (c.material.type === "WATER") {
           // Reuses Hopper (a plain tonnage heap) rather than a new model — a
@@ -530,11 +533,12 @@ export async function completeBatch(formData: FormData) {
           // same silent no-op as any other unregistered destination.
           const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
           if (waterHopper) {
-            const newLevelTons = Math.max(0, waterHopper.currentLevelTons - massTons);
-            await tx.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: newLevelTons } });
-            requisitionChecks.push(() =>
-              maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, waterHopper.capacityTons, waterHopper.minThresholdPct, (tons) => tons * 1000),
-            );
+            const newLevelTons = await adjustHopperLevel(tx, waterHopper.id, -massTons);
+            if (newLevelTons !== null) {
+              requisitionChecks.push(() =>
+                maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, waterHopper.capacityTons, waterHopper.minThresholdPct, (tons) => tons * 1000),
+              );
+            }
           }
         } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
           // Batched mass is always stored in kg (see addComponent in
@@ -543,19 +547,20 @@ export async function completeBatch(formData: FormData) {
           const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
           if (tank) {
             const liters = massKg / c.material.specificGravity;
-            const newLevelLiters = Math.max(0, tank.currentLevelLiters - liters);
-            await tx.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: newLevelLiters } });
+            const newLevelLiters = await adjustChemicalTankLevel(tx, tank.id, -liters);
             const specificGravity = c.material.specificGravity;
-            requisitionChecks.push(() =>
-              maybeAutoRequisitionMaterial(
-                c.materialId,
-                ticket.plant.siteId,
-                newLevelLiters,
-                tank.capacityLiters ?? 0,
-                tank.minThresholdPct,
-                (liters) => liters * specificGravity,
-              ),
-            );
+            if (newLevelLiters !== null) {
+              requisitionChecks.push(() =>
+                maybeAutoRequisitionMaterial(
+                  c.materialId,
+                  ticket.plant.siteId,
+                  newLevelLiters,
+                  tank.capacityLiters ?? 0,
+                  tank.minThresholdPct,
+                  (liters) => liters * specificGravity,
+                ),
+              );
+            }
           }
         }
       }
@@ -732,7 +737,7 @@ export async function startTrip(formData: FormData) {
             const creditTons = creditMassKg / 1000;
             if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
               const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-              if (silo) await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + creditTons } });
+              if (silo) await adjustSiloLevel(tx, silo.id, creditTons);
             } else if (AGGREGATE_TYPES.has(c.material.type)) {
               const hopper = await findMatchingHopper(
                 tx,
@@ -741,15 +746,15 @@ export async function startTrip(formData: FormData) {
                 c.materialId,
                 c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
               );
-              if (hopper) await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + creditTons } });
+              if (hopper) await adjustHopperLevel(tx, hopper.id, creditTons);
             } else if (c.material.type === "WATER") {
               const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-              if (waterHopper) await tx.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: waterHopper.currentLevelTons + creditTons } });
+              if (waterHopper) await adjustHopperLevel(tx, waterHopper.id, creditTons);
             } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
               const tank = await tx.chemicalTank.findFirst({ where: { plantId: ticket.plantId, materialId: c.materialId } });
               if (tank) {
                 const creditLiters = creditMassKg / c.material.specificGravity;
-                await tx.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: tank.currentLevelLiters + creditLiters } });
+                await adjustChemicalTankLevel(tx, tank.id, creditLiters);
               }
             }
           }
@@ -984,9 +989,7 @@ export async function deleteBatchTicket(formData: FormData) {
 
         if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
           const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-          if (silo) {
-            await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + massTons } });
-          }
+          if (silo) await adjustSiloLevel(tx, silo.id, massTons);
         } else if (AGGREGATE_TYPES.has(c.material.type)) {
           const hopper = await findMatchingHopper(
             tx,
@@ -995,19 +998,15 @@ export async function deleteBatchTicket(formData: FormData) {
             c.materialId,
             c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
           );
-          if (hopper) {
-            await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + massTons } });
-          }
+          if (hopper) await adjustHopperLevel(tx, hopper.id, massTons);
         } else if (c.material.type === "WATER") {
           const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-          if (waterHopper) {
-            await tx.hopper.update({ where: { id: waterHopper.id }, data: { currentLevelTons: waterHopper.currentLevelTons + massTons } });
-          }
+          if (waterHopper) await adjustHopperLevel(tx, waterHopper.id, massTons);
         } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
           const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
           if (tank) {
             const liters = massKg / c.material.specificGravity;
-            await tx.chemicalTank.update({ where: { id: tank.id }, data: { currentLevelLiters: tank.currentLevelLiters + liters } });
+            await adjustChemicalTankLevel(tx, tank.id, liters);
           }
         }
       }

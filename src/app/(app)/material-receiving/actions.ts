@@ -5,6 +5,7 @@ import type { Prisma } from "@prisma/client";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
+import { adjustSiloLevel, adjustHopperLevel } from "@/lib/inventoryLevels";
 import { revalidatePath } from "next/cache";
 
 // A destination silo/hopper wasn't checked against what's actually being
@@ -227,20 +228,16 @@ export async function updateReceipt(formData: FormData) {
     if (receipt.postedToInventory) {
       const oldNetTons = receipt.netWeightKg / 1000;
       if (receipt.destinationSiloId) {
-        const silo = await tx.silo.findUnique({ where: { id: receipt.destinationSiloId } });
-        if (silo) await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: Math.max(0, silo.currentLevelTons - oldNetTons) } });
+        await adjustSiloLevel(tx, receipt.destinationSiloId, -oldNetTons);
       } else if (receipt.destinationHopperId) {
-        const hopper = await tx.hopper.findUnique({ where: { id: receipt.destinationHopperId } });
-        if (hopper) await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: Math.max(0, hopper.currentLevelTons - oldNetTons) } });
+        await adjustHopperLevel(tx, receipt.destinationHopperId, -oldNetTons);
       }
 
       const newNetTons = netWeightKg / 1000;
       if (destinationSiloId) {
-        const silo = await tx.silo.findUnique({ where: { id: destinationSiloId } });
-        if (silo) await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: silo.currentLevelTons + newNetTons } });
+        await adjustSiloLevel(tx, destinationSiloId, newNetTons);
       } else if (destinationHopperId) {
-        const hopper = await tx.hopper.findUnique({ where: { id: destinationHopperId } });
-        if (hopper) await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + newNetTons } });
+        await adjustHopperLevel(tx, destinationHopperId, newNetTons);
       }
     }
 
@@ -304,15 +301,9 @@ export async function deleteReceipt(formData: FormData) {
     if (receipt.postedToInventory) {
       const netTons = receipt.netWeightKg / 1000;
       if (receipt.destinationSiloId) {
-        const silo = await tx.silo.findUnique({ where: { id: receipt.destinationSiloId } });
-        if (silo) {
-          await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: Math.max(0, silo.currentLevelTons - netTons) } });
-        }
+        await adjustSiloLevel(tx, receipt.destinationSiloId, -netTons);
       } else if (receipt.destinationHopperId) {
-        const hopper = await tx.hopper.findUnique({ where: { id: receipt.destinationHopperId } });
-        if (hopper) {
-          await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: Math.max(0, hopper.currentLevelTons - netTons) } });
-        }
+        await adjustHopperLevel(tx, receipt.destinationHopperId, -netTons);
       }
     }
     // Same PO-line reversal as updateReceipt above — a deleted receipt
@@ -351,15 +342,9 @@ export async function returnReceiptToSupplier(formData: FormData) {
     if (receipt.postedToInventory) {
       const netTons = receipt.netWeightKg / 1000;
       if (receipt.destinationSiloId) {
-        const silo = await tx.silo.findUnique({ where: { id: receipt.destinationSiloId } });
-        if (silo) {
-          await tx.silo.update({ where: { id: silo.id }, data: { currentLevelTons: Math.max(0, silo.currentLevelTons - netTons) } });
-        }
+        await adjustSiloLevel(tx, receipt.destinationSiloId, -netTons);
       } else if (receipt.destinationHopperId) {
-        const hopper = await tx.hopper.findUnique({ where: { id: receipt.destinationHopperId } });
-        if (hopper) {
-          await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: Math.max(0, hopper.currentLevelTons - netTons) } });
-        }
+        await adjustHopperLevel(tx, receipt.destinationHopperId, -netTons);
       }
     }
     // Same PO-line reversal as updateReceipt/deleteReceipt above — a
@@ -401,52 +386,52 @@ export async function setQcStatus(formData: FormData) {
   if (!receipt) return;
   if (!(await isPlantInScope(receipt.plantId, effectiveSiteId(user)))) return;
 
-  const shouldPost = await prisma.$transaction(async (tx) => {
-    // Claim "not yet posted" atomically via the update's own WHERE clause,
-    // instead of deciding shouldPost from a read taken before the
-    // transaction — two concurrent PASS submissions for the same receipt
-    // used to both see postedToInventory:false and both credit the silo/
-    // hopper. Postgres's row lock on the matching UPDATE serializes this:
-    // only the first writer can still match postedToInventory: false —
-    // the second's updateMany then matches zero rows.
-    const claim =
-      status === "PASSED"
-        ? await tx.materialReceipt.updateMany({
-            where: { id, postedToInventory: false },
-            data: { qcStatus: status, postedToInventory: true, inspectedById: user!.id, inspectionDate: new Date(), inspectionNotes },
-          })
-        : { count: 0 };
-    const shouldPost = claim.count > 0;
+  const netTons = receipt.netWeightKg / 1000;
 
-    if (!shouldPost) {
-      await tx.materialReceipt.update({
-        where: { id },
-        data: { qcStatus: status, inspectedById: user!.id, inspectionDate: new Date(), inspectionNotes },
+  // Claim the transition atomically via the update's own WHERE clause,
+  // instead of deciding what to do from a read taken before the
+  // transaction — two concurrent PASS submissions for the same receipt
+  // used to both see postedToInventory:false and both credit the silo/
+  // hopper. Postgres's row lock on the matching UPDATE serializes this:
+  // only the first writer can still match, the second's updateMany then
+  // matches zero rows.
+  //
+  // The reverse direction needed the identical guard and never had it: the
+  // UI only ever offers PASSED/HELD/REJECTED buttons while a receipt isn't
+  // already PASSED (see rawMaterialsReceiving.tsx), so this path isn't
+  // reachable by clicking through the app — but a direct/crafted request
+  // moving an ALREADY-posted receipt to REJECTED used to just flip
+  // qcStatus while leaving postedToInventory true and the credited
+  // tonnage sitting in the silo/hopper forever, uncorrectable through the
+  // UI (returnReceiptToSupplier is the only other path that reverses, and
+  // it's a separate action). Same server-side-must-not-trust-the-UI
+  // principle applied everywhere else in this app.
+  const outcome = await prisma.$transaction(async (tx) => {
+    if (status === "PASSED") {
+      const claim = await tx.materialReceipt.updateMany({
+        where: { id, postedToInventory: false },
+        data: { qcStatus: status, postedToInventory: true, inspectedById: user!.id, inspectionDate: new Date(), inspectionNotes },
       });
-    }
-
-    if (shouldPost) {
-      const netTons = receipt.netWeightKg / 1000;
-      if (receipt.destinationSiloId) {
-        const silo = await tx.silo.findUnique({ where: { id: receipt.destinationSiloId } });
-        if (silo) {
-          await tx.silo.update({
-            where: { id: silo.id },
-            data: { currentLevelTons: silo.currentLevelTons + netTons },
-          });
-        }
-      } else if (receipt.destinationHopperId) {
-        const hopper = await tx.hopper.findUnique({ where: { id: receipt.destinationHopperId } });
-        if (hopper) {
-          await tx.hopper.update({
-            where: { id: hopper.id },
-            data: { currentLevelTons: hopper.currentLevelTons + netTons },
-          });
-        }
+      if (claim.count === 0) {
+        await tx.materialReceipt.update({ where: { id }, data: { qcStatus: status, inspectedById: user!.id, inspectionDate: new Date(), inspectionNotes } });
+        return "NOOP";
       }
+      if (receipt.destinationSiloId) await adjustSiloLevel(tx, receipt.destinationSiloId, netTons);
+      else if (receipt.destinationHopperId) await adjustHopperLevel(tx, receipt.destinationHopperId, netTons);
+      return "POSTED";
     }
 
-    return shouldPost;
+    const unclaim = await tx.materialReceipt.updateMany({
+      where: { id, postedToInventory: true },
+      data: { qcStatus: status, postedToInventory: false, inspectedById: user!.id, inspectionDate: new Date(), inspectionNotes },
+    });
+    if (unclaim.count === 0) {
+      await tx.materialReceipt.update({ where: { id }, data: { qcStatus: status, inspectedById: user!.id, inspectionDate: new Date(), inspectionNotes } });
+      return "NOOP";
+    }
+    if (receipt.destinationSiloId) await adjustSiloLevel(tx, receipt.destinationSiloId, -netTons);
+    else if (receipt.destinationHopperId) await adjustHopperLevel(tx, receipt.destinationHopperId, -netTons);
+    return "REVERSED";
   });
 
   await logAudit({
@@ -455,7 +440,8 @@ export async function setQcStatus(formData: FormData) {
     field: "qcStatus",
     beforeValue: receipt.qcStatus,
     afterValue: status,
-    reasonCode: shouldPost ? "QC_PASSED_POSTED_TO_INVENTORY" : "QC_STATUS_UPDATED",
+    reasonCode:
+      outcome === "POSTED" ? "QC_PASSED_POSTED_TO_INVENTORY" : outcome === "REVERSED" ? "QC_STATUS_CHANGED_INVENTORY_REVERSED" : "QC_STATUS_UPDATED",
   });
 
   revalidatePath("/warehouses");
