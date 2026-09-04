@@ -2,12 +2,12 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
-import { requirePageAccess } from "@/lib/session";
+import { getCurrentUser, requirePageAccess } from "@/lib/session";
+import { canPerformAction } from "@/lib/permissions";
 import { getDictionary } from "@/lib/i18n";
 import {
   recordActuals,
   recordActualField,
-  completeBatch,
   startTrip,
   updateTripAssignment,
   addTicketComponent,
@@ -17,6 +17,8 @@ import {
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
 import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
+import { CompleteBatchForm } from "@/components/CompleteBatchForm";
+import { ReverseBatchForm } from "@/components/ReverseBatchForm";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -28,6 +30,8 @@ export default async function BatchTicketPage({
   searchParams: Promise<{ editTrip?: string }>;
 }) {
   await requirePageAccess("production");
+  const user = await getCurrentUser();
+  const canReverseBatch = !!user && (await canPerformAction(user.role, "production", "reverseBatch"));
   const { id } = await params;
   const { editTrip } = await searchParams;
   const { dict } = await getDictionary();
@@ -277,23 +281,32 @@ export default async function BatchTicketPage({
       )}
 
       {ticket.status !== "COMPLETE" && (
-        <form action={completeBatch} className={`${ui.card} flex flex-col gap-3`}>
-          <input type="hidden" name="batchTicketId" value={ticket.id} />
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="font-display text-lg font-semibold">{d.completeTitle}</h2>
-              <p className="text-sm text-ink-muted">{d.completeIntro}</p>
-            </div>
-            <button type="submit" className={ui.button}>
-              {d.completeButton}
-            </button>
-          </div>
-          <div>
-            <label className={ui.label}>{d.shortageOverrideNote}</label>
-            <textarea name="shortageOverrideNote" rows={2} placeholder={d.shortageOverrideNotePlaceholder} className={`${ui.input} w-full`} />
-            <p className="mt-1 text-xs text-ink-muted">{d.shortageOverrideNoteHint}</p>
-          </div>
-        </form>
+        <CompleteBatchForm
+          ticketId={ticket.id}
+          messages={{
+            completeTitle: d.completeTitle,
+            completeIntro: d.completeIntro,
+            completeButton: d.completeButton,
+            shortageOverrideNote: d.shortageOverrideNote,
+            shortageOverrideNotePlaceholder: d.shortageOverrideNotePlaceholder,
+            shortageOverrideNoteHint: d.shortageOverrideNoteHint,
+            errorInsufficientStock: d.errorInsufficientStock,
+            errorStorageNotConfigured: d.errorStorageNotConfigured,
+            errorAlreadyCompleted: d.errorAlreadyCompleted,
+            errorInvalidState: d.errorInvalidState,
+            errorConcurrentConflict: d.errorConcurrentConflict,
+            errorUnauthorizedOverride: d.errorUnauthorizedOverride,
+            errorNotFound: d.errorNotFound,
+          }}
+          showShortageField
+          cardClassName={`${ui.card} flex flex-col gap-3`}
+          titleClassName="font-display text-lg font-semibold"
+          introClassName="text-sm text-ink-muted"
+          buttonClassName={ui.button}
+          labelClassName={ui.label}
+          inputClassName={`${ui.input} w-full`}
+          hintClassName="mt-1 text-xs text-ink-muted"
+        />
       )}
 
       {ticket.status === "COMPLETE" && !ticket.trip && (
@@ -429,6 +442,26 @@ export default async function BatchTicketPage({
             {d.deleteTicket}
           </button>
         </form>
+      )}
+
+      {/* ADMIN-only (production.reverseBatch in src/lib/permissions.ts) —
+          canReverseBatch below already gates this render, so nothing
+          double-checks the permission here beyond what the Server Action
+          itself re-verifies. Available whenever the ticket is COMPLETE,
+          hasn't already been reversed, and hasn't been dispatched yet
+          (reversing a dispatched ticket needs its own flow — see
+          reverseBatchTicket's own guard in src/lib/batchCompletion.ts). */}
+      {canReverseBatch && ticket.status === "COMPLETE" && !ticket.trip && !ticket.reversedAt && (
+        <ReverseBatchForm
+          ticketId={ticket.id}
+          messages={d.reverse}
+          cardClassName={`${ui.card} flex flex-col gap-3 border-warn`}
+          titleClassName="font-display text-lg font-semibold"
+          hintClassName="text-sm text-ink-muted"
+          labelClassName={ui.label}
+          inputClassName={`${ui.input} w-full`}
+          buttonClassName="self-start rounded-md border border-warn px-4 py-2 text-sm font-medium text-warn hover:bg-warn/10"
+        />
       )}
 
       {showEditTripForm && ticket.trip && (

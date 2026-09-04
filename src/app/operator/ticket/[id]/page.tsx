@@ -3,11 +3,12 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { recordActuals, recordActualField, completeBatch, startTrip } from "@/app/(app)/production/actions";
+import { recordActuals, recordActualField, startTrip } from "@/app/(app)/production/actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
 import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
 import { OfflineSyncBanner } from "@/components/OfflineSyncBanner";
+import { CompleteBatchForm } from "@/components/CompleteBatchForm";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -184,14 +185,32 @@ export default async function OperatorTicketPage({
       </form>
 
       {ticket.status !== "COMPLETE" && (
-        <form action={completeBatch} className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-4 shadow-sm">
-          <input type="hidden" name="batchTicketId" value={ticket.id} />
-          <h2 className="font-display text-base font-semibold">{d.completeTitle}</h2>
-          <p className="text-xs text-ink-muted">{d.completeIntro}</p>
-          <button type="submit" className="rounded-md bg-accent py-2.5 text-sm font-medium text-white">
-            {d.completeButton}
-          </button>
-        </form>
+        <CompleteBatchForm
+          ticketId={ticket.id}
+          messages={{
+            completeTitle: d.completeTitle,
+            completeIntro: d.completeIntro,
+            completeButton: d.completeButton,
+            shortageOverrideNote: d.shortageOverrideNote,
+            shortageOverrideNotePlaceholder: d.shortageOverrideNotePlaceholder,
+            shortageOverrideNoteHint: d.shortageOverrideNoteHint,
+            errorInsufficientStock: d.errorInsufficientStock,
+            errorStorageNotConfigured: d.errorStorageNotConfigured,
+            errorAlreadyCompleted: d.errorAlreadyCompleted,
+            errorInvalidState: d.errorInvalidState,
+            errorConcurrentConflict: d.errorConcurrentConflict,
+            errorUnauthorizedOverride: d.errorUnauthorizedOverride,
+            errorNotFound: d.errorNotFound,
+          }}
+          showShortageField={false}
+          cardClassName="flex flex-col gap-2 rounded-xl border border-border bg-surface p-4 shadow-sm"
+          titleClassName="font-display text-base font-semibold"
+          introClassName="text-xs text-ink-muted"
+          buttonClassName="rounded-md bg-accent py-2.5 text-sm font-medium text-white"
+          labelClassName="block text-xs font-medium text-ink-muted mb-1"
+          inputClassName="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm"
+          hintClassName="mt-1 text-xs text-ink-muted"
+        />
       )}
 
       {ticket.status === "COMPLETE" && !ticket.trip && (
