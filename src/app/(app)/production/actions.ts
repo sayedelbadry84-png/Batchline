@@ -10,7 +10,7 @@ import { postSiloMovement, postHopperMovement, postChemicalTankMovement } from "
 import { findMatchingSilo, findMatchingHopper, AGGREGATE_TYPES } from "@/lib/storageMatching";
 import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain } from "@/lib/batchCompletion";
 import { withSequentialNumber } from "@/lib/sequence";
-import { REQUISITION_APPROVAL_ROLES } from "@/lib/permissions";
+import { REQUISITION_APPROVAL_ROLES, canPerformAction } from "@/lib/permissions";
 import { notify, notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -283,6 +283,16 @@ export async function recordActuals(formData: FormData) {
     include: { material: true },
   });
 
+  // Validate/parse first (no writes yet), then commit everything —
+  // including the ticket's own status flip — inside one transaction that
+  // claims the ticket row atomically before touching anything. Without
+  // this, completeBatchTicket's own claim (src/lib/batchCompletion.ts)
+  // could commit COMPLETE in the gap between the plain status read above
+  // and these writes, letting a reading land on an already-completed
+  // ticket whose ledger was posted from whatever the components showed
+  // at claim time — this closes that race the same way completion's own
+  // claim already closes double-completion.
+  const writes: { id: string; actualMassKg: number; moisturePct: number | null }[] = [];
   for (const c of components) {
     const rawActual = formData.get(`actual_${c.id}`);
     const rawMoisture = formData.get(`moisture_${c.id}`);
@@ -296,14 +306,21 @@ export async function recordActuals(formData: FormData) {
     // into `currentLevelTons - massTons` in completeBatch and INCREASE the
     // silo/hopper reading instead of decreasing it.
     if (!Number.isFinite(enteredMass) || enteredMass < 0) continue;
-
-    await prisma.batchComponentActual.update({
-      where: { id: c.id },
-      data: { actualMassKg: enteredMass, moisturePct },
-    });
+    writes.push({ id: c.id, actualMassKg: enteredMass, moisturePct });
   }
 
-  await prisma.batchTicket.update({ where: { id: batchTicketId }, data: { status: "BATCHING" } });
+  const claimed = await prisma.$transaction(async (tx) => {
+    const claim = await tx.batchTicket.updateMany({
+      where: { id: batchTicketId, status: { notIn: ["COMPLETE", "CANCELLED"] } },
+      data: { status: "BATCHING" },
+    });
+    if (claim.count === 0) return false;
+    for (const w of writes) {
+      await tx.batchComponentActual.update({ where: { id: w.id }, data: { actualMassKg: w.actualMassKg, moisturePct: w.moisturePct } });
+    }
+    return true;
+  });
+  if (!claimed) return;
 
   await logAudit({
     module: "Production",
@@ -342,14 +359,27 @@ export async function recordActualField(formData: FormData) {
   if (!component || component.batchTicketId !== batchTicketId || component.batchTicket.status === "COMPLETE" || component.batchTicket.status === "CANCELLED") return;
   if (!(await isPlantInScope(component.batchTicket.plantId, effectiveSiteId(user)))) return;
 
-  await prisma.batchComponentActual.update({
-    where: { id: componentId },
-    data: field === "actual" ? { actualMassKg: value } : { moisturePct: value },
+  // Same claim-then-write shape as recordActuals above: the status flip
+  // to BATCHING doubles as the atomic claim that closes the race against
+  // completeBatchTicket's own claim on this row (a completion committed
+  // in the gap between the plain read above and this write would
+  // otherwise let this autosave land on an already-COMPLETE ticket).
+  // Always setting "BATCHING" (not conditionally, like the old
+  // status !== "BATCHING" check) is harmless when it's already BATCHING
+  // — the WHERE clause is what does the real work.
+  const claimed = await prisma.$transaction(async (tx) => {
+    const claim = await tx.batchTicket.updateMany({
+      where: { id: batchTicketId, status: { notIn: ["COMPLETE", "CANCELLED"] } },
+      data: { status: "BATCHING" },
+    });
+    if (claim.count === 0) return false;
+    await tx.batchComponentActual.update({
+      where: { id: componentId },
+      data: field === "actual" ? { actualMassKg: value } : { moisturePct: value },
+    });
+    return true;
   });
-
-  if (component.batchTicket.status !== "BATCHING") {
-    await prisma.batchTicket.update({ where: { id: batchTicketId }, data: { status: "BATCHING" } });
-  }
+  if (!claimed) return;
 
   await logAudit({
     module: "Production",
@@ -363,31 +393,52 @@ export async function recordActualField(formData: FormData) {
   revalidatePath(`/operator/ticket/${batchTicketId}`);
 }
 
+// The typed result useActionState (see CompleteBatchForm.tsx) renders —
+// mirrors CompleteBatchResult's own status set 1:1 (src/lib/
+// batchCompletion.ts) plus a couple of wrapper-only outcomes
+// (UNAUTHORIZED_OVERRIDE, NOT_FOUND) so the UI can show an actual reason
+// instead of nothing happening, per this review's HI-05.
+export type CompleteBatchActionState = {
+  status: "SUCCESS" | "ALREADY_COMPLETED" | "INVALID_STATE" | "INSUFFICIENT_STOCK" | "CONCURRENT_CONFLICT" | "STORAGE_NOT_CONFIGURED" | "UNAUTHORIZED_OVERRIDE" | "NOT_FOUND";
+  detail?: string;
+} | null;
+
 // Thin Server Action wrapper around completeBatchTicket (src/lib/
 // batchCompletion.ts) — the actual claim/deduct/ledger-post logic lives
 // there now, as a pure domain service with no session/formData access
 // (so it's callable from tests directly). This wrapper's only jobs:
 // permission/scope checks, calling the domain service, and turning its
 // typed result into the same audit trail and revalidation this action
-// always produced. Every non-SUCCESS status is a silent return, same
-// convention as every other rejected action in this app — the shortage-
-// override textarea on the ticket page is always available for an
-// operator to fill in proactively; there's no separate UI state for a
-// rejected completion to react to.
-export async function completeBatch(formData: FormData) {
+// always produced, PLUS a returned state useActionState can render (see
+// CompleteBatchForm.tsx) — previously every non-SUCCESS status was a
+// silent return with nothing shown to the operator.
+export async function completeBatch(_prevState: CompleteBatchActionState, formData: FormData): Promise<CompleteBatchActionState> {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "complete");
 
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
-  if (!batchTicketId) return;
-  const shortageOverrideNote = String(formData.get("shortageOverrideNote") ?? "").trim() || null;
+  if (!batchTicketId) return { status: "NOT_FOUND" };
+  let shortageOverrideNote = String(formData.get("shortageOverrideNote") ?? "").trim() || null;
 
   const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId }, select: { plantId: true } });
-  if (!ticket) return;
-  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
+  if (!ticket) return { status: "NOT_FOUND" };
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
+
+  // A shortage override needs its own sign-off, not just whoever can
+  // complete a batch at all (HI-04) — an unauthorized note is dropped
+  // rather than trusted, so completion falls through to the normal
+  // (non-override) path and correctly rejects with INSUFFICIENT_STOCK if
+  // there really is a shortfall, instead of silently letting it through.
+  if (shortageOverrideNote && !(await canPerformAction(user!.role, "production", "overrideShortage"))) {
+    shortageOverrideNote = null;
+  }
 
   const result = await completeBatchTicket(batchTicketId, { shortageOverrideNote, actorId: user!.id });
-  if (result.status !== "SUCCESS") return;
+  if (result.status !== "SUCCESS") {
+    if (result.status === "INSUFFICIENT_STOCK") return { status: "INSUFFICIENT_STOCK", detail: result.shortages.join("; ") };
+    if (result.status === "STORAGE_NOT_CONFIGURED") return { status: "STORAGE_NOT_CONFIGURED", detail: result.material };
+    return { status: result.status };
+  }
 
   for (const r of result.requisitionCandidates) {
     const toKg = r.unit === "LITERS" ? (liters: number) => liters * (r.specificGravity ?? 1) : (tons: number) => tons * 1000;
@@ -416,6 +467,7 @@ export async function completeBatch(formData: FormData) {
   revalidatePath("/operator");
   revalidatePath("/warehouses");
   revalidatePath("/");
+  return { status: "SUCCESS" };
 }
 
 export async function startTrip(formData: FormData) {
@@ -443,7 +495,13 @@ export async function startTrip(formData: FormData) {
   // each component's PRE-reclaim target mass; only requiring COMPLETE
   // before dispatch guarantees that deduction has already happened by the
   // time the reclaim credit-back below runs, so the two stay consistent.
-  if (ticket.status !== "COMPLETE") return;
+  // reversedAt: a reversed ticket keeps status COMPLETE (see
+  // reverseBatchTicket in src/lib/batchCompletion.ts — its whole point is
+  // to keep the historical status intact rather than inventing a new
+  // terminal one), so the status check alone doesn't catch it. This is
+  // the cheap pre-check; the real guarantee against a concurrent reversal
+  // is the fresh re-read inside the Serializable transaction below.
+  if (ticket.status !== "COMPLETE" || ticket.reversedAt) return;
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
 
   const truck = await prisma.truck.findUnique({ where: { id: truckId }, include: { plant: true } });
@@ -527,6 +585,19 @@ export async function startTrip(formData: FormData) {
   try {
     trip = await prisma.$transaction(
       async (tx) => {
+        // Re-verify status/reversedAt fresh, inside this same Serializable
+        // transaction — the plain check above ran before the transaction
+        // started, so a reversal committed in the gap between that read
+        // and this one would otherwise slip through undetected. Reading
+        // it here means: if reverseBatchTicket's own transaction (also
+        // Serializable — see src/lib/batchCompletion.ts) commits first,
+        // this read sees reversedAt set and throws; if the two are truly
+        // concurrent, Postgres aborts one of them with a serialization
+        // failure regardless. Either way, dispatch and reversal can never
+        // both succeed for the same ticket.
+        const freshTicket = await tx.batchTicket.findUnique({ where: { id: batchTicketId }, select: { status: true, reversedAt: true } });
+        if (!freshTicket || freshTicket.status !== "COMPLETE" || freshTicket.reversedAt) throw new Error("TICKET_NOT_DISPATCHABLE");
+
         const truckBusy = await tx.trip.findFirst({ where: { truckId, status: { not: "CLOSED" } } });
         if (truckBusy) throw new Error("TRUCK_BUSY");
 
@@ -800,11 +871,23 @@ export async function addTicketComponent(formData: FormData) {
   if (!ticket || ticket.status === "COMPLETE" || ticket.status === "CANCELLED") return;
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
 
-  await prisma.batchComponentActual.upsert({
-    where: { batchTicketId_materialId: { batchTicketId, materialId } },
-    create: { batchTicketId, materialId, targetMassKg },
-    update: { targetMassKg },
+  // Touch-claim the ticket row before writing the component — no field
+  // here means anything on its own (updatedAt is purely the lock), but
+  // taking this row's lock is what makes this write and
+  // completeBatchTicket's own claim (src/lib/batchCompletion.ts)
+  // mutually exclusive: whichever transaction locks the row first is
+  // what the other necessarily sees once it gets its turn.
+  const claimed = await prisma.$transaction(async (tx) => {
+    const claim = await tx.batchTicket.updateMany({ where: { id: batchTicketId, status: { notIn: ["COMPLETE", "CANCELLED"] } }, data: { updatedAt: new Date() } });
+    if (claim.count === 0) return false;
+    await tx.batchComponentActual.upsert({
+      where: { batchTicketId_materialId: { batchTicketId, materialId } },
+      create: { batchTicketId, materialId, targetMassKg },
+      update: { targetMassKg },
+    });
+    return true;
   });
+  if (!claimed) return;
 
   await logAudit({
     module: "Production",
@@ -833,7 +916,14 @@ export async function deleteTicketComponent(formData: FormData) {
   if (!component || component.batchTicketId !== batchTicketId || component.batchTicket.status === "COMPLETE" || component.batchTicket.status === "CANCELLED") return;
   if (!(await isPlantInScope(component.batchTicket.plantId, effectiveSiteId(user)))) return;
 
-  await prisma.batchComponentActual.delete({ where: { id } });
+  // Same touch-claim as addTicketComponent above, same reason.
+  const claimed = await prisma.$transaction(async (tx) => {
+    const claim = await tx.batchTicket.updateMany({ where: { id: batchTicketId, status: { notIn: ["COMPLETE", "CANCELLED"] } }, data: { updatedAt: new Date() } });
+    if (claim.count === 0) return false;
+    await tx.batchComponentActual.delete({ where: { id } });
+    return true;
+  });
+  if (!claimed) return;
 
   await logAudit({ module: "Production", recordId: batchTicketId, field: "component", reasonCode: "TICKET_COMPONENT_REMOVED" });
 
@@ -879,25 +969,40 @@ export async function deleteBatchTicket(formData: FormData) {
   redirect("/production");
 }
 
+// Mirrors ReverseBatchResult's status set 1:1 (src/lib/batchCompletion.ts)
+// plus NOT_FOUND for this wrapper's own missing-id/scope case, so
+// ReverseBatchForm.tsx (HI-06) can show an actual reason for a rejected
+// reversal instead of nothing happening.
+export type ReverseBatchActionState = {
+  status: "SUCCESS" | "NOT_FOUND" | "INVALID_STATE" | "ALREADY_REVERSED" | "CONCURRENT_CONFLICT" | "CAPACITY_EXCEEDED" | "STORAGE_NOT_CONFIGURED";
+  detail?: string;
+} | null;
+
 // Undoes a COMPLETE ticket's posted inventory movements without deleting
 // the ticket — the row and its full posting history stay on file, unlike
 // deleteBatchTicket's old COMPLETE-ticket path. See reverseBatchTicket in
 // src/lib/batchCompletion.ts for the actual reversal logic; this wrapper
-// only handles permission/scope and the reason field.
-export async function reverseBatchTicket(formData: FormData) {
+// only handles permission/scope, the reason field, and returning a typed
+// state useActionState can render (see ReverseBatchForm.tsx).
+export async function reverseBatchTicket(_prevState: ReverseBatchActionState, formData: FormData): Promise<ReverseBatchActionState> {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "reverseBatch");
 
   const id = String(formData.get("id") ?? "");
   const reason = String(formData.get("reason") ?? "").trim();
-  if (!id || !reason) return;
+  if (!id || !reason) return { status: "NOT_FOUND" };
 
   const ticket = await prisma.batchTicket.findUnique({ where: { id }, select: { plantId: true } });
-  if (!ticket) return;
-  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
+  if (!ticket) return { status: "NOT_FOUND" };
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
 
   const result = await reverseBatchTicketDomain(id, { actorId: user!.id, reason });
-  if (result.status !== "SUCCESS") return;
+  if (result.status !== "SUCCESS") {
+    if (result.status === "STORAGE_NOT_CONFIGURED") return { status: "STORAGE_NOT_CONFIGURED", detail: result.material };
+    if (result.status === "CAPACITY_EXCEEDED") return { status: "CAPACITY_EXCEEDED", detail: result.storage };
+    if (result.status === "NOT_FOUND") return { status: "NOT_FOUND" };
+    return { status: result.status };
+  }
 
   await logAudit({ module: "Production", recordId: id, field: "reversedAt", afterValue: reason, reasonCode: "BATCH_TICKET_REVERSED" });
 
@@ -905,4 +1010,5 @@ export async function reverseBatchTicket(formData: FormData) {
   revalidatePath(`/production/${id}`);
   revalidatePath("/warehouses");
   revalidatePath("/");
+  return { status: "SUCCESS" };
 }

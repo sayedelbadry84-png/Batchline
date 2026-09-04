@@ -28,6 +28,17 @@ export type CompleteBatchResult =
   | { status: "CONCURRENT_CONFLICT" }
   | { status: "STORAGE_NOT_CONFIGURED"; material: string };
 
+// Materials whose type is normally inventory-tracked (they SHOULD always
+// resolve to a real silo/hopper/tank) — used to distinguish "this
+// material type has nothing to deduct from at all" (a real
+// STORAGE_NOT_CONFIGURED failure, CR-02) from a material type this app
+// doesn't inventory-track in the first place (left as a no-op, same as
+// before this fix — not every BatchComponentActual row necessarily
+// represents a physically stocked material).
+function isInventoryTracked(materialType: string): boolean {
+  return ["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME", "WATER", "ADMIXTURE"].includes(materialType) || AGGREGATE_TYPES.has(materialType);
+}
+
 type ResolvedComponent = {
   materialId: string;
   materialName: string;
@@ -57,11 +68,8 @@ export async function completeBatchTicket(
   ticketId: string,
   opts: { shortageOverrideNote?: string | null; actorId?: string | null },
 ): Promise<CompleteBatchResult> {
-  const ticket = await prisma.batchTicket.findUnique({
-    where: { id: ticketId },
-    include: { components: { include: { material: true } }, plant: true },
-  });
-  if (!ticket) return { status: "INVALID_STATE" };
+  const exists = await prisma.batchTicket.findUnique({ where: { id: ticketId }, select: { id: true } });
+  if (!exists) return { status: "INVALID_STATE" };
 
   try {
     return await withRetry(() =>
@@ -80,31 +88,55 @@ export async function completeBatchTicket(
         });
         if (claim.count === 0) return { status: "ALREADY_COMPLETED" as const };
 
+        // The authoritative read happens AFTER the claim, inside the same
+        // transaction — not before it. Reading components before the
+        // claim (the original version of this function) meant a
+        // concurrent actual/component edit that raced the claim could
+        // leave the ledger posting against a stale snapshot instead of
+        // whatever the ticket showed at the instant it actually became
+        // COMPLETE. recordActuals/recordActualField/addTicketComponent/
+        // deleteTicketComponent (production/actions.ts) now hold their
+        // own atomic claim against this same row before writing a
+        // component, so whichever side — this claim or theirs — commits
+        // first is what the other sees.
+        const ticket = await tx.batchTicket.findUnique({
+          where: { id: ticketId },
+          include: { components: { include: { material: true } }, plant: true },
+        });
+        if (!ticket) throw new DomainError("CONCURRENT_CONFLICT", "ticket vanished mid-transaction");
+
         // Resolve every component's target storage before posting
-        // anything to the ledger — same silent-skip behavior as before
-        // when nothing matches (an unconfigured store isn't a hard
-        // failure; it just means no deduction happens for that material,
-        // as today).
+        // anything to the ledger. A material type this app doesn't
+        // inventory-track at all (see isInventoryTracked) is skipped, as
+        // before — but a material type that SHOULD have a matching store
+        // and doesn't is now a hard failure (STORAGE_NOT_CONFIGURED),
+        // never a silent skip: the ticket used to still complete
+        // successfully with that component's material never actually
+        // deducted from anywhere, which is exactly the kind of gap this
+        // whole ledger exists to close.
         const resolved: ResolvedComponent[] = [];
         for (const c of ticket.components) {
+          if (!isInventoryTracked(c.material.type)) continue;
+
           const massKg = c.actualMassKg ?? c.targetMassKg;
           const massTons = massKg / 1000;
 
           if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
             const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-            if (!silo) continue;
+            if (!silo) throw new DomainError("STORAGE_NOT_CONFIGURED", c.material.name);
             resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "SILO", storageId: silo.id, quantity: -massTons, capacity: silo.capacityTons, minThresholdPct: silo.minThresholdPct });
           } else if (AGGREGATE_TYPES.has(c.material.type)) {
             const hopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" });
-            if (!hopper) continue;
+            if (!hopper) throw new DomainError("STORAGE_NOT_CONFIGURED", c.material.name);
             resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "HOPPER", storageId: hopper.id, quantity: -massTons, capacity: hopper.capacityTons, minThresholdPct: hopper.minThresholdPct });
           } else if (c.material.type === "WATER") {
             const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-            if (!waterHopper) continue;
+            if (!waterHopper) throw new DomainError("STORAGE_NOT_CONFIGURED", c.material.name);
             resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "HOPPER", storageId: waterHopper.id, quantity: -massTons, capacity: waterHopper.capacityTons, minThresholdPct: waterHopper.minThresholdPct });
-          } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
+          } else if (c.material.type === "ADMIXTURE") {
+            if (!c.material.specificGravity) throw new DomainError("STORAGE_NOT_CONFIGURED", `${c.material.name} (missing specific gravity)`);
             const tank = await tx.chemicalTank.findFirst({ where: { plantId: ticket.plantId, materialId: c.materialId } });
-            if (!tank) continue;
+            if (!tank) throw new DomainError("STORAGE_NOT_CONFIGURED", c.material.name);
             const liters = massKg / c.material.specificGravity;
             resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "CHEMICAL_TANK", storageId: tank.id, quantity: -liters, capacity: tank.capacityLiters ?? 0, minThresholdPct: tank.minThresholdPct, specificGravity: c.material.specificGravity });
           }
@@ -179,6 +211,7 @@ export type ReverseBatchResult =
   | { status: "INVALID_STATE" }
   | { status: "ALREADY_REVERSED" }
   | { status: "CONCURRENT_CONFLICT" }
+  | { status: "CAPACITY_EXCEEDED"; storage: string }
   | { status: "STORAGE_NOT_CONFIGURED"; material: string };
 
 /**
@@ -201,48 +234,73 @@ export async function reverseBatchTicket(ticketId: string, opts: { actorId: stri
 
   try {
     return await withRetry(() =>
-      prisma.$transaction(async (tx) => {
-        // Claim the reversal first — same claim-before-work convention as
-        // completeBatchTicket's own status claim. Two concurrent reversal
-        // requests can only have one of them actually post the opposite
-        // movements; the second's updateMany matches zero rows.
-        const claim = await tx.batchTicket.updateMany({
-          where: { id: ticketId, reversedAt: null },
-          data: { reversedAt: new Date(), reversedById: opts.actorId, reversalReason: opts.reason },
-        });
-        if (claim.count === 0) return { status: "ALREADY_REVERSED" as const };
-
-        const originalMovements = await tx.inventoryMovement.findMany({
-          where: { sourceType: "BatchTicket", sourceId: ticketId, movementType: "BATCH_COMPLETION" },
-        });
-
-        const sorted = [...originalMovements].sort((a, b) => (a.storageType === b.storageType ? a.storageId.localeCompare(b.storageId) : a.storageType.localeCompare(b.storageType)));
-
-        for (const m of sorted) {
-          const post = m.storageType === "SILO" ? postSiloMovement : m.storageType === "HOPPER" ? postHopperMovement : postChemicalTankMovement;
-          const movement = await post(tx, {
-            storageId: m.storageId, // the ORIGINAL storage, not re-resolved
-            materialId: m.materialId,
-            quantity: -m.quantity, // opposite sign of the original deduction
-            movementType: "BATCH_COMPLETION_REVERSAL",
-            sourceType: "BatchTicket",
-            sourceId: ticketId,
-            plantId: m.plantId,
-            siteId: m.siteId,
-            actorId: opts.actorId,
-            reason: opts.reason,
+      prisma.$transaction(
+        async (tx) => {
+          // Claim the reversal first — same claim-before-work convention
+          // as completeBatchTicket's own status claim. Two concurrent
+          // reversal requests can only have one of them actually post the
+          // opposite movements; the second's updateMany matches zero
+          // rows. `trip: null` closes the reversal side of CR-01: without
+          // it, a startTrip call that creates a Trip between this
+          // function's own pre-transaction read and this claim could
+          // still let a reversal through against a ticket that just got
+          // dispatched. Serializable isolation is the backstop for the
+          // symmetric race — startTrip's own transaction (see
+          // production/actions.ts) re-reads this same ticket row inside
+          // ITS Serializable transaction before creating the Trip, so
+          // whichever of the two transactions commits first is what the
+          // other necessarily sees, and Postgres aborts one with a
+          // serialization failure if they were truly concurrent.
+          const claim = await tx.batchTicket.updateMany({
+            where: { id: ticketId, reversedAt: null, trip: null },
+            data: { reversedAt: new Date(), reversedById: opts.actorId, reversalReason: opts.reason },
           });
-          if (movement.status === "STORAGE_NOT_CONFIGURED") throw new DomainError("STORAGE_NOT_CONFIGURED", m.materialId);
-          // ALREADY_POSTED means a retried reversal attempt already landed
-          // this exact movement — nothing more to do for it.
-        }
+          if (claim.count === 0) {
+            // Distinguish why the claim missed — same transaction, so
+            // this read is consistent with whatever actually blocked it.
+            const fresh = await tx.batchTicket.findUnique({ where: { id: ticketId }, select: { reversedAt: true, trip: { select: { id: true } } } });
+            if (fresh?.trip) return { status: "INVALID_STATE" as const };
+            return { status: "ALREADY_REVERSED" as const };
+          }
 
-        return { status: "SUCCESS" as const };
-      }),
+          const originalMovements = await tx.inventoryMovement.findMany({
+            where: { sourceType: "BatchTicket", sourceId: ticketId, movementType: "BATCH_COMPLETION" },
+          });
+
+          const sorted = [...originalMovements].sort((a, b) => (a.storageType === b.storageType ? a.storageId.localeCompare(b.storageId) : a.storageType.localeCompare(b.storageType)));
+
+          for (const m of sorted) {
+            const post = m.storageType === "SILO" ? postSiloMovement : m.storageType === "HOPPER" ? postHopperMovement : postChemicalTankMovement;
+            const movement = await post(tx, {
+              storageId: m.storageId, // the ORIGINAL storage, not re-resolved
+              materialId: m.materialId,
+              quantity: -m.quantity, // opposite sign of the original deduction
+              movementType: "BATCH_COMPLETION_REVERSAL",
+              sourceType: "BatchTicket",
+              sourceId: ticketId,
+              plantId: m.plantId,
+              siteId: m.siteId,
+              actorId: opts.actorId,
+              reason: opts.reason,
+            });
+            if (movement.status === "STORAGE_NOT_CONFIGURED") throw new DomainError("STORAGE_NOT_CONFIGURED", m.materialId);
+            // ALREADY_POSTED means a retried reversal attempt already
+            // landed this exact movement — nothing more to do for it.
+            // CAPACITY_EXCEEDED propagates as a DomainError throw from
+            // postMovement itself (see inventoryLedger.ts) — rolls back
+            // the whole reversal rather than stamping reversedAt over a
+            // credit that didn't fully land (CR-04).
+          }
+
+          return { status: "SUCCESS" as const };
+        },
+        { isolationLevel: "Serializable" },
+      ),
     );
   } catch (e) {
     if (e instanceof DomainError) {
       if (e.code === "STORAGE_NOT_CONFIGURED") return { status: "STORAGE_NOT_CONFIGURED", material: e.message };
+      if (e.code === "CAPACITY_EXCEEDED") return { status: "CAPACITY_EXCEEDED", storage: e.message };
       return { status: "CONCURRENT_CONFLICT" };
     }
     if (isP2034(e)) return { status: "CONCURRENT_CONFLICT" };

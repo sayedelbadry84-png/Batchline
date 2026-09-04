@@ -32,7 +32,7 @@ export type MovementResult =
 
 export class DomainError extends Error {
   constructor(
-    public code: "INSUFFICIENT_STOCK" | "CONCURRENT_CONFLICT" | "STORAGE_NOT_CONFIGURED",
+    public code: "INSUFFICIENT_STOCK" | "CAPACITY_EXCEEDED" | "CONCURRENT_CONFLICT" | "STORAGE_NOT_CONFIGURED",
     message?: string,
   ) {
     super(message ?? code);
@@ -131,12 +131,23 @@ async function postMovement(
   const { oldLevel, newLevel } = adjusted;
   const applied = newLevel - oldLevel;
   const isConsumption = input.quantity < 0;
-  const shortfall = isConsumption ? Math.abs(input.quantity) - Math.abs(applied) : 0;
-  if (shortfall > 0.001 && !input.allowShortage) {
+  const shortfall = Math.abs(input.quantity) - Math.abs(applied);
+  if (isConsumption && shortfall > 0.001 && !input.allowShortage) {
     // Rolls back the balance update above — the whole point of computing
     // the shortfall before ever recording a movement, rather than
     // clamping silently and moving on.
     throw new DomainError("INSUFFICIENT_STOCK", `Insufficient stock on ${storageType} ${input.storageId}: requested ${Math.abs(input.quantity)}, only ${Math.abs(applied)} available`);
+  }
+  if (!isConsumption && shortfall > 0.001) {
+    // A credit (reclaim, or a reversal crediting a deduction back) that
+    // gets clamped by LEAST(capacity, ...) because the store filled up in
+    // the meantime is NOT a lesser version of success — it silently loses
+    // the difference and, for a reversal specifically, would let the
+    // caller stamp reversedAt over a credit that never actually landed in
+    // full. Always a hard failure, never an opt-in like INSUFFICIENT_STOCK
+    // — there's no equivalent "audited override" for losing material off
+    // the top of a full silo.
+    throw new DomainError("CAPACITY_EXCEEDED", `${storageType} ${input.storageId} has no room for the full credit: requested ${input.quantity}, only ${applied} fit`);
   }
 
   // Record the ledger row with the TRUE applied delta (post-clamp), not

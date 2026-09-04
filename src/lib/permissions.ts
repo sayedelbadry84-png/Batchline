@@ -198,6 +198,13 @@ export const ACTION_ROLES = {
     release: ["PLANT_OPERATOR", "ADMIN"],
     manualBooking: ["PLANT_OPERATOR", "ADMIN"],
     complete: ["PLANT_OPERATOR", "ADMIN"],
+    // A real shortage — completing with less material than the recipe
+    // called for — needs sign-off above whoever's running the mixer, not
+    // just a typed note; anyone with `complete` used to be able to author
+    // one. Same roster as reverseBatch's own "bigger than the everyday
+    // action" posture, one notch below ADMIN-only since this is routine
+    // operational sign-off, not a financial correction.
+    overrideShortage: ["PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER", "OPERATIONS_SUPERVISOR", "PLANT_ADMIN", "ADMIN"],
     deleteTicket: ["PLANT_OPERATOR", "ADMIN"],
     // Reversing a completed ticket undoes real posted inventory movements
     // — a materially bigger, rarer action than completing or deleting one,
