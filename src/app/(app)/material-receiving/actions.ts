@@ -1,10 +1,47 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isPlantActive, isPlantInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
+
+// A destination silo/hopper wasn't checked against what's actually being
+// received at all — a form submitted with a mismatched or wrong-site
+// destination (typo, stale option in a picker, or a crafted request) would
+// silently credit tonnage nothing about the physical delivery supports:
+// wrong material into a silo, or wrong site's silo entirely. Mirrors the
+// same plantId-own/sharedAcrossPlants-same-site matching production's own
+// findMatchingSilo/findMatchingHopper use, and the same equals/startsWith
+// aggregate-type distinction (COARSE_AGGREGATE covers any COARSE_* hopper;
+// everything else must match exactly).
+async function isValidDestination(
+  db: Prisma.TransactionClient | typeof prisma,
+  plantId: string,
+  materialType: string,
+  destinationSiloId: string | null,
+  destinationHopperId: string | null,
+): Promise<boolean> {
+  if (!destinationSiloId && !destinationHopperId) return true;
+  if (destinationSiloId && destinationHopperId) return false;
+
+  const plant = await db.plant.findUnique({ where: { id: plantId }, select: { siteId: true } });
+  if (!plant) return false;
+
+  if (destinationSiloId) {
+    const silo = await db.silo.findUnique({ where: { id: destinationSiloId }, include: { plant: true } });
+    if (!silo || silo.materialType !== materialType) return false;
+    return silo.plantId === plantId || (silo.sharedAcrossPlants && silo.plant.siteId === plant.siteId);
+  }
+
+  const hopper = await db.hopper.findUnique({ where: { id: destinationHopperId! }, include: { plant: true } });
+  if (!hopper) return false;
+  const typeMatches =
+    materialType === "SAND" ? hopper.aggregateType === "SAND" : materialType === "COARSE_AGGREGATE" ? hopper.aggregateType.startsWith("COARSE") : hopper.aggregateType === materialType;
+  if (!typeMatches) return false;
+  return hopper.plantId === plantId || (hopper.sharedAcrossPlants && hopper.plant.siteId === plant.siteId);
+}
 
 export async function createReceipt(formData: FormData) {
   const user = await getCurrentUser();
@@ -34,28 +71,39 @@ export async function createReceipt(formData: FormData) {
   if (!(await isPlantInScope(plantId, effectiveSiteId(user!)))) return;
   if (!(await isPlantActive(plantId))) return;
 
+  const material = await prisma.material.findUnique({ where: { id: materialId } });
+  if (!material) return;
+  if (!(await isValidDestination(prisma, plantId, material.type, destinationSiloId, destinationHopperId))) return;
+
   const netWeightKg = grossWeightKg - tareWeightKg;
 
-  const receipt = await prisma.materialReceipt.create({
-    data: {
-      plantId,
-      supplierId,
-      materialId,
-      poNumber,
-      purchaseOrderLineId,
-      orderedMassKg,
-      grossWeightKg,
-      tareWeightKg,
-      netWeightKg,
-      moisturePct,
-      destinationSiloId,
-      destinationHopperId,
-      driverId,
-      driverName,
-    },
-  });
+  // The receipt and its PO-line receivedMassKg bump commit as one unit —
+  // without this, a failure between the two could leave a real receipt on
+  // file with the PO it was ordered against never actually counted as
+  // received.
+  const receipt = await prisma.$transaction(async (tx) => {
+    const receipt = await tx.materialReceipt.create({
+      data: {
+        plantId,
+        supplierId,
+        materialId,
+        poNumber,
+        purchaseOrderLineId,
+        orderedMassKg,
+        grossWeightKg,
+        tareWeightKg,
+        netWeightKg,
+        moisturePct,
+        destinationSiloId,
+        destinationHopperId,
+        driverId,
+        driverName,
+      },
+    });
 
-  if (purchaseOrderLineId) await postReceiptToPurchaseOrderLine(purchaseOrderLineId, netWeightKg);
+    if (purchaseOrderLineId) await postReceiptToPurchaseOrderLine(tx, purchaseOrderLineId, netWeightKg);
+    return receipt;
+  });
 
   await logAudit({
     module: "MaterialReceiving",
@@ -75,8 +123,8 @@ export async function createReceipt(formData: FormData) {
 // once all its batch tickets are in. netWeightKg is added in kilograms;
 // PurchaseOrderLine.orderedMassKg/receivedMassKg are also kilograms, so no
 // unit conversion is needed here.
-async function postReceiptToPurchaseOrderLine(purchaseOrderLineId: string, netWeightKg: number) {
-  const line = await prisma.purchaseOrderLine.update({
+async function postReceiptToPurchaseOrderLine(db: Prisma.TransactionClient | typeof prisma, purchaseOrderLineId: string, netWeightKg: number) {
+  const line = await db.purchaseOrderLine.update({
     where: { id: purchaseOrderLineId },
     data: { receivedMassKg: { increment: netWeightKg } },
     include: { purchaseOrder: { include: { lines: true } } },
@@ -92,7 +140,35 @@ async function postReceiptToPurchaseOrderLine(purchaseOrderLineId: string, netWe
   });
   const newStatus = allReceived ? "RECEIVED" : "PARTIALLY_RECEIVED";
   if (line.purchaseOrder.status !== newStatus) {
-    await prisma.purchaseOrder.update({ where: { id: line.purchaseOrder.id }, data: { status: newStatus } });
+    await db.purchaseOrder.update({ where: { id: line.purchaseOrder.id }, data: { status: newStatus } });
+  }
+}
+
+// Mirrors postReceiptToPurchaseOrderLine but subtracts — a receipt that
+// was already counted toward a PO line's receivedMassKg used to leave that
+// figure (and the PO's own RECEIVED/PARTIALLY_RECEIVED status) untouched
+// when the receipt was later corrected, deleted, or returned, so the PO
+// could keep showing as received against a delivery that no longer exists
+// or whose weight changed. Clamped at 0 rather than using a raw decrement
+// so a correction can never push received mass negative.
+async function reversePOLineReceipt(db: Prisma.TransactionClient | typeof prisma, purchaseOrderLineId: string, netWeightKg: number) {
+  const current = await db.purchaseOrderLine.findUnique({
+    where: { id: purchaseOrderLineId },
+    include: { purchaseOrder: { include: { lines: true } } },
+  });
+  if (!current) return;
+
+  const newReceivedMassKg = Math.max(0, (current.receivedMassKg ?? 0) - netWeightKg);
+  await db.purchaseOrderLine.update({ where: { id: purchaseOrderLineId }, data: { receivedMassKg: newReceivedMassKg } });
+
+  const allReceived = current.purchaseOrder.lines.every((l) => {
+    if (l.orderedMassKg == null) return true;
+    const received = l.id === purchaseOrderLineId ? newReceivedMassKg : l.receivedMassKg;
+    return (received ?? 0) >= l.orderedMassKg;
+  });
+  const newStatus = allReceived ? "RECEIVED" : "PARTIALLY_RECEIVED";
+  if (current.purchaseOrder.status !== newStatus) {
+    await db.purchaseOrder.update({ where: { id: current.purchaseOrder.id }, data: { status: newStatus } });
   }
 }
 
@@ -128,6 +204,10 @@ export async function updateReceipt(formData: FormData) {
   if (!receipt) return;
   if (!(await isPlantInScope(receipt.plantId, effectiveSiteId(user)))) return;
 
+  const material = await prisma.material.findUnique({ where: { id: materialId } });
+  if (!material) return;
+  if (!(await isValidDestination(prisma, receipt.plantId, material.type, destinationSiloId, destinationHopperId))) return;
+
   const netWeightKg = grossWeightKg - tareWeightKg;
 
   await prisma.$transaction(async (tx) => {
@@ -149,6 +229,16 @@ export async function updateReceipt(formData: FormData) {
         const hopper = await tx.hopper.findUnique({ where: { id: destinationHopperId } });
         if (hopper) await tx.hopper.update({ where: { id: hopper.id }, data: { currentLevelTons: hopper.currentLevelTons + newNetTons } });
       }
+    }
+
+    // The PO line's receivedMassKg was bumped by the OLD net weight at
+    // creation, independent of whether the receipt was ever posted to
+    // inventory — reverse that and re-apply the corrected weight, or the
+    // PO's received total silently drifts away from what this receipt
+    // actually says every time it's corrected.
+    if (receipt.purchaseOrderLineId) {
+      await reversePOLineReceipt(tx, receipt.purchaseOrderLineId, receipt.netWeightKg);
+      await postReceiptToPurchaseOrderLine(tx, receipt.purchaseOrderLineId, netWeightKg);
     }
 
     await tx.materialReceipt.update({
@@ -212,6 +302,9 @@ export async function deleteReceipt(formData: FormData) {
         }
       }
     }
+    // Same PO-line reversal as updateReceipt above — a deleted receipt
+    // must stop counting toward what the PO shows as received.
+    if (receipt.purchaseOrderLineId) await reversePOLineReceipt(tx, receipt.purchaseOrderLineId, receipt.netWeightKg);
     await tx.materialReceipt.delete({ where: { id } });
   });
 
@@ -256,6 +349,10 @@ export async function returnReceiptToSupplier(formData: FormData) {
         }
       }
     }
+    // Same PO-line reversal as updateReceipt/deleteReceipt above — a
+    // shipment sent back must stop counting toward what the PO shows as
+    // received, same as if it had never arrived.
+    if (receipt.purchaseOrderLineId) await reversePOLineReceipt(tx, receipt.purchaseOrderLineId, receipt.netWeightKg);
     await tx.materialReceipt.update({ where: { id }, data: { qcStatus: "RETURNED", postedToInventory: false } });
   });
 
