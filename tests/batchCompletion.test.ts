@@ -399,6 +399,13 @@ test("completion vs. addTicketComponent: exactly one of two valid outcomes", asy
       claimAndAddTicketComponent(ticketId, secondMaterial.id, 500),
     ]);
 
+    // TEMPORARY DEBUG — investigating a CI-only failure of this test, to
+    // be reverted once diagnosed.
+    console.log("DEBUG completeResult", JSON.stringify(completeResult));
+    console.log("DEBUG editResult", JSON.stringify(editResult));
+    console.log("DEBUG secondMaterial row", JSON.stringify(await prisma.material.findUnique({ where: { id: secondMaterial.id } })));
+    console.log("DEBUG components after race", JSON.stringify(await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } })));
+
     if (editResult.status === "OK") {
       // The new component was added before completion's claim — completion
       // must see it and correctly fail closed (CR-02), not silently skip it.
