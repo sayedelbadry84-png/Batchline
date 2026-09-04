@@ -557,6 +557,7 @@ const en: typeof ar = {
           errorCapacityExceeded: "Couldn't fully reverse — one of the storage locations is full and can't hold the full returned quantity",
           errorStorageNotConfigured: "Couldn't reverse — one of the original storage locations no longer exists",
           errorNotFound: "Ticket not found",
+          errorNoPostedMovements: "Couldn't reverse — no inventory movement is recorded for this ticket (it most likely completed before the movement ledger existed); check the balance manually if needed",
         },
       },
     },

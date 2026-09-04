@@ -16,6 +16,7 @@ export type ReverseBatchMessages = {
   errorCapacityExceeded: string;
   errorStorageNotConfigured: string;
   errorNotFound: string;
+  errorNoPostedMovements: string;
 };
 
 function errorText(state: NonNullable<ReverseBatchActionState>, m: ReverseBatchMessages): string | null {
@@ -34,6 +35,8 @@ function errorText(state: NonNullable<ReverseBatchActionState>, m: ReverseBatchM
       return m.errorStorageNotConfigured;
     case "NOT_FOUND":
       return m.errorNotFound;
+    case "NO_POSTED_MOVEMENTS":
+      return m.errorNoPostedMovements;
   }
 }
 

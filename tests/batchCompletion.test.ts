@@ -41,6 +41,8 @@ process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 const { PrismaClient } = await import("@prisma/client");
 const { completeBatchTicket, reverseBatchTicket } = await import("../src/lib/batchCompletion");
 const { postSiloMovement } = await import("../src/lib/inventoryLedger");
+const { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } = await import("../src/lib/batchComponentEdits");
+const { claimTripSlot } = await import("../src/lib/tripDispatch");
 
 const prisma = new PrismaClient();
 
@@ -240,6 +242,41 @@ test("insufficient stock fails without changing ticket, ledger, or balance", asy
   assert.equal(movements.length, 0);
 });
 
+// ---- 4b. A total stockout with an authorized override succeeds without
+// ---- posting a zero-quantity ledger row (P0-01) -----------------------
+// The very first version of postMovement tried to INSERT quantity=0
+// whenever a shortage override hit a completely empty store (applied
+// clamps all the way to 0) and got an unhandled CHECK-constraint failure
+// (InventoryMovement_quantity_nonzero) instead of a clean SUCCESS.
+
+test("a total stockout with an authorized override succeeds and posts no zero-quantity row", async () => {
+  await resetSilo(0); // completely empty
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 5000 }]); // needs 5t, 0t on hand
+
+  const result = await completeBatchTicket(ticketId, { shortageOverrideNote: "authorized total shortage" });
+  assert.equal(result.status, "SUCCESS");
+  if (result.status === "SUCCESS") assert.ok(result.shortages.length > 0, "expected the shortage to be reported even though completion succeeded");
+
+  const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
+  assert.equal(ticket.status, "COMPLETE");
+  assert.equal(await siloLevel(siloId), 0); // never went negative, never "gained" anything either
+
+  // No ledger row at all for this component — a zero-effect movement
+  // isn't a real event, and the CHECK constraint would reject it anyway.
+  const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
+  assert.equal(movements.length, 0);
+});
+
+test("insufficient stock without an override is still rejected even from a completely empty store", async () => {
+  await resetSilo(0);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 5000 }]);
+
+  const result = await completeBatchTicket(ticketId, {});
+  assert.equal(result.status, "INSUFFICIENT_STOCK");
+  assert.equal((await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } })).status, "RELEASED");
+  assert.equal(await siloLevel(siloId), 0);
+});
+
 // ---- 5. A failure on one component rolls back all components ---------
 
 test("a failure while processing one component rolls back all components", async () => {
@@ -274,12 +311,18 @@ test("a failure while processing one component rolls back all components", async
   }
 });
 
-// ---- 6. COMPLETE/CANCELLED reject actual/component changes -----------
-// (Regression coverage — this guard predates this test suite; see
-// production/actions.ts's recordActuals/recordActualField/
-// addTicketComponent/deleteTicketComponent. Verified here at the DB
-// level directly, since these are still plain Server Actions requiring
-// a session — the check they share is a one-line status guard.)
+// ---- 6. COMPLETE/CANCELLED reject actual/component changes, under real
+// ---- concurrency, against the real production code (CR-03, P1-01) -----
+// claimAndRecordActuals/claimAndRecordActualField/claimAndAddTicketComponent/
+// claimAndDeleteTicketComponent (src/lib/batchComponentEdits.ts) are the
+// exact functions production/actions.ts's Server Actions call — not a
+// paraphrase of their logic. Racing each against completeBatchTicket via
+// Promise.all must always resolve to exactly one of two valid outcomes:
+// the edit committed first (so completion picks it up and the edit
+// itself reports OK), or completion committed first (so the edit is
+// refused with TERMINAL and the component is provably unchanged) — never
+// a third outcome where the ledger is built from a stale snapshot while
+// a newer edit also got saved.
 
 test("a COMPLETE ticket cannot be re-completed", async () => {
   await resetSilo(50);
@@ -288,6 +331,117 @@ test("a COMPLETE ticket cannot be re-completed", async () => {
   assert.equal(first.status, "SUCCESS");
   const second = await completeBatchTicket(ticketId, {});
   assert.equal(second.status, "ALREADY_COMPLETED");
+});
+
+test("completion vs. recordActualField: exactly one of two valid outcomes, never a stale-ledger/saved-edit mix", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]); // 1kg -> 0.001t, small on purpose
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+
+  const [completeResult, editResult] = await Promise.all([
+    completeBatchTicket(ticketId, {}),
+    claimAndRecordActualField(ticketId, component.id, "actual", 2000), // 2kg — deliberately different from the 1kg target
+  ]);
+
+  assert.equal(completeResult.status, "SUCCESS"); // completion always eventually succeeds — BATCHING never blocks its own claim
+  const finalComponent = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
+  const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
+  assert.equal(movements.length, 1);
+
+  if (editResult.status === "OK") {
+    // Edit committed first — completion must have picked up the edited value.
+    assert.equal(finalComponent.actualMassKg, 2000);
+    assert.equal(Math.abs(movements[0].quantity), 2);
+  } else {
+    // Completion committed first — the edit must have been refused and
+    // the component must be exactly as it was (target only, no actual set).
+    assert.equal(editResult.status, "TERMINAL");
+    assert.equal(finalComponent.actualMassKg, null);
+    assert.equal(Math.abs(movements[0].quantity), 1);
+  }
+});
+
+test("completion vs. recordActuals (bulk): exactly one of two valid outcomes", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+
+  const [completeResult, editResult] = await Promise.all([
+    completeBatchTicket(ticketId, {}),
+    claimAndRecordActuals(ticketId, [{ id: component.id, actualMassKg: 3000, moisturePct: null }]),
+  ]);
+
+  assert.equal(completeResult.status, "SUCCESS");
+  const finalComponent = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
+  const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
+  assert.equal(movements.length, 1);
+
+  if (editResult.status === "OK") {
+    assert.equal(finalComponent.actualMassKg, 3000);
+    assert.equal(Math.abs(movements[0].quantity), 3);
+  } else {
+    assert.equal(editResult.status, "TERMINAL");
+    assert.equal(finalComponent.actualMassKg, null);
+    assert.equal(Math.abs(movements[0].quantity), 1);
+  }
+});
+
+test("completion vs. addTicketComponent: exactly one of two valid outcomes", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-CEMENT-RACE", type: "CEMENT", specificGravity: null } });
+  try {
+    // secondMaterial has no matching silo at all — if it DOES get added
+    // and completion picks it up, completion must correctly fail with
+    // STORAGE_NOT_CONFIGURED (CR-02) rather than silently ignoring it.
+    const [completeResult, editResult] = await Promise.all([
+      completeBatchTicket(ticketId, {}),
+      claimAndAddTicketComponent(ticketId, secondMaterial.id, 500),
+    ]);
+
+    if (editResult.status === "OK") {
+      // The new component was added before completion's claim — completion
+      // must see it and correctly fail closed (CR-02), not silently skip it.
+      assert.equal(completeResult.status, "STORAGE_NOT_CONFIGURED");
+      const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
+      assert.equal(ticket.status, "RELEASED");
+      assert.equal(await siloLevel(siloId), 50); // whole transaction rolled back, original component's silo untouched too
+    } else {
+      // Completion claimed first — the add must have been refused and
+      // never actually created a second component row.
+      assert.equal(editResult.status, "TERMINAL");
+      assert.equal(completeResult.status, "SUCCESS");
+      const components = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+      assert.equal(components.length, 1);
+    }
+  } finally {
+    await prisma.batchComponentActual.deleteMany({ where: { batchTicketId: ticketId, materialId: secondMaterial.id } });
+    await prisma.material.delete({ where: { id: secondMaterial.id } }).catch(() => {});
+  }
+});
+
+test("completion vs. deleteTicketComponent: exactly one of two valid outcomes", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+
+  const [completeResult, editResult] = await Promise.all([completeBatchTicket(ticketId, {}), claimAndDeleteTicketComponent(ticketId, component.id)]);
+
+  if (editResult.status === "OK") {
+    // The component was deleted before completion's claim — completion
+    // must have nothing left to deduct at all.
+    assert.equal(completeResult.status, "SUCCESS");
+    const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
+    assert.equal(movements.length, 0);
+    assert.equal(await siloLevel(siloId), 50); // nothing deducted
+  } else {
+    // Completion claimed first — the delete must have been refused and
+    // the component must still exist, now attached to a COMPLETE ticket.
+    assert.equal(editResult.status, "TERMINAL");
+    assert.equal(completeResult.status, "SUCCESS");
+    const stillThere = await prisma.batchComponentActual.findUnique({ where: { id: component.id } });
+    assert.ok(stillThere);
+  }
 });
 
 // ---- 7/8. Reversal restores exact quantities once; a second reversal --
@@ -318,6 +472,36 @@ test("reversal restores the exact posted quantities once, and a second reversal 
 
   const movementsAfterSecond = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
   assert.equal(movementsAfterSecond.length, 2);
+});
+
+// ---- 8b. A pre-ledger COMPLETE ticket refuses reversal instead of -----
+// ---- silently "succeeding" with nothing to restore (P1-06) ------------
+// Every ticket completed before this ledger existed has zero
+// InventoryMovement rows — exactly the case this simulates by creating a
+// COMPLETE ticket directly, bypassing completeBatchTicket entirely,
+// rather than going through the normal flow.
+
+test("reversing a COMPLETE ticket with no posted movements is refused, not silently accepted", async () => {
+  const ticket = await prisma.batchTicket.create({
+    data: {
+      reservationId,
+      mixId,
+      plantId,
+      ticketNumber: `TEST-SUITE-BT-PRELEDGER-${Date.now()}`,
+      volumeM3: 5,
+      status: "COMPLETE",
+      batchCompletedAt: new Date(),
+      components: { create: [{ materialId, targetMassKg: 3000 }] },
+    },
+  });
+  ticketIds.push(ticket.id);
+
+  const result = await reverseBatchTicket(ticket.id, { actorId: adminUserId, reason: "test pre-ledger reversal" });
+  assert.equal(result.status, "NO_POSTED_MOVEMENTS");
+
+  const fresh = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticket.id } });
+  assert.equal(fresh.status, "COMPLETE"); // unchanged
+  assert.equal(fresh.reversedAt, null); // the claim was rolled back, not left stamped with nothing actually reversed
 });
 
 // ---- 9. Consumption uses the explicitly assigned storage --------------
@@ -364,20 +548,53 @@ test("a material with no configured storage fails the whole completion", async (
   }
 });
 
+// ---- 11b. An ADMIXTURE with no specificGravity on file fails the same
+// ---- way (distinct from "no tank exists" — this is "can't even compute
+// ---- how many liters", a data problem, not a storage-assignment one) --
+// A previous commit message claimed this exact case was covered by the
+// test above; it wasn't (that material was created WITH specificGravity
+// 1.1) — this is the real test for it.
+
+test("an ADMIXTURE with no specificGravity on file fails the whole completion", async () => {
+  await resetSilo(50);
+  const admixtureNoGravity = await prisma.material.create({ data: { name: "TEST-SUITE-ADMIXTURE-NO-GRAVITY", type: "ADMIXTURE", specificGravity: null } });
+  try {
+    const ticketId = await makeTicket([
+      { materialId, targetMassKg: 1000 },
+      { materialId: admixtureNoGravity.id, targetMassKg: 50 },
+    ]);
+
+    const result = await completeBatchTicket(ticketId, {});
+    assert.equal(result.status, "STORAGE_NOT_CONFIGURED");
+    if (result.status === "STORAGE_NOT_CONFIGURED") assert.match(result.material, /TEST-SUITE-ADMIXTURE-NO-GRAVITY/);
+
+    const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
+    assert.equal(ticket.status, "RELEASED");
+    assert.equal(await siloLevel(siloId), 50); // rolled back entirely, same as the no-tank case
+
+    const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
+    assert.equal(movements.length, 0);
+  } finally {
+    await prisma.material.delete({ where: { id: admixtureNoGravity.id } }).catch(() => {});
+  }
+});
+
 // ---- 12. Dispatch and reversal are mutually exclusive (CR-01) ---------
 // startTrip itself (production/actions.ts) needs a session and can't be
 // called directly from here — this mirrors its actual guard exactly (a
 // fresh reversedAt/status re-check inside the same kind of Serializable
 // transaction startTrip uses) rather than testing a paraphrase of it.
 
+// Calls the REAL claimTripSlot (src/lib/tripDispatch.ts) — the exact
+// function startTrip itself calls, per P1-02 in the review — inside the
+// same Serializable transaction shape startTrip uses, then creates the
+// Trip exactly as startTrip's own tx.trip.create call does.
 async function tryDispatch(ticketId: string): Promise<"OK" | "REJECTED"> {
   try {
     await prisma.$transaction(
       async (tx) => {
-        const fresh = await tx.batchTicket.findUnique({ where: { id: ticketId }, select: { status: true, reversedAt: true } });
-        if (!fresh || fresh.status !== "COMPLETE" || fresh.reversedAt) throw new Error("TICKET_NOT_DISPATCHABLE");
-        const truckBusy = await tx.trip.findFirst({ where: { truckId, status: { not: "CLOSED" } } });
-        if (truckBusy) throw new Error("TRUCK_BUSY");
+        const claim = await claimTripSlot(tx, { ticketId, truckId });
+        if (claim.status !== "OK") throw new Error(claim.status);
         const created = await tx.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date() } });
         tripIds.push(created.id);
       },

@@ -32,7 +32,7 @@ export type MovementResult =
 
 export class DomainError extends Error {
   constructor(
-    public code: "INSUFFICIENT_STOCK" | "CAPACITY_EXCEEDED" | "CONCURRENT_CONFLICT" | "STORAGE_NOT_CONFIGURED",
+    public code: "INSUFFICIENT_STOCK" | "CAPACITY_EXCEEDED" | "CONCURRENT_CONFLICT" | "STORAGE_NOT_CONFIGURED" | "NO_POSTED_MOVEMENTS",
     message?: string,
   ) {
     super(message ?? code);
@@ -148,6 +148,22 @@ async function postMovement(
     // — there's no equivalent "audited override" for losing material off
     // the top of a full silo.
     throw new DomainError("CAPACITY_EXCEEDED", `${storageType} ${input.storageId} has no room for the full credit: requested ${input.quantity}, only ${applied} fit`);
+  }
+
+  // A zero-effect movement — either a fully-authorized shortage against a
+  // completely empty store (isConsumption && allowShortage, applied
+  // clamps all the way to 0), or a genuinely zero-quantity request (an
+  // actualMassKg of exactly 0kg is a real, reachable weighed value) —
+  // posts no ledger row at all. The table's own quantity<>0 CHECK
+  // constraint (see the migration) exists precisely so a real event
+  // always has a nonzero footprint; a zero-effect "event" isn't one, and
+  // there's nothing for a later reversal to undo either way. Found this
+  // the hard way: the very first version of this function tried to
+  // insert quantity=0 whenever a shortage override hit a fully-empty
+  // store and got a raw, unhandled CHECK-constraint failure instead of a
+  // clean result.
+  if (Math.abs(applied) < 0.001) {
+    return { status: "OK", appliedQuantity: 0, newLevel };
   }
 
   // Record the ledger row with the TRUE applied delta (post-clamp), not

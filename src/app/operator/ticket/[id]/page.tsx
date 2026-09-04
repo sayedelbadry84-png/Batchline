@@ -38,6 +38,9 @@ export default async function OperatorTicketPage({
   });
   if (!ticket) notFound();
 
+  // Same terminal-state guard every write path already enforces — see
+  // production/[id]/page.tsx's own isTerminal for the full reasoning.
+  const isTerminal = ticket.status === "COMPLETE" || ticket.status === "CANCELLED";
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
 
@@ -177,14 +180,14 @@ export default async function OperatorTicketPage({
             </div>
           );
         })}
-        {ticket.status !== "COMPLETE" && (
+        {!isTerminal && (
           <button type="submit" className="mt-1 rounded-md border border-border py-2.5 text-sm font-medium">
             {d.saveReadings}
           </button>
         )}
       </form>
 
-      {ticket.status !== "COMPLETE" && (
+      {!isTerminal && (
         <CompleteBatchForm
           ticketId={ticket.id}
           messages={{

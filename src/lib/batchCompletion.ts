@@ -212,7 +212,15 @@ export type ReverseBatchResult =
   | { status: "ALREADY_REVERSED" }
   | { status: "CONCURRENT_CONFLICT" }
   | { status: "CAPACITY_EXCEEDED"; storage: string }
-  | { status: "STORAGE_NOT_CONFIGURED"; material: string };
+  | { status: "STORAGE_NOT_CONFIGURED"; material: string }
+  // A COMPLETE ticket with zero posted BATCH_COMPLETION movements — either
+  // it predates the ledger entirely (completed before this system
+  // existed), or every one of its components happened to apply as a
+  // zero-effect movement (see inventoryLedger.ts's own zero-quantity
+  // skip). Refusing outright, rather than silently stamping reversedAt
+  // with nothing to actually credit back, is the whole point of this
+  // status existing.
+  | { status: "NO_POSTED_MOVEMENTS" };
 
 /**
  * Undoes a completed ticket's posted inventory movements without ever
@@ -267,6 +275,15 @@ export async function reverseBatchTicket(ticketId: string, opts: { actorId: stri
             where: { sourceType: "BatchTicket", sourceId: ticketId, movementType: "BATCH_COMPLETION" },
           });
 
+          // A COMPLETE ticket with nothing posted against it — most likely
+          // it predates the ledger (every ticket completed before this
+          // system existed has zero InventoryMovement rows) — must never
+          // silently stamp reversedAt as if inventory had been restored.
+          // Throwing rolls back the claim above too, so the ticket stays
+          // exactly as it was: COMPLETE, not reversed, free to try again
+          // once/if it's ever legitimately resolved.
+          if (originalMovements.length === 0) throw new DomainError("NO_POSTED_MOVEMENTS", ticketId);
+
           const sorted = [...originalMovements].sort((a, b) => (a.storageType === b.storageType ? a.storageId.localeCompare(b.storageId) : a.storageType.localeCompare(b.storageType)));
 
           for (const m of sorted) {
@@ -301,6 +318,7 @@ export async function reverseBatchTicket(ticketId: string, opts: { actorId: stri
     if (e instanceof DomainError) {
       if (e.code === "STORAGE_NOT_CONFIGURED") return { status: "STORAGE_NOT_CONFIGURED", material: e.message };
       if (e.code === "CAPACITY_EXCEEDED") return { status: "CAPACITY_EXCEEDED", storage: e.message };
+      if (e.code === "NO_POSTED_MOVEMENTS") return { status: "NO_POSTED_MOVEMENTS" };
       return { status: "CONCURRENT_CONFLICT" };
     }
     if (isP2034(e)) return { status: "CONCURRENT_CONFLICT" };

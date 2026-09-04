@@ -52,7 +52,15 @@ export default async function BatchTicketPage({
   ]);
   if (!ticket) notFound();
 
-  const canEditComponents = ticket.status !== "COMPLETE";
+  // Matches the domain-layer guard every write path already enforces
+  // (recordActuals/recordActualField/addTicketComponent/
+  // deleteTicketComponent/completeBatchTicket all reject both COMPLETE
+  // and CANCELLED) — the UI used to only hide these for COMPLETE, so a
+  // CANCELLED ticket (nothing sets this today, but the schema and every
+  // domain guard already treat it as terminal) would still show a
+  // weighing/completion form that could only ever fail.
+  const isTerminal = ticket.status === "COMPLETE" || ticket.status === "CANCELLED";
+  const canEditComponents = !isTerminal;
   const componentMaterialIds = new Set(ticket.components.map((c) => c.materialId));
   const addableMaterials = materials.filter((mt) => !componentMaterialIds.has(mt.id));
 
@@ -250,7 +258,7 @@ export default async function BatchTicketPage({
             })}
           </tbody>
         </table>
-        {ticket.status !== "COMPLETE" && (
+        {!isTerminal && (
           <div className="mt-4 flex gap-3">
             <button type="submit" className="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt">
               {d.saveReadings}
@@ -280,7 +288,7 @@ export default async function BatchTicketPage({
         </form>
       )}
 
-      {ticket.status !== "COMPLETE" && (
+      {!isTerminal && (
         <CompleteBatchForm
           ticketId={ticket.id}
           messages={{

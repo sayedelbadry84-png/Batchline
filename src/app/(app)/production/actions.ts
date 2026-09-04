@@ -9,6 +9,8 @@ import { getAvailableReclaimForTruck } from "@/lib/reclaim";
 import { postSiloMovement, postHopperMovement, postChemicalTankMovement } from "@/lib/inventoryLedger";
 import { findMatchingSilo, findMatchingHopper, AGGREGATE_TYPES } from "@/lib/storageMatching";
 import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain } from "@/lib/batchCompletion";
+import { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } from "@/lib/batchComponentEdits";
+import { claimTripSlot } from "@/lib/tripDispatch";
 import { withSequentialNumber } from "@/lib/sequence";
 import { REQUISITION_APPROVAL_ROLES, canPerformAction } from "@/lib/permissions";
 import { notify, notifyRoles } from "@/lib/notify";
@@ -309,18 +311,8 @@ export async function recordActuals(formData: FormData) {
     writes.push({ id: c.id, actualMassKg: enteredMass, moisturePct });
   }
 
-  const claimed = await prisma.$transaction(async (tx) => {
-    const claim = await tx.batchTicket.updateMany({
-      where: { id: batchTicketId, status: { notIn: ["COMPLETE", "CANCELLED"] } },
-      data: { status: "BATCHING" },
-    });
-    if (claim.count === 0) return false;
-    for (const w of writes) {
-      await tx.batchComponentActual.update({ where: { id: w.id }, data: { actualMassKg: w.actualMassKg, moisturePct: w.moisturePct } });
-    }
-    return true;
-  });
-  if (!claimed) return;
+  const result = await claimAndRecordActuals(batchTicketId, writes);
+  if (result.status !== "OK") return;
 
   await logAudit({
     module: "Production",
@@ -367,19 +359,8 @@ export async function recordActualField(formData: FormData) {
   // Always setting "BATCHING" (not conditionally, like the old
   // status !== "BATCHING" check) is harmless when it's already BATCHING
   // — the WHERE clause is what does the real work.
-  const claimed = await prisma.$transaction(async (tx) => {
-    const claim = await tx.batchTicket.updateMany({
-      where: { id: batchTicketId, status: { notIn: ["COMPLETE", "CANCELLED"] } },
-      data: { status: "BATCHING" },
-    });
-    if (claim.count === 0) return false;
-    await tx.batchComponentActual.update({
-      where: { id: componentId },
-      data: field === "actual" ? { actualMassKg: value } : { moisturePct: value },
-    });
-    return true;
-  });
-  if (!claimed) return;
+  const result = await claimAndRecordActualField(batchTicketId, componentId, field, value);
+  if (result.status !== "OK") return;
 
   await logAudit({
     module: "Production",
@@ -426,16 +407,22 @@ export async function completeBatch(_prevState: CompleteBatchActionState, formDa
 
   // A shortage override needs its own sign-off, not just whoever can
   // complete a batch at all (HI-04) — an unauthorized note is dropped
-  // rather than trusted, so completion falls through to the normal
-  // (non-override) path and correctly rejects with INSUFFICIENT_STOCK if
-  // there really is a shortfall, instead of silently letting it through.
-  if (shortageOverrideNote && !(await canPerformAction(user!.role, "production", "overrideShortage"))) {
-    shortageOverrideNote = null;
-  }
+  // rather than trusted, so completion still attempts the normal
+  // (non-override) path first: if there's no real shortage, it succeeds
+  // exactly as if the note had never been typed. Only report
+  // UNAUTHORIZED_OVERRIDE (rather than a plain INSUFFICIENT_STOCK, which
+  // wouldn't explain that an override WAS attempted but refused) if it
+  // turns out there really was a shortage and this note would have
+  // covered it.
+  const noteDroppedForPermission = !!shortageOverrideNote && !(await canPerformAction(user!.role, "production", "overrideShortage"));
+  if (noteDroppedForPermission) shortageOverrideNote = null;
 
   const result = await completeBatchTicket(batchTicketId, { shortageOverrideNote, actorId: user!.id });
   if (result.status !== "SUCCESS") {
-    if (result.status === "INSUFFICIENT_STOCK") return { status: "INSUFFICIENT_STOCK", detail: result.shortages.join("; ") };
+    if (result.status === "INSUFFICIENT_STOCK") {
+      if (noteDroppedForPermission) return { status: "UNAUTHORIZED_OVERRIDE" };
+      return { status: "INSUFFICIENT_STOCK", detail: result.shortages.join("; ") };
+    }
     if (result.status === "STORAGE_NOT_CONFIGURED") return { status: "STORAGE_NOT_CONFIGURED", detail: result.material };
     return { status: result.status };
   }
@@ -585,41 +572,11 @@ export async function startTrip(formData: FormData) {
   try {
     trip = await prisma.$transaction(
       async (tx) => {
-        // Re-verify status/reversedAt fresh, inside this same Serializable
-        // transaction — the plain check above ran before the transaction
-        // started, so a reversal committed in the gap between that read
-        // and this one would otherwise slip through undetected. Reading
-        // it here means: if reverseBatchTicket's own transaction (also
-        // Serializable — see src/lib/batchCompletion.ts) commits first,
-        // this read sees reversedAt set and throws; if the two are truly
-        // concurrent, Postgres aborts one of them with a serialization
-        // failure regardless. Either way, dispatch and reversal can never
-        // both succeed for the same ticket.
-        const freshTicket = await tx.batchTicket.findUnique({ where: { id: batchTicketId }, select: { status: true, reversedAt: true } });
-        if (!freshTicket || freshTicket.status !== "COMPLETE" || freshTicket.reversedAt) throw new Error("TICKET_NOT_DISPATCHABLE");
-
-        const truckBusy = await tx.trip.findFirst({ where: { truckId, status: { not: "CLOSED" } } });
-        if (truckBusy) throw new Error("TRUCK_BUSY");
-
-        // Same double-booking risk as the truck: a pump unit or a crew
-        // member can only be actually running one trip at a time, so
-        // check each the same way — under the same Serializable
-        // transaction, so a concurrent submission can't slip both onto
-        // two open trips at once.
-        if (pumpId) {
-          const pumpBusy = await tx.trip.findFirst({ where: { pumpId, status: { not: "CLOSED" } } });
-          if (pumpBusy) throw new Error("PUMP_BUSY");
-        }
-        if (pumpOperatorId || pumpAssistantId) {
-          const crewIds = [pumpOperatorId, pumpAssistantId].filter((v): v is string => Boolean(v));
-          const crewBusy = await tx.trip.findFirst({
-            where: {
-              status: { not: "CLOSED" },
-              OR: [{ pumpOperatorId: { in: crewIds } }, { pumpAssistantId: { in: crewIds } }],
-            },
-          });
-          if (crewBusy) throw new Error("CREW_BUSY");
-        }
+        // Same claim used by the "dispatch and reversal can never both
+        // succeed" test in tests/batchCompletion.test.ts — this is the
+        // real production code path, not a paraphrase of it.
+        const claim = await claimTripSlot(tx, { ticketId: batchTicketId, truckId, pumpId, pumpOperatorId, pumpAssistantId });
+        if (claim.status !== "OK") throw new Error(claim.status);
 
         const created = await tx.trip.create({
           data: {
@@ -877,17 +834,8 @@ export async function addTicketComponent(formData: FormData) {
   // completeBatchTicket's own claim (src/lib/batchCompletion.ts)
   // mutually exclusive: whichever transaction locks the row first is
   // what the other necessarily sees once it gets its turn.
-  const claimed = await prisma.$transaction(async (tx) => {
-    const claim = await tx.batchTicket.updateMany({ where: { id: batchTicketId, status: { notIn: ["COMPLETE", "CANCELLED"] } }, data: { updatedAt: new Date() } });
-    if (claim.count === 0) return false;
-    await tx.batchComponentActual.upsert({
-      where: { batchTicketId_materialId: { batchTicketId, materialId } },
-      create: { batchTicketId, materialId, targetMassKg },
-      update: { targetMassKg },
-    });
-    return true;
-  });
-  if (!claimed) return;
+  const result = await claimAndAddTicketComponent(batchTicketId, materialId, targetMassKg);
+  if (result.status !== "OK") return;
 
   await logAudit({
     module: "Production",
@@ -917,13 +865,8 @@ export async function deleteTicketComponent(formData: FormData) {
   if (!(await isPlantInScope(component.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   // Same touch-claim as addTicketComponent above, same reason.
-  const claimed = await prisma.$transaction(async (tx) => {
-    const claim = await tx.batchTicket.updateMany({ where: { id: batchTicketId, status: { notIn: ["COMPLETE", "CANCELLED"] } }, data: { updatedAt: new Date() } });
-    if (claim.count === 0) return false;
-    await tx.batchComponentActual.delete({ where: { id } });
-    return true;
-  });
-  if (!claimed) return;
+  const result = await claimAndDeleteTicketComponent(batchTicketId, id);
+  if (result.status !== "OK") return;
 
   await logAudit({ module: "Production", recordId: batchTicketId, field: "component", reasonCode: "TICKET_COMPONENT_REMOVED" });
 
@@ -974,7 +917,7 @@ export async function deleteBatchTicket(formData: FormData) {
 // ReverseBatchForm.tsx (HI-06) can show an actual reason for a rejected
 // reversal instead of nothing happening.
 export type ReverseBatchActionState = {
-  status: "SUCCESS" | "NOT_FOUND" | "INVALID_STATE" | "ALREADY_REVERSED" | "CONCURRENT_CONFLICT" | "CAPACITY_EXCEEDED" | "STORAGE_NOT_CONFIGURED";
+  status: "SUCCESS" | "NOT_FOUND" | "INVALID_STATE" | "ALREADY_REVERSED" | "CONCURRENT_CONFLICT" | "CAPACITY_EXCEEDED" | "STORAGE_NOT_CONFIGURED" | "NO_POSTED_MOVEMENTS";
   detail?: string;
 } | null;
 
