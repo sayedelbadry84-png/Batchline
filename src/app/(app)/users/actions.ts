@@ -55,7 +55,7 @@ export async function updateUser(formData: FormData) {
 
   if (!id || !name || !role) return;
 
-  const existing = await prisma.user.findUnique({ where: { id }, select: { plantId: true } });
+  const existing = await prisma.user.findUnique({ where: { id }, select: { plantId: true, role: true, status: true } });
   if (!existing) return;
   const plantId = siteId ? await resolvePlantIdForSite(siteId, existing.plantId) : null;
 
@@ -63,6 +63,17 @@ export async function updateUser(formData: FormData) {
     where: { id },
     data: { name, role, plantId, employeeId, status },
   });
+
+  // getCurrentUser already rejects a session the instant status flips off
+  // ACTIVE (it re-checks on every request), so that specific case was
+  // never actually exploitable — but a role change previously left an
+  // already-open session logged in under the OLD role's own page/nav
+  // state until they next navigated, and there was no "kick them out
+  // right now" lever at all for either case. Deleting the sessions here
+  // makes both immediate rather than eventually-consistent.
+  if (existing.role !== role || existing.status !== status) {
+    await prisma.session.deleteMany({ where: { userId: id } });
+  }
 
   await logAudit({ module: "Users", recordId: id, afterValue: `${role} / ${status}`, reasonCode: "USER_UPDATED" });
   revalidatePath("/users");
@@ -83,6 +94,12 @@ export async function resetUserPassword(formData: FormData) {
     where: { id },
     data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
   });
+
+  // A password reset is often exactly the response to a suspected
+  // compromise — leaving a session opened under the OLD password still
+  // valid afterward would defeat the point: whoever had that cookie stays
+  // logged in regardless of the new password until it naturally expires.
+  await prisma.session.deleteMany({ where: { userId: id } });
 
   await logAudit({ module: "Users", recordId: id, reasonCode: "USER_PASSWORD_RESET" });
   revalidatePath("/users");

@@ -16,9 +16,13 @@ const NEXT_STATUS: Record<string, string> = {
 export async function advanceTrip(formData: FormData) {
   // DRIVER is allowed here too — the driver app's wrappers (see
   // src/app/driver/actions.ts) call straight into these three functions,
-  // and requireOwnTrip already verified the trip belongs to that driver
-  // before we get here; a plain Trips-page call never carries a DRIVER
-  // session in the first place.
+  // and requireOwnTrip already verifies the trip belongs to that driver
+  // before getting here. But that's a check made by the CALLER, not this
+  // function — a Server Action's own reference is present in the client
+  // bundle of any page that imports it, direct or not, so a DRIVER session
+  // must never be trusted to have arrived only through that wrapper.
+  // Re-verified here too: PLANT_OPERATOR/ADMIN may act on any in-scope
+  // trip, but a DRIVER may only ever advance their own.
   const user = await getCurrentUser();
   requireRole(user, ["PLANT_OPERATOR", "ADMIN", "DRIVER"]);
 
@@ -26,6 +30,7 @@ export async function advanceTrip(formData: FormData) {
   const trip = await prisma.trip.findUnique({ where: { id: tripId }, include: { batchTicket: { select: { plantId: true } } } });
   if (!trip) return;
   if (!(await isPlantInScope(trip.batchTicket.plantId, effectiveSiteId(user)))) return;
+  if (user!.role === "DRIVER" && trip.driverId !== user!.employeeId) return;
 
   const next = NEXT_STATUS[trip.status];
   if (!next) return;
@@ -53,6 +58,7 @@ export async function closeTripFull(formData: FormData) {
   const trip = await prisma.trip.findUnique({ where: { id: tripId }, include: { batchTicket: true } });
   if (!trip || trip.status === "CLOSED") return;
   if (!(await isPlantInScope(trip.batchTicket.plantId, effectiveSiteId(user)))) return;
+  if (user!.role === "DRIVER" && trip.driverId !== user!.employeeId) return;
 
   await prisma.trip.update({
     where: { id: tripId },
@@ -91,6 +97,7 @@ export async function closeTripWithReturn(formData: FormData) {
   });
   if (!trip || trip.status === "CLOSED") return;
   if (!(await isPlantInScope(trip.batchTicket.plantId, effectiveSiteId(user)))) return;
+  if (user!.role === "DRIVER" && trip.driverId !== user!.employeeId) return;
   // A truck can't return more concrete than the ticket loaded it with — an
   // unbounded value here (typo, or a bad-faith over-claim) would flow
   // straight into disposition math and the customer's billing reduction.
