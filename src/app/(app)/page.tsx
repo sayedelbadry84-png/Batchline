@@ -165,7 +165,6 @@ export default async function DashboardPage() {
       .reduce((sum, t) => sum + t.volumeM3, 0);
     sparklineDays.push({ date: dayStart, volumeM3 });
   }
-  const produced7d = sparklineDays.reduce((sum, day) => sum + day.volumeM3, 0);
   const sparklineMax = Math.max(...sparklineDays.map((day) => day.volumeM3), 1);
   // Today vs. yesterday are always the sparkline's last two entries — the
   // loop above pushes oldest-first, today last.

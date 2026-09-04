@@ -163,6 +163,15 @@ export default async function ReservationsPage({
   const operators = crew.filter((c) => c.role === "OPERATOR").map((c) => ({ id: c.id, name: c.name }));
   const assistants = crew.filter((c) => c.role === "HELPER").map((c) => ({ id: c.id, name: c.name }));
 
+  // react-hooks/purity flags any Date.now() in a component body on the
+  // (client-oriented) assumption that a stale value could leak across a
+  // re-render — this is a top-level Server Component, invoked fresh
+  // exactly once per HTTP request with no React reconciliation against a
+  // prior render, so that concern doesn't apply here. Computed once (not
+  // inside the .map below) so every reminder row's "due in" figure is
+  // consistent with the others in the same request.
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
   const baseUrl = `/reservations?date=${selectedDate}&dateTo=${selectedDateTo}`;
   const isRange = selectedDate !== selectedDateTo;
   const waMessage =
@@ -186,7 +195,7 @@ export default async function ReservationsPage({
           </div>
           <div className="flex flex-col gap-2">
             {dueForReminder.map((r) => {
-              const minsUntil = Math.max(0, Math.round((r.pourWindowStart.getTime() - Date.now()) / 60000));
+              const minsUntil = Math.max(0, Math.round((r.pourWindowStart.getTime() - nowMs) / 60000));
               const message = m.reminderMessage(r.reservationNumber, r.project.name, r.mix.code, r.requestedVolumeM3, fmtDateTime(r.pourWindowStart), r.siteLocation);
               return (
                 <div key={r.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface-alt px-3 py-2 text-sm">
