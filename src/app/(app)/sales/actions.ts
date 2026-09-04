@@ -45,7 +45,7 @@ export async function createOpportunity(formData: FormData) {
 
   const opportunity = await withSequentialNumber(
     "OPP",
-    () => prisma.opportunity.count(),
+    (yr) => prisma.opportunity.count({ where: { createdAt: yr } }),
     (opportunityNumber) =>
       prisma.opportunity.create({
         data: {
@@ -191,7 +191,7 @@ export async function logFieldVisit(formData: FormData) {
 
   const visit = await withSequentialNumber(
     "FV",
-    () => prisma.fieldVisit.count(),
+    (yr) => prisma.fieldVisit.count({ where: { visitDate: yr } }),
     (visitNumber) =>
       prisma.fieldVisit.create({
         data: {
@@ -267,7 +267,7 @@ export async function createQuote(formData: FormData) {
 
   const quote = await withSequentialNumber(
     "QT",
-    () => prisma.quote.count(),
+    (yr) => prisma.quote.count({ where: { createdAt: yr } }),
     (quoteNumber) =>
       prisma.quote.create({
         data: {
@@ -407,7 +407,7 @@ export async function convertQuoteLineToReservation(formData: FormData) {
   const now = new Date();
   const reservation = await withSequentialNumber(
     "RES",
-    () => prisma.reservation.count(),
+    (yr) => prisma.reservation.count({ where: { createdAt: yr } }),
     (reservationNumber) =>
       prisma.reservation.create({
         data: {

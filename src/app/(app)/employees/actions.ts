@@ -342,7 +342,7 @@ export async function createLeaveRequest(formData: FormData) {
 
   const leave = await withSequentialNumber(
     "LV",
-    () => prisma.leaveRequest.count(),
+    (yr) => prisma.leaveRequest.count({ where: { createdAt: yr } }),
     (requestNumber) =>
       prisma.leaveRequest.create({
         data: { requestNumber, employeeId, type, startDate, endDate, daysCount, reason, requestedById: user!.id },
@@ -452,7 +452,7 @@ export async function calculateEndOfServiceSettlement(formData: FormData) {
 
   const settlement = await withSequentialNumber(
     "EOS",
-    () => prisma.endOfServiceSettlement.count(),
+    (yr) => prisma.endOfServiceSettlement.count({ where: { createdAt: yr } }),
     (settlementNumber) =>
       prisma.endOfServiceSettlement.create({
         data: {
@@ -527,7 +527,7 @@ export async function markEndOfServiceSettlementPaid(formData: FormData) {
   await prisma.$transaction(async (tx) => {
     const txn = await withSequentialNumber(
       "TXN",
-      () => tx.cashTransaction.count(),
+      (yr) => tx.cashTransaction.count({ where: { createdAt: yr } }),
       (txnNumber) =>
         tx.cashTransaction.create({
           data: {

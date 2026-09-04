@@ -102,7 +102,7 @@ async function maybeAutoRequisitionMaterial(
 
   const requisition = await withSequentialNumber(
     "MTR",
-    () => prisma.materialRequisition.count(),
+    (yr) => prisma.materialRequisition.count({ where: { createdAt: yr } }),
     (requisitionNumber) =>
       prisma.materialRequisition.create({
         data: { requisitionNumber, materialId, siteId, quantityNeededKg: toKg(shortfall) },
@@ -164,7 +164,7 @@ async function releaseTicketForReservation(reservationId: string, requestedVolum
         // the full story.
         const created = await withSequentialNumber(
           "BT",
-          () => tx.batchTicket.count(),
+          (yr) => tx.batchTicket.count({ where: { createdAt: yr } }),
           (ticketNumber) =>
             tx.batchTicket.create({
               data: {
@@ -276,7 +276,7 @@ export async function createManualRelease(formData: FormData) {
   const now = new Date();
   const reservation = await withSequentialNumber(
     "RES",
-    () => prisma.reservation.count(),
+    (yr) => prisma.reservation.count({ where: { createdAt: yr } }),
     (reservationNumber) =>
       prisma.reservation.create({
         data: {

@@ -72,7 +72,7 @@ export async function receiveSparePart(formData: FormData) {
 
   const receipt = await withSequentialNumber(
     "GRN",
-    () => prisma.sparePartReceipt.count(),
+    (yr) => prisma.sparePartReceipt.count({ where: { receivedAt: yr } }),
     (receiptNumber) =>
       prisma.sparePartReceipt.create({
         data: { receiptNumber, sparePartId, siteId, quantity, unitCost, supplierId, serialNumbers, purchaseOrderLineId, receivedById: actor!.id },
@@ -136,7 +136,7 @@ export async function issueSparePart(formData: FormData) {
 
   const issuance = await withSequentialNumber(
     "SPI",
-    () => prisma.sparePartIssuance.count(),
+    (yr) => prisma.sparePartIssuance.count({ where: { issuedAt: yr } }),
     (issuanceNumber) =>
       prisma.sparePartIssuance.create({
         data: { issuanceNumber, sparePartId, siteId, quantity, unitCost, reason, maintenanceOrderId, equipmentType, equipmentId, equipmentLabel, notes, issuedById: actor!.id },

@@ -52,7 +52,7 @@ export async function createPurchaseOrder(formData: FormData) {
 
   const po = await withSequentialNumber(
     "PO",
-    () => prisma.purchaseOrder.count(),
+    (yr) => prisma.purchaseOrder.count({ where: { createdAt: yr } }),
     (poNumber) =>
       prisma.purchaseOrder.create({
         data: {
@@ -189,7 +189,7 @@ export async function createSupplierContract(formData: FormData) {
 
   const contract = await withSequentialNumber(
     "SC",
-    () => prisma.supplierContract.count(),
+    (yr) => prisma.supplierContract.count({ where: { createdAt: yr } }),
     (contractNumber) =>
       prisma.supplierContract.create({
         data: {
@@ -244,7 +244,7 @@ export async function renewSupplierContract(formData: FormData) {
   const today = new Date();
   const contract = await withSequentialNumber(
     "SC",
-    () => prisma.supplierContract.count(),
+    (yr) => prisma.supplierContract.count({ where: { createdAt: yr } }),
     (contractNumber) =>
       prisma.$transaction(async (tx) => {
         await tx.supplierContract.update({ where: { id }, data: { status: "TERMINATED", endDate: today } });
@@ -316,7 +316,7 @@ export async function createPurchaseOrderFromRequisitions(formData: FormData) {
 
   const po = await withSequentialNumber(
     "PO",
-    () => prisma.purchaseOrder.count(),
+    (yr) => prisma.purchaseOrder.count({ where: { createdAt: yr } }),
     (poNumber) =>
       prisma.$transaction(async (tx) => {
         const created = await tx.purchaseOrder.create({
@@ -397,7 +397,7 @@ export async function createPurchaseOrderFromMaterialRequisitions(formData: Form
 
   const po = await withSequentialNumber(
     "PO",
-    () => prisma.purchaseOrder.count(),
+    (yr) => prisma.purchaseOrder.count({ where: { createdAt: yr } }),
     (poNumber) =>
       prisma.$transaction(async (tx) => {
         const created = await tx.purchaseOrder.create({

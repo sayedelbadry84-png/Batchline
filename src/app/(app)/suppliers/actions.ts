@@ -135,7 +135,7 @@ export async function createSupplierEvaluation(formData: FormData) {
 
   const evaluation = await withSequentialNumber(
     "SEV",
-    () => prisma.supplierEvaluation.count(),
+    (yr) => prisma.supplierEvaluation.count({ where: { createdAt: yr } }),
     (evaluationNumber) =>
       prisma.supplierEvaluation.create({
         data: {

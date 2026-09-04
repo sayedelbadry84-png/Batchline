@@ -95,7 +95,7 @@ export async function generatePayrollRun(formData: FormData) {
 
   const run = await withSequentialNumber(
     "PYR",
-    () => prisma.payrollRun.count(),
+    (yr) => prisma.payrollRun.count({ where: { createdAt: yr } }),
     (runNumber) =>
       prisma.payrollRun.create({
         data: { runNumber, periodStart, periodEnd, createdById: user!.id },
@@ -265,7 +265,7 @@ export async function markPayrollRunPaid(formData: FormData) {
     await prisma.$transaction(async (tx) => {
       const txn = await withSequentialNumber(
         "TXN",
-        () => tx.cashTransaction.count(),
+        (yr) => tx.cashTransaction.count({ where: { createdAt: yr } }),
         (txnNumber) =>
           tx.cashTransaction.create({
             data: {

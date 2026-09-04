@@ -38,7 +38,7 @@ export async function createMaintenanceTicket(formData: FormData) {
 
   const ticket = await withSequentialNumber(
     "MT",
-    () => prisma.maintenanceTicket.count(),
+    (yr) => prisma.maintenanceTicket.count({ where: { createdAt: yr } }),
     (ticketNumber) =>
       prisma.maintenanceTicket.create({
         data: {
@@ -215,7 +215,7 @@ export async function generateTicketFromPlan(formData: FormData) {
 
   const ticket = await withSequentialNumber(
     "MT",
-    () => prisma.maintenanceTicket.count(),
+    (yr) => prisma.maintenanceTicket.count({ where: { createdAt: yr } }),
     (ticketNumber) =>
       prisma.maintenanceTicket.create({
         data: {
@@ -259,7 +259,7 @@ export async function convertTicketToOrder(formData: FormData) {
 
   const order = await withSequentialNumber(
     "MO",
-    () => prisma.maintenanceOrder.count(),
+    (yr) => prisma.maintenanceOrder.count({ where: { createdAt: yr } }),
     (orderNumber) =>
       prisma.maintenanceOrder.create({
         data: { orderNumber, ticketId, createdById: actor!.id },
@@ -488,7 +488,7 @@ export async function issueSparePartToOrder(formData: FormData) {
       if (short > 0) {
         const requisition = await withSequentialNumber(
           "SPR",
-          () => tx.sparePartsRequisition.count(),
+          (yr) => tx.sparePartsRequisition.count({ where: { createdAt: yr } }),
           (num) =>
             tx.sparePartsRequisition.create({
               data: {

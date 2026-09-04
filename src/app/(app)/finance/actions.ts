@@ -40,7 +40,7 @@ export async function createSupplierBill(formData: FormData) {
   const bill = await prisma.$transaction(async (tx) => {
     const bill = await withSequentialNumber(
       "BILL",
-      () => tx.supplierBill.count(),
+      (yr) => tx.supplierBill.count({ where: { createdAt: yr } }),
       (billNumber) =>
         tx.supplierBill.create({
           data: {
@@ -157,7 +157,7 @@ export async function createCashTransaction(formData: FormData) {
   const txn = await prisma.$transaction(async (tx) => {
     const txn = await withSequentialNumber(
       "TXN",
-      () => tx.cashTransaction.count(),
+      (yr) => tx.cashTransaction.count({ where: { createdAt: yr } }),
       (txnNumber) =>
         tx.cashTransaction.create({
           data: {

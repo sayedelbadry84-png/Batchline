@@ -134,7 +134,7 @@ export async function addLabResult(formData: FormData) {
   if (passFail === "FAIL") {
     const capa = await withSequentialNumber(
       "CAPA",
-      () => prisma.capaRecord.count(),
+      (yr) => prisma.capaRecord.count({ where: { createdAt: yr } }),
       (capaNumber) => prisma.capaRecord.create({ data: { capaNumber, labResultId: result.id } }),
     );
     await logAudit({ module: "Quality", recordId: capa.id, afterValue: capa.capaNumber, reasonCode: "CAPA_AUTO_OPENED" });
@@ -399,7 +399,7 @@ export async function recordCalibration(formData: FormData) {
 
   const record = await withSequentialNumber(
     "CAL",
-    () => prisma.calibrationRecord.count(),
+    (yr) => prisma.calibrationRecord.count({ where: { createdAt: yr } }),
     (recordNumber) =>
       prisma.calibrationRecord.create({
         data: {
@@ -453,7 +453,7 @@ export async function scheduleInternalAudit(formData: FormData) {
 
   const audit = await withSequentialNumber(
     "AUD",
-    () => prisma.internalAudit.count(),
+    (yr) => prisma.internalAudit.count({ where: { createdAt: yr } }),
     (auditNumber) =>
       prisma.internalAudit.create({
         data: { auditNumber, department, processAudited, isoClauseScope, auditorId, scheduledDate: new Date(scheduledDateRaw), createdById: user!.id },
@@ -520,7 +520,7 @@ export async function addAuditFinding(formData: FormData) {
 
   const finding = await withSequentialNumber(
     "AF",
-    () => prisma.internalAuditFinding.count(),
+    (yr) => prisma.internalAuditFinding.count({ where: { createdAt: yr } }),
     (findingNumber) => prisma.internalAuditFinding.create({ data: { findingNumber, auditId, description, classification, isoClauseRef } }),
   );
 
@@ -662,7 +662,7 @@ export async function createTrainingSession(formData: FormData) {
 
   const session = await withSequentialNumber(
     "TRN",
-    () => prisma.trainingSession.count(),
+    (yr) => prisma.trainingSession.count({ where: { createdAt: yr } }),
     (sessionNumber) =>
       prisma.trainingSession.create({
         data: {
@@ -745,7 +745,7 @@ export async function createMaterialLabTest(formData: FormData) {
 
   const test = await withSequentialNumber(
     "MLT",
-    () => prisma.materialLabTest.count(),
+    (yr) => prisma.materialLabTest.count({ where: { reportDate: yr } }),
     (testNumber) =>
       prisma.materialLabTest.create({
         data: {

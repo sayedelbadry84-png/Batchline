@@ -316,7 +316,7 @@ export async function issueCreditNote(formData: FormData) {
 
       const cn = await withSequentialNumber(
         "CN",
-        () => tx.creditNote.count(),
+        (yr) => tx.creditNote.count({ where: { createdAt: yr } }),
         (creditNoteNumber) =>
           tx.creditNote.create({
             data: { creditNoteNumber, invoiceId, amount, reason, notes, issuedById: user!.id },

@@ -89,7 +89,7 @@ export async function postJournalEntry(
 
   await withSequentialNumber(
     "JE",
-    () => db.journalEntry.count(),
+    (yr) => db.journalEntry.count({ where: { postedAt: yr } }),
     (entryNumber) =>
       db.journalEntry.create({
         data: {
@@ -123,7 +123,7 @@ export async function reverseJournalEntry(db: Db, sourceModule: string, sourceRe
 
   await withSequentialNumber(
     "JE",
-    () => db.journalEntry.count(),
+    (yr) => db.journalEntry.count({ where: { postedAt: yr } }),
     (entryNumber) =>
       db.journalEntry.create({
         data: {
