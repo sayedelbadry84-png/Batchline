@@ -199,6 +199,11 @@ export const ACTION_ROLES = {
     manualBooking: ["PLANT_OPERATOR", "ADMIN"],
     complete: ["PLANT_OPERATOR", "ADMIN"],
     deleteTicket: ["PLANT_OPERATOR", "ADMIN"],
+    // Reversing a completed ticket undoes real posted inventory movements
+    // — a materially bigger, rarer action than completing or deleting one,
+    // so it's ADMIN-only, same posture as approveFinal being stricter than
+    // approveInitial in reservations.
+    reverseBatch: ["ADMIN"],
     recordActuals: ["PLANT_OPERATOR", "ADMIN"],
     recordActualField: ["PLANT_OPERATOR", "ADMIN"],
     startTrip: ["PLANT_OPERATOR", "ADMIN"],

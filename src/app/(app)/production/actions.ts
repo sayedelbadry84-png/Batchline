@@ -1,23 +1,19 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@prisma/client";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { getAvailableReclaimForTruck } from "@/lib/reclaim";
-import { adjustSiloLevel, adjustHopperLevel, adjustChemicalTankLevel } from "@/lib/inventoryLevels";
+import { postSiloMovement, postHopperMovement, postChemicalTankMovement } from "@/lib/inventoryLedger";
+import { findMatchingSilo, findMatchingHopper, AGGREGATE_TYPES } from "@/lib/storageMatching";
+import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain } from "@/lib/batchCompletion";
 import { withSequentialNumber } from "@/lib/sequence";
 import { REQUISITION_APPROVAL_ROLES } from "@/lib/permissions";
 import { notify, notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-
-// Aggregate-family materials get moisture-corrected at batch time; cement,
-// admixture and water do not (this mirrors the moisture-correction rule in
-// the Batchline design spec — only aggregates carry surface moisture).
-const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
 // See the same note on billing/actions.ts's own TX_OPTIONS — completeBatch's
 // per-component silo/hopper/tank lookups+updates are several sequential
@@ -25,51 +21,6 @@ const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 // interactive-transaction timeout, especially on a cold connection. 15s
 // gives real headroom without masking a genuinely broken/looping query.
 const TX_OPTIONS = { timeout: 15000 };
-
-// A hopper's aggregate/water heap, or a cement silo, can be shared by
-// every production line at one SITE (Hopper/Silo.sharedAcrossPlants) —
-// prefer a match at the ticket's own line, but fall back to a shared one
-// at the SAME site rather than silently finding nothing. Deliberately
-// scoped by siteId, not global: two unrelated sites' stock must never
-// cross-contaminate just because both happen to have a hopper flagged
-// shared.
-//
-// A store explicitly assigned to a specific material (Hopper/
-// Silo.materialId) is always matched by that exact assignment first —
-// materialType/aggregateType alone can't tell two products of the same
-// general type apart (two cement brands, say), which is exactly the gap
-// that let completeBatch pick an arbitrary same-type silo regardless of
-// what was actually in it. The type-based match below is now a fallback
-// used ONLY among stores nobody has explicitly assigned yet
-// (materialId: null) — an explicitly-assigned store is never borrowed
-// for a different material just because the type happens to match.
-async function findMatchingHopper(
-  db: Prisma.TransactionClient | typeof prisma,
-  plantId: string,
-  siteId: string,
-  materialId: string,
-  aggregateTypeWhere: { equals: string } | { startsWith: string },
-) {
-  const ownAssigned = await db.hopper.findFirst({ where: { plantId, materialId } });
-  if (ownAssigned) return ownAssigned;
-  const sharedAssigned = await db.hopper.findFirst({ where: { sharedAcrossPlants: true, materialId, plant: { siteId } } });
-  if (sharedAssigned) return sharedAssigned;
-
-  const own = await db.hopper.findFirst({ where: { plantId, aggregateType: aggregateTypeWhere, materialId: null } });
-  if (own) return own;
-  return db.hopper.findFirst({ where: { sharedAcrossPlants: true, aggregateType: aggregateTypeWhere, materialId: null, plant: { siteId } } });
-}
-
-async function findMatchingSilo(db: Prisma.TransactionClient | typeof prisma, plantId: string, siteId: string, materialId: string, materialType: string) {
-  const ownAssigned = await db.silo.findFirst({ where: { plantId, materialId } });
-  if (ownAssigned) return ownAssigned;
-  const sharedAssigned = await db.silo.findFirst({ where: { sharedAcrossPlants: true, materialId, plant: { siteId } } });
-  if (sharedAssigned) return sharedAssigned;
-
-  const own = await db.silo.findFirst({ where: { plantId, materialType, materialId: null } });
-  if (own) return own;
-  return db.silo.findFirst({ where: { sharedAcrossPlants: true, materialType, materialId: null, plant: { siteId } } });
-}
 
 // Raw-material counterpart to issueSparePartToOrder's shortfall handling —
 // called from completeBatch right after a silo/hopper/tank's level is
@@ -412,6 +363,17 @@ export async function recordActualField(formData: FormData) {
   revalidatePath(`/operator/ticket/${batchTicketId}`);
 }
 
+// Thin Server Action wrapper around completeBatchTicket (src/lib/
+// batchCompletion.ts) — the actual claim/deduct/ledger-post logic lives
+// there now, as a pure domain service with no session/formData access
+// (so it's callable from tests directly). This wrapper's only jobs:
+// permission/scope checks, calling the domain service, and turning its
+// typed result into the same audit trail and revalidation this action
+// always produced. Every non-SUCCESS status is a silent return, same
+// convention as every other rejected action in this app — the shortage-
+// override textarea on the ticket page is always available for an
+// operator to fill in proactively; there's no separate UI state for a
+// rejected completion to react to.
 export async function completeBatch(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "complete");
@@ -420,170 +382,31 @@ export async function completeBatch(formData: FormData) {
   if (!batchTicketId) return;
   const shortageOverrideNote = String(formData.get("shortageOverrideNote") ?? "").trim() || null;
 
-  const ticket = await prisma.batchTicket.findUnique({
-    where: { id: batchTicketId },
-    include: {
-      components: { include: { material: true } },
-      plant: { include: { silos: true, hoppers: true, chemicalTanks: true } },
-    },
-  });
-  if (!ticket || ticket.status === "COMPLETE" || ticket.status === "CANCELLED") return;
+  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId }, select: { plantId: true } });
+  if (!ticket) return;
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
 
-  // Would deducting this component take its store below zero? Completing
-  // used to clamp at 0 silently (Math.max(0, current - usage)), hiding a
-  // real physical shortfall — the mixer ran with less material than the
-  // recipe called for, with no record anywhere that it happened. Same
-  // "no note, no [consequential change]" rule as CAPA/waste-memo/incoming-
-  // inspection elsewhere: a shortage still completes, but only with a
-  // written override reason, and that reason is what gets audited.
-  const shortages: string[] = [];
-  for (const c of ticket.components) {
-    const massKg = c.actualMassKg ?? c.targetMassKg;
-    const massTons = massKg / 1000;
-    if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-      const silo = await findMatchingSilo(prisma, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-      if (silo && silo.currentLevelTons < massTons) shortages.push(`${c.material.name}: ${silo.currentLevelTons.toFixed(2)}t on hand, ${massTons.toFixed(2)}t needed`);
-    } else if (AGGREGATE_TYPES.has(c.material.type)) {
-      const hopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" });
-      if (hopper && hopper.currentLevelTons < massTons) shortages.push(`${c.material.name}: ${hopper.currentLevelTons.toFixed(2)}t on hand, ${massTons.toFixed(2)}t needed`);
-    } else if (c.material.type === "WATER") {
-      const waterHopper = await findMatchingHopper(prisma, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-      if (waterHopper && waterHopper.currentLevelTons < massTons) shortages.push(`${c.material.name}: ${waterHopper.currentLevelTons.toFixed(2)}t on hand, ${massTons.toFixed(2)}t needed`);
-    } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
-      const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
-      if (tank) {
-        const liters = massKg / c.material.specificGravity;
-        if (tank.currentLevelLiters < liters) shortages.push(`${c.material.name}: ${tank.currentLevelLiters.toFixed(0)}L on hand, ${liters.toFixed(0)}L needed`);
-      }
-    }
+  const result = await completeBatchTicket(batchTicketId, { shortageOverrideNote, actorId: user!.id });
+  if (result.status !== "SUCCESS") return;
+
+  for (const r of result.requisitionCandidates) {
+    const toKg = r.unit === "LITERS" ? (liters: number) => liters * (r.specificGravity ?? 1) : (tons: number) => tons * 1000;
+    await maybeAutoRequisitionMaterial(r.materialId, r.siteId, r.newLevel, r.capacity, r.minThresholdPct, toKg);
   }
-  if (shortages.length > 0 && !shortageOverrideNote) return;
-
-  // Auto-requisition checks (maybeAutoRequisitionMaterial) fire their own
-  // notification side effect and aren't part of the inventory/status write
-  // itself — collected here and run once the transaction below has
-  // actually committed, rather than inside it.
-  const requisitionChecks: Array<() => Promise<void>> = [];
-
-  // Deduct actual (or target, if never weighed) mass from the matching
-  // silo, hopper, or chemical tank — the same inventory the Silos screen
-  // and dashboard alerts read. The whole loop plus the final status flip
-  // run as one transaction: previously each update committed independently
-  // and only the status flip at the end marked the ticket COMPLETE, so a
-  // failure partway through the loop (e.g. the 3rd component's update
-  // throws) left the first two materials already deducted but the ticket
-  // still not COMPLETE — a retry would then re-run the whole loop and
-  // double-deduct the materials that succeeded the first time.
-  try {
-    await prisma.$transaction(async (tx) => {
-      // Claim the ticket atomically, first thing inside the transaction —
-      // the plain `ticket.status === "COMPLETE"` check above was read
-      // BEFORE this transaction started, so two concurrent completions of
-      // the same ticket could both pass it and both run the deduction loop
-      // below, double-consuming every component's mass for one physical
-      // batch. Postgres row-locks this UPDATE, so only the first caller's
-      // WHERE clause can still match a non-terminal status; the second's
-      // updateMany then matches zero rows, the thrown error rolls the
-      // whole transaction back, and nothing gets deducted twice. Excludes
-      // CANCELLED too (not just COMPLETE) — the schema lists it as a valid
-      // terminal status even though nothing sets it today, and a future
-      // cancel feature must not silently reopen a batch this check was
-      // meant to keep shut.
-      const claim = await tx.batchTicket.updateMany({
-        where: { id: batchTicketId, status: { notIn: ["COMPLETE", "CANCELLED"] } },
-        data: { status: "COMPLETE", batchCompletedAt: new Date() },
-      });
-      if (claim.count === 0) throw new Error("ALREADY_TERMINAL");
-
-      for (const c of ticket.components) {
-        const massKg = c.actualMassKg ?? c.targetMassKg;
-        const massTons = massKg / 1000;
-
-        if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-          const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-          if (silo) {
-            const newLevelTons = await adjustSiloLevel(tx, silo.id, -massTons);
-            if (newLevelTons !== null) {
-              requisitionChecks.push(() =>
-                maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, silo.capacityTons, silo.minThresholdPct, (tons) => tons * 1000),
-              );
-            }
-          }
-        } else if (AGGREGATE_TYPES.has(c.material.type)) {
-          const hopper = await findMatchingHopper(
-            tx,
-            ticket.plantId,
-            ticket.plant.siteId,
-            c.materialId,
-            c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
-          );
-          if (hopper) {
-            const newLevelTons = await adjustHopperLevel(tx, hopper.id, -massTons);
-            if (newLevelTons !== null) {
-              requisitionChecks.push(() =>
-                maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, hopper.capacityTons, hopper.minThresholdPct, (tons) => tons * 1000),
-              );
-            }
-          }
-        } else if (c.material.type === "WATER") {
-          // Reuses Hopper (a plain tonnage heap) rather than a new model — a
-          // plant that meters bulk water registers a Hopper with
-          // aggregateType "WATER"; one that doesn't just has no match here,
-          // same silent no-op as any other unregistered destination.
-          const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-          if (waterHopper) {
-            const newLevelTons = await adjustHopperLevel(tx, waterHopper.id, -massTons);
-            if (newLevelTons !== null) {
-              requisitionChecks.push(() =>
-                maybeAutoRequisitionMaterial(c.materialId, ticket.plant.siteId, newLevelTons, waterHopper.capacityTons, waterHopper.minThresholdPct, (tons) => tons * 1000),
-              );
-            }
-          }
-        } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
-          // Batched mass is always stored in kg (see addComponent in
-          // mix-designs/actions.ts) — convert back to liters, the unit a
-          // chemical tank is actually metered in.
-          const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
-          if (tank) {
-            const liters = massKg / c.material.specificGravity;
-            const newLevelLiters = await adjustChemicalTankLevel(tx, tank.id, -liters);
-            const specificGravity = c.material.specificGravity;
-            if (newLevelLiters !== null) {
-              requisitionChecks.push(() =>
-                maybeAutoRequisitionMaterial(
-                  c.materialId,
-                  ticket.plant.siteId,
-                  newLevelLiters,
-                  tank.capacityLiters ?? 0,
-                  tank.minThresholdPct,
-                  (liters) => liters * specificGravity,
-                ),
-              );
-            }
-          }
-        }
-      }
-    }, TX_OPTIONS);
-  } catch {
-    return;
-  }
-
-  for (const check of requisitionChecks) await check();
 
   await logAudit({
     module: "Production",
     recordId: batchTicketId,
     field: "status",
     afterValue: "COMPLETE",
-    reasonCode: shortages.length > 0 ? "BATCH_COMPLETE_WITH_SHORTAGE_OVERRIDE" : "BATCH_COMPLETE_INVENTORY_DEDUCTED",
+    reasonCode: result.shortages.length > 0 ? "BATCH_COMPLETE_WITH_SHORTAGE_OVERRIDE" : "BATCH_COMPLETE_INVENTORY_DEDUCTED",
   });
-  if (shortages.length > 0) {
+  if (result.shortages.length > 0) {
     await logAudit({
       module: "Production",
       recordId: batchTicketId,
       field: "shortageOverrideNote",
-      afterValue: `${shortageOverrideNote} — ${shortages.join("; ")}`,
+      afterValue: `${shortageOverrideNote} — ${result.shortages.join("; ")}`,
       reasonCode: "BATCH_SHORTAGE_OVERRIDDEN",
     });
   }
@@ -752,23 +575,33 @@ export async function startTrip(formData: FormData) {
           // for this specific truck wasn't known yet at completion time.
           // Now that it is, credit back the reclaimed share of whatever was
           // actually deducted (actualMassKg if weighed, else targetMassKg —
-          // the same fallback completeBatch itself uses) to the same
-          // silo/hopper/tank it came from, so the ledger matches the fresh
-          // material genuinely drawn for this load.
+          // the same fallback completeBatch itself uses) to the matching
+          // silo/hopper/tank, posted through the ledger (RECLAIM_CREDIT,
+          // sourced from this Trip) rather than a bare balance write.
+          // targetMassKg — the original design target — is never mutated
+          // any more; reclaimCreditMassKg records the credited share
+          // separately so reports can still show design vs. reclaimed vs.
+          // fresh-drawn mass. Reserving reclaim BEFORE batching, rather
+          // than crediting it back after like this, is a deeper sequencing
+          // fix left for a later phase (see the field's own schema comment).
+          type ReclaimCredit = {
+            componentId: string;
+            materialId: string;
+            creditMassKg: number;
+            storageType: "SILO" | "HOPPER" | "CHEMICAL_TANK";
+            storageId: string;
+            creditQuantity: number; // tons for SILO/HOPPER, liters for CHEMICAL_TANK
+          };
+          const credits: ReclaimCredit[] = [];
           for (const c of ticket.components) {
             const deductedMassKg = c.actualMassKg ?? c.targetMassKg;
             const creditMassKg = deductedMassKg * reclaimedFraction;
-
-            await tx.batchComponentActual.update({
-              where: { id: c.id },
-              data: { targetMassKg: c.targetMassKg * freshFraction },
-            });
-
             if (creditMassKg <= 0) continue;
             const creditTons = creditMassKg / 1000;
+
             if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
               const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-              if (silo) await adjustSiloLevel(tx, silo.id, creditTons);
+              if (silo) credits.push({ componentId: c.id, materialId: c.materialId, creditMassKg, storageType: "SILO", storageId: silo.id, creditQuantity: creditTons });
             } else if (AGGREGATE_TYPES.has(c.material.type)) {
               const hopper = await findMatchingHopper(
                 tx,
@@ -777,18 +610,44 @@ export async function startTrip(formData: FormData) {
                 c.materialId,
                 c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
               );
-              if (hopper) await adjustHopperLevel(tx, hopper.id, creditTons);
+              if (hopper) credits.push({ componentId: c.id, materialId: c.materialId, creditMassKg, storageType: "HOPPER", storageId: hopper.id, creditQuantity: creditTons });
             } else if (c.material.type === "WATER") {
               const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-              if (waterHopper) await adjustHopperLevel(tx, waterHopper.id, creditTons);
+              if (waterHopper) credits.push({ componentId: c.id, materialId: c.materialId, creditMassKg, storageType: "HOPPER", storageId: waterHopper.id, creditQuantity: creditTons });
             } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
               const tank = await tx.chemicalTank.findFirst({ where: { plantId: ticket.plantId, materialId: c.materialId } });
-              if (tank) {
-                const creditLiters = creditMassKg / c.material.specificGravity;
-                await adjustChemicalTankLevel(tx, tank.id, creditLiters);
-              }
+              if (tank) credits.push({ componentId: c.id, materialId: c.materialId, creditMassKg, storageType: "CHEMICAL_TANK", storageId: tank.id, creditQuantity: creditMassKg / c.material.specificGravity });
             }
           }
+
+          // Sort before iterating — same lock-ordering reasoning as
+          // completeBatchTicket and reverseBatchTicket: this loop,
+          // completeBatchTicket's, and reverseBatchTicket's can all touch
+          // the same rows for one ticket, and a consistent order across all
+          // three avoids a lock-ordering deadlock between concurrent
+          // transactions that a bounded retry would otherwise just paper over.
+          credits.sort((a, b) => (a.storageType === b.storageType ? a.storageId.localeCompare(b.storageId) : a.storageType.localeCompare(b.storageType)));
+
+          for (const credit of credits) {
+            await tx.batchComponentActual.update({
+              where: { id: credit.componentId },
+              data: { reclaimCreditMassKg: { increment: credit.creditMassKg } },
+            });
+            const post = credit.storageType === "SILO" ? postSiloMovement : credit.storageType === "HOPPER" ? postHopperMovement : postChemicalTankMovement;
+            await post(tx, {
+              storageId: credit.storageId,
+              materialId: credit.materialId,
+              quantity: credit.creditQuantity,
+              movementType: "RECLAIM_CREDIT",
+              sourceType: "Trip",
+              sourceId: created.id,
+              plantId: ticket.plantId,
+              siteId: ticket.plant.siteId,
+              actorId: user!.id,
+              reason: null,
+            });
+          }
+
           await tx.drumReturn.update({
             where: { id: availableReclaim.drumReturnId },
             data: { consumedAt: new Date(), consumedInTripId: created.id },
@@ -987,6 +846,15 @@ export async function deleteTicketComponent(formData: FormData) {
 // If the ticket had already reached COMPLETE, its components' mass was
 // deducted from inventory in completeBatch — reverse that deduction here
 // before deleting, the mirror image of that same deduction loop.
+// A COMPLETE ticket is never deleted any more — see reverseBatchTicket
+// below. It posted real InventoryMovement rows when it completed; hard-
+// deleting it would destroy that posting history, and the old reversal
+// branch this replaced re-resolved "the CURRENT matching silo/hopper" via
+// findMatchingSilo/findMatchingHopper rather than the storage actually
+// used at completion time — if the assignment changed since, it credited
+// the wrong store. Only RELEASED/BATCHING tickets (which never posted
+// anything) reach this delete path now, so no reversal logic is needed
+// here at all.
 export async function deleteBatchTicket(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "deleteTicket");
@@ -994,70 +862,47 @@ export async function deleteBatchTicket(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  const ticket = await prisma.batchTicket.findUnique({
-    where: { id },
-    include: {
-      trip: true,
-      components: { include: { material: true } },
-      plant: { include: { silos: true, hoppers: true, chemicalTanks: true } },
-    },
-  });
-  if (!ticket || ticket.trip) return;
+  const ticket = await prisma.batchTicket.findUnique({ where: { id }, include: { trip: true } });
+  if (!ticket || ticket.trip || ticket.status === "COMPLETE") return;
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
 
-  // The reversal loop and the delete itself used to be independent writes
-  // — a failure partway through the loop (the 3rd component's update
-  // throws, say) left some materials already credited back but the
-  // ticket still on file, un-deletable a second time the same way without
-  // double-crediting what already went back. One transaction makes the
-  // whole reversal-plus-delete all-or-nothing, same as completeBatch's own
-  // deduction loop.
-  await prisma.$transaction(async (tx) => {
-    if (ticket.status === "COMPLETE") {
-      for (const c of ticket.components) {
-        const massKg = c.actualMassKg ?? c.targetMassKg;
-        const massTons = massKg / 1000;
+  // Components cascade-delete with the ticket (see BatchComponentActual's
+  // onDelete: Cascade in schema.prisma).
+  await prisma.batchTicket.delete({ where: { id } });
 
-        if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-          const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-          if (silo) await adjustSiloLevel(tx, silo.id, massTons);
-        } else if (AGGREGATE_TYPES.has(c.material.type)) {
-          const hopper = await findMatchingHopper(
-            tx,
-            ticket.plantId,
-            ticket.plant.siteId,
-            c.materialId,
-            c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
-          );
-          if (hopper) await adjustHopperLevel(tx, hopper.id, massTons);
-        } else if (c.material.type === "WATER") {
-          const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-          if (waterHopper) await adjustHopperLevel(tx, waterHopper.id, massTons);
-        } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
-          const tank = ticket.plant.chemicalTanks.find((t) => t.materialId === c.materialId);
-          if (tank) {
-            const liters = massKg / c.material.specificGravity;
-            await adjustChemicalTankLevel(tx, tank.id, liters);
-          }
-        }
-      }
-    }
-
-    // Components cascade-delete with the ticket (see BatchComponentActual's
-    // onDelete: Cascade in schema.prisma).
-    await tx.batchTicket.delete({ where: { id } });
-  }, TX_OPTIONS);
-
-  await logAudit({
-    module: "Production",
-    recordId: id,
-    afterValue: ticket.ticketNumber,
-    reasonCode: ticket.status === "COMPLETE" ? "TICKET_DELETED_INVENTORY_RESTORED" : "TICKET_DELETED",
-  });
+  await logAudit({ module: "Production", recordId: id, afterValue: ticket.ticketNumber, reasonCode: "TICKET_DELETED" });
 
   revalidatePath("/production");
   revalidatePath("/reservations");
   revalidatePath("/warehouses");
   revalidatePath("/");
   redirect("/production");
+}
+
+// Undoes a COMPLETE ticket's posted inventory movements without deleting
+// the ticket — the row and its full posting history stay on file, unlike
+// deleteBatchTicket's old COMPLETE-ticket path. See reverseBatchTicket in
+// src/lib/batchCompletion.ts for the actual reversal logic; this wrapper
+// only handles permission/scope and the reason field.
+export async function reverseBatchTicket(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "production", "reverseBatch");
+
+  const id = String(formData.get("id") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim();
+  if (!id || !reason) return;
+
+  const ticket = await prisma.batchTicket.findUnique({ where: { id }, select: { plantId: true } });
+  if (!ticket) return;
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
+
+  const result = await reverseBatchTicketDomain(id, { actorId: user!.id, reason });
+  if (result.status !== "SUCCESS") return;
+
+  await logAudit({ module: "Production", recordId: id, field: "reversedAt", afterValue: reason, reasonCode: "BATCH_TICKET_REVERSED" });
+
+  revalidatePath("/production");
+  revalidatePath(`/production/${id}`);
+  revalidatePath("/warehouses");
+  revalidatePath("/");
 }

@@ -32,31 +32,49 @@ export type MovementResult =
 
 export class DomainError extends Error {
   constructor(
-    public code: "INSUFFICIENT_STOCK" | "CONCURRENT_CONFLICT",
+    public code: "INSUFFICIENT_STOCK" | "CONCURRENT_CONFLICT" | "STORAGE_NOT_CONFIGURED",
     message?: string,
   ) {
     super(message ?? code);
   }
 }
 
-// The idempotency claim: INSERT ... ON CONFLICT DO NOTHING keyed on the
-// same business identity every caller uses (source + movement type +
-// material + storage). A retried or duplicated request for the exact same
-// event inserts zero rows and touches no balance — this is intentionally
-// NOT a `create()` wrapped in a try/catch for a unique-constraint error:
+// Cheap idempotency pre-check — no row lock taken. Both real callers
+// (completeBatchTicket, reverseBatchTicket) already hold their OWN
+// ticket-level atomic claim (an updateMany on BatchTicket) before they
+// ever loop into postMovement, so two calls for the truly same movement
+// should never reach here concurrently in practice; this is a fast-path
+// no-op for the "already ran, someone retried the outer call" case, not
+// the primary correctness mechanism (that's the storage row lock +
+// unique-constrained insert below, which stays correct even without this
+// check).
+async function alreadyPosted(tx: Tx, input: MovementInput): Promise<boolean> {
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT "id" FROM "InventoryMovement"
+    WHERE "sourceType" = ${input.sourceType} AND "sourceId" = ${input.sourceId} AND "movementType" = ${input.movementType}
+      AND "materialId" = ${input.materialId} AND "storageId" = ${input.storageId}`;
+  return rows.length > 0;
+}
+
+// The real idempotency claim, posted AFTER the balance is adjusted (see
+// postMovement below) so the recorded quantity is always the TRUE applied
+// delta — never the pre-clamp requested one, which would make a later
+// reversal over-credit a shortage that was allowed through with an
+// override note. INSERT ... ON CONFLICT DO NOTHING is intentional here
+// rather than `create()` in a try/catch for a unique-constraint error:
 // Postgres aborts the whole transaction on a statement error until
-// rollback, so catching a P2002 here and continuing in the same tx would
-// just fail on the very next statement. ON CONFLICT DO NOTHING has no such
+// rollback, so catching a P2002 and continuing in the same tx would just
+// fail on the very next statement. ON CONFLICT DO NOTHING has no such
 // problem — a conflicting row simply isn't inserted, RETURNING gives back
 // nothing, and the transaction stays healthy.
-async function claimMovement(tx: Tx, storageType: string, input: MovementInput): Promise<string | null> {
+async function claimMovement(tx: Tx, storageType: string, input: MovementInput, appliedQuantity: number): Promise<string | null> {
   const id = randomUUID();
   const unit = storageType === "CHEMICAL_TANK" ? "LITERS" : "TONS";
   const rows = await tx.$queryRaw<{ id: string }[]>`
     INSERT INTO "InventoryMovement"
       ("id", "storageType", "storageId", "materialId", "quantity", "unit", "movementType", "sourceType", "sourceId", "plantId", "siteId", "actorId", "reason", "createdAt")
     VALUES
-      (${id}, ${storageType}, ${input.storageId}, ${input.materialId}, ${input.quantity}, ${unit}, ${input.movementType}, ${input.sourceType}, ${input.sourceId}, ${input.plantId}, ${input.siteId}, ${input.actorId ?? null}, ${input.reason ?? null}, now())
+      (${id}, ${storageType}, ${input.storageId}, ${input.materialId}, ${appliedQuantity}, ${unit}, ${input.movementType}, ${input.sourceType}, ${input.sourceId}, ${input.plantId}, ${input.siteId}, ${input.actorId ?? null}, ${input.reason ?? null}, now())
     ON CONFLICT ("sourceType", "sourceId", "movementType", "materialId", "storageId") DO NOTHING
     RETURNING "id"`;
   return rows[0]?.id ?? null;
@@ -105,8 +123,7 @@ async function postMovement(
   capacityNullable: boolean,
   input: MovementInput,
 ): Promise<MovementResult> {
-  const claimedId = await claimMovement(tx, storageType, { ...input, storageId: input.storageId });
-  if (!claimedId) return { status: "ALREADY_POSTED" };
+  if (await alreadyPosted(tx, input)) return { status: "ALREADY_POSTED" };
 
   const adjusted = await lockAndAdjust(tx, table, levelColumn, capacityColumn, capacityNullable, input.storageId, input.quantity);
   if (!adjusted) return { status: "STORAGE_NOT_CONFIGURED" };
@@ -116,11 +133,22 @@ async function postMovement(
   const isConsumption = input.quantity < 0;
   const shortfall = isConsumption ? Math.abs(input.quantity) - Math.abs(applied) : 0;
   if (shortfall > 0.001 && !input.allowShortage) {
-    // Rolls back BOTH the movement row just inserted and the balance
-    // update above — the whole point of doing this inside one
-    // transaction rather than clamping silently and moving on.
+    // Rolls back the balance update above — the whole point of computing
+    // the shortfall before ever recording a movement, rather than
+    // clamping silently and moving on.
     throw new DomainError("INSUFFICIENT_STOCK", `Insufficient stock on ${storageType} ${input.storageId}: requested ${Math.abs(input.quantity)}, only ${Math.abs(applied)} available`);
   }
+
+  // Record the ledger row with the TRUE applied delta (post-clamp), not
+  // the originally requested one — a reversal later reverses exactly what
+  // actually happened. Guards the astronomically unlikely case where
+  // something raced past the alreadyPosted check above (both real callers
+  // hold their own ticket-level claim, so this shouldn't be reachable in
+  // practice) by throwing rather than silently under-reporting a balance
+  // change that already landed — the caller's retry wrapper will retry
+  // this as a fresh attempt.
+  const claimedId = await claimMovement(tx, storageType, input, applied);
+  if (!claimedId) throw new DomainError("CONCURRENT_CONFLICT", `Movement for ${input.sourceType}/${input.sourceId}/${input.movementType} was posted by another transaction`);
 
   return { status: "OK", appliedQuantity: applied, newLevel };
 }

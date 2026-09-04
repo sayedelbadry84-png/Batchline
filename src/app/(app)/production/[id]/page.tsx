@@ -413,7 +413,12 @@ export default async function BatchTicketPage({
         </div>
       )}
 
-      {!ticket.trip && (
+      {/* deleteBatchTicket now refuses a COMPLETE ticket outright (it has
+          real posted inventory movements — see reverseBatchTicket in
+          production/actions.ts) rather than silently no-op-ing, so the
+          button is hidden for that state the same way it's already hidden
+          once a trip exists. */}
+      {!ticket.trip && ticket.status !== "COMPLETE" && (
         <form action={deleteBatchTicket} className={`${ui.card} flex items-center justify-between`}>
           <input type="hidden" name="id" value={ticket.id} />
           <div>
