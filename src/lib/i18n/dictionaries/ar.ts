@@ -486,6 +486,19 @@ const ar = {
       colRecent: { ticket: "البطاقة", project: "المشروع", volume: "الكمية", completed: "الإكمال", trip: "الرحلة" },
       noTripYet: "لا توجد رحلة بعد",
       emptyRecent: "لا شيء مكتمل بعد.",
+      // Surfaced as a visible banner on this page (RMR-R2-P2-03) when a
+      // release fails for a reason beyond the picker's own stale-option
+      // guards — previously logged only, leaving the operator staring at
+      // a silently-reloaded page with no explanation, and (for a manual
+      // walk-in booking specifically) a new reservation on file with no
+      // ticket and nothing on screen saying why.
+      releaseError: {
+        STORAGE_NOT_CONFIGURED: (material: string) => `تعذّر إصدار البطاقة: لا يوجد مكان تخزين متاح لمادة "${material}" في هذه المحطة.`,
+        INVALID_STATE: "تعذّر إصدار البطاقة: تغيّرت حالة الحجز أو المحطة قبل إتمام الإصدار — يرجى إعادة المحاولة.",
+        NOT_FOUND: "تعذّر إصدار البطاقة: الحجز أو المحطة لم يعودا موجودين.",
+        NO_REMAINING_VOLUME: "تعذّر إصدار البطاقة: لم تعد هناك كمية متبقية على هذا الحجز.",
+        manualBookingKeptNote: "تم حفظ الحجز اليدوي — يمكن إعادة محاولة الإصدار من قائمة الحجوزات الجاهزة أدناه بعد معالجة السبب أعلاه.",
+      },
       mixOverride: {
         title: "تعديل خلطة الحجز",
         scopedNotice: "هذا التعديل يخص هذا الحجز فقط ولن يغيّر الخلطة التصميمية الأصلية.",
