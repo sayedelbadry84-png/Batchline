@@ -7,7 +7,6 @@ import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import {
   saveReservationMixRevision as saveRevisionDomain,
   cancelActiveReservationMixRevision as cancelRevisionDomain,
-  getEffectiveMix,
   type ComponentInput,
 } from "@/lib/reservationMixRevisions";
 import { revalidatePath } from "next/cache";
@@ -17,8 +16,11 @@ import { revalidatePath } from "next/cache";
 // no session/formData access, callable from tests directly), same split
 // as every other feature this session (batchCompletion.ts,
 // shortageOverrideRequests.ts, ...). These wrappers only handle
-// permission/scope checks, parsing formData, and turning the typed
-// result into an audit trail and a useActionState-shaped return.
+// permission/scope checks and parsing formData — the domain functions
+// themselves now write their own AuditEvent row atomically, inside the
+// same transaction as the revision change (RMR-P2-04; this file used to
+// do it afterward, as a separate, later call, which meant a failed audit
+// write could leave a recipe change on file with no record of it).
 
 async function requireReservationMixEditScope(reservationId: string) {
   const user = await getCurrentUser();
@@ -41,12 +43,35 @@ async function requireReservationMixEditScope(reservationId: string) {
 
   const reservation = await prisma.reservation.findUnique({ where: { id: reservationId }, select: { siteId: true, mixId: true } });
   if (!reservation) return { user, reservation: null };
-  if (!isSiteInScope(reservation.siteId, effectiveSiteId(user))) return { user, reservation: null };
+  if (!isSiteInScope(reservation.siteId, effectiveSiteId(user))) {
+    // A cross-site attempt against a REAL reservation ID is recorded the
+    // same way a straight permission denial is (RMR-P2-04) — the
+    // response to the caller stays NOT_FOUND either way (never revealing
+    // whether the id exists or merely belongs to another site), only the
+    // internal record distinguishes the two.
+    await logAudit({
+      module: "Production",
+      recordId: reservationId,
+      reasonCode: "UNAUTHORIZED_MIX_EDIT_ATTEMPT",
+      afterValue: user?.email ?? "unknown",
+    });
+    return { user, reservation: null };
+  }
   return { user, reservation };
 }
 
 export type SaveReservationMixActionState = {
-  status: "OK" | "NOT_FOUND" | "INVALID_STATE" | "NO_COMPONENTS" | "DUPLICATE_MATERIAL" | "INVALID_QUANTITY" | "MATERIAL_NOT_FOUND" | "INVALID_REASON";
+  status:
+    | "OK"
+    | "NOT_FOUND"
+    | "INVALID_STATE"
+    | "NO_COMPONENTS"
+    | "DUPLICATE_MATERIAL"
+    | "INVALID_QUANTITY"
+    | "MATERIAL_NOT_FOUND"
+    | "UNSUPPORTED_MATERIAL_TYPE"
+    | "MISSING_SPECIFIC_GRAVITY"
+    | "INVALID_REASON";
   detail?: string;
 } | null;
 
@@ -73,29 +98,19 @@ export async function saveReservationMixRevisionAction(_prevState: SaveReservati
     return { status: "NO_COMPONENTS" };
   }
 
-  const before = await getEffectiveMix(prisma, reservationId, reservation.mixId);
-
   const result = await saveRevisionDomain(reservationId, { reason, actorId: user!.id, components });
   if (result.status === "OK") {
-    await logAudit({
-      module: "Production",
-      recordId: reservationId,
-      field: "mixRevision",
-      beforeValue: JSON.stringify(before.components),
-      afterValue: JSON.stringify({ revisionNumber: result.revisionNumber, reason, components }),
-      reasonCode: "RESERVATION_MIX_REVISED",
-    });
     revalidatePath(`/production/reservationMix/${reservationId}`);
     revalidatePath("/production");
     return { status: "OK" };
   }
-  if (result.status === "DUPLICATE_MATERIAL" || result.status === "INVALID_QUANTITY" || result.status === "MATERIAL_NOT_FOUND") {
+  if (result.status === "DUPLICATE_MATERIAL" || result.status === "INVALID_QUANTITY" || result.status === "MATERIAL_NOT_FOUND" || result.status === "UNSUPPORTED_MATERIAL_TYPE" || result.status === "MISSING_SPECIFIC_GRAVITY") {
     return { status: result.status, detail: result.materialId };
   }
   return { status: result.status };
 }
 
-export type CancelReservationMixActionState = { status: "OK" | "NOT_FOUND" | "NO_ACTIVE_REVISION" } | null;
+export type CancelReservationMixActionState = { status: "OK" | "NOT_FOUND" | "INVALID_STATE" | "NO_ACTIVE_REVISION" } | null;
 
 export async function cancelReservationMixRevisionAction(_prevState: CancelReservationMixActionState, formData: FormData): Promise<CancelReservationMixActionState> {
   const reservationId = String(formData.get("reservationId") ?? "");
@@ -106,7 +121,6 @@ export async function cancelReservationMixRevisionAction(_prevState: CancelReser
 
   const result = await cancelRevisionDomain(reservationId, { actorId: user!.id });
   if (result.status === "OK") {
-    await logAudit({ module: "Production", recordId: reservationId, field: "mixRevision", reasonCode: "RESERVATION_MIX_REVISION_CANCELLED" });
     revalidatePath(`/production/reservationMix/${reservationId}`);
     revalidatePath("/production");
   }
