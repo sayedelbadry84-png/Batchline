@@ -42,7 +42,7 @@ if (process.env.TEST_DATABASE_URL === process.env.DATABASE_URL) {
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 const { PrismaClient } = await import("@prisma/client");
-const { completeBatchTicket, reverseBatchTicket } = await import("../src/lib/batchCompletion");
+const { completeBatchTicket, reverseBatchTicket, isValidSpecificGravity } = await import("../src/lib/batchCompletion");
 const { releaseTicketForReservation } = await import("../src/lib/reservationRelease");
 const { getEffectiveMix, saveReservationMixRevision, cancelActiveReservationMixRevision } = await import("../src/lib/reservationMixRevisions");
 const { getRemainingVolumeM3 } = await import("../src/lib/reservations");
@@ -166,6 +166,13 @@ async function cleanupDelete(fn: () => Promise<unknown>): Promise<void> {
   } catch (e) {
     if (!isRecordNotFound(e)) throw e;
   }
+}
+
+// A one-off throwaway Plant used only to prove release refuses a
+// deactivated/wrong-site station (RMR-R2-P1-02) — never had anything
+// created against it, so a plain delete is safe.
+async function cleanupPlant(plantId: string): Promise<void> {
+  await cleanupDelete(() => prisma.plant.delete({ where: { id: plantId } }));
 }
 
 async function makeReservation(overrides: Partial<{ status: string; requestedVolumeM3: number }> = {}) {
@@ -373,6 +380,83 @@ test("cancelling the active revision of a now-terminal reservation is refused, n
   assert.ok(stillActive, "the revision must remain ACTIVE — the cancel attempt must be a complete no-op on a terminal reservation");
 });
 
+// ---- RMR-R2-P1-02: release re-checks the reservation's authoritative --
+// ---- state INSIDE its own transaction, not just via the caller's ------
+// ---- earlier, now-possibly-stale outer check ---------------------------
+//
+// A literal concurrent close-vs-release race (the reservation closing in
+// the exact gap between an outer pre-check and this transaction
+// starting) can't be reproduced deterministically without a hook into
+// the transaction's own timing, which doesn't exist here. What CAN be
+// proven deterministically — and is the actual guarantee the fix
+// provides — is that the check really happens fresh, every time,
+// wherever the state already changed before releaseTicketForReservation
+// was ever called: if it were only checked once by the caller (the old
+// bug), these would all still succeed.
+
+test("release refuses a reservation that went terminal (closed early) after it still had remaining volume", async () => {
+  const reservationId = await makeReservation({ requestedVolumeM3: 20 });
+  await expectReleaseOk(reservationId, 5); // some volume already out, 15 m³ still remaining
+
+  // closeReservation's own terminal set (reservations/actions.ts) —
+  // status flips to DELIVERED without touching requestedVolumeM3, so
+  // real remaining volume stays > 0 even though nothing should be
+  // released against it again.
+  await prisma.reservation.update({ where: { id: reservationId }, data: { status: "DELIVERED" } });
+
+  const result = await releaseTicketForReservation(reservationId, 5, plantId);
+  assert.equal(result.status, "INVALID_STATE");
+
+  // The reservation must not have been silently reopened either.
+  const reservation = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+  assert.equal(reservation.status, "DELIVERED");
+});
+
+test("release refuses a reservation whose approval was revoked (e.g. by a concurrent edit) since the caller's own outer check", async () => {
+  const reservationId = await makeReservation();
+  await prisma.reservation.update({ where: { id: reservationId }, data: { initialApprovedAt: null, initialApprovedById: null, finalApprovedAt: null, finalApprovedById: null } });
+
+  const result = await releaseTicketForReservation(reservationId, 5, plantId);
+  assert.equal(result.status, "INVALID_STATE");
+});
+
+test("release refuses a station that was deactivated, or that doesn't belong to this reservation's own site, since the caller's own outer check", async () => {
+  const reservationId = await makeReservation();
+
+  const deactivatedPlant = await prisma.plant.create({ data: { siteId, name: "TEST-SUITE-RMR-DEACTIVATED-PLANT", status: "FROZEN" } });
+  const deactivatedResult = await releaseTicketForReservation(reservationId, 5, deactivatedPlant.id);
+  assert.equal(deactivatedResult.status, "INVALID_STATE");
+  await cleanupPlant(deactivatedPlant.id);
+
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-RMR-OTHER-${Date.now()}`, name: "TEST-SUITE-RMR-OTHER-SITE", city: "Test", country: "Test" } });
+  const otherSitePlant = await prisma.plant.create({ data: { siteId: otherSite.id, name: "TEST-SUITE-RMR-OTHER-SITE-PLANT" } });
+  const wrongSiteResult = await releaseTicketForReservation(reservationId, 5, otherSitePlant.id);
+  assert.equal(wrongSiteResult.status, "INVALID_STATE");
+  await cleanupPlant(otherSitePlant.id);
+  await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+});
+
+// ---- RMR-R2-P2-01: concurrent releases against the same reservation ---
+// ---- never exceed its remaining volume, and a genuine conflict --------
+// ---- resolves through withRetry rather than an unhandled rejection ----
+
+test("two concurrent releases together never dispatch more than the reservation's remaining volume", async () => {
+  const reservationId = await makeReservation({ requestedVolumeM3: 10 });
+
+  const [r1, r2] = await Promise.all([releaseTicketForReservation(reservationId, 8, plantId), releaseTicketForReservation(reservationId, 8, plantId)]);
+  // Neither call should throw an unhandled P2034 out to the caller —
+  // Promise.all above would already have rejected this whole test if one
+  // had. Each resolves to either a real ticket or a clean typed
+  // rejection (NO_REMAINING_VOLUME for whichever one lost the race).
+  for (const r of [r1, r2]) {
+    if (r.status === "OK") ticketIds.push(r.ticket.id);
+    else assert.equal(r.status, "NO_REMAINING_VOLUME", `unexpected non-OK status: ${r.status}`);
+  }
+
+  const totalVolume = [r1, r2].filter((r) => r.status === "OK").reduce((sum, r) => sum + (r.status === "OK" ? r.ticket.volumeM3 : 0), 0);
+  assert.ok(totalVolume <= 10 + 1e-6, `released ${totalVolume} m³ against a 10 m³ reservation`);
+});
+
 // ---- 11. Concurrent save-vs-release never yields mixed components ------
 
 test("a concurrent revision save and ticket release never produce a ticket with mixed old/new components", async () => {
@@ -384,9 +468,11 @@ test("a concurrent revision save and ticket release never produce a ticket with 
   ]);
   assert.equal(saveResult.status, "OK");
 
-  // A genuine Serializable conflict is a possible, typed outcome here
-  // (RMR-P2-07) — a real caller just retries, so this test does too, to
-  // reach a ticket to actually inspect.
+  // releaseTicketForReservation now retries a genuine Serializable
+  // conflict internally (withRetry, RMR-R2-P2-01), so this should
+  // resolve to OK directly in practice — the fallback below stays as a
+  // defensive safety net, not because a bare P2034 is expected to
+  // surface here anymore.
   const finalTicket = releaseResult.status === "OK" ? releaseResult.ticket : await expectReleaseOk(reservationId, 5);
   if (releaseResult.status === "OK") ticketIds.push(releaseResult.ticket.id);
 
@@ -494,6 +580,58 @@ test("releasing a ticket against a revision whose material has nowhere to draw f
   // BatchTicket row is ever inserted.
   const orphanTicket = await prisma.batchTicket.findFirst({ where: { reservationId } });
   assert.equal(orphanTicket, null);
+
+  // RMR-R2-P2-03's operational decision (production/actions.ts,
+  // createManualRelease): a reservation is never rolled back or
+  // auto-cancelled just because its first release attempt failed — it's
+  // a real, confirmed booking, still perfectly retriable once whatever
+  // blocked release is fixed. The Server Action wrapper itself isn't
+  // reachable from this session-less harness, but the invariant its
+  // decision depends on — releaseTicketForReservation never touches the
+  // reservation row at all on a non-OK result — is verified directly
+  // here.
+  const reservationAfterFailedRelease = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+  assert.equal(reservationAfterFailedRelease.status, "CONFIRMED");
+  assert.equal(reservationAfterFailedRelease.requestedVolumeM3, 20);
+});
+
+// ---- RMR-R2-P1-03: negative/non-finite specific gravity is rejected ---
+//
+// The database itself now refuses to store a Material row with a
+// negative/zero/infinite/NaN specificGravity (the new CHECK constraint,
+// verified directly below) — so the end-to-end "a bad row makes it all
+// the way to a positive inventory credit" scenario the review describes
+// can no longer be constructed at all; there is no way left to get such
+// a row into the table to feed it to saveReservationMixRevision or
+// resolveTicketComponents in the first place. isValidSpecificGravity
+// itself — the exact function both of those call — is still tested
+// directly, as a pure function, so the application-level logic (a
+// deliberate second, defense-in-depth layer) is verified independently
+// of whether the database would ever let a bad value reach it.
+
+test("isValidSpecificGravity rejects negative, zero, infinite, and NaN values, and accepts a normal positive one", () => {
+  assert.equal(isValidSpecificGravity(1.1), true);
+  assert.equal(isValidSpecificGravity(0.001), true);
+  assert.equal(isValidSpecificGravity(-1.1), false);
+  assert.equal(isValidSpecificGravity(0), false);
+  assert.equal(isValidSpecificGravity(Infinity), false);
+  assert.equal(isValidSpecificGravity(-Infinity), false);
+  assert.equal(isValidSpecificGravity(NaN), false);
+  assert.equal(isValidSpecificGravity(null), false);
+});
+
+test("the database itself refuses to store a Material with a negative, zero, infinite, or NaN specific gravity", async () => {
+  for (const bad of [-1.1, 0, Infinity, -Infinity, NaN]) {
+    await assert.rejects(
+      () => prisma.material.create({ data: { name: `TEST-SUITE-RMR-BAD-SG-${Date.now()}-${Math.random()}`, type: "ADMIXTURE", specificGravity: bad } }),
+      /specificGravity|constraint/i,
+      `specificGravity=${bad} must be rejected by the database CHECK constraint`,
+    );
+  }
+  // A real, valid positive value still works — the constraint isn't
+  // over-broad.
+  const ok = await prisma.material.create({ data: { name: `TEST-SUITE-RMR-GOOD-SG-${Date.now()}`, type: "ADMIXTURE", specificGravity: 1.05 } });
+  materialIds.push(ok.id);
 });
 
 // ---- RMR-P2-04: audit creation is atomic with the recipe change --------
@@ -515,7 +653,9 @@ test("saving and cancelling a revision each write their AuditEvent atomically wi
   assert.equal(cancelAudit!.actorId, adminUserId);
 });
 
-// ---- RMR-P1-02: revision history is immutable at the database itself --
+// ---- RMR-P1-02 / RMR-R2-P1-01: revision history is immutable at the ---
+// ---- database itself, and its lifecycle can only move ACTIVE -> -----
+// ---- terminal, exactly once -------------------------------------------
 
 test("a ReservationMixRevision row cannot be deleted or have its frozen fields updated directly, even bypassing the app", async () => {
   const reservationId = await makeReservation();
@@ -544,6 +684,63 @@ test("a ReservationMixRevision row cannot be deleted or have its frozen fields u
   // confirming the trigger's allow-list is exactly that, not broader.
   const cancelled = await cancelActiveReservationMixRevision(reservationId, { actorId: adminUserId });
   assert.equal(cancelled.status, "OK");
+});
+
+test("a CANCELLED revision's lifecycle fields can never be moved again — not reactivated, not moved sideways, not rewritten", async () => {
+  const reservationId = await makeReservation();
+  const saved = await saveReservationMixRevision(reservationId, { reason: "lifecycle transition probe (cancelled)", actorId: adminUserId, components: revisedComponents() });
+  assert.equal(saved.status, "OK");
+  if (saved.status !== "OK") throw new Error("unreachable");
+  const cancelled = await cancelActiveReservationMixRevision(reservationId, { actorId: adminUserId });
+  assert.equal(cancelled.status, "OK");
+
+  const row = await prisma.reservationMixRevision.findUniqueOrThrow({ where: { id: saved.revisionId } });
+  assert.equal(row.status, "CANCELLED");
+  assert.ok(row.resolvedAt);
+  assert.ok(row.resolvedById);
+
+  await assert.rejects(
+    () => prisma.reservationMixRevision.update({ where: { id: saved.revisionId }, data: { status: "ACTIVE" } }),
+    /only allows a single ACTIVE -> SUPERSEDED\|CANCELLED transition/,
+    "CANCELLED -> ACTIVE must be rejected",
+  );
+  await assert.rejects(
+    () => prisma.reservationMixRevision.update({ where: { id: saved.revisionId }, data: { status: "SUPERSEDED" } }),
+    /only allows a single ACTIVE -> SUPERSEDED\|CANCELLED transition/,
+    "a terminal-to-terminal move (CANCELLED -> SUPERSEDED) must be rejected",
+  );
+  await assert.rejects(
+    () => prisma.reservationMixRevision.update({ where: { id: saved.revisionId }, data: { resolvedAt: null, resolvedById: null } }),
+    /only allows a single ACTIVE -> SUPERSEDED\|CANCELLED transition/,
+    "resolution metadata must never be clearable once set",
+  );
+  await assert.rejects(
+    () => prisma.reservationMixRevision.update({ where: { id: saved.revisionId }, data: { resolvedAt: new Date(Date.now() + 60_000) } }),
+    /only allows a single ACTIVE -> SUPERSEDED\|CANCELLED transition/,
+    "resolution metadata must never be rewritable once set, even to a plausible-looking new value",
+  );
+
+  const unchanged = await prisma.reservationMixRevision.findUniqueOrThrow({ where: { id: saved.revisionId } });
+  assert.equal(unchanged.status, "CANCELLED");
+  assert.equal(unchanged.resolvedAt!.getTime(), row.resolvedAt!.getTime());
+});
+
+test("a SUPERSEDED revision cannot be reactivated either", async () => {
+  const reservationId = await makeReservation();
+  const first = await saveReservationMixRevision(reservationId, { reason: "will be superseded", actorId: adminUserId, components: revisedComponents() });
+  assert.equal(first.status, "OK");
+  if (first.status !== "OK") throw new Error("unreachable");
+  const second = await saveReservationMixRevision(reservationId, { reason: "supersedes the first", actorId: adminUserId, components: revisedComponents() });
+  assert.equal(second.status, "OK");
+
+  const supersededRow = await prisma.reservationMixRevision.findUniqueOrThrow({ where: { id: first.revisionId } });
+  assert.equal(supersededRow.status, "SUPERSEDED");
+
+  await assert.rejects(
+    () => prisma.reservationMixRevision.update({ where: { id: first.revisionId }, data: { status: "ACTIVE" } }),
+    /only allows a single ACTIVE -> SUPERSEDED\|CANCELLED transition/,
+    "SUPERSEDED -> ACTIVE must be rejected",
+  );
 });
 
 // ---- 8/9 (partial — see file header). Pure permission/scope logic ------
