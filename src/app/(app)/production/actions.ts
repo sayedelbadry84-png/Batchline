@@ -117,15 +117,19 @@ export async function releaseBatchTicket(formData: FormData) {
 
   const result = await releaseTicketForReservation(reservationId, requestedVolume, plantId);
   if (result.status !== "OK") {
-    // Not silently doing nothing (RMR-P2-07) — a rejection this specific
-    // (as opposed to the picker simply offering a stale/invalid option,
-    // already guarded above) is worth a record even though the UI itself
-    // stays a silent no-op, matching every other rejected action in this
-    // file.
-    if (result.status === "STORAGE_NOT_CONFIGURED") {
-      await logAudit({ module: "Production", recordId: reservationId, reasonCode: "RELEASE_STORAGE_NOT_CONFIGURED", afterValue: result.material });
-    }
-    return;
+    // Not silently doing nothing (RMR-P2-07, RMR-R2-P2-03) — logged for
+    // every non-OK outcome, and surfaced as a visible banner on the
+    // returning page (production/page.tsx reads releaseError) rather
+    // than just a silent reload with no explanation.
+    await logAudit({
+      module: "Production",
+      recordId: reservationId,
+      reasonCode: `RELEASE_${result.status}`,
+      afterValue: result.status === "STORAGE_NOT_CONFIGURED" ? result.material : undefined,
+    });
+    const params = new URLSearchParams({ releaseError: result.status });
+    if (result.status === "STORAGE_NOT_CONFIGURED") params.set("releaseErrorMaterial", result.material);
+    redirect(`${returnPrefix}?${params.toString()}`);
   }
 
   revalidatePath("/production");
@@ -189,10 +193,29 @@ export async function createManualRelease(formData: FormData) {
 
   const result = await releaseTicketForReservation(reservation.id, volumeM3, plantId);
   if (result.status !== "OK") {
-    if (result.status === "STORAGE_NOT_CONFIGURED") {
-      await logAudit({ module: "Production", recordId: reservation.id, reasonCode: "RELEASE_STORAGE_NOT_CONFIGURED", afterValue: result.material });
-    }
-    return;
+    // Operational decision (RMR-R2-P2-03): the reservation created just
+    // above is KEPT, not rolled back or auto-cancelled — it's a real,
+    // confirmed, fully-signed-off booking (self-approved, same as any
+    // other manual booking), and once whatever blocked release is fixed
+    // (e.g. a requisition arrives), it already shows up in the normal
+    // "ready to release" list below like any other confirmed reservation,
+    // so an operator can just retry it from there — no separate recovery
+    // flow needed. What was actually missing was any visible sign that
+    // this happened at all; now logged AND surfaced as a banner (with an
+    // explicit note that the booking is on file for retry), rather than
+    // a walk-in customer's booking silently vanishing from view with no
+    // ticket and no explanation.
+    await logAudit({
+      module: "Production",
+      recordId: reservation.id,
+      reasonCode: `RELEASE_${result.status}`,
+      afterValue: result.status === "STORAGE_NOT_CONFIGURED" ? result.material : undefined,
+    });
+    revalidatePath("/production");
+    revalidatePath("/reservations");
+    const params = new URLSearchParams({ releaseError: result.status, manualBookingKept: "1" });
+    if (result.status === "STORAGE_NOT_CONFIGURED") params.set("releaseErrorMaterial", result.material);
+    redirect(`/production?${params.toString()}`);
   }
 
   revalidatePath("/production");

@@ -48,13 +48,23 @@ function fmtDateTime(d: Date): string {
 export default async function ProductionPage({
   searchParams,
 }: {
-  searchParams: Promise<{ manualBooking?: string; date?: string; dateTo?: string }>;
+  searchParams: Promise<{ manualBooking?: string; date?: string; dateTo?: string; releaseError?: string; releaseErrorMaterial?: string; manualBookingKept?: string }>;
 }) {
   const user = await requirePageAccess("production");
   const canEditMix = await canPerformAction(user.role, "production", "editReservationMix");
   const { dict } = await getDictionary();
   const m = dict.modules.production;
-  const { manualBooking, date: dateRaw, dateTo: dateToRaw } = await searchParams;
+  const { manualBooking, date: dateRaw, dateTo: dateToRaw, releaseError, releaseErrorMaterial, manualBookingKept } = await searchParams;
+  const releaseErrorText =
+    releaseError === "STORAGE_NOT_CONFIGURED"
+      ? m.releaseError.STORAGE_NOT_CONFIGURED(releaseErrorMaterial ?? "")
+      : releaseError === "INVALID_STATE"
+        ? m.releaseError.INVALID_STATE
+        : releaseError === "NOT_FOUND"
+          ? m.releaseError.NOT_FOUND
+          : releaseError === "NO_REMAINING_VOLUME"
+            ? m.releaseError.NO_REMAINING_VOLUME
+            : null;
   const siteId = await getActiveSiteId(user);
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
   const selectedDate = isDateParam(dateRaw) ? dateRaw : toDateParam(new Date());
@@ -168,6 +178,13 @@ export default async function ProductionPage({
         <h1 className={ui.h1}>{m.title}</h1>
         <p className={ui.intro}>{m.intro}</p>
       </header>
+
+      {releaseErrorText && (
+        <p className="rounded-md border border-critical/40 bg-critical-soft px-3 py-2 text-sm text-critical">
+          {releaseErrorText}
+          {manualBookingKept === "1" && <span className="block font-normal">{m.releaseError.manualBookingKeptNote}</span>}
+        </p>
+      )}
 
       <form action="/production" className="flex flex-wrap items-end gap-3">
         <Link href={`/production?date=${addDays(selectedDate, -1)}`} className="rounded-md border border-border px-3 py-2 text-sm hover:bg-surface-alt" aria-label={m.prevDay}>
