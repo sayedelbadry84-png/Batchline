@@ -77,7 +77,19 @@ jobs:
       # TEST_DATABASE_URL === DATABASE_URL) passes trivially; the test
       # file itself redirects the app's Prisma singleton to
       # TEST_DATABASE_URL before importing anything that constructs it.
-      - name: Integration tests
+      #
+      # Run twice, in this same job, against this same disposable
+      # database (not two separate CI jobs/containers) — the acceptance
+      # bar for the reservation-mix-revision review (RMR review, criterion
+      # #11): a second run only stays green if the first run's teardown
+      # truly left zero residue behind, which two independent jobs (each
+      # starting from a fresh, empty database) would never actually prove.
+      - name: Integration tests (first run)
+        env:
+          TEST_DATABASE_URL: postgresql://ci:ci@localhost:5432/ci_test
+        run: npm test
+
+      - name: Integration tests (second run, same database — proves zero fixture residue)
         env:
           TEST_DATABASE_URL: postgresql://ci:ci@localhost:5432/ci_test
         run: npm test
