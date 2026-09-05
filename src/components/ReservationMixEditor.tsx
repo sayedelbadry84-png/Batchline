@@ -51,12 +51,25 @@ export type ReservationMixEditorMessages = {
   errorMaterialNotFound: string;
   errorInvalidReason: string;
   errorNoActiveRevision: string;
+  errorUnsupportedMaterialType: string;
+  errorMissingSpecificGravity: string;
   unitKgShort: string;
   unitLiterShort: string;
 };
 
-function displayValue(row: { designMassKgPerM3: number; dosageUnit: "KG" | "LITER"; specificGravity: number | null }): number {
+export function displayValue(row: { designMassKgPerM3: number; dosageUnit: "KG" | "LITER"; specificGravity: number | null }): number {
   return row.dosageUnit === "LITER" && row.specificGravity ? row.designMassKgPerM3 / row.specificGravity : row.designMassKgPerM3;
+}
+
+// Same kg→display-unit conversion as displayValue, but for a value that
+// isn't itself a full row (a diff, or a total) — kept separate so a
+// caller can convert without constructing a fake row object. Every
+// number in one row (original/modified/diff/total) must share one basis
+// (RMR-P2-05, first draft showed diff always in kg and total always
+// labelled "kg" even for a liter-dosed admixture, disagreeing with the
+// original/modified columns next to them).
+function toDisplayUnit(kgValue: number, row: { dosageUnit: "KG" | "LITER"; specificGravity: number | null }): number {
+  return row.dosageUnit === "LITER" && row.specificGravity ? kgValue / row.specificGravity : kgValue;
 }
 
 function saveErrorText(state: NonNullable<Awaited<ReturnType<typeof saveReservationMixRevisionAction>>>, m: ReservationMixEditorMessages): string | null {
@@ -75,6 +88,10 @@ function saveErrorText(state: NonNullable<Awaited<ReturnType<typeof saveReservat
       return m.errorInvalidQuantity;
     case "MATERIAL_NOT_FOUND":
       return m.errorMaterialNotFound;
+    case "UNSUPPORTED_MATERIAL_TYPE":
+      return m.errorUnsupportedMaterialType;
+    case "MISSING_SPECIFIC_GRAVITY":
+      return m.errorMissingSpecificGravity;
     case "INVALID_REASON":
       return m.errorInvalidReason;
   }
@@ -183,8 +200,9 @@ export function ReservationMixEditor({
               const unit = r.dosageUnit === "LITER" && r.specificGravity ? m.unitLiterShort : m.unitKgShort;
               const modifiedDisplay = displayValue(r);
               const originalDisplay = orig ? displayValue(orig) : null;
-              const diff = orig ? r.designMassKgPerM3 - orig.designMassKgPerM3 : r.designMassKgPerM3;
-              const total = r.designMassKgPerM3 * volumeM3;
+              const diffKg = orig ? r.designMassKgPerM3 - orig.designMassKgPerM3 : r.designMassKgPerM3;
+              const diff = toDisplayUnit(diffKg, r);
+              const total = toDisplayUnit(r.designMassKgPerM3 * volumeM3, r);
               return (
                 <tr key={r.materialId}>
                   <td className="border-b border-border px-3 py-2.5">{r.materialName}</td>
@@ -212,7 +230,9 @@ export function ReservationMixEditor({
                     {diff > 1e-6 ? "+" : ""}
                     {diff.toFixed(2)}
                   </td>
-                  <td className="border-b border-border px-3 py-2.5 font-mono tabular text-xs" dir="ltr">{total.toFixed(1)} kg</td>
+                  <td className="border-b border-border px-3 py-2.5 font-mono tabular text-xs" dir="ltr">
+                    {total.toFixed(2)} {unit}
+                  </td>
                   <td className="border-b border-border px-3 py-2.5">
                     <input
                       type="text"
@@ -313,7 +333,7 @@ export function ReservationMixEditor({
           </button>
           {cancelState && cancelState.status !== "OK" && (
             <p role="alert" className="text-sm text-critical">
-              {cancelState.status === "NOT_FOUND" ? m.errorNotFound : m.errorNoActiveRevision}
+              {cancelState.status === "NOT_FOUND" ? m.errorNotFound : cancelState.status === "INVALID_STATE" ? m.errorInvalidState : m.errorNoActiveRevision}
             </p>
           )}
         </form>
