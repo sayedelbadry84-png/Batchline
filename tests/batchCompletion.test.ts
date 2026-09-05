@@ -68,29 +68,29 @@ const ticketIds: string[] = [];
 const tripIds: string[] = [];
 
 before(async () => {
-  const site = await prisma.site.create({ data: { code: `TEST-SUITE-${Date.now()}`, name: "TEST-SUITE-SITE", city: "Test", country: "Test" } });
+  const site = await prisma.site.create({ data: { code: `TEST-SUITE-BC-${Date.now()}`, name: "TEST-SUITE-BC-SITE", city: "Test", country: "Test" } });
   siteId = site.id;
-  const plant = await prisma.plant.create({ data: { siteId, name: "TEST-SUITE-PLANT" } });
+  const plant = await prisma.plant.create({ data: { siteId, name: "TEST-SUITE-BC-PLANT" } });
   plantId = plant.id;
-  const material = await prisma.material.create({ data: { name: "TEST-SUITE-CEMENT", type: "CEMENT" } });
+  const material = await prisma.material.create({ data: { name: "TEST-SUITE-BC-CEMENT", type: "CEMENT" } });
   materialId = material.id;
   const silo = await prisma.silo.create({
-    data: { plantId, name: "TEST-SUITE-SILO", materialType: "CEMENT", materialId, capacityTons: 500, currentLevelTons: 0, minThresholdPct: 15 },
+    data: { plantId, name: "TEST-SUITE-BC-SILO", materialType: "CEMENT", materialId, capacityTons: 500, currentLevelTons: 0, minThresholdPct: 15 },
   });
   siloId = silo.id;
   const fallbackSilo = await prisma.silo.create({
-    data: { plantId, name: "TEST-SUITE-FALLBACK-SILO", materialType: "CEMENT", materialId: null, capacityTons: 500, currentLevelTons: 1000, minThresholdPct: 15 },
+    data: { plantId, name: "TEST-SUITE-BC-FALLBACK-SILO", materialType: "CEMENT", materialId: null, capacityTons: 500, currentLevelTons: 1000, minThresholdPct: 15 },
   });
   fallbackSiloId = fallbackSilo.id;
 
-  const customer = await prisma.customer.create({ data: { legalName: "TEST-SUITE-CUSTOMER", creditLimit: 999999 } });
+  const customer = await prisma.customer.create({ data: { legalName: "TEST-SUITE-BC-CUSTOMER", creditLimit: 999999 } });
   customerId = customer.id;
-  const project = await prisma.project.create({ data: { name: "TEST-SUITE-PROJECT", customerId, siteAddress: "Test Address" } });
+  const project = await prisma.project.create({ data: { name: "TEST-SUITE-BC-PROJECT", customerId, siteAddress: "Test Address" } });
   projectId = project.id;
-  const mix = await prisma.mixDesign.create({ data: { code: `TEST-SUITE-MIX-${Date.now()}`, grade: "C25", slumpTargetMm: 100, wcRatio: 0.5 } });
+  const mix = await prisma.mixDesign.create({ data: { code: `TEST-SUITE-BC-MIX-${Date.now()}`, grade: "C25", slumpTargetMm: 100, wcRatio: 0.5 } });
   mixId = mix.id;
   const reservation = await prisma.reservation.create({
-    data: { reservationNumber: `TEST-SUITE-RES-${Date.now()}`, projectId, siteId, mixId, requestedVolumeM3: 100, originalVolumeM3: 100, pourWindowStart: new Date(), status: "CONFIRMED" },
+    data: { reservationNumber: `TEST-SUITE-BC-RES-${Date.now()}`, projectId, siteId, mixId, requestedVolumeM3: 100, originalVolumeM3: 100, pourWindowStart: new Date(), status: "CONFIRMED" },
   });
   reservationId = reservation.id;
 
@@ -99,16 +99,16 @@ before(async () => {
   // depending on an external seed step, so this suite runs against any
   // freshly-migrated, otherwise-empty test database.
   const admin = await prisma.user.create({
-    data: { email: `test-suite-admin-${Date.now()}@example.invalid`, name: "TEST-SUITE-ADMIN", passwordHash: "not-a-real-hash", role: "ADMIN" },
+    data: { email: `test-suite-bc-admin-${Date.now()}@example.invalid`, name: "TEST-SUITE-BC-ADMIN", passwordHash: "not-a-real-hash", role: "ADMIN" },
   });
   adminUserId = admin.id;
 
   // For the dispatch-related tests (CR-01) — a real Truck/Employee so a
   // Trip row can be created directly, satisfying the same FKs startTrip
   // itself would populate.
-  const truck = await prisma.truck.create({ data: { plantId, code: "TEST-SUITE-TRUCK", drumCapacityM3: 12 } });
+  const truck = await prisma.truck.create({ data: { plantId, code: "TEST-SUITE-BC-TRUCK", drumCapacityM3: 12 } });
   truckId = truck.id;
-  const driver = await prisma.employee.create({ data: { plantId, name: "TEST-SUITE-DRIVER", role: "DRIVER", status: "ACTIVE" } });
+  const driver = await prisma.employee.create({ data: { plantId, name: "TEST-SUITE-BC-DRIVER", role: "DRIVER", status: "ACTIVE" } });
   driverId = driver.id;
 });
 
@@ -167,7 +167,7 @@ after(async () => {
   }
   await deleteMovements({ OR: [{ storageId: siloId }, { storageId: fallbackSiloId }] });
 
-  // Generic, FK-safe sweep for every auxiliary TEST-SUITE-* Material/Silo
+  // Generic, FK-safe sweep for every auxiliary TEST-SUITE-BC-* Material/Silo
   // an individual test created directly for a one-off scenario. These
   // used to be deleted in each test's own `finally` block while a
   // BatchComponentActual or InventoryMovement row (both FKs are ON
@@ -178,8 +178,8 @@ after(async () => {
   // per-test catches). Doing it once, generically, by name prefix, after
   // every ticket/trip is already gone, replaces tracking every auxiliary
   // fixture's id by hand across a dozen tests.
-  const leftoverMaterialIds = (await prisma.material.findMany({ where: { name: { startsWith: "TEST-SUITE-" } }, select: { id: true } })).map((m) => m.id);
-  const leftoverSiloIds = (await prisma.silo.findMany({ where: { name: { startsWith: "TEST-SUITE-" } }, select: { id: true } })).map((s) => s.id);
+  const leftoverMaterialIds = (await prisma.material.findMany({ where: { name: { startsWith: "TEST-SUITE-BC-" } }, select: { id: true } })).map((m) => m.id);
+  const leftoverSiloIds = (await prisma.silo.findMany({ where: { name: { startsWith: "TEST-SUITE-BC-" } }, select: { id: true } })).map((s) => s.id);
   if (leftoverMaterialIds.length > 0) await deleteMovements({ materialId: { in: leftoverMaterialIds } });
   if (leftoverSiloIds.length > 0) await deleteMovements({ storageId: { in: leftoverSiloIds } });
   if (leftoverMaterialIds.length > 0) await prisma.batchComponentActual.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } });
@@ -198,16 +198,16 @@ after(async () => {
 
   // Proves the sweep above actually worked, not just that it ran without
   // throwing — the acceptance bar the sixth review asked for: zero
-  // TEST-SUITE-* residue, not merely "no error was thrown."
+  // TEST-SUITE-BC-* residue, not merely "no error was thrown."
   const residue = await Promise.all([
-    prisma.material.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
-    prisma.silo.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
-    prisma.user.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
-    prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
-    prisma.plant.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
-    prisma.batchTicket.count({ where: { ticketNumber: { startsWith: "TEST-SUITE-" } } }),
+    prisma.material.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
+    prisma.silo.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
+    prisma.user.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
+    prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
+    prisma.plant.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
+    prisma.batchTicket.count({ where: { ticketNumber: { startsWith: "TEST-SUITE-BC-" } } }),
   ]);
-  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-* fixtures after teardown: [material, silo, user, site, plant, ticket] = ${JSON.stringify(residue)}`);
+  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket] = ${JSON.stringify(residue)}`);
 
   await prisma.$disconnect();
 });
@@ -218,7 +218,7 @@ async function makeTicket(components: { materialId: string; targetMassKg: number
       reservationId,
       mixId,
       plantId,
-      ticketNumber: `TEST-SUITE-BT-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      ticketNumber: `TEST-SUITE-BC-BT-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       volumeM3: 5,
       status: "RELEASED",
       components: { create: components },
@@ -513,24 +513,24 @@ test("the database itself rejects deleting a BatchTicket with a ShortageOverride
 test("notifyRoles with a siteId only notifies users at that site, plus ADMIN (FR-P1-02)", async () => {
   const { notifyRoles } = await import("../src/lib/notify");
 
-  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-OTHER-${Date.now()}`, name: "TEST-SUITE-OTHER-SITE", city: "Test", country: "Test" } });
-  const otherPlant = await prisma.plant.create({ data: { siteId: otherSite.id, name: "TEST-SUITE-OTHER-PLANT" } });
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-BC-OTHER-${Date.now()}`, name: "TEST-SUITE-BC-OTHER-SITE", city: "Test", country: "Test" } });
+  const otherPlant = await prisma.plant.create({ data: { siteId: otherSite.id, name: "TEST-SUITE-BC-OTHER-PLANT" } });
   const sameSiteManager = await prisma.user.create({
-    data: { email: `test-suite-same-site-${Date.now()}@example.invalid`, name: "TEST-SUITE-SAME-SITE-MANAGER", passwordHash: "not-a-real-hash", role: "PLANT_MANAGER", plantId },
+    data: { email: `test-suite-bc-same-site-${Date.now()}@example.invalid`, name: "TEST-SUITE-BC-SAME-SITE-MANAGER", passwordHash: "not-a-real-hash", role: "PLANT_MANAGER", plantId },
   });
   const otherSiteManager = await prisma.user.create({
-    data: { email: `test-suite-other-site-${Date.now()}@example.invalid`, name: "TEST-SUITE-OTHER-SITE-MANAGER", passwordHash: "not-a-real-hash", role: "PLANT_MANAGER", plantId: otherPlant.id },
+    data: { email: `test-suite-bc-other-site-${Date.now()}@example.invalid`, name: "TEST-SUITE-BC-OTHER-SITE-MANAGER", passwordHash: "not-a-real-hash", role: "PLANT_MANAGER", plantId: otherPlant.id },
   });
 
   try {
-    await notifyRoles(["PLANT_MANAGER", "ADMIN"], { module: "Production", title: "TEST-SUITE-SITE-SCOPED-NOTIFICATION" }, { siteId });
+    await notifyRoles(["PLANT_MANAGER", "ADMIN"], { module: "Production", title: "TEST-SUITE-BC-SITE-SCOPED-NOTIFICATION" }, { siteId });
 
-    const recipientIds = (await prisma.notification.findMany({ where: { title: "TEST-SUITE-SITE-SCOPED-NOTIFICATION" }, select: { userId: true } })).map((n) => n.userId);
+    const recipientIds = (await prisma.notification.findMany({ where: { title: "TEST-SUITE-BC-SITE-SCOPED-NOTIFICATION" }, select: { userId: true } })).map((n) => n.userId);
     assert.ok(recipientIds.includes(sameSiteManager.id));
     assert.ok(recipientIds.includes(adminUserId)); // ADMIN always included regardless of site
     assert.ok(!recipientIds.includes(otherSiteManager.id));
   } finally {
-    await prisma.notification.deleteMany({ where: { title: "TEST-SUITE-SITE-SCOPED-NOTIFICATION" } });
+    await prisma.notification.deleteMany({ where: { title: "TEST-SUITE-BC-SITE-SCOPED-NOTIFICATION" } });
     await prisma.user.delete({ where: { id: sameSiteManager.id } }).catch(() => {});
     await prisma.user.delete({ where: { id: otherSiteManager.id } }).catch(() => {});
     await prisma.plant.delete({ where: { id: otherPlant.id } }).catch(() => {});
@@ -649,9 +649,9 @@ test("approving a request after its ticket expired it returns NOT_PENDING, not O
 // edited to need more, or a different material became short too.
 test("an approval for one material cannot authorize a shortage on a different material (P1-03)", async () => {
   await resetSilo(0); // materialId already short at request time
-  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-SNAPSHOT-B", type: "CEMENT" } });
+  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-BC-SNAPSHOT-B", type: "CEMENT" } });
   const secondSilo = await prisma.silo.create({
-    data: { plantId, name: "TEST-SUITE-SNAPSHOT-SILO-B", materialType: "CEMENT", materialId: secondMaterial.id, capacityTons: 500, currentLevelTons: 10 }, // plenty for now
+    data: { plantId, name: "TEST-SUITE-BC-SNAPSHOT-SILO-B", materialType: "CEMENT", materialId: secondMaterial.id, capacityTons: 500, currentLevelTons: 10 }, // plenty for now
   });
   try {
     const ticketId = await makeTicket([
@@ -719,10 +719,10 @@ test("the snapshot simulates cumulative demand when two materials share one fall
   // deterministic order between two equally-qualifying rows). SLAG hits
   // the exact same SILO resolution branch in resolveTicketComponents
   // without colliding with any existing fixture.
-  const materialA = await prisma.material.create({ data: { name: "TEST-SUITE-SHARED-FALLBACK-A", type: "SLAG" } });
-  const materialB = await prisma.material.create({ data: { name: "TEST-SUITE-SHARED-FALLBACK-B", type: "SLAG" } });
+  const materialA = await prisma.material.create({ data: { name: "TEST-SUITE-BC-SHARED-FALLBACK-A", type: "SLAG" } });
+  const materialB = await prisma.material.create({ data: { name: "TEST-SUITE-BC-SHARED-FALLBACK-B", type: "SLAG" } });
   const sharedFallback = await prisma.silo.create({
-    data: { plantId, name: "TEST-SUITE-SHARED-FALLBACK-SILO", materialType: "SLAG", materialId: null, capacityTons: 500, currentLevelTons: 1.5 },
+    data: { plantId, name: "TEST-SUITE-BC-SHARED-FALLBACK-SILO", materialType: "SLAG", materialId: null, capacityTons: 500, currentLevelTons: 1.5 },
   });
   try {
     const ticketId = await makeTicket([
@@ -816,7 +816,7 @@ test("approving or rejecting a request is refused once its ticket is terminal, e
 // call, never this code path.
 test("applyReclaimCredit never credits an inventoryTracked:false material (P1-04)", async () => {
   await resetSilo(50);
-  const untrackedMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-UNTRACKED-RECLAIM", type: "WATER", inventoryTracked: false } });
+  const untrackedMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-BC-UNTRACKED-RECLAIM", type: "WATER", inventoryTracked: false } });
   try {
     const ticketId = await makeTicket([
       { materialId, targetMassKg: 1000 },
@@ -876,7 +876,7 @@ test("applyReclaimCredit credits the ORIGINAL storage even if the material's ass
   assert.equal(completion.status, "SUCCESS");
   assert.equal(await siloLevel(siloId), 49);
 
-  const newSilo = await prisma.silo.create({ data: { plantId, name: "TEST-SUITE-RECLAIM-NEW-SILO", materialType: "CEMENT", materialId, capacityTons: 500, currentLevelTons: 0 } });
+  const newSilo = await prisma.silo.create({ data: { plantId, name: "TEST-SUITE-BC-RECLAIM-NEW-SILO", materialType: "CEMENT", materialId, capacityTons: 500, currentLevelTons: 0 } });
   try {
     // The material gets reassigned to a DIFFERENT silo after completion —
     // the credit must still go back to the ORIGINAL one, not wherever
@@ -909,8 +909,8 @@ test("applyReclaimCredit credits the ORIGINAL storage even if the material's ass
 });
 
 test("applyReclaimCredit reports failure when the original storage no longer exists (P1-04)", async () => {
-  const throwawayMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-RECLAIM-MISSING-STORAGE", type: "CEMENT" } });
-  const throwawaySilo = await prisma.silo.create({ data: { plantId, name: "TEST-SUITE-RECLAIM-THROWAWAY-SILO", materialType: "CEMENT", materialId: throwawayMaterial.id, capacityTons: 500, currentLevelTons: 50 } });
+  const throwawayMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-BC-RECLAIM-MISSING-STORAGE", type: "CEMENT" } });
+  const throwawaySilo = await prisma.silo.create({ data: { plantId, name: "TEST-SUITE-BC-RECLAIM-THROWAWAY-SILO", materialType: "CEMENT", materialId: throwawayMaterial.id, capacityTons: 500, currentLevelTons: 50 } });
   try {
     const ticketId = await makeTicket([{ materialId: throwawayMaterial.id, targetMassKg: 1000 }]);
     const completion = await completeBatchTicket(ticketId, {});
@@ -937,8 +937,8 @@ test("applyReclaimCredit reports failure when the original storage no longer exi
 
 test("a capacity failure rolls back every reclaim credit already applied in the same transaction (P1-04)", async () => {
   await resetSilo(50);
-  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-RECLAIM-CAPACITY-B", type: "CEMENT" } });
-  const secondSilo = await prisma.silo.create({ data: { plantId, name: "TEST-SUITE-RECLAIM-CAPACITY-SILO-B", materialType: "CEMENT", materialId: secondMaterial.id, capacityTons: 10, currentLevelTons: 10 } });
+  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-BC-RECLAIM-CAPACITY-B", type: "CEMENT" } });
+  const secondSilo = await prisma.silo.create({ data: { plantId, name: "TEST-SUITE-BC-RECLAIM-CAPACITY-SILO-B", materialType: "CEMENT", materialId: secondMaterial.id, capacityTons: 10, currentLevelTons: 10 } });
   try {
     const ticketId = await makeTicket([
       { materialId, targetMassKg: 1000 }, // 1t — plenty of room to credit back later
@@ -1012,9 +1012,9 @@ test("cancelBatchTicket refuses an already-complete ticket (P2-01)", async () =>
 
 test("a failure while processing one component rolls back all components", async () => {
   await resetSilo(10); // plenty for one component, not enough for two
-  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-CEMENT-2", type: "CEMENT" } });
+  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-BC-CEMENT-2", type: "CEMENT" } });
   const secondSilo = await prisma.silo.create({
-    data: { plantId, name: "TEST-SUITE-SILO-2", materialType: "CEMENT", materialId: secondMaterial.id, capacityTons: 500, currentLevelTons: 1 },
+    data: { plantId, name: "TEST-SUITE-BC-SILO-2", materialType: "CEMENT", materialId: secondMaterial.id, capacityTons: 500, currentLevelTons: 1 },
   });
 
   try {
@@ -1129,7 +1129,7 @@ test("completion vs. addTicketComponent: exactly one of two valid outcomes", asy
   // instead of proving the STORAGE_NOT_CONFIGURED path this test wants.
   // No fixture silo of any kind exists for SILICA_FUME, so this really has
   // no matching storage at all.
-  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-SILICA-FUME-RACE", type: "SILICA_FUME", specificGravity: null } });
+  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-BC-SILICA-FUME-RACE", type: "SILICA_FUME", specificGravity: null } });
   try {
     // secondMaterial has no matching silo at all — if it DOES get added
     // and completion picks it up, completion must correctly fail with
@@ -1227,7 +1227,7 @@ test("reversing a COMPLETE ticket with no posted movements is refused, not silen
       reservationId,
       mixId,
       plantId,
-      ticketNumber: `TEST-SUITE-BT-PRELEDGER-${Date.now()}`,
+      ticketNumber: `TEST-SUITE-BC-BT-PRELEDGER-${Date.now()}`,
       volumeM3: 5,
       status: "COMPLETE",
       batchCompletedAt: new Date(),
@@ -1263,7 +1263,7 @@ test("material consumption uses the explicitly assigned storage, not a same-type
 
 test("a material with no configured storage fails the whole completion", async () => {
   await resetSilo(50);
-  const admixture = await prisma.material.create({ data: { name: "TEST-SUITE-ADMIXTURE-NO-TANK", type: "ADMIXTURE", specificGravity: 1.1 } });
+  const admixture = await prisma.material.create({ data: { name: "TEST-SUITE-BC-ADMIXTURE-NO-TANK", type: "ADMIXTURE", specificGravity: 1.1 } });
   try {
     // No ChemicalTank exists anywhere for this material — completeBatchTicket's
     // ADMIXTURE branch does `chemicalTank.findFirst({ plantId, materialId })`
@@ -1275,7 +1275,7 @@ test("a material with no configured storage fails the whole completion", async (
 
     const result = await completeBatchTicket(ticketId, {});
     assert.equal(result.status, "STORAGE_NOT_CONFIGURED");
-    if (result.status === "STORAGE_NOT_CONFIGURED") assert.match(result.material, /TEST-SUITE-ADMIXTURE-NO-TANK/);
+    if (result.status === "STORAGE_NOT_CONFIGURED") assert.match(result.material, /TEST-SUITE-BC-ADMIXTURE-NO-TANK/);
 
     const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
     assert.equal(ticket.status, "RELEASED");
@@ -1297,7 +1297,7 @@ test("a material with no configured storage fails the whole completion", async (
 
 test("an ADMIXTURE with no specificGravity on file fails the whole completion", async () => {
   await resetSilo(50);
-  const admixtureNoGravity = await prisma.material.create({ data: { name: "TEST-SUITE-ADMIXTURE-NO-GRAVITY", type: "ADMIXTURE", specificGravity: null } });
+  const admixtureNoGravity = await prisma.material.create({ data: { name: "TEST-SUITE-BC-ADMIXTURE-NO-GRAVITY", type: "ADMIXTURE", specificGravity: null } });
   try {
     const ticketId = await makeTicket([
       { materialId, targetMassKg: 1000 },
@@ -1306,7 +1306,7 @@ test("an ADMIXTURE with no specificGravity on file fails the whole completion", 
 
     const result = await completeBatchTicket(ticketId, {});
     assert.equal(result.status, "STORAGE_NOT_CONFIGURED");
-    if (result.status === "STORAGE_NOT_CONFIGURED") assert.match(result.material, /TEST-SUITE-ADMIXTURE-NO-GRAVITY/);
+    if (result.status === "STORAGE_NOT_CONFIGURED") assert.match(result.material, /TEST-SUITE-BC-ADMIXTURE-NO-GRAVITY/);
 
     const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
     assert.equal(ticket.status, "RELEASED");
@@ -1322,7 +1322,7 @@ test("an ADMIXTURE with no specificGravity on file fails the whole completion", 
 // ---- 11b. A material marked inventoryTracked:false is skipped silently ----
 test("a component whose material has inventoryTracked:false is skipped, not STORAGE_NOT_CONFIGURED", async () => {
   await resetSilo(50);
-  const untrackedWater = await prisma.material.create({ data: { name: "TEST-SUITE-UNTRACKED-WATER", type: "WATER", inventoryTracked: false } });
+  const untrackedWater = await prisma.material.create({ data: { name: "TEST-SUITE-BC-UNTRACKED-WATER", type: "WATER", inventoryTracked: false } });
   try {
     const ticketId = await makeTicket([
       { materialId, targetMassKg: 1000 },
