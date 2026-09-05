@@ -3,13 +3,14 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
-import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
+import { isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { getAvailableReclaimForTruck } from "@/lib/reclaim";
 import { AGGREGATE_TYPES } from "@/lib/storageMatching";
 import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain, cancelBatchTicket as cancelBatchTicketDomain } from "@/lib/batchCompletion";
 import { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } from "@/lib/batchComponentEdits";
 import { claimTripSlot, applyReclaimCredit } from "@/lib/tripDispatch";
+import { releaseTicketForReservation } from "@/lib/reservationRelease";
 import {
   requestShortageOverride as requestShortageOverrideDomain,
   approveShortageOverrideRequest as approveShortageOverrideRequestDomain,
@@ -79,89 +80,6 @@ async function maybeAutoRequisitionMaterial(
 // reservation remains — the same ceiling the release form's own input
 // max enforces client-side (production/page.tsx); this is the real gate.
 const MAX_LOAD_M3 = 15;
-
-// The actual ticket-creation logic shared by releaseBatchTicket (a planned,
-// pre-approved reservation) and createManualRelease (a walk-in sale that
-// self-approves on the way in) — pulled out so neither has to duplicate
-// the ticket-number/component-snapshot logic. Doesn't redirect; each
-// caller does that itself since they land somewhere different.
-//
-// plantId here is the STATION — the reservation itself only committed to
-// a plant/site (see the Reservation model comment); which station within
-// it actually produces this ticket is decided right here, at release
-// time, by whoever's releasing it. The caller is responsible for
-// validating plantId belongs to reservation.siteId and is ACTIVE before
-// calling this.
-async function releaseTicketForReservation(reservationId: string, requestedVolume: number, plantId: string) {
-  const reservation = await prisma.reservation.findUnique({
-    where: { id: reservationId },
-    include: { mix: { include: { components: true } } },
-  });
-  if (!reservation) return null;
-
-  // The remaining-volume read and the ticket create used to be two separate
-  // round trips with no lock between them — two concurrent releases for the
-  // same reservation could both read the same "remaining" figure and both
-  // create a ticket, together dispatching more than was ever requested.
-  // Serializable makes Postgres detect that read-write conflict and abort
-  // one of the two competing transactions.
-  let ticket;
-  try {
-    ticket = await prisma.$transaction(
-      async (tx) => {
-        const remaining = await getRemainingVolumeM3(reservationId, reservation.requestedVolumeM3, tx);
-        const volumeM3 = Math.min(requestedVolume, remaining);
-        if (volumeM3 <= 0) throw new Error("NO_REMAINING_VOLUME");
-
-        // ticketNumber is globally unique (one company-wide sequence, not
-        // per-plant) — it used to be counted per plantId while the column
-        // itself has no per-plant scoping, so the FIRST ticket at any
-        // second plant always collided with "BT-<year>-0001" from the
-        // first one ever used. See withSequentialNumber's own comment for
-        // the full story.
-        const created = await withSequentialNumber(
-          "BT",
-          (yr) => tx.batchTicket.count({ where: { createdAt: yr } }),
-          (ticketNumber) =>
-            tx.batchTicket.create({
-              data: {
-                reservationId,
-                mixId: reservation.mixId,
-                plantId,
-                ticketNumber,
-                volumeM3,
-                status: "RELEASED",
-                components: {
-                  create: reservation.mix.components.map((c) => ({
-                    materialId: c.materialId,
-                    targetMassKg: c.designMassKgPerM3 * volumeM3,
-                  })),
-                },
-              },
-            }),
-        );
-
-        if (reservation.status !== "IN_PRODUCTION") {
-          await tx.reservation.update({ where: { id: reservationId }, data: { status: "IN_PRODUCTION" } });
-        }
-
-        return created;
-      },
-      { ...TX_OPTIONS, isolationLevel: "Serializable" },
-    );
-  } catch {
-    return null;
-  }
-
-  await logAudit({
-    module: "Production",
-    recordId: ticket.id,
-    afterValue: `${ticket.ticketNumber} — ${ticket.volumeM3} m3`,
-    reasonCode: "BATCH_RELEASED",
-  });
-
-  return ticket;
-}
 
 // A reservation's requested volume is a target, not a single truck load —
 // a 200 m³ pour goes out as many partial tickets (one per truck), each

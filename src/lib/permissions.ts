@@ -234,6 +234,12 @@ export const ACTION_ROLES = {
     updateTripAssignment: ["PLANT_OPERATOR", "ADMIN"],
     addTicketComponent: ["PLANT_OPERATOR", "ADMIN"],
     deleteTicketComponent: ["PLANT_OPERATOR", "ADMIN"],
+    // Reservation-level mix-recipe override (copy-on-write revision) —
+    // same operational-edit roster as addTicketComponent/
+    // deleteTicketComponent, since this is the same kind of "what does
+    // this specific booking actually contain" authority, one level up
+    // from a single ticket's own components.
+    editReservationMix: ["PLANT_OPERATOR", "ADMIN"],
   },
   equipment: {
     createTruck: ["PLANT_OPERATOR", "ADMIN"],
