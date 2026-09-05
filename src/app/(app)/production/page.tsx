@@ -2,6 +2,7 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { canPerformAction } from "@/lib/permissions";
 import { getDictionary } from "@/lib/i18n";
 import { releaseBatchTicket, createManualRelease } from "./actions";
 import { closeReservation } from "../reservations/actions";
@@ -50,6 +51,7 @@ export default async function ProductionPage({
   searchParams: Promise<{ manualBooking?: string; date?: string; dateTo?: string }>;
 }) {
   const user = await requirePageAccess("production");
+  const canEditMix = await canPerformAction(user.role, "production", "editReservationMix");
   const { dict } = await getDictionary();
   const m = dict.modules.production;
   const { manualBooking, date: dateRaw, dateTo: dateToRaw } = await searchParams;
@@ -296,6 +298,11 @@ export default async function ProductionPage({
                     />
                     <button className={ui.button}>{m.release}</button>
                   </form>
+                  {canEditMix && (
+                    <Link href={`/production/reservationMix/${r.id}`} className="mt-1 inline-block text-xs font-medium text-accent-strong hover:underline">
+                      {m.editMix}
+                    </Link>
+                  )}
                   <form action={closeReservation} className="mt-1 flex items-center gap-1">
                     <input type="hidden" name="id" value={r.id} />
                     <select name="closeReasonCode" required defaultValue="" className="rounded-md border border-border bg-surface px-1.5 py-1 text-xs">
