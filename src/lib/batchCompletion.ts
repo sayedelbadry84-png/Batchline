@@ -53,6 +53,19 @@ export function isInventoryTracked(material: { type: string; inventoryTracked: b
   return ["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME", "WATER", "ADMIXTURE"].includes(material.type) || AGGREGATE_TYPES.has(material.type);
 }
 
+// `!specificGravity` is a JS truthiness test, not a "does this represent
+// a usable ratio" test — a negative value or Infinity is truthy and used
+// to pass straight through both here and in saveReservationMixRevision
+// (RMR-R2-P1-03). A negative specific gravity flips
+// `liters = massKg / specificGravity` negative, turning an admixture
+// DEDUCTION into a positive inventory CREDIT the moment a batch
+// completes. Exported so both call sites (and the database's own CHECK
+// constraint, which backstops every OTHER write path to Material) agree
+// on exactly the same definition of "valid."
+export function isValidSpecificGravity(value: number | null): value is number {
+  return value !== null && Number.isFinite(value) && value > 0;
+}
+
 export type ResolvedComponent = {
   materialId: string;
   materialName: string;
@@ -107,7 +120,7 @@ export async function resolveTicketComponents(db: Tx | typeof prisma, ticket: Ti
       if (!waterHopper) return { status: "STORAGE_NOT_CONFIGURED", material: c.material.name };
       resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "HOPPER", storageId: waterHopper.id, quantity: -massTons, currentLevel: waterHopper.currentLevelTons, capacity: waterHopper.capacityTons, minThresholdPct: waterHopper.minThresholdPct });
     } else if (c.material.type === "ADMIXTURE") {
-      if (!c.material.specificGravity) return { status: "STORAGE_NOT_CONFIGURED", material: `${c.material.name} (missing specific gravity)` };
+      if (!isValidSpecificGravity(c.material.specificGravity)) return { status: "STORAGE_NOT_CONFIGURED", material: `${c.material.name} (missing specific gravity)` };
       const tank = await db.chemicalTank.findFirst({ where: { plantId: ticket.plantId, materialId: c.materialId } });
       if (!tank) return { status: "STORAGE_NOT_CONFIGURED", material: c.material.name };
       const liters = massKg / c.material.specificGravity;
