@@ -598,7 +598,14 @@ model ReservationMixRevision {
 model ReservationMixRevisionComponent {
   id                String                 @id @default(cuid())
   revisionId        String
-  revision          ReservationMixRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  // RESTRICT, not the original Cascade — a revision's components are
+  // meant to be permanent audit trail (see ReservationMixRevision's own
+  // comment), so deleting the parent revision must never silently take
+  // its components with it. In practice the parent row can't be deleted
+  // at all (see the DB-level immutability trigger added in
+  // 20260906_harden_reservation_mix_revision/migration.sql) — this is
+  // the belt-and-suspenders backstop if that trigger is ever bypassed.
+  revision          ReservationMixRevision @relation(fields: [revisionId], references: [id], onDelete: Restrict)
   materialId        String
   material          Material               @relation(fields: [materialId], references: [id])
   designMassKgPerM3 Decimal                @db.Decimal(12, 4)
@@ -1265,9 +1272,13 @@ model BatchTicket {
   // as before this feature existed. Purely a record of what happened;
   // nothing downstream (completion, reclaim, reversal) reads this — they
   // all already work strictly from BatchComponentActual (see that model's
-  // own comment).
+  // own comment). RESTRICT, not the default SET NULL — once a ticket has
+  // been issued from a revision, that provenance link must never be
+  // silently erased by deleting the revision; the revision itself can't
+  // actually be deleted in practice (see its own model comment), but the
+  // FK stays RESTRICT as the same belt-and-suspenders backstop.
   reservationMixRevisionId String?
-  reservationMixRevision   ReservationMixRevision? @relation(fields: [reservationMixRevisionId], references: [id])
+  reservationMixRevision   ReservationMixRevision? @relation(fields: [reservationMixRevisionId], references: [id], onDelete: Restrict)
 
   components               BatchComponentActual[]
   trip                     Trip?
