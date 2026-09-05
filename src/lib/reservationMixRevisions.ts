@@ -2,6 +2,7 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withRetry } from "@/lib/inventoryLedger";
+import { isValidSpecificGravity } from "@/lib/batchCompletion";
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -145,7 +146,7 @@ export async function saveReservationMixRevision(
   for (const c of opts.components) {
     const material = materialById.get(c.materialId)!;
     if (!SUPPORTED_MATERIAL_TYPES.has(material.type)) return { status: "UNSUPPORTED_MATERIAL_TYPE", materialId: c.materialId };
-    if (material.type === "ADMIXTURE" && !material.specificGravity) return { status: "MISSING_SPECIFIC_GRAVITY", materialId: c.materialId };
+    if (material.type === "ADMIXTURE" && !isValidSpecificGravity(material.specificGravity)) return { status: "MISSING_SPECIFIC_GRAVITY", materialId: c.materialId };
   }
 
   return withRevisionRetry(() =>
@@ -219,7 +220,12 @@ export async function saveReservationMixRevision(
 
         return { status: "OK" as const, revisionId: created.id, revisionNumber: created.revisionNumber };
       },
-      { isolationLevel: "Serializable", timeout: 15000 },
+      // 20s, not the original 15s — RMR-P2-04's atomic audit write added
+      // two more sequential round trips inside this same transaction
+      // (getEffectiveMix's own read, and the actor-role lookup), on top
+      // of everything already here. Observed hitting the original 15s
+      // ceiling for real, under a slow/cold connection, mid-session.
+      { isolationLevel: "Serializable", timeout: 20000 },
     ),
   );
 }
@@ -272,7 +278,11 @@ export async function cancelActiveReservationMixRevision(reservationId: string, 
 
         return { status: "OK" as const };
       },
-      { isolationLevel: "Serializable" },
+      // Explicit timeout, not Prisma's 5s default — this transaction now
+      // does 4 sequential round trips (reservation read, active-revision
+      // read, the update, the actor-role lookup, the audit insert), same
+      // reasoning as saveReservationMixRevision's own bump above.
+      { isolationLevel: "Serializable", timeout: 15000 },
     ),
   );
 }
