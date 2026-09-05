@@ -147,10 +147,17 @@ async function cleanupDelete(fn: () => Promise<unknown>): Promise<void> {
 after(async () => {
   for (const id of tripIds) {
     await prisma.drumReturn.deleteMany({ where: { tripId: id } });
+    // RECLAIM_CREDIT movements are sourced by the TRIP's own id, not the
+    // ticket's — the ticket-loop's own deleteMovements below (sourceId:
+    // ticketId) never matched these, silently leaving them behind
+    // (P2-02, sixth review's "no unexpected FK errors, zero residue"
+    // ask, even though InventoryMovement.storageId/sourceId carry no FK
+    // that would surface this as a thrown error).
+    await deleteMovements({ sourceType: "Trip", sourceId: id });
     await cleanupDelete(() => prisma.trip.delete({ where: { id } }));
   }
   for (const id of ticketIds) {
-    await deleteMovements({ OR: [{ sourceType: "BatchTicket", sourceId: id }, { sourceType: "Trip", sourceId: id }] });
+    await deleteMovements({ sourceType: "BatchTicket", sourceId: id });
     // Required, not optional — ShortageOverrideRequest.batchTicketId is
     // ON DELETE RESTRICT (deliberately, see its own schema comment), so
     // the ticket delete below fails a real FK check without this first.
@@ -159,18 +166,49 @@ after(async () => {
     await cleanupDelete(() => prisma.batchTicket.delete({ where: { id } }));
   }
   await deleteMovements({ OR: [{ storageId: siloId }, { storageId: fallbackSiloId }] });
+
+  // Generic, FK-safe sweep for every auxiliary TEST-SUITE-* Material/Silo
+  // an individual test created directly for a one-off scenario. These
+  // used to be deleted in each test's own `finally` block while a
+  // BatchComponentActual or InventoryMovement row (both FKs are ON
+  // DELETE RESTRICT for Material) still referenced them — a real FK
+  // violation silently swallowed by a blanket `.catch(() => {})` (P2-02,
+  // sixth review: the previous commit's claim that cleanup "only
+  // swallows P2025" was true for this shared hook but not for those
+  // per-test catches). Doing it once, generically, by name prefix, after
+  // every ticket/trip is already gone, replaces tracking every auxiliary
+  // fixture's id by hand across a dozen tests.
+  const leftoverMaterialIds = (await prisma.material.findMany({ where: { name: { startsWith: "TEST-SUITE-" } }, select: { id: true } })).map((m) => m.id);
+  const leftoverSiloIds = (await prisma.silo.findMany({ where: { name: { startsWith: "TEST-SUITE-" } }, select: { id: true } })).map((s) => s.id);
+  if (leftoverMaterialIds.length > 0) await deleteMovements({ materialId: { in: leftoverMaterialIds } });
+  if (leftoverSiloIds.length > 0) await deleteMovements({ storageId: { in: leftoverSiloIds } });
+  if (leftoverMaterialIds.length > 0) await prisma.batchComponentActual.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } });
+  if (leftoverSiloIds.length > 0) await cleanupDelete(() => prisma.silo.deleteMany({ where: { id: { in: leftoverSiloIds } } }));
+  if (leftoverMaterialIds.length > 0) await cleanupDelete(() => prisma.material.deleteMany({ where: { id: { in: leftoverMaterialIds } } }));
+
   await cleanupDelete(() => prisma.truck.delete({ where: { id: truckId } }));
   await cleanupDelete(() => prisma.employee.delete({ where: { id: driverId } }));
   await cleanupDelete(() => prisma.reservation.delete({ where: { id: reservationId } }));
   await cleanupDelete(() => prisma.mixDesign.delete({ where: { id: mixId } }));
   await cleanupDelete(() => prisma.project.delete({ where: { id: projectId } }));
   await cleanupDelete(() => prisma.customer.delete({ where: { id: customerId } }));
-  await cleanupDelete(() => prisma.silo.delete({ where: { id: fallbackSiloId } }));
-  await cleanupDelete(() => prisma.silo.delete({ where: { id: siloId } }));
-  await cleanupDelete(() => prisma.material.delete({ where: { id: materialId } }));
   await cleanupDelete(() => prisma.plant.delete({ where: { id: plantId } }));
   await cleanupDelete(() => prisma.site.delete({ where: { id: siteId } }));
   await cleanupDelete(() => prisma.user.delete({ where: { id: adminUserId } }));
+
+  // Proves the sweep above actually worked, not just that it ran without
+  // throwing — the acceptance bar the sixth review asked for: zero
+  // TEST-SUITE-* residue, not merely "no error was thrown."
+  const residue = await Promise.all([
+    prisma.material.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
+    prisma.silo.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
+    prisma.user.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
+    prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
+    prisma.plant.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
+    prisma.batchTicket.count({ where: { ticketNumber: { startsWith: "TEST-SUITE-" } } }),
+  ]);
+  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-* fixtures after teardown: [material, silo, user, site, plant, ticket] = ${JSON.stringify(residue)}`);
+
   await prisma.$disconnect();
 });
 
@@ -636,9 +674,12 @@ test("an approval for one material cannot authorize a shortage on a different ma
     assert.equal((await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } })).status, "RELEASED");
     assert.equal(await siloLevel(siloId), 0); // whole completion rolled back — material A never deducted either
   } finally {
+    // secondSilo/secondMaterial themselves are cleaned up generically in
+    // after() (P2-02, sixth review) — deleting them here, before the
+    // shared teardown has removed the InventoryMovement/BatchComponentActual
+    // rows still referencing them, used to fail on a real FK violation
+    // silently swallowed by a blanket .catch(() => {}).
     await prisma.batchComponentActual.deleteMany({ where: { materialId: secondMaterial.id } });
-    await prisma.silo.delete({ where: { id: secondSilo.id } }).catch(() => {});
-    await prisma.material.delete({ where: { id: secondMaterial.id } }).catch(() => {});
   }
 });
 
@@ -659,6 +700,104 @@ test("an approval for a smaller shortage cannot authorize a larger one after a c
 
   const result = await completeBatchTicket(ticketId, {});
   assert.equal(result.status, "INSUFFICIENT_STOCK"); // the extra 3t of shortage was never approved
+});
+
+// ---- 4f. Regressions from the sixth external review (Codex) ------------
+
+// BL-FU-P1-01: the snapshot used to score each component against the
+// SAME original storage balance, independently — two materials with no
+// explicit assignment can both resolve to the very same generic fallback
+// silo, and real completion draws it down sequentially. A snapshot that
+// doesn't simulate that same draw-down could report NO_SHORTAGE for a
+// ticket completion then genuinely can't satisfy.
+test("the snapshot simulates cumulative demand when two materials share one fallback silo (BL-FU-P1-01)", async () => {
+  await resetSilo(0); // materialId's own explicitly-assigned silo — irrelevant to this scenario
+  const materialA = await prisma.material.create({ data: { name: "TEST-SUITE-SHARED-FALLBACK-A", type: "CEMENT" } });
+  const materialB = await prisma.material.create({ data: { name: "TEST-SUITE-SHARED-FALLBACK-B", type: "CEMENT" } });
+  // Neither A nor B has its own silo — both resolve to the SAME generic
+  // fallback (materialId: null, same materialType), exactly like
+  // fallbackSiloId itself. A dedicated fallback here (not the shared
+  // fallbackSiloId fixture) so this test's numbers can't be perturbed by
+  // anything else in the suite that touches the shared one.
+  const sharedFallback = await prisma.silo.create({
+    data: { plantId, name: "TEST-SUITE-SHARED-FALLBACK-SILO", materialType: "CEMENT", materialId: null, capacityTons: 500, currentLevelTons: 1.5 },
+  });
+  try {
+    const ticketId = await makeTicket([
+      { materialId: materialA.id, targetMassKg: 1000 }, // 1.0t
+      { materialId: materialB.id, targetMassKg: 1000 }, // 1.0t — combined 2.0t against 1.5t on hand
+    ]);
+
+    const request = await requestShortageOverride(ticketId, { reason: "shared fallback storage", requestedById: adminUserId });
+    // The old bug: both components independently saw 1.5t available
+    // against their own 1.0t need, so neither looked short and this
+    // returned NO_SHORTAGE even though the ticket needs 2.0t combined
+    // from a silo that only has 1.5t.
+    assert.equal(request.status, "OK");
+    if (request.status !== "OK") return;
+
+    const stored = await prisma.shortageOverrideRequest.findUniqueOrThrow({ where: { id: request.requestId } });
+    const snapshot = stored.shortageSnapshot as { materialId: string; shortageQty: number }[];
+    const totalSnapshottedShortage = snapshot.reduce((sum, e) => sum + e.shortageQty, 0);
+    assert.ok(Math.abs(totalSnapshottedShortage - 0.5) < 1e-6, `expected combined shortage of 0.5t, got ${totalSnapshottedShortage}`);
+
+    const approval = await approveShortageOverrideRequest(request.requestId, adminUserId);
+    assert.equal(approval.status, "OK");
+
+    const result = await completeBatchTicket(ticketId, {});
+    assert.equal(result.status, "SUCCESS");
+    if (result.status === "SUCCESS") assert.equal(result.consumedOverrideRequestId, request.requestId);
+
+    const finalSilo = await prisma.silo.findUniqueOrThrow({ where: { id: sharedFallback.id } });
+    assert.equal(finalSilo.currentLevelTons, 0); // the full 1.5t physically available was consumed, nothing more
+  } finally {
+    await prisma.batchComponentActual.deleteMany({ where: { materialId: { in: [materialA.id, materialB.id] } } });
+    await deleteMovements({ storageId: sharedFallback.id });
+    await cleanupDelete(() => prisma.silo.delete({ where: { id: sharedFallback.id } }));
+  }
+});
+
+// BL-FU-P1-02: a request approved before the shortageSnapshot column
+// existed (or one otherwise missing a snapshot) must never silently
+// authorize a shortage it never actually recorded — completion should
+// treat it exactly like an unapproved ticket (INSUFFICIENT_STOCK), not
+// like a blanket "anything goes."
+test("a request with no bound snapshot (legacy/null) authorizes nothing at completion (BL-FU-P1-02)", async () => {
+  await resetSilo(0);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const legacyRequest = await prisma.shortageOverrideRequest.create({
+    data: { batchTicketId: ticketId, reason: "simulates a pre-snapshot-feature row", status: "APPROVED", requestedById: adminUserId, approvedById: adminUserId, approvedAt: new Date(), shortageSnapshot: undefined },
+  });
+  assert.equal(legacyRequest.shortageSnapshot, null);
+
+  const result = await completeBatchTicket(ticketId, {});
+  assert.equal(result.status, "INSUFFICIENT_STOCK"); // an empty allowance map covers nothing, same as no request at all
+});
+
+// BL-FU-P2-01: approve/reject must independently refuse a terminal
+// ticket's request rather than relying solely on completeBatchTicket/
+// cancelBatchTicket having already expired it — defense in depth for
+// inconsistent data (a PENDING row that, for whatever reason, still
+// points at an already-terminal ticket).
+test("approving or rejecting a request is refused once its ticket is terminal, even if the request row is still PENDING (BL-FU-P2-01)", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  // A PENDING row inserted directly, bypassing the normal expire-on-
+  // completion path, to simulate the inconsistent-data scenario the
+  // review describes rather than the (already-covered) normal race.
+  const staleRequest = await prisma.shortageOverrideRequest.create({
+    data: { batchTicketId: ticketId, reason: "simulates stale/inconsistent data", status: "PENDING", requestedById: adminUserId },
+  });
+  const completion = await completeBatchTicket(ticketId, {});
+  assert.equal(completion.status, "SUCCESS"); // ticket is now COMPLETE; staleRequest was created after completeBatchTicket's own read, so it's untouched by the expire logic — exactly the inconsistency being tested
+
+  const approval = await approveShortageOverrideRequest(staleRequest.id, adminUserId);
+  assert.equal(approval.status, "NOT_PENDING");
+  const rejection = await rejectShortageOverrideRequest(staleRequest.id, adminUserId, "should also be refused");
+  assert.equal(rejection.status, "NOT_PENDING");
+
+  const finalRequest = await prisma.shortageOverrideRequest.findUniqueOrThrow({ where: { id: staleRequest.id } });
+  assert.equal(finalRequest.status, "PENDING"); // refused, not silently flipped to APPROVED/REJECTED
 });
 
 // P1-04: startTrip's reclaim-credit block used to invent credits for
@@ -697,7 +836,7 @@ test("applyReclaimCredit never credits an inventoryTracked:false material (P1-04
     assert.equal(creditMovements.length, 1); // only the tracked component got a RECLAIM_CREDIT row
     assert.equal(creditMovements[0].materialId, materialId);
   } finally {
-    await prisma.material.delete({ where: { id: untrackedMaterial.id } }).catch(() => {});
+    // untrackedMaterial is cleaned up generically in after() (P2-02, sixth review).
   }
 });
 
@@ -749,8 +888,10 @@ test("applyReclaimCredit credits the ORIGINAL storage even if the material's ass
     assert.equal(await siloLevel(siloId), 50); // credited back to the ORIGINAL silo
     assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: newSilo.id } })).currentLevelTons, 0); // the new one untouched
   } finally {
+    // Restores the shared fixture's own assignment — not cleanup of an
+    // auxiliary fixture, so this stays here (newSilo itself is cleaned
+    // up generically in after(), P2-02, sixth review).
     await prisma.silo.update({ where: { id: siloId }, data: { materialId } }).catch(() => {});
-    await prisma.silo.delete({ where: { id: newSilo.id } }).catch(() => {});
   }
 });
 
@@ -777,7 +918,7 @@ test("applyReclaimCredit reports failure when the original storage no longer exi
     assert.equal(creditResult.status, "CREDIT_FAILED");
     if (creditResult.status === "CREDIT_FAILED") assert.equal(creditResult.reason, "STORAGE_NOT_CONFIGURED");
   } finally {
-    await prisma.material.delete({ where: { id: throwawayMaterial.id } }).catch(() => {});
+    // throwawayMaterial is cleaned up generically in after() (P2-02, sixth review).
   }
 });
 
@@ -813,9 +954,12 @@ test("a capacity failure rolls back every reclaim credit already applied in the 
     assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: secondSilo.id } })).currentLevelTons, 9);
     assert.equal((await prisma.inventoryMovement.findMany({ where: { sourceType: "Trip", sourceId: trip.id } })).length, 0);
   } finally {
+    // secondSilo/secondMaterial themselves are cleaned up generically in
+    // after() (P2-02, sixth review) — deleting them here, before the
+    // shared teardown has removed the InventoryMovement/BatchComponentActual
+    // rows still referencing them, used to fail on a real FK violation
+    // silently swallowed by a blanket .catch(() => {}).
     await prisma.batchComponentActual.deleteMany({ where: { materialId: secondMaterial.id } });
-    await prisma.silo.delete({ where: { id: secondSilo.id } }).catch(() => {});
-    await prisma.material.delete({ where: { id: secondMaterial.id } }).catch(() => {});
   }
 });
 
@@ -880,8 +1024,9 @@ test("a failure while processing one component rolls back all components", async
     const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
     assert.equal(movements.length, 0);
   } finally {
-    await prisma.silo.delete({ where: { id: secondSilo.id } }).catch(() => {});
-    await prisma.material.delete({ where: { id: secondMaterial.id } }).catch(() => {});
+    // secondSilo/secondMaterial are cleaned up generically in after()
+    // (P2-02, sixth review).
+    await prisma.batchComponentActual.deleteMany({ where: { materialId: secondMaterial.id } });
   }
 });
 
@@ -997,8 +1142,8 @@ test("completion vs. addTicketComponent: exactly one of two valid outcomes", asy
       assert.equal(components.length, 1);
     }
   } finally {
+    // secondMaterial itself is cleaned up generically in after() (P2-02, sixth review).
     await prisma.batchComponentActual.deleteMany({ where: { batchTicketId: ticketId, materialId: secondMaterial.id } });
-    await prisma.material.delete({ where: { id: secondMaterial.id } }).catch(() => {});
   }
 });
 
@@ -1126,7 +1271,7 @@ test("a material with no configured storage fails the whole completion", async (
     const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
     assert.equal(movements.length, 0);
   } finally {
-    await prisma.material.delete({ where: { id: admixture.id } }).catch(() => {});
+    // admixture is cleaned up generically in after() (P2-02, sixth review).
   }
 });
 
@@ -1157,7 +1302,7 @@ test("an ADMIXTURE with no specificGravity on file fails the whole completion", 
     const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
     assert.equal(movements.length, 0);
   } finally {
-    await prisma.material.delete({ where: { id: admixtureNoGravity.id } }).catch(() => {});
+    // admixtureNoGravity is cleaned up generically in after() (P2-02, sixth review).
   }
 });
 
@@ -1180,7 +1325,7 @@ test("a component whose material has inventoryTracked:false is skipped, not STOR
     assert.equal(movements.length, 1); // only the tracked component posted a movement
     assert.equal(movements[0].materialId, materialId);
   } finally {
-    await prisma.material.delete({ where: { id: untrackedWater.id } }).catch(() => {});
+    // untrackedWater is cleaned up generically in after() (P2-02, sixth review).
   }
 });
 

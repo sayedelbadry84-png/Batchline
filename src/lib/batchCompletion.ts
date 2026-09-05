@@ -129,8 +129,19 @@ export async function resolveTicketComponents(db: Tx | typeof prisma, ticket: Ti
   // credit-back, and reverseBatchTicket all touch the same kind of rows
   // for one ticket; iterating in a consistent order across all three
   // avoids a lock-ordering deadlock between concurrent transactions that
-  // a bounded retry would otherwise just paper over.
-  resolved.sort((a, b) => (a.storageType === b.storageType ? a.storageId.localeCompare(b.storageId) : a.storageType.localeCompare(b.storageType)));
+  // a bounded retry would otherwise just paper over. materialId is an
+  // explicit tie-breaker, not an incidental one: two different materials
+  // with no explicit assignment can both resolve to the very same
+  // fallback silo/hopper (storageMatching.ts's own materialId:null
+  // lookup doesn't care which material asked), and computeShortageSnapshot
+  // (shortageOverrideRequests.ts) depends on this exact, deterministic
+  // order to simulate the same sequential draw-down real completion
+  // applies to that shared storage (BL-FU-P1-01, sixth review).
+  resolved.sort((a, b) => {
+    if (a.storageType !== b.storageType) return a.storageType.localeCompare(b.storageType);
+    if (a.storageId !== b.storageId) return a.storageId.localeCompare(b.storageId);
+    return a.materialId.localeCompare(b.materialId);
+  });
   return { status: "OK", resolved };
 }
 

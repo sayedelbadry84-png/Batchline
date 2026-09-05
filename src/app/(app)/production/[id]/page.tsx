@@ -498,8 +498,12 @@ export default async function BatchTicketPage({
           DELETE RESTRICT, deliberately, so an approval decision's history
           is never silently erased) — CancelBatchTicketForm replaces it in
           that case instead of sitting next to a button that would just
-          silently do nothing (P2-01, fourth review). */}
-      {!ticket.trip && ticket.status !== "COMPLETE" && hasAnyOverrideRequest && (
+          silently do nothing (P2-01, fourth review). Both use !isTerminal,
+          not a COMPLETE-only check — a CANCELLED ticket (reachable now
+          that cancelBatchTicket exists) was still showing the cancel form,
+          which would just fail with INVALID_STATE on submit (P2-03, sixth
+          review). */}
+      {!ticket.trip && !isTerminal && hasAnyOverrideRequest && (
         <CancelBatchTicketForm
           ticketId={ticket.id}
           messages={{
@@ -520,7 +524,7 @@ export default async function BatchTicketPage({
           buttonClassName="self-start rounded-md border border-critical px-4 py-2 text-sm font-medium text-critical hover:bg-critical-soft"
         />
       )}
-      {!ticket.trip && ticket.status !== "COMPLETE" && !hasAnyOverrideRequest && (
+      {!ticket.trip && !isTerminal && !hasAnyOverrideRequest && (
         <form action={deleteBatchTicket} className={`${ui.card} flex items-center justify-between`}>
           <input type="hidden" name="id" value={ticket.id} />
           <div>

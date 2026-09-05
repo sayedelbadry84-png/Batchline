@@ -29,6 +29,18 @@ type SnapshotResult = { status: "OK"; entries: ShortageSnapshotEntry[] } | { sta
 // materials genuinely short (by more than a floating-point epsilon) make
 // it into the snapshot; a ticket with no real shortage right now gets
 // NO_SHORTAGE rather than a request that could never authorize anything.
+//
+// Simulates a per-storage running balance, decremented as components are
+// processed in resolveTicketComponents' own deterministic order, rather
+// than reading each component's availableQty independently against the
+// same original balance (BL-FU-P1-01, sixth review): two different
+// materials with no explicit silo/hopper assignment can both resolve to
+// the very same generic fallback storage, and real completion posts
+// against it sequentially, each post seeing the PRIOR post's already-
+// decremented level (via postMovement's own SELECT ... FOR UPDATE). A
+// snapshot that scored every component against the same starting balance
+// could report NO_SHORTAGE for a ticket that completion then genuinely
+// can't satisfy.
 async function computeShortageSnapshot(db: Tx | typeof prisma, ticketId: string): Promise<SnapshotResult> {
   const ticket = await db.batchTicket.findUnique({
     where: { id: ticketId },
@@ -39,11 +51,14 @@ async function computeShortageSnapshot(db: Tx | typeof prisma, ticketId: string)
   const resolution: ResolveComponentsResult = await resolveTicketComponents(db, ticket);
   if (resolution.status === "STORAGE_NOT_CONFIGURED") return resolution;
 
+  const remainingByStorage = new Map<string, number>();
   const entries: ShortageSnapshotEntry[] = [];
   for (const r of resolution.resolved) {
+    if (!remainingByStorage.has(r.storageId)) remainingByStorage.set(r.storageId, r.currentLevel);
+    const availableQty = Math.max(0, remainingByStorage.get(r.storageId)!);
     const requiredQty = Math.abs(r.quantity);
-    const availableQty = Math.max(0, r.currentLevel);
     const shortageQty = Math.max(0, requiredQty - availableQty);
+    remainingByStorage.set(r.storageId, availableQty - Math.min(requiredQty, availableQty));
     if (shortageQty > EPSILON) {
       entries.push({ materialId: r.materialId, materialName: r.materialName, unit: r.storageType === "CHEMICAL_TANK" ? "LITERS" : "TONS", requiredQty, availableQty, shortageQty });
     }
@@ -107,7 +122,25 @@ export async function requestShortageOverride(ticketId: string, opts: { reason: 
 
 export type DecisionResult = { status: "OK" } | { status: "NOT_FOUND" } | { status: "NOT_PENDING" };
 
+// The normal path never lets a PENDING request survive its ticket going
+// terminal — completeBatchTicket/cancelBatchTicket always expire it in
+// the same transaction that flips the ticket (see batchCompletion.ts).
+// This is a defense-in-depth check on top of that, not the primary
+// safety mechanism: if a PENDING row ever DID end up pointing at an
+// already-terminal ticket (inconsistent data, manual DB recovery, a bug
+// elsewhere), the decision endpoints must still refuse it themselves
+// rather than trusting the normal path always ran (BL-FU-P2-01, sixth
+// review) — the server stays authoritative even if the UI is stale.
+async function isTicketTerminal(batchTicketId: string): Promise<boolean> {
+  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId }, select: { status: true } });
+  return ticket?.status === "COMPLETE" || ticket?.status === "CANCELLED";
+}
+
 export async function approveShortageOverrideRequest(requestId: string, approvedById: string): Promise<DecisionResult> {
+  const request = await prisma.shortageOverrideRequest.findUnique({ where: { id: requestId }, select: { batchTicketId: true } });
+  if (!request) return { status: "NOT_FOUND" };
+  if (await isTicketTerminal(request.batchTicketId)) return { status: "NOT_PENDING" };
+
   const claim = await prisma.shortageOverrideRequest.updateMany({
     where: { id: requestId, status: "PENDING" },
     data: { status: "APPROVED", approvedById, approvedAt: new Date() },
@@ -124,6 +157,10 @@ export async function approveShortageOverrideRequest(requestId: string, approved
 }
 
 export async function rejectShortageOverrideRequest(requestId: string, approvedById: string, rejectionNote: string): Promise<DecisionResult> {
+  const request = await prisma.shortageOverrideRequest.findUnique({ where: { id: requestId }, select: { batchTicketId: true } });
+  if (!request) return { status: "NOT_FOUND" };
+  if (await isTicketTerminal(request.batchTicketId)) return { status: "NOT_PENDING" };
+
   const claim = await prisma.shortageOverrideRequest.updateMany({
     where: { id: requestId, status: "PENDING" },
     data: { status: "REJECTED", approvedById, approvedAt: new Date(), rejectionNote },
