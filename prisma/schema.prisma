@@ -122,6 +122,8 @@ model User {
   batchTicketsCancelled             BatchTicket[]             @relation("BatchTicketCancelledBy")
   shortageOverrideRequestsMade      ShortageOverrideRequest[] @relation("ShortageOverrideRequestedBy")
   shortageOverrideRequestsDecided   ShortageOverrideRequest[] @relation("ShortageOverrideApprovedBy")
+  reservationMixRevisionsCreated    ReservationMixRevision[]  @relation("ReservationMixRevisionCreatedBy")
+  reservationMixRevisionsResolved   ReservationMixRevision[]  @relation("ReservationMixRevisionResolvedBy")
 }
 
 model Session {
@@ -457,6 +459,7 @@ model MixDesign {
   priceListEntries PriceListEntry[]
   opportunities    Opportunity[]
   quoteLines       QuoteLine[]
+  mixRevisions     ReservationMixRevision[]
 }
 
 model Material {
@@ -496,16 +499,17 @@ model Material {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  mixComponents      MixComponent[]
-  batchActuals       BatchComponentActual[]
-  receipts           MaterialReceipt[]
-  chemicalTanks      ChemicalTank[]
-  purchaseOrderLines PurchaseOrderLine[]
-  supplierContracts  SupplierContract[]
-  requisitions       MaterialRequisition[]
-  silos              Silo[]
-  hoppers            Hopper[]
-  inventoryMovements InventoryMovement[]
+  mixComponents         MixComponent[]
+  batchActuals          BatchComponentActual[]
+  receipts              MaterialReceipt[]
+  chemicalTanks         ChemicalTank[]
+  purchaseOrderLines    PurchaseOrderLine[]
+  supplierContracts     SupplierContract[]
+  requisitions          MaterialRequisition[]
+  silos                 Silo[]
+  hoppers               Hopper[]
+  inventoryMovements    InventoryMovement[]
+  mixRevisionComponents ReservationMixRevisionComponent[]
 }
 
 model MixComponent {
@@ -524,6 +528,83 @@ model MixComponent {
   dosageUnit        String    @default("KG") // KG, LITER
 
   @@unique([mixId, materialId])
+}
+
+// A reservation-scoped, copy-on-write override of its mix design's
+// components — lets a plant operator adjust the recipe for ONE
+// reservation (a real supplier substitution, a site-specific correction)
+// without ever touching the shared MixDesign/MixComponent rows every
+// other reservation using that same design also relies on. Mirrors the
+// established "snapshot at creation, never re-read live" posture already
+// used for BatchTicket.volumeM3/mixId (see that model's own comment) —
+// this just extends the same idea one level up, to the reservation
+// itself, with real history instead of a single overwritten value.
+//
+// Immutable once created, same posture as InventoryMovement/AuditEvent —
+// an edit never updates an existing revision's own components; it
+// supersedes the current ACTIVE one (status flips to SUPERSEDED) and
+// creates a new row with the next revisionNumber. releaseTicketForReservation
+// (src/lib/reservationRelease.ts) reads whichever revision is ACTIVE at
+// the moment a NEW BatchTicket is created and stamps that ticket with
+// this revision's id — a ticket already released before an edit keeps
+// its own frozen BatchComponentActual rows regardless of what happens to
+// the reservation's revision history afterward (see that file's own
+// comment for why no extra guard is needed beyond "read what's active
+// right now").
+model ReservationMixRevision {
+  id             String      @id @default(cuid())
+  reservationId  String
+  reservation    Reservation @relation(fields: [reservationId], references: [id])
+  // The ORIGINAL mix design this revision is based on — snapshotted, not
+  // re-read from reservation.mixId, so a (currently impossible, but not
+  // schema-prevented) future mix reassignment on the reservation can
+  // never retroactively reinterpret an existing revision's own numbers.
+  mixId          String
+  mix            MixDesign   @relation(fields: [mixId], references: [id])
+  // 1, 2, 3... increasing per reservation — never reused, even across
+  // cancellations, so "revision 3" always means the same row forever.
+  revisionNumber Int
+  status         String      @default("ACTIVE") // ACTIVE, SUPERSEDED, CANCELLED
+  reason         String
+  createdById    String
+  createdBy      User        @relation("ReservationMixRevisionCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime    @default(now())
+  // Who/when this revision stopped being ACTIVE (superseded by a newer
+  // edit, or explicitly cancelled back to the original mix design) — null
+  // while ACTIVE. Never cleared or reused once set: this row's own
+  // history is permanent regardless of what happens next.
+  resolvedAt     DateTime?
+  resolvedById   String?
+  resolvedBy     User?       @relation("ReservationMixRevisionResolvedBy", fields: [resolvedById], references: [id])
+
+  components   ReservationMixRevisionComponent[]
+  batchTickets BatchTicket[]
+
+  @@unique([reservationId, revisionNumber])
+  @@index([reservationId, status])
+}
+
+// Decimal, not Float, deliberately — this is the one place in the schema
+// a reservation's own edited recipe quantities live, and the user
+// requested exact decimal arithmetic for them specifically (the rest of
+// this app's quantity columns, e.g. MixComponent.designMassKgPerM3 and
+// BatchComponentActual.targetMassKg, stay Float — a broader precision
+// migration for those was already explicitly deferred earlier in this
+// project's history, and retrofitting it here would be a much bigger,
+// separate change). The conversion to Float happens at exactly one
+// boundary — releaseTicketForReservation, when these values are copied
+// into a new BatchTicket's BatchComponentActual rows, which is Float
+// like every sibling row in that table.
+model ReservationMixRevisionComponent {
+  id                String                 @id @default(cuid())
+  revisionId        String
+  revision          ReservationMixRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  materialId        String
+  material          Material               @relation(fields: [materialId], references: [id])
+  designMassKgPerM3 Decimal                @db.Decimal(12, 4)
+  note              String?
+
+  @@unique([revisionId, materialId])
 }
 
 model Customer {
@@ -744,6 +825,7 @@ model Reservation {
 
   batchTickets    BatchTicket[]
   pumpAssignments PumpAssignment[]
+  mixRevisions    ReservationMixRevision[]
 }
 
 model Employee {
@@ -1140,30 +1222,30 @@ model Truck {
 // the requested volume) so a later mix-design edit never silently changes
 // a ticket that has already been batched.
 model BatchTicket {
-  id                 String      @id @default(cuid())
-  reservationId      String
-  reservation        Reservation @relation(fields: [reservationId], references: [id])
-  mixId              String
-  mix                MixDesign   @relation(fields: [mixId], references: [id])
-  plantId            String
-  plant              Plant       @relation(fields: [plantId], references: [id])
-  ticketNumber       String      @unique
-  volumeM3           Float
-  status             String      @default("RELEASED") // RELEASED, BATCHING, COMPLETE, CANCELLED
-  releasedAt         DateTime    @default(now())
-  batchCompletedAt   DateTime?
-  createdAt          DateTime    @default(now())
-  updatedAt          DateTime    @updatedAt
+  id                       String                  @id @default(cuid())
+  reservationId            String
+  reservation              Reservation             @relation(fields: [reservationId], references: [id])
+  mixId                    String
+  mix                      MixDesign               @relation(fields: [mixId], references: [id])
+  plantId                  String
+  plant                    Plant                   @relation(fields: [plantId], references: [id])
+  ticketNumber             String                  @unique
+  volumeM3                 Float
+  status                   String                  @default("RELEASED") // RELEASED, BATCHING, COMPLETE, CANCELLED
+  releasedAt               DateTime                @default(now())
+  batchCompletedAt         DateTime?
+  createdAt                DateTime                @default(now())
+  updatedAt                DateTime                @updatedAt
   // A completed ticket is never deleted (see reverseBatchTicket in
   // production/actions.ts) — reversal posts opposite InventoryMovement
   // rows and stamps these three fields instead, so the original posting
   // history stays on file. reversedAt is the atomic claim (updateMany
   // where reversedAt: null) that stops a second reversal from posting a
   // second set of opposite movements.
-  reversedAt         DateTime?
-  reversedById       String?
-  reversedBy         User?       @relation("BatchTicketReversedBy", fields: [reversedById], references: [id])
-  reversalReason     String?
+  reversedAt               DateTime?
+  reversedById             String?
+  reversedBy               User?                   @relation("BatchTicketReversedBy", fields: [reversedById], references: [id])
+  reversalReason           String?
   // Soft-cancel for a ticket that never should have existed or is no
   // longer needed (RELEASED/BATCHING only — a COMPLETE ticket is reversed
   // instead, never cancelled). Replaces deleteBatchTicket's hard delete
@@ -1173,10 +1255,19 @@ model BatchTicket {
   // approval decision's history. A ticket with no request on file can
   // still be hard-deleted as before; this is additive, not a replacement
   // for every delete.
-  cancelledAt        DateTime?
-  cancelledById      String?
-  cancelledBy        User?       @relation("BatchTicketCancelledBy", fields: [cancelledById], references: [id])
-  cancellationReason String?
+  cancelledAt              DateTime?
+  cancelledById            String?
+  cancelledBy              User?                   @relation("BatchTicketCancelledBy", fields: [cancelledById], references: [id])
+  cancellationReason       String?
+  // Which reservation-level mix revision (if any) this ticket's own
+  // BatchComponentActual rows were snapshotted from at release time — null
+  // means the reservation's original MixDesign components were used, same
+  // as before this feature existed. Purely a record of what happened;
+  // nothing downstream (completion, reclaim, reversal) reads this — they
+  // all already work strictly from BatchComponentActual (see that model's
+  // own comment).
+  reservationMixRevisionId String?
+  reservationMixRevision   ReservationMixRevision? @relation(fields: [reservationMixRevisionId], references: [id])
 
   components               BatchComponentActual[]
   trip                     Trip?
