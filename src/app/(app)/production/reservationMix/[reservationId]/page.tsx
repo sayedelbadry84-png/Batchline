@@ -7,7 +7,8 @@ import { canPerformAction } from "@/lib/permissions";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
 import { getEffectiveMix } from "@/lib/reservationMixRevisions";
-import { ReservationMixEditor, type MixOverrideRow } from "@/components/ReservationMixEditor";
+import { getRemainingVolumeM3 } from "@/lib/reservations";
+import { ReservationMixEditor, displayValue, type MixOverrideRow } from "@/components/ReservationMixEditor";
 
 // A reservation's mix can only be edited while it's still open for
 // batching — matches the same window saveReservationMixRevision itself
@@ -34,13 +35,28 @@ export default async function ReservationMixPage({ params }: { params: Promise<{
     prisma.material.findMany({ orderBy: { name: "asc" } }),
   ]);
   if (!reservation) notFound();
+  // A user outside this reservation's own site must never see ANY of its
+  // data — customer/project names, mix code/grade, volume, or its
+  // effective recipe — not just be blocked from editing it (RMR-P1-01).
+  // This is checked before anything renders, same as the missing-record
+  // case above, and independent of the editReservationMix permission
+  // check below (a same-site user who merely lacks edit rights still
+  // sees the read-only fallback further down).
+  if (!isSiteInScope(reservation.siteId, effectiveSiteId(user))) notFound();
 
   const canEditPermission = await canPerformAction(user.role, "production", "editReservationMix");
-  const canEditScope = canEditPermission && isSiteInScope(reservation.siteId, effectiveSiteId(user));
   const isEditableState = EDITABLE_STATUSES.has(reservation.status);
-  const canEdit = canEditScope && isEditableState;
+  const canEdit = canEditPermission && isEditableState;
 
-  const effective = await getEffectiveMix(prisma, reservationId, reservation.mixId);
+  const [effective, remainingVolumeM3] = await Promise.all([
+    getEffectiveMix(prisma, reservationId, reservation.mixId),
+    // A revision only ever applies to future tickets (RMR-P2-05) — the
+    // editor's own "total for reservation" column must be scaled by what's
+    // actually left to release, not the full original booking, or it
+    // overstates the real future requirement for a partially-fulfilled
+    // reservation.
+    getRemainingVolumeM3(reservationId, reservation.requestedVolumeM3, prisma),
+  ]);
 
   const toRow = (materialId: string, materialName: string, materialType: string, designMassKgPerM3: number, note: string | null): MixOverrideRow => {
     const original = reservation.mix.components.find((c) => c.materialId === materialId);
@@ -104,6 +120,10 @@ export default async function ReservationMixPage({ params }: { params: Promise<{
             <dd className="font-mono tabular">{reservation.requestedVolumeM3} m³</dd>
           </div>
           <div>
+            <dt className="text-xs text-ink-muted">{m.col.remaining}</dt>
+            <dd className="font-mono tabular">{remainingVolumeM3} m³</dd>
+          </div>
+          <div>
             <dt className="text-xs text-ink-muted">{m.col.status}</dt>
             <dd>{dict.status[reservation.status as keyof typeof dict.status] ?? reservation.status}</dd>
           </div>
@@ -116,11 +136,17 @@ export default async function ReservationMixPage({ params }: { params: Promise<{
         </dl>
       </div>
 
+      {canEdit && (
+        <p className="rounded-md border border-accent/40 bg-accent-soft px-3 py-2 text-sm text-accent-strong">
+          {mo.remainingVolumeNote.replace("{value}", String(remainingVolumeM3))}
+        </p>
+      )}
+
       <div className={ui.card}>
         {canEdit ? (
           <ReservationMixEditor
             reservationId={reservation.id}
-            volumeM3={reservation.requestedVolumeM3}
+            volumeM3={remainingVolumeM3}
             originalComponents={originalComponents}
             initialComponents={initialComponents}
             hasActiveRevision={reservation.mixRevisions.length > 0}
@@ -152,6 +178,8 @@ export default async function ReservationMixPage({ params }: { params: Promise<{
               errorMaterialNotFound: mo.errorMaterialNotFound,
               errorInvalidReason: mo.errorInvalidReason,
               errorNoActiveRevision: mo.errorNoActiveRevision,
+              errorUnsupportedMaterialType: mo.errorUnsupportedMaterialType,
+              errorMissingSpecificGravity: mo.errorMissingSpecificGravity,
               unitKgShort: dUnit.unitKgShort,
               unitLiterShort: dUnit.unitLiterShort,
             }}
@@ -170,14 +198,19 @@ export default async function ReservationMixPage({ params }: { params: Promise<{
                   </tr>
                 </thead>
                 <tbody>
-                  {initialComponents.map((c) => (
-                    <tr key={c.materialId}>
-                      <td className={ui.td}>{c.materialName}</td>
-                      <td className={`${ui.td} text-xs text-ink-muted`}>{dict.materialTypes[c.materialType as keyof typeof dict.materialTypes] ?? c.materialType}</td>
-                      <td className={`${ui.td} font-mono tabular text-xs`}>{c.designMassKgPerM3.toFixed(2)} kg</td>
-                      <td className={`${ui.td} text-xs`}>{c.note ?? "—"}</td>
-                    </tr>
-                  ))}
+                  {initialComponents.map((c) => {
+                    const unit = c.dosageUnit === "LITER" && c.specificGravity ? dUnit.unitLiterShort : dUnit.unitKgShort;
+                    return (
+                      <tr key={c.materialId}>
+                        <td className={ui.td}>{c.materialName}</td>
+                        <td className={`${ui.td} text-xs text-ink-muted`}>{dict.materialTypes[c.materialType as keyof typeof dict.materialTypes] ?? c.materialType}</td>
+                        <td className={`${ui.td} font-mono tabular text-xs`} dir="ltr">
+                          {displayValue(c).toFixed(2)} {unit}
+                        </td>
+                        <td className={`${ui.td} text-xs`}>{c.note ?? "—"}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
