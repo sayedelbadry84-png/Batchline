@@ -216,6 +216,13 @@ export const ACTION_ROLES = {
     approveShortageOverrideRequest: SHORTAGE_OVERRIDE_DECISION_ROLES,
     rejectShortageOverrideRequest: SHORTAGE_OVERRIDE_DECISION_ROLES,
     deleteTicket: ["PLANT_OPERATOR", "ADMIN"],
+    // Soft-cancel (P2-01, fourth review) — the path for a non-terminal
+    // ticket that has a ShortageOverrideRequest on file, which deleteTicket
+    // can no longer actually delete (that request's own FK is ON DELETE
+    // RESTRICT, deliberately, so an approval decision's history is never
+    // silently erased). Same roster as deleteTicket — this replaces that
+    // action for those tickets, not a bigger or smaller authority.
+    cancelTicket: ["PLANT_OPERATOR", "ADMIN"],
     // Reversing a completed ticket undoes real posted inventory movements
     // — a materially bigger, rarer action than completing or deleting one,
     // so it's ADMIN-only, same posture as approveFinal being stricter than

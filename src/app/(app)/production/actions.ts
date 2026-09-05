@@ -6,11 +6,10 @@ import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getRemainingVolumeM3, isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { getAvailableReclaimForTruck } from "@/lib/reclaim";
-import { postSiloMovement, postHopperMovement, postChemicalTankMovement } from "@/lib/inventoryLedger";
-import { findMatchingSilo, findMatchingHopper, AGGREGATE_TYPES } from "@/lib/storageMatching";
-import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain } from "@/lib/batchCompletion";
+import { AGGREGATE_TYPES } from "@/lib/storageMatching";
+import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain, cancelBatchTicket as cancelBatchTicketDomain } from "@/lib/batchCompletion";
 import { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } from "@/lib/batchComponentEdits";
-import { claimTripSlot } from "@/lib/tripDispatch";
+import { claimTripSlot, applyReclaimCredit } from "@/lib/tripDispatch";
 import {
   requestShortageOverride as requestShortageOverrideDomain,
   approveShortageOverrideRequest as approveShortageOverrideRequestDomain,
@@ -463,7 +462,8 @@ export async function completeBatch(_prevState: CompleteBatchActionState, formDa
 // return.
 
 export type RequestShortageOverrideActionState = {
-  status: "OK" | "NOT_FOUND" | "TICKET_TERMINAL" | "ALREADY_PENDING" | "ALREADY_APPROVED";
+  status: "OK" | "NOT_FOUND" | "TICKET_TERMINAL" | "ALREADY_PENDING" | "ALREADY_APPROVED" | "NO_SHORTAGE" | "STORAGE_NOT_CONFIGURED";
+  detail?: string;
 } | null;
 
 // Anyone who can complete a batch can request an override after hitting a
@@ -501,7 +501,9 @@ export async function requestShortageOverride(_prevState: RequestShortageOverrid
     );
     revalidatePath(`/production/${batchTicketId}`);
     revalidatePath("/production");
+    return { status: "OK" };
   }
+  if (result.status === "STORAGE_NOT_CONFIGURED") return { status: "STORAGE_NOT_CONFIGURED", detail: result.material };
   return { status: result.status };
 }
 
@@ -699,84 +701,27 @@ export async function startTrip(formData: FormData) {
         if (availableReclaim && reclaimedVolumeM3) {
           const freshFraction = 1 - reclaimedVolumeM3 / ticket.volumeM3;
           const reclaimedFraction = 1 - freshFraction;
-          // completeBatch (required to have already run — see the
-          // ticket.status === "COMPLETE" check above) deducted every
-          // component's FULL pre-reclaim mass from inventory, since reclaim
-          // for this specific truck wasn't known yet at completion time.
-          // Now that it is, credit back the reclaimed share of whatever was
-          // actually deducted (actualMassKg if weighed, else targetMassKg —
-          // the same fallback completeBatch itself uses) to the matching
-          // silo/hopper/tank, posted through the ledger (RECLAIM_CREDIT,
-          // sourced from this Trip) rather than a bare balance write.
-          // targetMassKg — the original design target — is never mutated
-          // any more; reclaimCreditMassKg records the credited share
-          // separately so reports can still show design vs. reclaimed vs.
-          // fresh-drawn mass. Reserving reclaim BEFORE batching, rather
-          // than crediting it back after like this, is a deeper sequencing
-          // fix left for a later phase (see the field's own schema comment).
-          type ReclaimCredit = {
-            componentId: string;
-            materialId: string;
-            creditMassKg: number;
-            storageType: "SILO" | "HOPPER" | "CHEMICAL_TANK";
-            storageId: string;
-            creditQuantity: number; // tons for SILO/HOPPER, liters for CHEMICAL_TANK
-          };
-          const credits: ReclaimCredit[] = [];
-          for (const c of ticket.components) {
-            const deductedMassKg = c.actualMassKg ?? c.targetMassKg;
-            const creditMassKg = deductedMassKg * reclaimedFraction;
-            if (creditMassKg <= 0) continue;
-            const creditTons = creditMassKg / 1000;
 
-            if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-              const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-              if (silo) credits.push({ componentId: c.id, materialId: c.materialId, creditMassKg, storageType: "SILO", storageId: silo.id, creditQuantity: creditTons });
-            } else if (AGGREGATE_TYPES.has(c.material.type)) {
-              const hopper = await findMatchingHopper(
-                tx,
-                ticket.plantId,
-                ticket.plant.siteId,
-                c.materialId,
-                c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" },
-              );
-              if (hopper) credits.push({ componentId: c.id, materialId: c.materialId, creditMassKg, storageType: "HOPPER", storageId: hopper.id, creditQuantity: creditTons });
-            } else if (c.material.type === "WATER") {
-              const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-              if (waterHopper) credits.push({ componentId: c.id, materialId: c.materialId, creditMassKg, storageType: "HOPPER", storageId: waterHopper.id, creditQuantity: creditTons });
-            } else if (c.material.type === "ADMIXTURE" && c.material.specificGravity) {
-              const tank = await tx.chemicalTank.findFirst({ where: { plantId: ticket.plantId, materialId: c.materialId } });
-              if (tank) credits.push({ componentId: c.id, materialId: c.materialId, creditMassKg, storageType: "CHEMICAL_TANK", storageId: tank.id, creditQuantity: creditMassKg / c.material.specificGravity });
-            }
-          }
-
-          // Sort before iterating — same lock-ordering reasoning as
-          // completeBatchTicket and reverseBatchTicket: this loop,
-          // completeBatchTicket's, and reverseBatchTicket's can all touch
-          // the same rows for one ticket, and a consistent order across all
-          // three avoids a lock-ordering deadlock between concurrent
-          // transactions that a bounded retry would otherwise just paper over.
-          credits.sort((a, b) => (a.storageType === b.storageType ? a.storageId.localeCompare(b.storageId) : a.storageType.localeCompare(b.storageType)));
-
-          for (const credit of credits) {
-            await tx.batchComponentActual.update({
-              where: { id: credit.componentId },
-              data: { reclaimCreditMassKg: { increment: credit.creditMassKg } },
-            });
-            const post = credit.storageType === "SILO" ? postSiloMovement : credit.storageType === "HOPPER" ? postHopperMovement : postChemicalTankMovement;
-            await post(tx, {
-              storageId: credit.storageId,
-              materialId: credit.materialId,
-              quantity: credit.creditQuantity,
-              movementType: "RECLAIM_CREDIT",
-              sourceType: "Trip",
-              sourceId: created.id,
-              plantId: ticket.plantId,
-              siteId: ticket.plant.siteId,
-              actorId: user!.id,
-              reason: null,
-            });
-          }
+          // Derives credits from the ticket's own immutable
+          // BATCH_COMPLETION ledger rows, never recomputed from the
+          // recipe/current component mass and never re-resolved against
+          // whatever storage is CURRENTLY assigned to the material — see
+          // applyReclaimCredit's own comment (tripDispatch.ts) for the
+          // three bugs a fourth external review (P1-04) found in the
+          // previous inline version of this block, and why extracting it
+          // (matching claimTripSlot's own extraction, same file) was part
+          // of the fix: that review also found the reclaim test suite
+          // only ever exercised a bare postSiloMovement call with a
+          // reclaim-shaped payload, never the real code path — extracting
+          // it here is what lets tests call the REAL logic directly.
+          const creditResult = await applyReclaimCredit(tx, {
+            batchTicketId,
+            tripId: created.id,
+            components: ticket.components,
+            reclaimedFraction,
+            actorId: user!.id,
+          });
+          if (creditResult.status !== "OK") throw new Error(`RECLAIM_CREDIT_FAILED:${creditResult.reason}`);
 
           await tx.drumReturn.update({
             where: { id: availableReclaim.drumReturnId },
@@ -1023,6 +968,39 @@ export async function deleteBatchTicket(formData: FormData) {
   revalidatePath("/warehouses");
   revalidatePath("/");
   redirect("/production");
+}
+
+// Typed result so CancelBatchTicketForm.tsx can show why a cancellation
+// was refused instead of nothing happening (same HI-05 posture as
+// completeBatch/reverseBatchTicket). Mirrors CancelBatchTicketResult's own
+// status set 1:1 (src/lib/batchCompletion.ts) plus NOT_FOUND for this
+// wrapper's own missing-id/scope case.
+export type CancelBatchTicketActionState = { status: "SUCCESS" | "NOT_FOUND" | "INVALID_STATE" } | null;
+
+// The soft-cancel path for a non-terminal ticket with a ShortageOverrideRequest
+// on file, which deleteBatchTicket can no longer actually delete (P2-01,
+// fourth review) — see cancelBatchTicket's own comment in batchCompletion.ts.
+export async function cancelBatchTicket(_prevState: CancelBatchTicketActionState, formData: FormData): Promise<CancelBatchTicketActionState> {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "production", "cancelTicket");
+
+  const batchTicketId = String(formData.get("batchTicketId") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim();
+  if (!batchTicketId || !reason) return { status: "NOT_FOUND" };
+
+  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId }, select: { plantId: true, ticketNumber: true } });
+  if (!ticket) return { status: "NOT_FOUND" };
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
+
+  const result = await cancelBatchTicketDomain(batchTicketId, { actorId: user!.id, reason });
+  if (result.status === "SUCCESS") {
+    await logAudit({ module: "Production", recordId: batchTicketId, field: "status", afterValue: "CANCELLED", reasonCode: "TICKET_CANCELLED" });
+    revalidatePath(`/production/${batchTicketId}`);
+    revalidatePath("/production");
+    revalidatePath("/reservations");
+    revalidatePath("/");
+  }
+  return result;
 }
 
 // Mirrors ReverseBatchResult's status set 1:1 (src/lib/batchCompletion.ts)

@@ -1,7 +1,10 @@
 import "server-only";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { findMatchingSilo, findMatchingHopper, AGGREGATE_TYPES } from "@/lib/storageMatching";
-import { postSiloMovement, postHopperMovement, postChemicalTankMovement, DomainError, withRetry, type MovementResult } from "@/lib/inventoryLedger";
+import { postSiloMovement, postHopperMovement, postChemicalTankMovement, DomainError, withRetry, EPSILON, type MovementResult } from "@/lib/inventoryLedger";
+
+type Tx = Prisma.TransactionClient;
 
 // completeBatch's per-component silo/hopper/tank lookups+posts are several
 // sequential round trips to Neon, which can comfortably exceed Prisma's 5s
@@ -42,26 +45,100 @@ export type CompleteBatchResult =
 // material into inventory (municipal supply, no water hopper on file) can
 // mark THAT material untracked without affecting every other site's own
 // Water material. Checked first so an explicit "don't track this one"
-// always wins regardless of type.
-function isInventoryTracked(material: { type: string; inventoryTracked: boolean }): boolean {
+// always wins regardless of type. Exported so both the real completion
+// path here and the dry-run shortage snapshot (shortageOverrideRequests.ts)
+// use the exact same rule rather than two copies that could drift.
+export function isInventoryTracked(material: { type: string; inventoryTracked: boolean }): boolean {
   if (!material.inventoryTracked) return false;
   return ["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME", "WATER", "ADMIXTURE"].includes(material.type) || AGGREGATE_TYPES.has(material.type);
 }
 
-type ResolvedComponent = {
+export type ResolvedComponent = {
   materialId: string;
   materialName: string;
   storageType: "SILO" | "HOPPER" | "CHEMICAL_TANK";
   storageId: string;
   quantity: number; // negative — this is always a deduction
+  currentLevel: number;
   capacity: number;
   minThresholdPct: number;
   specificGravity?: number;
 };
 
+export type ResolveComponentsResult = { status: "OK"; resolved: ResolvedComponent[] } | { status: "STORAGE_NOT_CONFIGURED"; material: string };
+
+type TicketForResolution = {
+  plantId: string;
+  plant: { siteId: string };
+  components: {
+    materialId: string;
+    targetMassKg: number;
+    actualMassKg: number | null;
+    material: { type: string; name: string; inventoryTracked: boolean; specificGravity: number | null };
+  }[];
+};
+
+// Resolves every tracked component to its matching storage — pure reads,
+// no writes, no lock — shared by completeBatchTicket (which then posts
+// real ledger movements against what this resolves) and
+// computeShortageSnapshot (shortageOverrideRequests.ts, a dry run at
+// request time that never posts anything). Extracted so a request's
+// shortage snapshot is always computed by the EXACT same storage-
+// matching rules real completion uses, not a second copy that could
+// silently drift from it.
+export async function resolveTicketComponents(db: Tx | typeof prisma, ticket: TicketForResolution): Promise<ResolveComponentsResult> {
+  const resolved: ResolvedComponent[] = [];
+  for (const c of ticket.components) {
+    if (!isInventoryTracked(c.material)) continue;
+
+    const massKg = c.actualMassKg ?? c.targetMassKg;
+    const massTons = massKg / 1000;
+
+    if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
+      const silo = await findMatchingSilo(db, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
+      if (!silo) return { status: "STORAGE_NOT_CONFIGURED", material: c.material.name };
+      resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "SILO", storageId: silo.id, quantity: -massTons, currentLevel: silo.currentLevelTons, capacity: silo.capacityTons, minThresholdPct: silo.minThresholdPct });
+    } else if (AGGREGATE_TYPES.has(c.material.type)) {
+      const hopper = await findMatchingHopper(db, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" });
+      if (!hopper) return { status: "STORAGE_NOT_CONFIGURED", material: c.material.name };
+      resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "HOPPER", storageId: hopper.id, quantity: -massTons, currentLevel: hopper.currentLevelTons, capacity: hopper.capacityTons, minThresholdPct: hopper.minThresholdPct });
+    } else if (c.material.type === "WATER") {
+      const waterHopper = await findMatchingHopper(db, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
+      if (!waterHopper) return { status: "STORAGE_NOT_CONFIGURED", material: c.material.name };
+      resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "HOPPER", storageId: waterHopper.id, quantity: -massTons, currentLevel: waterHopper.currentLevelTons, capacity: waterHopper.capacityTons, minThresholdPct: waterHopper.minThresholdPct });
+    } else if (c.material.type === "ADMIXTURE") {
+      if (!c.material.specificGravity) return { status: "STORAGE_NOT_CONFIGURED", material: `${c.material.name} (missing specific gravity)` };
+      const tank = await db.chemicalTank.findFirst({ where: { plantId: ticket.plantId, materialId: c.materialId } });
+      if (!tank) return { status: "STORAGE_NOT_CONFIGURED", material: c.material.name };
+      const liters = massKg / c.material.specificGravity;
+      resolved.push({
+        materialId: c.materialId,
+        materialName: c.material.name,
+        storageType: "CHEMICAL_TANK",
+        storageId: tank.id,
+        quantity: -liters,
+        currentLevel: tank.currentLevelLiters,
+        capacity: tank.capacityLiters ?? 0,
+        minThresholdPct: tank.minThresholdPct,
+        specificGravity: c.material.specificGravity,
+      });
+    }
+  }
+
+  // Sort before returning — completeBatchTicket, startTrip's reclaim
+  // credit-back, and reverseBatchTicket all touch the same kind of rows
+  // for one ticket; iterating in a consistent order across all three
+  // avoids a lock-ordering deadlock between concurrent transactions that
+  // a bounded retry would otherwise just paper over.
+  resolved.sort((a, b) => (a.storageType === b.storageType ? a.storageId.localeCompare(b.storageId) : a.storageType.localeCompare(b.storageType)));
+  return { status: "OK", resolved };
+}
+
 function isP2034(e: unknown): boolean {
   return typeof e === "object" && e !== null && "code" in e && (e as { code?: string }).code === "P2034";
 }
+
+type ShortageSnapshotEntry = { materialId: string; materialName: string; unit: "TONS" | "LITERS"; requiredQty: number; availableQty: number; shortageQty: number };
 
 /**
  * The domain service behind the "complete batch" action — pure DB logic,
@@ -94,16 +171,31 @@ export async function completeBatchTicket(ticketId: string, opts: { actorId?: st
         });
         if (claim.count === 0) return { status: "ALREADY_COMPLETED" as const };
 
-        // An APPROVED, unconsumed shortage-override request tied to this
-        // exact ticket (see shortageOverrideRequests.ts) is the ONLY thing
-        // that can let this completion clamp a real shortage through — the
-        // old "type a note if you happen to hold overrideShortage"
-        // moment-of-completion path is gone (P1-04). Read inside the same
-        // transaction as the claim above so this can never race a
-        // concurrent approval/consumption of the same request.
-        const activeOverride = await tx.shortageOverrideRequest.findFirst({
-          where: { batchTicketId: ticketId, status: "APPROVED" },
+        // The only active (PENDING or APPROVED) ShortageOverrideRequest
+        // tied to this exact ticket, if any — read fresh inside the same
+        // transaction as the claim above, so this can never race a
+        // concurrent request/approval/rejection of it. This is also the
+        // ONE place that ever resolves such a request (consumed or
+        // expired, below) — whichever request is on file the instant
+        // this ticket becomes terminal is the last one that will ever
+        // matter for it (P1-02, fourth review): a request left PENDING
+        // (never decided) or APPROVED-but-unused can never authorize
+        // anything on a now-COMPLETE ticket, so it's expired rather than
+        // left to look actionable forever.
+        const activeRequest = await tx.shortageOverrideRequest.findFirst({
+          where: { batchTicketId: ticketId, status: { in: ["PENDING", "APPROVED"] } },
         });
+        const approvedRequest = activeRequest?.status === "APPROVED" ? activeRequest : null;
+        // The snapshot binds this approval to EXACTLY the shortage a
+        // manager saw at request time (P1-03, fourth review) — a map from
+        // materialId to the shortage amount THAT material was approved
+        // for. A material missing here, or a real shortfall bigger than
+        // what's recorded, is never covered: an edit that changes or
+        // worsens the shortage after approval simply isn't authorized by
+        // it, without needing a separate invalidation step the moment
+        // that edit happens.
+        const snapshotEntries = (approvedRequest?.shortageSnapshot as ShortageSnapshotEntry[] | null) ?? [];
+        const maxShortfallByMaterial = new Map(snapshotEntries.map((e) => [e.materialId, e.shortageQty]));
 
         // The authoritative read happens AFTER the claim, inside the same
         // transaction — not before it. Reading components before the
@@ -131,45 +223,12 @@ export async function completeBatchTicket(ticketId: string, opts: { actorId?: st
         // successfully with that component's material never actually
         // deducted from anywhere, which is exactly the kind of gap this
         // whole ledger exists to close.
-        const resolved: ResolvedComponent[] = [];
-        for (const c of ticket.components) {
-          if (!isInventoryTracked(c.material)) continue;
-
-          const massKg = c.actualMassKg ?? c.targetMassKg;
-          const massTons = massKg / 1000;
-
-          if (["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"].includes(c.material.type)) {
-            const silo = await findMatchingSilo(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type);
-            if (!silo) throw new DomainError("STORAGE_NOT_CONFIGURED", c.material.name);
-            resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "SILO", storageId: silo.id, quantity: -massTons, capacity: silo.capacityTons, minThresholdPct: silo.minThresholdPct });
-          } else if (AGGREGATE_TYPES.has(c.material.type)) {
-            const hopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, c.material.type === "SAND" ? { equals: "SAND" } : { startsWith: "COARSE" });
-            if (!hopper) throw new DomainError("STORAGE_NOT_CONFIGURED", c.material.name);
-            resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "HOPPER", storageId: hopper.id, quantity: -massTons, capacity: hopper.capacityTons, minThresholdPct: hopper.minThresholdPct });
-          } else if (c.material.type === "WATER") {
-            const waterHopper = await findMatchingHopper(tx, ticket.plantId, ticket.plant.siteId, c.materialId, { equals: "WATER" });
-            if (!waterHopper) throw new DomainError("STORAGE_NOT_CONFIGURED", c.material.name);
-            resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "HOPPER", storageId: waterHopper.id, quantity: -massTons, capacity: waterHopper.capacityTons, minThresholdPct: waterHopper.minThresholdPct });
-          } else if (c.material.type === "ADMIXTURE") {
-            if (!c.material.specificGravity) throw new DomainError("STORAGE_NOT_CONFIGURED", `${c.material.name} (missing specific gravity)`);
-            const tank = await tx.chemicalTank.findFirst({ where: { plantId: ticket.plantId, materialId: c.materialId } });
-            if (!tank) throw new DomainError("STORAGE_NOT_CONFIGURED", c.material.name);
-            const liters = massKg / c.material.specificGravity;
-            resolved.push({ materialId: c.materialId, materialName: c.material.name, storageType: "CHEMICAL_TANK", storageId: tank.id, quantity: -liters, capacity: tank.capacityLiters ?? 0, minThresholdPct: tank.minThresholdPct, specificGravity: c.material.specificGravity });
-          }
-        }
-
-        // Sort before iterating — completeBatchTicket, startTrip's reclaim
-        // credit-back, and reverseBatchTicket all touch the same kind of
-        // rows for one ticket; iterating in a consistent order across all
-        // three avoids a lock-ordering deadlock between concurrent
-        // transactions that a bounded retry would otherwise just paper
-        // over.
-        resolved.sort((a, b) => (a.storageType === b.storageType ? a.storageId.localeCompare(b.storageId) : a.storageType.localeCompare(b.storageType)));
+        const resolution = await resolveTicketComponents(tx, ticket);
+        if (resolution.status === "STORAGE_NOT_CONFIGURED") throw new DomainError("STORAGE_NOT_CONFIGURED", resolution.material);
 
         const shortages: string[] = [];
         const requisitionCandidates: RequisitionCandidate[] = [];
-        for (const r of resolved) {
+        for (const r of resolution.resolved) {
           const post = r.storageType === "SILO" ? postSiloMovement : r.storageType === "HOPPER" ? postHopperMovement : postChemicalTankMovement;
           const movement: MovementResult = await post(tx, {
             storageId: r.storageId,
@@ -181,8 +240,8 @@ export async function completeBatchTicket(ticketId: string, opts: { actorId?: st
             plantId: ticket.plantId,
             siteId: ticket.plant.siteId,
             actorId: opts.actorId ?? null,
-            reason: activeOverride?.reason ?? null,
-            allowShortage: !!activeOverride,
+            reason: approvedRequest?.reason ?? null,
+            maxAllowedShortfall: maxShortfallByMaterial.get(r.materialId) ?? 0,
           });
 
           if (movement.status === "ALREADY_POSTED") continue; // a retried attempt after this exact component already landed
@@ -194,7 +253,11 @@ export async function completeBatchTicket(ticketId: string, opts: { actorId?: st
             throw new DomainError("STORAGE_NOT_CONFIGURED", r.materialName);
           }
 
-          if (Math.abs(movement.appliedQuantity) < Math.abs(r.quantity) - 0.001) {
+          // shortfallAllowed is the ledger's own, single source of truth
+          // for "did a real shortage happen here" — not a second
+          // recomputation with its own separate tolerance (see the fourth
+          // review's P1-01, which caught exactly that kind of drift).
+          if (movement.shortfallAllowed > EPSILON) {
             shortages.push(`${r.materialName}: requested ${Math.abs(r.quantity).toFixed(2)}, applied ${Math.abs(movement.appliedQuantity).toFixed(2)}`);
           }
           requisitionCandidates.push({
@@ -208,22 +271,28 @@ export async function completeBatchTicket(ticketId: string, opts: { actorId?: st
           });
         }
 
-        // Consume the override only if this completion actually needed it
-        // to cover a real shortage — an approval that turns out unneeded
-        // (e.g. actuals came in higher than the shortage suggested) stays
-        // available rather than being burned for nothing, but one that WAS
-        // used can never authorize a second shortage (the ticket is now
-        // COMPLETE, a terminal state, so there's no second attempt against
-        // this same ticket regardless — this guards a different request
-        // being reused, which the one-active-per-ticket constraint already
-        // rules out, so this is really just keeping the record accurate).
+        // Resolve whatever active request is on file, now that the
+        // ticket is COMPLETE — consumed if it actually covered a real
+        // shortage, expired otherwise (see the comment on activeRequest
+        // above). A conditional updateMany, not a plain update, for the
+        // expire branch: if a decision (approve/reject) legitimately
+        // committed concurrently with this same completion, whichever
+        // status the row is actually in when this runs is what gets
+        // resolved — never a blind overwrite of a concurrent write.
         let consumedOverrideRequestId: string | null = null;
-        if (activeOverride && shortages.length > 0) {
-          await tx.shortageOverrideRequest.update({
-            where: { id: activeOverride.id },
-            data: { status: "CONSUMED", consumedAt: new Date() },
-          });
-          consumedOverrideRequestId = activeOverride.id;
+        if (activeRequest) {
+          if (approvedRequest && shortages.length > 0) {
+            await tx.shortageOverrideRequest.update({
+              where: { id: activeRequest.id },
+              data: { status: "CONSUMED", consumedAt: new Date() },
+            });
+            consumedOverrideRequestId = activeRequest.id;
+          } else {
+            await tx.shortageOverrideRequest.updateMany({
+              where: { id: activeRequest.id, status: { in: ["PENDING", "APPROVED"] } },
+              data: { status: "EXPIRED" },
+            });
+          }
         }
 
         return { status: "SUCCESS" as const, shortages, requisitionCandidates, consumedOverrideRequestId };
@@ -359,4 +428,44 @@ export async function reverseBatchTicket(ticketId: string, opts: { actorId: stri
     if (isP2034(e)) return { status: "CONCURRENT_CONFLICT" };
     throw e;
   }
+}
+
+export type CancelBatchTicketResult = { status: "SUCCESS" } | { status: "NOT_FOUND" } | { status: "INVALID_STATE" };
+
+/**
+ * Soft-cancels a non-terminal ticket (RELEASED/BATCHING only — a COMPLETE
+ * one is reversed instead, never cancelled) — replaces deleteBatchTicket's
+ * hard delete whenever the ticket has a ShortageOverrideRequest on file
+ * (P2-01, fourth review): that request's own FK to BatchTicket is ON
+ * DELETE RESTRICT specifically so an approval decision's history is never
+ * silently erased, so a ticket with one can never actually be hard-
+ * deleted — this gives it a real, visible way to be closed out instead.
+ * Never posts or reverses any inventory movement: a RELEASED/BATCHING
+ * ticket has never deducted anything (only completeBatchTicket does, at
+ * COMPLETE), so there's nothing to credit back.
+ */
+export async function cancelBatchTicket(ticketId: string, opts: { actorId: string; reason: string }): Promise<CancelBatchTicketResult> {
+  const ticket = await prisma.batchTicket.findUnique({ where: { id: ticketId }, include: { trip: true } });
+  if (!ticket) return { status: "NOT_FOUND" };
+  if (ticket.trip || ticket.status === "COMPLETE" || ticket.status === "CANCELLED") return { status: "INVALID_STATE" };
+
+  return withRetry(() =>
+    prisma.$transaction(async (tx) => {
+      const claim = await tx.batchTicket.updateMany({
+        where: { id: ticketId, status: { notIn: ["COMPLETE", "CANCELLED"] } },
+        data: { status: "CANCELLED", cancelledAt: new Date(), cancelledById: opts.actorId, cancellationReason: opts.reason },
+      });
+      if (claim.count === 0) return { status: "INVALID_STATE" as const };
+
+      // Same expire-on-terminal logic as completeBatchTicket (P1-02) — a
+      // CANCELLED ticket can never be completed, so any request still
+      // active against it can never do anything either way.
+      await tx.shortageOverrideRequest.updateMany({
+        where: { batchTicketId: ticketId, status: { in: ["PENDING", "APPROVED"] } },
+        data: { status: "EXPIRED" },
+      });
+
+      return { status: "SUCCESS" as const };
+    }),
+  );
 }

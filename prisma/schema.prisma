@@ -119,6 +119,7 @@ model User {
   pushSubscriptions                 PushSubscription[]
   inventoryMovementsPosted          InventoryMovement[]
   batchTicketsReversed              BatchTicket[]             @relation("BatchTicketReversedBy")
+  batchTicketsCancelled             BatchTicket[]             @relation("BatchTicketCancelledBy")
   shortageOverrideRequestsMade      ShortageOverrideRequest[] @relation("ShortageOverrideRequestedBy")
   shortageOverrideRequestsDecided   ShortageOverrideRequest[] @relation("ShortageOverrideApprovedBy")
 }
@@ -1139,30 +1140,43 @@ model Truck {
 // the requested volume) so a later mix-design edit never silently changes
 // a ticket that has already been batched.
 model BatchTicket {
-  id               String      @id @default(cuid())
-  reservationId    String
-  reservation      Reservation @relation(fields: [reservationId], references: [id])
-  mixId            String
-  mix              MixDesign   @relation(fields: [mixId], references: [id])
-  plantId          String
-  plant            Plant       @relation(fields: [plantId], references: [id])
-  ticketNumber     String      @unique
-  volumeM3         Float
-  status           String      @default("RELEASED") // RELEASED, BATCHING, COMPLETE, CANCELLED
-  releasedAt       DateTime    @default(now())
-  batchCompletedAt DateTime?
-  createdAt        DateTime    @default(now())
-  updatedAt        DateTime    @updatedAt
+  id                 String      @id @default(cuid())
+  reservationId      String
+  reservation        Reservation @relation(fields: [reservationId], references: [id])
+  mixId              String
+  mix                MixDesign   @relation(fields: [mixId], references: [id])
+  plantId            String
+  plant              Plant       @relation(fields: [plantId], references: [id])
+  ticketNumber       String      @unique
+  volumeM3           Float
+  status             String      @default("RELEASED") // RELEASED, BATCHING, COMPLETE, CANCELLED
+  releasedAt         DateTime    @default(now())
+  batchCompletedAt   DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
   // A completed ticket is never deleted (see reverseBatchTicket in
   // production/actions.ts) — reversal posts opposite InventoryMovement
   // rows and stamps these three fields instead, so the original posting
   // history stays on file. reversedAt is the atomic claim (updateMany
   // where reversedAt: null) that stops a second reversal from posting a
   // second set of opposite movements.
-  reversedAt       DateTime?
-  reversedById     String?
-  reversedBy       User?       @relation("BatchTicketReversedBy", fields: [reversedById], references: [id])
-  reversalReason   String?
+  reversedAt         DateTime?
+  reversedById       String?
+  reversedBy         User?       @relation("BatchTicketReversedBy", fields: [reversedById], references: [id])
+  reversalReason     String?
+  // Soft-cancel for a ticket that never should have existed or is no
+  // longer needed (RELEASED/BATCHING only — a COMPLETE ticket is reversed
+  // instead, never cancelled). Replaces deleteBatchTicket's hard delete
+  // whenever the ticket has a ShortageOverrideRequest on file (fourth
+  // review, P2-01) — a hard delete would either violate that request's
+  // own ON DELETE RESTRICT FK or, if forced through, erase a real
+  // approval decision's history. A ticket with no request on file can
+  // still be hard-deleted as before; this is additive, not a replacement
+  // for every delete.
+  cancelledAt        DateTime?
+  cancelledById      String?
+  cancelledBy        User?       @relation("BatchTicketCancelledBy", fields: [cancelledById], references: [id])
+  cancellationReason String?
 
   components               BatchComponentActual[]
   trip                     Trip?
@@ -1203,21 +1217,54 @@ model BatchComponentActual {
 // (the shortage didn't materialize, e.g. actuals came in higher after all)
 // stays available rather than being burned for nothing, but a used one can
 // never authorize a second shortage.
+//
+// status is PENDING, APPROVED, REJECTED, CONSUMED, or EXPIRED — EXPIRED
+// is stamped on whatever active (PENDING or APPROVED) request is still on
+// file the moment its ticket becomes COMPLETE or CANCELLED without having
+// consumed it (see completeBatchTicket/cancelBatchTicket): the ticket is
+// now terminal and can never be completed again, so a lingering request
+// against it could never do anything either way — expiring it closes a
+// real race a fourth review caught (P1-02), where a request created (or
+// a decision made) concurrently with completion could otherwise sit
+// forever looking actionable on a ticket that already finished.
+//
+// shortageSnapshot/*Qty/unit below bind an approval to the EXACT shortage
+// a manager saw, not a blanket "there's a shortage, trust me" for
+// whatever the ticket looks like by completion time (P1-03, fourth
+// review) — computeShortageSnapshot (shortageOverrideRequests.ts) reads
+// the ticket's current components against real storage levels at request
+// time (a dry run — no lock, no write) and stores one entry per
+// materialId that's actually short right now. completeBatchTicket cross-
+// checks the REAL shortfall it observes for each material against this
+// snapshot at posting time (via inventoryLedger's maxAllowedShortfall,
+// not a ticket-wide boolean) — a material missing from the snapshot, or
+// a real shortfall bigger than what was snapshotted, is never covered,
+// so an edit that changes or worsens the shortage after approval simply
+// isn't authorized by it, without needing to separately invalidate the
+// request the moment that edit happens.
 model ShortageOverrideRequest {
-  id            String      @id @default(cuid())
-  batchTicketId String
-  batchTicket   BatchTicket @relation(fields: [batchTicketId], references: [id])
-  reason        String
-  status        String      @default("PENDING") // PENDING, APPROVED, REJECTED, CONSUMED
-  requestedById String
-  requestedBy   User        @relation("ShortageOverrideRequestedBy", fields: [requestedById], references: [id])
-  approvedById  String?
-  approvedBy    User?       @relation("ShortageOverrideApprovedBy", fields: [approvedById], references: [id])
-  approvedAt    DateTime?
-  rejectionNote String?
-  consumedAt    DateTime?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  id               String      @id @default(cuid())
+  batchTicketId    String
+  batchTicket      BatchTicket @relation(fields: [batchTicketId], references: [id])
+  reason           String
+  status           String      @default("PENDING") // PENDING, APPROVED, REJECTED, CONSUMED, EXPIRED
+  // JSON array of {materialId, materialName, unit, requiredQty,
+  // availableQty, shortageQty} — see the model comment above. Nullable
+  // only because a request can theoretically be created for a ticket
+  // whose shortage briefly resolved (materials, resolved just before
+  // the dry run reached them) — see NO_SHORTAGE in
+  // shortageOverrideRequests.ts — never expected to be null for a
+  // request that made it to PENDING.
+  shortageSnapshot Json?
+  requestedById    String
+  requestedBy      User        @relation("ShortageOverrideRequestedBy", fields: [requestedById], references: [id])
+  approvedById     String?
+  approvedBy       User?       @relation("ShortageOverrideApprovedBy", fields: [approvedById], references: [id])
+  approvedAt       DateTime?
+  rejectionNote    String?
+  consumedAt       DateTime?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
 
   @@index([batchTicketId, status])
 }

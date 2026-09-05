@@ -39,10 +39,10 @@ if (process.env.TEST_DATABASE_URL === process.env.DATABASE_URL) {
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 const { PrismaClient } = await import("@prisma/client");
-const { completeBatchTicket, reverseBatchTicket } = await import("../src/lib/batchCompletion");
+const { completeBatchTicket, reverseBatchTicket, cancelBatchTicket } = await import("../src/lib/batchCompletion");
 const { postSiloMovement } = await import("../src/lib/inventoryLedger");
 const { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } = await import("../src/lib/batchComponentEdits");
-const { claimTripSlot } = await import("../src/lib/tripDispatch");
+const { claimTripSlot, applyReclaimCredit } = await import("../src/lib/tripDispatch");
 const { requestShortageOverride, approveShortageOverrideRequest, rejectShortageOverrideRequest } = await import("../src/lib/shortageOverrideRequests");
 
 const prisma = new PrismaClient();
@@ -122,29 +122,55 @@ async function deleteMovements(where: NonNullable<Parameters<typeof prisma.inven
   await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_movement_immutability = 'on'`, prisma.inventoryMovement.deleteMany({ where })]);
 }
 
+// P2025 ("record not found") is the one expected outcome here — some
+// tests already delete their own fixture (e.g. an extra Material) in
+// their own `finally` block, so by the time this runs it's legitimately
+// already gone. Anything else (a real foreign-key violation, most
+// notably) means cleanup is actually broken and must fail the suite
+// loudly, not disappear into a silent `.catch(() => {})` — that silence
+// is exactly what let a real bug (P2-03, fourth review: teardown deleted
+// tickets before their own ShortageOverrideRequest rows, which have an
+// ON DELETE RESTRICT FK to BatchTicket) hide behind a still-green CI for
+// this whole file's worth of new tests.
+function isRecordNotFound(e: unknown): boolean {
+  return typeof e === "object" && e !== null && "code" in e && (e as { code?: string }).code === "P2025";
+}
+
+async function cleanupDelete(fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    if (!isRecordNotFound(e)) throw e;
+  }
+}
+
 after(async () => {
   for (const id of tripIds) {
     await prisma.drumReturn.deleteMany({ where: { tripId: id } });
-    await prisma.trip.delete({ where: { id } }).catch(() => {});
+    await cleanupDelete(() => prisma.trip.delete({ where: { id } }));
   }
   for (const id of ticketIds) {
     await deleteMovements({ OR: [{ sourceType: "BatchTicket", sourceId: id }, { sourceType: "Trip", sourceId: id }] });
+    // Required, not optional — ShortageOverrideRequest.batchTicketId is
+    // ON DELETE RESTRICT (deliberately, see its own schema comment), so
+    // the ticket delete below fails a real FK check without this first.
+    await prisma.shortageOverrideRequest.deleteMany({ where: { batchTicketId: id } });
     await prisma.batchComponentActual.deleteMany({ where: { batchTicketId: id } });
-    await prisma.batchTicket.delete({ where: { id } }).catch(() => {});
+    await cleanupDelete(() => prisma.batchTicket.delete({ where: { id } }));
   }
   await deleteMovements({ OR: [{ storageId: siloId }, { storageId: fallbackSiloId }] });
-  await prisma.truck.delete({ where: { id: truckId } }).catch(() => {});
-  await prisma.employee.delete({ where: { id: driverId } }).catch(() => {});
-  await prisma.reservation.delete({ where: { id: reservationId } }).catch(() => {});
-  await prisma.mixDesign.delete({ where: { id: mixId } }).catch(() => {});
-  await prisma.project.delete({ where: { id: projectId } }).catch(() => {});
-  await prisma.customer.delete({ where: { id: customerId } }).catch(() => {});
-  await prisma.silo.delete({ where: { id: fallbackSiloId } }).catch(() => {});
-  await prisma.silo.delete({ where: { id: siloId } }).catch(() => {});
-  await prisma.material.delete({ where: { id: materialId } }).catch(() => {});
-  await prisma.plant.delete({ where: { id: plantId } }).catch(() => {});
-  await prisma.site.delete({ where: { id: siteId } }).catch(() => {});
-  await prisma.user.delete({ where: { id: adminUserId } }).catch(() => {});
+  await cleanupDelete(() => prisma.truck.delete({ where: { id: truckId } }));
+  await cleanupDelete(() => prisma.employee.delete({ where: { id: driverId } }));
+  await cleanupDelete(() => prisma.reservation.delete({ where: { id: reservationId } }));
+  await cleanupDelete(() => prisma.mixDesign.delete({ where: { id: mixId } }));
+  await cleanupDelete(() => prisma.project.delete({ where: { id: projectId } }));
+  await cleanupDelete(() => prisma.customer.delete({ where: { id: customerId } }));
+  await cleanupDelete(() => prisma.silo.delete({ where: { id: fallbackSiloId } }));
+  await cleanupDelete(() => prisma.silo.delete({ where: { id: siloId } }));
+  await cleanupDelete(() => prisma.material.delete({ where: { id: materialId } }));
+  await cleanupDelete(() => prisma.plant.delete({ where: { id: plantId } }));
+  await cleanupDelete(() => prisma.site.delete({ where: { id: siteId } }));
+  await cleanupDelete(() => prisma.user.delete({ where: { id: adminUserId } }));
   await prisma.$disconnect();
 });
 
@@ -306,6 +332,7 @@ test("a request without approval doesn't let a real shortage through", async () 
 });
 
 test("requesting again while one is already pending is refused, not duplicated", async () => {
+  await resetSilo(0); // requestShortageOverride now requires a real shortage to exist (NO_SHORTAGE otherwise)
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
 
   const first = await requestShortageOverride(ticketId, { reason: "first", requestedById: adminUserId });
@@ -318,6 +345,7 @@ test("requesting again while one is already pending is refused, not duplicated",
 });
 
 test("two concurrent requests for the same ticket — only one lands", async () => {
+  await resetSilo(0);
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
 
   const [a, b] = await Promise.all([
@@ -332,6 +360,7 @@ test("two concurrent requests for the same ticket — only one lands", async () 
 });
 
 test("a rejected request is no longer active — a new one can be made", async () => {
+  await resetSilo(0);
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
 
   const request = await requestShortageOverride(ticketId, { reason: "first attempt", requestedById: adminUserId });
@@ -349,6 +378,7 @@ test("a rejected request is no longer active — a new one can be made", async (
 });
 
 test("only one of two concurrent decisions on the same request wins", async () => {
+  await resetSilo(0);
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
   const request = await requestShortageOverride(ticketId, { reason: "race decision", requestedById: adminUserId });
   assert.equal(request.status, "OK");
@@ -417,6 +447,7 @@ test("a genuinely tiny but real quantity still posts a movement and reverses cle
 // the same "the database itself rejects X" style as the immutability
 // trigger's own test below.
 test("the database itself rejects deleting a BatchTicket with a ShortageOverrideRequest on file (FR-P2-01)", async () => {
+  await resetSilo(0); // requestShortageOverride now requires a real shortage to exist
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
   const request = await requestShortageOverride(ticketId, { reason: "for the delete-guard test", requestedById: adminUserId });
   assert.equal(request.status, "OK");
@@ -467,6 +498,357 @@ test("notifyRoles with a siteId only notifies users at that site, plus ADMIN (FR
     await prisma.plant.delete({ where: { id: otherPlant.id } }).catch(() => {});
     await prisma.site.delete({ where: { id: otherSite.id } }).catch(() => {});
   }
+});
+
+// ---- 4e. Regressions from the fifth external review (Codex) -----------
+
+// P1-01: the SHORTFALL threshold (not the zero-effect one, already fixed
+// above) was still a whole kg/liter (0.001) — a real shortfall smaller
+// than that slipped through with no INSUFFICIENT_STOCK at all, override
+// or not, since 0.001 was being used as an implicit "this doesn't really
+// count" business cutoff rather than a floating-point epsilon.
+test("a tiny consumption from a completely empty silo without an override is still INSUFFICIENT_STOCK (P1-01)", async () => {
+  await resetSilo(0);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 0.5 }]); // 0.5kg = 0.0005t — below the old 0.001 shortfall threshold
+
+  const result = await completeBatchTicket(ticketId, {});
+  assert.equal(result.status, "INSUFFICIENT_STOCK");
+  assert.equal((await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } })).status, "RELEASED");
+  assert.equal(await siloLevel(siloId), 0);
+  assert.equal((await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } })).length, 0);
+});
+
+test("a genuinely small authorized shortage is still recorded and consumes the approved request (P1-01)", async () => {
+  await resetSilo(9.9995);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 10000 }]); // needs 10t, 9.9995t on hand — 0.5kg short
+
+  const request = await requestShortageOverride(ticketId, { reason: "tiny shortage", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+  const approval = await approveShortageOverrideRequest(request.requestId, adminUserId);
+  assert.equal(approval.status, "OK");
+
+  const result = await completeBatchTicket(ticketId, {});
+  assert.equal(result.status, "SUCCESS");
+  if (result.status === "SUCCESS") {
+    assert.ok(result.shortages.length > 0);
+    assert.equal(result.consumedOverrideRequestId, request.requestId);
+  }
+  assert.equal(await siloLevel(siloId), 0); // clamped, not negative
+  assert.equal((await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } })).length, 1); // small but real — still posted
+});
+
+test("a reversal that would exceed capacity fails and reversedAt stays unset (P1-01 boundary)", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 10000 }]); // 10t
+  const completion = await completeBatchTicket(ticketId, {});
+  assert.equal(completion.status, "SUCCESS");
+  assert.equal(await siloLevel(siloId), 40);
+
+  // Something else filled the silo almost to capacity in the meantime —
+  // crediting the full 10t back on reversal would overflow it.
+  await prisma.silo.update({ where: { id: siloId }, data: { currentLevelTons: 495 } });
+
+  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test capacity boundary" });
+  assert.equal(reversal.status, "CAPACITY_EXCEEDED");
+
+  const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
+  assert.equal(ticket.reversedAt, null);
+  assert.equal(await siloLevel(siloId), 495); // untouched — the whole reversal rolled back
+
+  await resetSilo(40); // restore, so this test doesn't leave the fixture silo in a weird state for whatever runs next
+});
+
+// P1-02: a request could be created for (or decided on) a ticket that had
+// already gone terminal, since requestShortageOverride only read ticket
+// status once, outside any lock, and nothing ever resolved a request left
+// PENDING/APPROVED once its ticket completed without needing it.
+test("requesting an override on an already-complete ticket is refused (P1-02)", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const completion = await completeBatchTicket(ticketId, {});
+  assert.equal(completion.status, "SUCCESS");
+
+  const request = await requestShortageOverride(ticketId, { reason: "too late", requestedById: adminUserId });
+  assert.equal(request.status, "TICKET_TERMINAL");
+});
+
+test("a request left undecided when its ticket completes without needing it is expired, not left dangling (P1-02)", async () => {
+  await resetSilo(0);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]); // a real shortage right now
+
+  const request = await requestShortageOverride(ticketId, { reason: "shortage that resolves itself", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+
+  await resetSilo(50); // a delivery arrives before anyone decides the request
+  const result = await completeBatchTicket(ticketId, {});
+  assert.equal(result.status, "SUCCESS");
+  if (result.status === "SUCCESS") assert.equal(result.consumedOverrideRequestId, null); // never needed
+
+  const finalRequest = await prisma.shortageOverrideRequest.findUniqueOrThrow({ where: { id: request.requestId } });
+  assert.equal(finalRequest.status, "EXPIRED"); // was PENDING, never decided — the ticket is terminal now regardless
+});
+
+test("approving a request after its ticket expired it returns NOT_PENDING, not OK (P1-02)", async () => {
+  await resetSilo(0);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const request = await requestShortageOverride(ticketId, { reason: "will expire", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+
+  await resetSilo(50);
+  const result = await completeBatchTicket(ticketId, {});
+  assert.equal(result.status, "SUCCESS");
+
+  const decision = await approveShortageOverrideRequest(request.requestId, adminUserId);
+  assert.equal(decision.status, "NOT_PENDING"); // EXPIRED, not PENDING — nothing left to decide
+});
+
+// P1-03: an approval used to be a blanket "there's a shortage, trust me"
+// for the whole ticket — not bound to the specific material/quantity a
+// manager actually saw, and it stayed valid even after a component was
+// edited to need more, or a different material became short too.
+test("an approval for one material cannot authorize a shortage on a different material (P1-03)", async () => {
+  await resetSilo(0); // materialId already short at request time
+  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-SNAPSHOT-B", type: "CEMENT" } });
+  const secondSilo = await prisma.silo.create({
+    data: { plantId, name: "TEST-SUITE-SNAPSHOT-SILO-B", materialType: "CEMENT", materialId: secondMaterial.id, capacityTons: 500, currentLevelTons: 10 }, // plenty for now
+  });
+  try {
+    const ticketId = await makeTicket([
+      { materialId, targetMassKg: 1000 }, // 1t needed, 0 on hand — short
+      { materialId: secondMaterial.id, targetMassKg: 1000 }, // 1t needed, 10 on hand — fine for now
+    ]);
+
+    const request = await requestShortageOverride(ticketId, { reason: "only material A is short right now", requestedById: adminUserId });
+    assert.equal(request.status, "OK");
+    if (request.status !== "OK") return;
+    const approval = await approveShortageOverrideRequest(request.requestId, adminUserId);
+    assert.equal(approval.status, "OK");
+
+    // A shortage appears for material B AFTER approval — never in the
+    // snapshot, so the approval must not cover it.
+    await prisma.silo.update({ where: { id: secondSilo.id }, data: { currentLevelTons: 0 } });
+
+    const result = await completeBatchTicket(ticketId, {});
+    assert.equal(result.status, "INSUFFICIENT_STOCK"); // material B's new shortage isn't authorized by an approval scoped to material A only
+    assert.equal((await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } })).status, "RELEASED");
+    assert.equal(await siloLevel(siloId), 0); // whole completion rolled back — material A never deducted either
+  } finally {
+    await prisma.batchComponentActual.deleteMany({ where: { materialId: secondMaterial.id } });
+    await prisma.silo.delete({ where: { id: secondSilo.id } }).catch(() => {});
+    await prisma.material.delete({ where: { id: secondMaterial.id } }).catch(() => {});
+  }
+});
+
+test("an approval for a smaller shortage cannot authorize a larger one after a component edit (P1-03)", async () => {
+  await resetSilo(1);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 2000 }]); // needs 2t — 1t short
+
+  const request = await requestShortageOverride(ticketId, { reason: "1 ton short", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+  const approval = await approveShortageOverrideRequest(request.requestId, adminUserId);
+  assert.equal(approval.status, "OK");
+
+  // Edited to need MORE after approval — a bigger shortage than what was
+  // actually approved (only 1t was ever snapshotted).
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+  await prisma.batchComponentActual.update({ where: { id: component.id }, data: { targetMassKg: 5000 } }); // now needs 5t — 4t short
+
+  const result = await completeBatchTicket(ticketId, {});
+  assert.equal(result.status, "INSUFFICIENT_STOCK"); // the extra 3t of shortage was never approved
+});
+
+// P1-04: startTrip's reclaim-credit block used to invent credits for
+// inventoryTracked:false materials, pro-rate the full recipe/actual
+// target instead of what completion actually applied, and re-resolve
+// "the current matching silo/hopper" instead of the exact storageId
+// completion posted to. Extracted into applyReclaimCredit
+// (tripDispatch.ts) specifically so these tests call the REAL logic —
+// the previous reclaim test only ever exercised a bare postSiloMovement
+// call, never this code path.
+test("applyReclaimCredit never credits an inventoryTracked:false material (P1-04)", async () => {
+  await resetSilo(50);
+  const untrackedMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-UNTRACKED-RECLAIM", type: "WATER", inventoryTracked: false } });
+  try {
+    const ticketId = await makeTicket([
+      { materialId, targetMassKg: 1000 },
+      { materialId: untrackedMaterial.id, targetMassKg: 200 },
+    ]);
+    const completion = await completeBatchTicket(ticketId, {});
+    assert.equal(completion.status, "SUCCESS");
+
+    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date(), reclaimedVolumeM3: 2 } });
+    tripIds.push(trip.id);
+
+    const ticketWithComponents = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId }, include: { components: { include: { material: true } } } });
+    const creditResult = await prisma.$transaction((tx) =>
+      applyReclaimCredit(tx, { batchTicketId: ticketId, tripId: trip.id, components: ticketWithComponents.components, reclaimedFraction: 0.5, actorId: adminUserId }),
+    );
+    assert.equal(creditResult.status, "OK");
+
+    const untrackedComponent = ticketWithComponents.components.find((c) => c.materialId === untrackedMaterial.id)!;
+    const freshComponent = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: untrackedComponent.id } });
+    assert.equal(freshComponent.reclaimCreditMassKg, 0); // no credit at all — it was never deducted in the first place
+
+    const creditMovements = await prisma.inventoryMovement.findMany({ where: { sourceType: "Trip", sourceId: trip.id } });
+    assert.equal(creditMovements.length, 1); // only the tracked component got a RECLAIM_CREDIT row
+    assert.equal(creditMovements[0].materialId, materialId);
+  } finally {
+    await prisma.material.delete({ where: { id: untrackedMaterial.id } }).catch(() => {});
+  }
+});
+
+test("applyReclaimCredit credits only the fraction of what was ACTUALLY deducted, not the recipe target (P1-04)", async () => {
+  await resetSilo(0.5); // only 0.5t on hand
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]); // needs 1t — 0.5t short
+
+  const request = await requestShortageOverride(ticketId, { reason: "half short", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+  assert.equal((await approveShortageOverrideRequest(request.requestId, adminUserId)).status, "OK");
+
+  const completion = await completeBatchTicket(ticketId, {});
+  assert.equal(completion.status, "SUCCESS"); // only 0.5t actually applied — all that was on hand
+  assert.equal(await siloLevel(siloId), 0);
+
+  const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date(), reclaimedVolumeM3: 5 } });
+  tripIds.push(trip.id);
+  const ticketWithComponents = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId }, include: { components: { include: { material: true } } } });
+  const creditResult = await prisma.$transaction((tx) =>
+    applyReclaimCredit(tx, { batchTicketId: ticketId, tripId: trip.id, components: ticketWithComponents.components, reclaimedFraction: 1, actorId: adminUserId }),
+  );
+  assert.equal(creditResult.status, "OK");
+  assert.equal(await siloLevel(siloId), 0.5); // 100% of the ACTUAL 0.5t applied, not the 1t recipe target
+});
+
+test("applyReclaimCredit credits the ORIGINAL storage even if the material's assignment changed since (P1-04)", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const completion = await completeBatchTicket(ticketId, {});
+  assert.equal(completion.status, "SUCCESS");
+  assert.equal(await siloLevel(siloId), 49);
+
+  const newSilo = await prisma.silo.create({ data: { plantId, name: "TEST-SUITE-RECLAIM-NEW-SILO", materialType: "CEMENT", materialId, capacityTons: 500, currentLevelTons: 0 } });
+  try {
+    // The material gets reassigned to a DIFFERENT silo after completion —
+    // the credit must still go back to the ORIGINAL one, not wherever
+    // the material happens to point now.
+    await prisma.silo.update({ where: { id: siloId }, data: { materialId: null } });
+
+    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date(), reclaimedVolumeM3: 5 } });
+    tripIds.push(trip.id);
+    const ticketWithComponents = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId }, include: { components: { include: { material: true } } } });
+    const creditResult = await prisma.$transaction((tx) =>
+      applyReclaimCredit(tx, { batchTicketId: ticketId, tripId: trip.id, components: ticketWithComponents.components, reclaimedFraction: 1, actorId: adminUserId }),
+    );
+    assert.equal(creditResult.status, "OK");
+
+    assert.equal(await siloLevel(siloId), 50); // credited back to the ORIGINAL silo
+    assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: newSilo.id } })).currentLevelTons, 0); // the new one untouched
+  } finally {
+    await prisma.silo.update({ where: { id: siloId }, data: { materialId } }).catch(() => {});
+    await prisma.silo.delete({ where: { id: newSilo.id } }).catch(() => {});
+  }
+});
+
+test("applyReclaimCredit reports failure when the original storage no longer exists (P1-04)", async () => {
+  const throwawayMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-RECLAIM-MISSING-STORAGE", type: "CEMENT" } });
+  const throwawaySilo = await prisma.silo.create({ data: { plantId, name: "TEST-SUITE-RECLAIM-THROWAWAY-SILO", materialType: "CEMENT", materialId: throwawayMaterial.id, capacityTons: 500, currentLevelTons: 50 } });
+  try {
+    const ticketId = await makeTicket([{ materialId: throwawayMaterial.id, targetMassKg: 1000 }]);
+    const completion = await completeBatchTicket(ticketId, {});
+    assert.equal(completion.status, "SUCCESS");
+
+    // storageId on InventoryMovement has no FK (intentionally polymorphic
+    // — see the model comment), so deleting the silo the ticket already
+    // posted against doesn't cascade-fail; it just leaves nothing for a
+    // later reclaim credit to land on.
+    await prisma.silo.delete({ where: { id: throwawaySilo.id } });
+
+    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date(), reclaimedVolumeM3: 5 } });
+    tripIds.push(trip.id);
+    const ticketWithComponents = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId }, include: { components: { include: { material: true } } } });
+    const creditResult = await prisma.$transaction((tx) =>
+      applyReclaimCredit(tx, { batchTicketId: ticketId, tripId: trip.id, components: ticketWithComponents.components, reclaimedFraction: 1, actorId: adminUserId }),
+    );
+    assert.equal(creditResult.status, "CREDIT_FAILED");
+    if (creditResult.status === "CREDIT_FAILED") assert.equal(creditResult.reason, "STORAGE_NOT_CONFIGURED");
+  } finally {
+    await prisma.material.delete({ where: { id: throwawayMaterial.id } }).catch(() => {});
+  }
+});
+
+test("a capacity failure rolls back every reclaim credit already applied in the same transaction (P1-04)", async () => {
+  await resetSilo(50);
+  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-RECLAIM-CAPACITY-B", type: "CEMENT" } });
+  const secondSilo = await prisma.silo.create({ data: { plantId, name: "TEST-SUITE-RECLAIM-CAPACITY-SILO-B", materialType: "CEMENT", materialId: secondMaterial.id, capacityTons: 10, currentLevelTons: 10 } });
+  try {
+    const ticketId = await makeTicket([
+      { materialId, targetMassKg: 1000 }, // 1t — plenty of room to credit back later
+      { materialId: secondMaterial.id, targetMassKg: 2000 }, // 2t
+    ]);
+    const completion = await completeBatchTicket(ticketId, {});
+    assert.equal(completion.status, "SUCCESS");
+    assert.equal(await siloLevel(siloId), 49);
+    assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: secondSilo.id } })).currentLevelTons, 8);
+
+    // Something else nearly refilled secondSilo in the meantime —
+    // crediting the full 2t back would overflow its 10t capacity.
+    await prisma.silo.update({ where: { id: secondSilo.id }, data: { currentLevelTons: 9 } });
+
+    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date(), reclaimedVolumeM3: 5 } });
+    tripIds.push(trip.id);
+    const ticketWithComponents = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId }, include: { components: { include: { material: true } } } });
+
+    await assert.rejects(() =>
+      prisma.$transaction((tx) =>
+        applyReclaimCredit(tx, { batchTicketId: ticketId, tripId: trip.id, components: ticketWithComponents.components, reclaimedFraction: 1, actorId: adminUserId }),
+      ),
+    );
+
+    assert.equal(await siloLevel(siloId), 49); // whole transaction rolled back — the OTHER credit, which would have succeeded alone, never landed either
+    assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: secondSilo.id } })).currentLevelTons, 9);
+    assert.equal((await prisma.inventoryMovement.findMany({ where: { sourceType: "Trip", sourceId: trip.id } })).length, 0);
+  } finally {
+    await prisma.batchComponentActual.deleteMany({ where: { materialId: secondMaterial.id } });
+    await prisma.silo.delete({ where: { id: secondSilo.id } }).catch(() => {});
+    await prisma.material.delete({ where: { id: secondMaterial.id } }).catch(() => {});
+  }
+});
+
+// P2-01: deleteBatchTicket silently refused (post-FR-P2-01) any ticket
+// with a ShortageOverrideRequest on file, with no way to actually close
+// it out — cancelBatchTicket is the real path for that now.
+test("cancelBatchTicket cancels a non-terminal ticket and expires any active override request (P2-01)", async () => {
+  await resetSilo(0);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const request = await requestShortageOverride(ticketId, { reason: "will be cancelled", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+
+  const cancellation = await cancelBatchTicket(ticketId, { actorId: adminUserId, reason: "test cancellation" });
+  assert.equal(cancellation.status, "SUCCESS");
+
+  const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
+  assert.equal(ticket.status, "CANCELLED");
+  assert.equal(ticket.cancelledById, adminUserId);
+  assert.equal(ticket.cancellationReason, "test cancellation");
+
+  const finalRequest = await prisma.shortageOverrideRequest.findUniqueOrThrow({ where: { id: request.requestId } });
+  assert.equal(finalRequest.status, "EXPIRED");
+});
+
+test("cancelBatchTicket refuses an already-complete ticket (P2-01)", async () => {
+  await resetSilo(50);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const completion = await completeBatchTicket(ticketId, {});
+  assert.equal(completion.status, "SUCCESS");
+
+  const result = await cancelBatchTicket(ticketId, { actorId: adminUserId, reason: "should be refused" });
+  assert.equal(result.status, "INVALID_STATE");
 });
 
 // ---- 5. A failure on one component rolls back all components ---------

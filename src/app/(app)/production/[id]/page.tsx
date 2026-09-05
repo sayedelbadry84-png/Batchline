@@ -19,7 +19,8 @@ import { AutoSaveField } from "@/components/AutoSaveField";
 import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
 import { CompleteBatchForm } from "@/components/CompleteBatchForm";
 import { ReverseBatchForm } from "@/components/ReverseBatchForm";
-import { ShortageOverridePanel } from "@/components/ShortageOverridePanel";
+import { ShortageOverridePanel, type ShortageSnapshotEntry } from "@/components/ShortageOverridePanel";
+import { CancelBatchTicketForm } from "@/components/CancelBatchTicketForm";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -34,7 +35,8 @@ export default async function BatchTicketPage({
   const user = await getCurrentUser();
   const canReverseBatch = !!user && (await canPerformAction(user.role, "production", "reverseBatch"));
   const canRequestShortageOverride = !!user && (await canPerformAction(user.role, "production", "requestShortageOverride"));
-  const canDecideShortageOverride = !!user && (await canPerformAction(user.role, "production", "approveShortageOverrideRequest"));
+  const canApproveShortageOverride = !!user && (await canPerformAction(user.role, "production", "approveShortageOverrideRequest"));
+  const canRejectShortageOverride = !!user && (await canPerformAction(user.role, "production", "rejectShortageOverrideRequest"));
   const { id } = await params;
   const { editTrip } = await searchParams;
   const { dict } = await getDictionary();
@@ -67,12 +69,14 @@ export default async function BatchTicketPage({
   const latestOverrideRequest = ticket.shortageOverrideRequests[0]
     ? {
         id: ticket.shortageOverrideRequests[0].id,
-        status: ticket.shortageOverrideRequests[0].status as "PENDING" | "APPROVED" | "REJECTED" | "CONSUMED",
+        status: ticket.shortageOverrideRequests[0].status as "PENDING" | "APPROVED" | "REJECTED" | "CONSUMED" | "EXPIRED",
         reason: ticket.shortageOverrideRequests[0].reason,
         requestedByName: ticket.shortageOverrideRequests[0].requestedBy.name,
         rejectionNote: ticket.shortageOverrideRequests[0].rejectionNote,
+        shortageSnapshot: ticket.shortageOverrideRequests[0].shortageSnapshot as ShortageSnapshotEntry[] | null,
       }
     : null;
+  const hasAnyOverrideRequest = ticket.shortageOverrideRequests.length > 0;
   const canEditComponents = !isTerminal;
   const componentMaterialIds = new Set(ticket.components.map((c) => c.materialId));
   const addableMaterials = materials.filter((mt) => !componentMaterialIds.has(mt.id));
@@ -322,12 +326,13 @@ export default async function BatchTicketPage({
         />
       )}
 
-      {(canRequestShortageOverride || canDecideShortageOverride || latestOverrideRequest) && (
+      {(canRequestShortageOverride || canApproveShortageOverride || canRejectShortageOverride || latestOverrideRequest) && (
         <ShortageOverridePanel
           ticketId={ticket.id}
           latestRequest={latestOverrideRequest}
           canRequest={canRequestShortageOverride}
-          canDecide={canDecideShortageOverride}
+          canApprove={canApproveShortageOverride}
+          canReject={canRejectShortageOverride}
           isTerminal={isTerminal}
           messages={{
             title: d.shortageOverride.title,
@@ -337,6 +342,11 @@ export default async function BatchTicketPage({
             approvedStatus: d.shortageOverride.approvedStatus,
             rejectedStatus: d.shortageOverride.rejectedStatus,
             consumedStatus: d.shortageOverride.consumedStatus,
+            expiredStatus: d.shortageOverride.expiredStatus,
+            snapshotMaterial: d.shortageOverride.snapshotMaterial,
+            snapshotRequired: d.shortageOverride.snapshotRequired,
+            snapshotAvailable: d.shortageOverride.snapshotAvailable,
+            snapshotShortage: d.shortageOverride.snapshotShortage,
             requestLabel: d.shortageOverride.requestLabel,
             requestPlaceholder: d.shortageOverride.requestPlaceholder,
             requestButton: d.shortageOverride.requestButton,
@@ -348,6 +358,8 @@ export default async function BatchTicketPage({
             errorTicketTerminal: d.shortageOverride.errorTicketTerminal,
             errorAlreadyPending: d.shortageOverride.errorAlreadyPending,
             errorAlreadyApproved: d.shortageOverride.errorAlreadyApproved,
+            errorNoShortage: d.shortageOverride.errorNoShortage,
+            errorStorageNotConfigured: d.shortageOverride.errorStorageNotConfigured,
             errorNotPending: d.shortageOverride.errorNotPending,
           }}
           cardClassName={`${ui.card} flex flex-col gap-3`}
@@ -481,8 +493,34 @@ export default async function BatchTicketPage({
           real posted inventory movements — see reverseBatchTicket in
           production/actions.ts) rather than silently no-op-ing, so the
           button is hidden for that state the same way it's already hidden
-          once a trip exists. */}
-      {!ticket.trip && ticket.status !== "COMPLETE" && (
+          once a trip exists. It also can't actually delete a ticket with a
+          ShortageOverrideRequest on file (that request's own FK is ON
+          DELETE RESTRICT, deliberately, so an approval decision's history
+          is never silently erased) — CancelBatchTicketForm replaces it in
+          that case instead of sitting next to a button that would just
+          silently do nothing (P2-01, fourth review). */}
+      {!ticket.trip && ticket.status !== "COMPLETE" && hasAnyOverrideRequest && (
+        <CancelBatchTicketForm
+          ticketId={ticket.id}
+          messages={{
+            title: d.cancelTicket.title,
+            hint: d.cancelTicket.hint,
+            reasonLabel: d.cancelTicket.reasonLabel,
+            reasonPlaceholder: d.cancelTicket.reasonPlaceholder,
+            confirmPrompt: d.cancelTicket.confirmPrompt,
+            button: d.cancelTicket.button,
+            errorInvalidState: d.cancelTicket.errorInvalidState,
+            errorNotFound: d.cancelTicket.errorNotFound,
+          }}
+          cardClassName={`${ui.card} flex flex-col gap-3`}
+          titleClassName="font-display text-lg font-semibold"
+          hintClassName="text-sm text-ink-muted"
+          labelClassName={ui.label}
+          inputClassName={`${ui.input} w-full`}
+          buttonClassName="self-start rounded-md border border-critical px-4 py-2 text-sm font-medium text-critical hover:bg-critical-soft"
+        />
+      )}
+      {!ticket.trip && ticket.status !== "COMPLETE" && !hasAnyOverrideRequest && (
         <form action={deleteBatchTicket} className={`${ui.card} flex items-center justify-between`}>
           <input type="hidden" name="id" value={ticket.id} />
           <div>

@@ -9,7 +9,7 @@ import { AutoSaveField } from "@/components/AutoSaveField";
 import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
 import { OfflineSyncBanner } from "@/components/OfflineSyncBanner";
 import { CompleteBatchForm } from "@/components/CompleteBatchForm";
-import { ShortageOverridePanel } from "@/components/ShortageOverridePanel";
+import { ShortageOverridePanel, type ShortageSnapshotEntry } from "@/components/ShortageOverridePanel";
 import { canPerformAction } from "@/lib/permissions";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
@@ -45,14 +45,16 @@ export default async function OperatorTicketPage({
   // production/[id]/page.tsx's own isTerminal for the full reasoning.
   const isTerminal = ticket.status === "COMPLETE" || ticket.status === "CANCELLED";
   const canRequestShortageOverride = await canPerformAction(user.role, "production", "requestShortageOverride");
-  const canDecideShortageOverride = await canPerformAction(user.role, "production", "approveShortageOverrideRequest");
+  const canApproveShortageOverride = await canPerformAction(user.role, "production", "approveShortageOverrideRequest");
+  const canRejectShortageOverride = await canPerformAction(user.role, "production", "rejectShortageOverrideRequest");
   const latestOverrideRequest = ticket.shortageOverrideRequests[0]
     ? {
         id: ticket.shortageOverrideRequests[0].id,
-        status: ticket.shortageOverrideRequests[0].status as "PENDING" | "APPROVED" | "REJECTED" | "CONSUMED",
+        status: ticket.shortageOverrideRequests[0].status as "PENDING" | "APPROVED" | "REJECTED" | "CONSUMED" | "EXPIRED",
         reason: ticket.shortageOverrideRequests[0].reason,
         requestedByName: ticket.shortageOverrideRequests[0].requestedBy.name,
         rejectionNote: ticket.shortageOverrideRequests[0].rejectionNote,
+        shortageSnapshot: ticket.shortageOverrideRequests[0].shortageSnapshot as ShortageSnapshotEntry[] | null,
       }
     : null;
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
@@ -222,12 +224,13 @@ export default async function OperatorTicketPage({
         />
       )}
 
-      {(canRequestShortageOverride || canDecideShortageOverride || latestOverrideRequest) && (
+      {(canRequestShortageOverride || canApproveShortageOverride || canRejectShortageOverride || latestOverrideRequest) && (
         <ShortageOverridePanel
           ticketId={ticket.id}
           latestRequest={latestOverrideRequest}
           canRequest={canRequestShortageOverride}
-          canDecide={canDecideShortageOverride}
+          canApprove={canApproveShortageOverride}
+          canReject={canRejectShortageOverride}
           isTerminal={isTerminal}
           messages={{
             title: d.shortageOverride.title,
@@ -237,6 +240,11 @@ export default async function OperatorTicketPage({
             approvedStatus: d.shortageOverride.approvedStatus,
             rejectedStatus: d.shortageOverride.rejectedStatus,
             consumedStatus: d.shortageOverride.consumedStatus,
+            expiredStatus: d.shortageOverride.expiredStatus,
+            snapshotMaterial: d.shortageOverride.snapshotMaterial,
+            snapshotRequired: d.shortageOverride.snapshotRequired,
+            snapshotAvailable: d.shortageOverride.snapshotAvailable,
+            snapshotShortage: d.shortageOverride.snapshotShortage,
             requestLabel: d.shortageOverride.requestLabel,
             requestPlaceholder: d.shortageOverride.requestPlaceholder,
             requestButton: d.shortageOverride.requestButton,
@@ -248,6 +256,8 @@ export default async function OperatorTicketPage({
             errorTicketTerminal: d.shortageOverride.errorTicketTerminal,
             errorAlreadyPending: d.shortageOverride.errorAlreadyPending,
             errorAlreadyApproved: d.shortageOverride.errorAlreadyApproved,
+            errorNoShortage: d.shortageOverride.errorNoShortage,
+            errorStorageNotConfigured: d.shortageOverride.errorStorageNotConfigured,
             errorNotPending: d.shortageOverride.errorNotPending,
           }}
           cardClassName="flex flex-col gap-2 rounded-xl border border-border bg-surface p-4 shadow-sm"

@@ -10,6 +10,20 @@ import type { Prisma } from "@prisma/client";
 // gracefully from.
 type Tx = Prisma.TransactionClient;
 
+// A single explicit epsilon (in the movement's own unit — tons for
+// Silo/Hopper, liters for ChemicalTank), used everywhere this module
+// decides "is this shortfall/applied-delta effectively zero." A floating-
+// point tolerance, NOT a business "small quantity" cutoff. A fourth
+// external review caught that this module used to mix two different ad-
+// hoc thresholds: shortfall/capacity checks compared against a whole
+// 0.001 (a full kg/liter), while the zero-effect check (below) had
+// already been tightened to 1e-9 by an earlier review — so a real
+// shortfall UNDER 1kg/1L slipped through with no shortage flagged and no
+// override needed at all, the opposite of "every real event has a
+// nonzero footprint" this whole ledger exists to enforce. One constant,
+// used consistently, closes that gap.
+export const EPSILON = 1e-6;
+
 export type MovementInput = {
   storageId: string;
   materialId: string;
@@ -21,12 +35,22 @@ export type MovementInput = {
   siteId: string;
   actorId?: string | null;
   reason?: string | null;
-  /** Allow this movement to be clamped at zero (a real, audited shortage) instead of being rejected outright. */
-  allowShortage?: boolean;
+  /**
+   * How much of a consumption shortfall (in this movement's own unit) may
+   * be clamped through instead of rejected outright — a real, audited
+   * ceiling bound to a specific approved ShortageOverrideRequest (P1-03,
+   * fourth review), never a blanket "any shortfall is fine" boolean. A
+   * real shortfall bigger than this still throws INSUFFICIENT_STOCK, so
+   * an approval only ever covers exactly what it was given for. Omit (or
+   * 0) to reject any shortfall at all — the default, safe posture.
+   * Ignored for a credit (positive quantity): there's no equivalent
+   * override for losing material off the top of a full silo.
+   */
+  maxAllowedShortfall?: number;
 };
 
 export type MovementResult =
-  | { status: "OK"; appliedQuantity: number; newLevel: number }
+  | { status: "OK"; appliedQuantity: number; newLevel: number; shortfallAllowed: number }
   | { status: "ALREADY_POSTED" }
   | { status: "STORAGE_NOT_CONFIGURED" };
 
@@ -132,13 +156,17 @@ async function postMovement(
   const applied = newLevel - oldLevel;
   const isConsumption = input.quantity < 0;
   const shortfall = Math.abs(input.quantity) - Math.abs(applied);
-  if (isConsumption && shortfall > 0.001 && !input.allowShortage) {
+  const maxAllowedShortfall = Math.max(0, input.maxAllowedShortfall ?? 0);
+  if (isConsumption && shortfall > maxAllowedShortfall + EPSILON) {
     // Rolls back the balance update above — the whole point of computing
     // the shortfall before ever recording a movement, rather than
-    // clamping silently and moving on.
+    // clamping silently and moving on. Fires for ANY real shortfall
+    // beyond what maxAllowedShortfall actually covers — including one
+    // smaller than a whole kg/liter, and including one that exceeds an
+    // approved request's own snapshotted amount (P1-03).
     throw new DomainError("INSUFFICIENT_STOCK", `Insufficient stock on ${storageType} ${input.storageId}: requested ${Math.abs(input.quantity)}, only ${Math.abs(applied)} available`);
   }
-  if (!isConsumption && shortfall > 0.001) {
+  if (!isConsumption && shortfall > EPSILON) {
     // A credit (reclaim, or a reversal crediting a deduction back) that
     // gets clamped by LEAST(capacity, ...) because the store filled up in
     // the meantime is NOT a lesser version of success — it silently loses
@@ -150,29 +178,31 @@ async function postMovement(
     throw new DomainError("CAPACITY_EXCEEDED", `${storageType} ${input.storageId} has no room for the full credit: requested ${input.quantity}, only ${applied} fit`);
   }
 
+  // How much of a real shortfall this call actually let through — 0 for
+  // an exact/near-exact fill, otherwise the audited amount that was
+  // within maxAllowedShortfall. The caller (completeBatchTicket) uses
+  // this, not a separate recomputation, to decide whether an approved
+  // request was actually needed and should be marked consumed — one
+  // source of truth for "did a real shortage happen here."
+  const shortfallAllowed = isConsumption ? Math.max(0, shortfall) : 0;
+
   // A zero-effect movement — either a fully-authorized shortage against a
-  // completely empty store (isConsumption && allowShortage, applied
-  // clamps all the way to 0), or a genuinely zero-quantity request (an
-  // actualMassKg of exactly 0kg is a real, reachable weighed value) —
-  // posts no ledger row at all. The table's own quantity<>0 CHECK
-  // constraint (see the migration) exists precisely so a real event
-  // always has a nonzero footprint; a zero-effect "event" isn't one, and
-  // there's nothing for a later reversal to undo either way. Found this
-  // the hard way: the very first version of this function tried to
-  // insert quantity=0 whenever a shortage override hit a fully-empty
-  // store and got a raw, unhandled CHECK-constraint failure instead of a
-  // clean result.
-  //
-  // The threshold here is a floating-point epsilon, NOT a business
-  // "small quantity" cutoff — a later external review caught that the
-  // original 0.001 (a whole kg/liter) silently dropped the ledger row
-  // for any genuinely tiny but real movement (e.g. a 0.5kg admixture
-  // correction, applied = -0.0005), leaving the balance changed with
-  // nothing in the ledger to reconcile against. Only a TRUE no-op
-  // (oldLevel and newLevel land on the exact same clamp boundary, e.g.
-  // deducting from an already-empty silo) should skip posting.
-  if (Math.abs(applied) < 1e-9) {
-    return { status: "OK", appliedQuantity: 0, newLevel };
+  // completely empty store (applied clamps all the way to 0), or a
+  // genuinely zero-quantity request (an actualMassKg of exactly 0kg is a
+  // real, reachable weighed value) — posts no ledger row at all. The
+  // table's own quantity<>0 CHECK constraint (see the migration) exists
+  // precisely so a real event always has a nonzero footprint; a zero-
+  // effect "event" isn't one, and there's nothing for a later reversal to
+  // undo either way. Found this the hard way: the very first version of
+  // this function tried to insert quantity=0 whenever a shortage override
+  // hit a fully-empty store and got a raw, unhandled CHECK-constraint
+  // failure instead of a clean result. EPSILON here is the same floating-
+  // point tolerance used above, not a business "small quantity" cutoff —
+  // only a TRUE no-op (oldLevel and newLevel land on the exact same clamp
+  // boundary) skips posting; a genuinely tiny but real movement still
+  // gets its own ledger row.
+  if (Math.abs(applied) < EPSILON) {
+    return { status: "OK", appliedQuantity: 0, newLevel, shortfallAllowed };
   }
 
   // Record the ledger row with the TRUE applied delta (post-clamp), not
@@ -186,7 +216,7 @@ async function postMovement(
   const claimedId = await claimMovement(tx, storageType, input, applied);
   if (!claimedId) throw new DomainError("CONCURRENT_CONFLICT", `Movement for ${input.sourceType}/${input.sourceId}/${input.movementType} was posted by another transaction`);
 
-  return { status: "OK", appliedQuantity: applied, newLevel };
+  return { status: "OK", appliedQuantity: applied, newLevel, shortfallAllowed };
 }
 
 export function postSiloMovement(tx: Tx, input: MovementInput): Promise<MovementResult> {
