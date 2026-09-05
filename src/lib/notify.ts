@@ -27,8 +27,27 @@ export async function notify(userIds: string[], params: { title: string; body?: 
  * "who's allowed to do X" role-list pattern every ACTION_ROLES/
  * REQUISITION_APPROVAL_ROLES gate already uses elsewhere, just read here
  * instead of enforced.
+ *
+ * siteId narrows recipients to that one site (ADMIN always included
+ * regardless, same "ADMIN sees every site" rule effectiveSiteId itself
+ * uses in siteScope.ts) — omit it (as every call site before this one
+ * still does) to keep the existing org-wide broadcast. Added for a real
+ * cross-site leak an external review caught on the shortage-override
+ * notification specifically: a plant-scoped manager at Site B was being
+ * notified about a request raised at Site A. The other org-wide
+ * notifyRoles call sites (requisition approval, purchasing, quality,
+ * driver) are unchanged — narrowing those too is a separate, broader
+ * decision this fix doesn't make on their behalf.
  */
-export async function notifyRoles(roles: readonly string[], params: { title: string; body?: string; link?: string; module: string }): Promise<void> {
-  const users = await prisma.user.findMany({ where: { role: { in: [...roles] }, status: "ACTIVE" }, select: { id: true } });
+export async function notifyRoles(
+  roles: readonly string[],
+  params: { title: string; body?: string; link?: string; module: string },
+  opts?: { siteId?: string | null },
+): Promise<void> {
+  const where =
+    opts?.siteId != null
+      ? { role: { in: [...roles] }, status: "ACTIVE" as const, OR: [{ role: "ADMIN" }, { plant: { siteId: opts.siteId } }] }
+      : { role: { in: [...roles] }, status: "ACTIVE" as const };
+  const users = await prisma.user.findMany({ where, select: { id: true } });
   await notify(users.map((u) => u.id), params);
 }

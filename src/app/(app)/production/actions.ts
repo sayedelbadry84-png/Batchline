@@ -479,19 +479,26 @@ export async function requestShortageOverride(_prevState: RequestShortageOverrid
   const reason = String(formData.get("reason") ?? "").trim();
   if (!batchTicketId || !reason) return { status: "NOT_FOUND" };
 
-  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId }, select: { plantId: true, ticketNumber: true } });
+  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId }, select: { plantId: true, ticketNumber: true, plant: { select: { siteId: true } } } });
   if (!ticket) return { status: "NOT_FOUND" };
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
 
   const result = await requestShortageOverrideDomain(batchTicketId, { reason, requestedById: user!.id });
   if (result.status === "OK") {
     await logAudit({ module: "Production", recordId: batchTicketId, field: "shortageOverrideRequestId", afterValue: result.requestId, reasonCode: "SHORTAGE_OVERRIDE_REQUESTED" });
-    await notifyRoles(SHORTAGE_OVERRIDE_DECISION_ROLES, {
-      module: "Production",
-      title: `Shortage override requested — ${ticket.ticketNumber}`,
-      body: reason,
-      link: `/production/${batchTicketId}`,
-    });
+    // Site-scoped (FR-P1-02, third review) — a manager at a different site
+    // has no business reasons/decision-authority over this ticket, so they
+    // must not be paged about it either.
+    await notifyRoles(
+      SHORTAGE_OVERRIDE_DECISION_ROLES,
+      {
+        module: "Production",
+        title: `Shortage override requested — ${ticket.ticketNumber}`,
+        body: reason,
+        link: `/production/${batchTicketId}`,
+      },
+      { siteId: ticket.plant.siteId },
+    );
     revalidatePath(`/production/${batchTicketId}`);
     revalidatePath("/production");
   }
@@ -993,6 +1000,17 @@ export async function deleteBatchTicket(formData: FormData) {
   const ticket = await prisma.batchTicket.findUnique({ where: { id }, include: { trip: true } });
   if (!ticket || ticket.trip || ticket.status === "COMPLETE") return;
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
+
+  // A ShortageOverrideRequest's FK to BatchTicket is ON DELETE RESTRICT —
+  // deliberately, so deleting a ticket never silently erases an approval
+  // decision's history — but that means a raw, unhandled foreign-key
+  // violation was the actual behavior for any ticket with one on file
+  // (pending, approved, rejected, or already consumed), found by a later
+  // external review (FR-P2-01). Same silent-refusal convention every
+  // other guard in this function already uses rather than a typed error
+  // state, since this action has never surfaced one.
+  const hasOverrideRequest = await prisma.shortageOverrideRequest.findFirst({ where: { batchTicketId: id }, select: { id: true } });
+  if (hasOverrideRequest) return;
 
   // Components cascade-delete with the ticket (see BatchComponentActual's
   // onDelete: Cascade in schema.prisma).

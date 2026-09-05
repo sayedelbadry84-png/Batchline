@@ -162,7 +162,16 @@ async function postMovement(
   // insert quantity=0 whenever a shortage override hit a fully-empty
   // store and got a raw, unhandled CHECK-constraint failure instead of a
   // clean result.
-  if (Math.abs(applied) < 0.001) {
+  //
+  // The threshold here is a floating-point epsilon, NOT a business
+  // "small quantity" cutoff — a later external review caught that the
+  // original 0.001 (a whole kg/liter) silently dropped the ledger row
+  // for any genuinely tiny but real movement (e.g. a 0.5kg admixture
+  // correction, applied = -0.0005), leaving the balance changed with
+  // nothing in the ledger to reconcile against. Only a TRUE no-op
+  // (oldLevel and newLevel land on the exact same clamp boundary, e.g.
+  // deducting from an already-empty silo) should skip posting.
+  if (Math.abs(applied) < 1e-9) {
     return { status: "OK", appliedQuantity: 0, newLevel };
   }
 

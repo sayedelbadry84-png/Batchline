@@ -383,6 +383,92 @@ test("an approved request for one ticket doesn't leak to a different ticket", as
   assert.equal(approvedResult.status, "SUCCESS");
 });
 
+// ---- 4d. Regressions from the fourth external review -------------------
+
+// FR-P1-01: the zero-effect skip in postMovement used to key off a whole
+// kg/liter (0.001), not a floating-point epsilon — silently dropping the
+// ledger row for any genuinely tiny but real movement while the balance
+// itself still changed. A component this small is unusual but reachable
+// (e.g. a corrected admixture reading).
+test("a genuinely tiny but real quantity still posts a movement and reverses cleanly (FR-P1-01)", async () => {
+  await resetSilo(10);
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 0.5 }]); // 0.5kg = 0.0005t — below the old 0.001 threshold, not zero
+
+  const result = await completeBatchTicket(ticketId, {});
+  assert.equal(result.status, "SUCCESS");
+  assert.equal(await siloLevel(siloId), 9.9995);
+
+  const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
+  assert.equal(movements.length, 1); // the old bug posted zero rows here
+  assert.ok(Math.abs(movements[0].quantity - -0.0005) < 1e-6, `expected ~-0.0005, got ${movements[0].quantity}`); // exact equality isn't safe here — this is a real float round-trip, not a literal
+
+  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test reversal of a tiny quantity" });
+  assert.equal(reversal.status, "SUCCESS");
+  assert.equal(await siloLevel(siloId), 10); // restored exactly, nothing left unreconciled
+});
+
+// FR-P2-01: ShortageOverrideRequest.batchTicketId is ON DELETE RESTRICT
+// (deliberately — deleting a ticket must never silently erase an
+// approval decision's history) but deleteBatchTicket didn't check for
+// one before calling delete(), so it would throw a raw, unhandled
+// foreign-key-violation error. This confirms the constraint the
+// application-level guard (production/actions.ts) is now built around
+// actually exists and actually blocks the delete at the database level —
+// the same "the database itself rejects X" style as the immutability
+// trigger's own test below.
+test("the database itself rejects deleting a BatchTicket with a ShortageOverrideRequest on file (FR-P2-01)", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const request = await requestShortageOverride(ticketId, { reason: "for the delete-guard test", requestedById: adminUserId });
+  assert.equal(request.status, "OK");
+  if (request.status !== "OK") return;
+
+  await assert.rejects(() => prisma.batchTicket.delete({ where: { id: ticketId } }));
+
+  const rejection = await rejectShortageOverrideRequest(request.requestId, adminUserId, "resolving so cleanup can proceed");
+  assert.equal(rejection.status, "OK");
+  // Even a resolved (REJECTED/CONSUMED) request still restricts the
+  // delete — the constraint has no status carve-out, matching the
+  // application guard's own "any request on file at all" check.
+  await assert.rejects(() => prisma.batchTicket.delete({ where: { id: ticketId } }));
+
+  await prisma.shortageOverrideRequest.delete({ where: { id: request.requestId } });
+});
+
+// FR-P1-02: notifyRoles used to broadcast to every active user with a
+// matching role org-wide, with no way to narrow it — a manager at an
+// unrelated site had no business reason to be notified about, or to
+// decide on, a shortage override raised at a different site. The new
+// optional siteId narrows recipients to that site (ADMIN still included
+// everywhere, same "ADMIN sees every site" rule effectiveSiteId itself
+// uses).
+test("notifyRoles with a siteId only notifies users at that site, plus ADMIN (FR-P1-02)", async () => {
+  const { notifyRoles } = await import("../src/lib/notify");
+
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-OTHER-${Date.now()}`, name: "TEST-SUITE-OTHER-SITE", city: "Test", country: "Test" } });
+  const otherPlant = await prisma.plant.create({ data: { siteId: otherSite.id, name: "TEST-SUITE-OTHER-PLANT" } });
+  const sameSiteManager = await prisma.user.create({
+    data: { email: `test-suite-same-site-${Date.now()}@example.invalid`, name: "TEST-SUITE-SAME-SITE-MANAGER", passwordHash: "not-a-real-hash", role: "PLANT_MANAGER", plantId },
+  });
+  const otherSiteManager = await prisma.user.create({
+    data: { email: `test-suite-other-site-${Date.now()}@example.invalid`, name: "TEST-SUITE-OTHER-SITE-MANAGER", passwordHash: "not-a-real-hash", role: "PLANT_MANAGER", plantId: otherPlant.id },
+  });
+
+  try {
+    await notifyRoles(["PLANT_MANAGER", "ADMIN"], { module: "Production", title: "TEST-SUITE-SITE-SCOPED-NOTIFICATION" }, { siteId });
+
+    const recipientIds = (await prisma.notification.findMany({ where: { title: "TEST-SUITE-SITE-SCOPED-NOTIFICATION" }, select: { userId: true } })).map((n) => n.userId);
+    assert.ok(recipientIds.includes(sameSiteManager.id));
+    assert.ok(recipientIds.includes(adminUserId)); // ADMIN always included regardless of site
+    assert.ok(!recipientIds.includes(otherSiteManager.id));
+  } finally {
+    await prisma.notification.deleteMany({ where: { title: "TEST-SUITE-SITE-SCOPED-NOTIFICATION" } });
+    await prisma.user.delete({ where: { id: sameSiteManager.id } }).catch(() => {});
+    await prisma.user.delete({ where: { id: otherSiteManager.id } }).catch(() => {});
+    await prisma.plant.delete({ where: { id: otherPlant.id } }).catch(() => {});
+    await prisma.site.delete({ where: { id: otherSite.id } }).catch(() => {});
+  }
+});
+
 // ---- 5. A failure on one component rolls back all components ---------
 
 test("a failure while processing one component rolls back all components", async () => {
