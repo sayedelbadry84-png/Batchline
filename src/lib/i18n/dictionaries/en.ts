@@ -487,6 +487,19 @@ const en: typeof ar = {
       colRecent: { ticket: "Ticket", project: "Project", volume: "Volume", completed: "Completed", trip: "Trip" },
       noTripYet: "no trip yet",
       emptyRecent: "Nothing completed yet.",
+      // Surfaced as a visible banner on this page (RMR-R2-P2-03) when a
+      // release fails for a reason beyond the picker's own stale-option
+      // guards — previously logged only, leaving the operator staring at
+      // a silently-reloaded page with no explanation, and (for a manual
+      // walk-in booking specifically) a new reservation on file with no
+      // ticket and nothing on screen saying why.
+      releaseError: {
+        STORAGE_NOT_CONFIGURED: (material: string) => `Couldn't release the ticket: no storage is configured for "${material}" at this station.`,
+        INVALID_STATE: "Couldn't release the ticket: the reservation or station's state changed before the release finished — please try again.",
+        NOT_FOUND: "Couldn't release the ticket: the reservation or station no longer exists.",
+        NO_REMAINING_VOLUME: "Couldn't release the ticket: this reservation has no remaining volume left.",
+        manualBookingKeptNote: "The manual booking was saved — retry the release from the ready-to-release list below once the reason above is resolved.",
+      },
       mixOverride: {
         title: "Edit reservation mix",
         scopedNotice: "This change applies only to this reservation and will not change the original mix design.",
