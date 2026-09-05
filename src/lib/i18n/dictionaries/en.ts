@@ -492,6 +492,7 @@ const en: typeof ar = {
         scopedNotice: "This change applies only to this reservation and will not change the original mix design.",
         revisedBadge: (n: number) => `Modified for this reservation — Revision ${n}`,
         notEditableState: "This reservation's mix can't be edited in its current state.",
+        remainingVolumeNote: "The totals below reflect only the {value} m³ still remaining on this reservation and not yet released as tickets — tickets already released are unaffected.",
         col: { material: "Material", type: "Type", original: "Original (per m³)", modified: "Modified (per m³)", diff: "Difference", total: "Total for reservation", note: "Notes" },
         addMaterialPlaceholder: "Add a material…",
         addMaterialButton: "Add",
@@ -515,6 +516,8 @@ const en: typeof ar = {
         errorMaterialNotFound: "One of the materials could not be found.",
         errorInvalidReason: "A reason for the change is required.",
         errorNoActiveRevision: "There's no active revision to cancel.",
+        errorUnsupportedMaterialType: "This material's type isn't supported in production mixes.",
+        errorMissingSpecificGravity: "This chemical admixture needs a specific gravity on file before it can be added to the mix.",
       },
       detail: {
         targetVsActual: "Target vs. actual",

@@ -491,6 +491,7 @@ const ar = {
         scopedNotice: "هذا التعديل يخص هذا الحجز فقط ولن يغيّر الخلطة التصميمية الأصلية.",
         revisedBadge: (n: number) => `معدّلة لهذا الحجز — نسخة ${n}`,
         notEditableState: "لا يمكن تعديل خلطة هذا الحجز في حالته الحالية.",
+        remainingVolumeNote: "الإجماليات أدناه تعكس فقط الـ {value} م³ المتبقية من هذا الحجز ولم تُصدر بعد كتذاكر — التذاكر الصادرة مسبقًا لا تتأثر.",
         col: { material: "المادة", type: "النوع", original: "الأصلية (لكل م³)", modified: "المعدّلة (لكل م³)", diff: "الفرق", total: "الإجمالي للحجز", note: "ملاحظات" },
         addMaterialPlaceholder: "أضف مادة...",
         addMaterialButton: "إضافة",
@@ -514,6 +515,8 @@ const ar = {
         errorMaterialNotFound: "إحدى المواد غير موجودة.",
         errorInvalidReason: "سبب التعديل إلزامي.",
         errorNoActiveRevision: "لا يوجد تعديل نشط لإلغائه.",
+        errorUnsupportedMaterialType: "نوع هذه المادة غير مدعوم في خلطات الإنتاج.",
+        errorMissingSpecificGravity: "هذه الإضافة الكيميائية بحاجة إلى كثافة نوعية مسجَّلة قبل إضافتها للخلطة.",
       },
       detail: {
         targetVsActual: "المستهدف مقابل الفعلي",
