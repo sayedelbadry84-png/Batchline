@@ -712,15 +712,17 @@ test("an approval for a smaller shortage cannot authorize a larger one after a c
 // ticket completion then genuinely can't satisfy.
 test("the snapshot simulates cumulative demand when two materials share one fallback silo (BL-FU-P1-01)", async () => {
   await resetSilo(0); // materialId's own explicitly-assigned silo — irrelevant to this scenario
-  const materialA = await prisma.material.create({ data: { name: "TEST-SUITE-SHARED-FALLBACK-A", type: "CEMENT" } });
-  const materialB = await prisma.material.create({ data: { name: "TEST-SUITE-SHARED-FALLBACK-B", type: "CEMENT" } });
-  // Neither A nor B has its own silo — both resolve to the SAME generic
-  // fallback (materialId: null, same materialType), exactly like
-  // fallbackSiloId itself. A dedicated fallback here (not the shared
-  // fallbackSiloId fixture) so this test's numbers can't be perturbed by
-  // anything else in the suite that touches the shared one.
+  // SLAG, not CEMENT — the shared fallbackSiloId fixture is itself a
+  // CEMENT-type, materialId:null silo, so a materialType:"CEMENT" pair
+  // here would be genuinely ambiguous between it and this test's own
+  // dedicated fallback (findMatchingSilo's fallback lookup has no
+  // deterministic order between two equally-qualifying rows). SLAG hits
+  // the exact same SILO resolution branch in resolveTicketComponents
+  // without colliding with any existing fixture.
+  const materialA = await prisma.material.create({ data: { name: "TEST-SUITE-SHARED-FALLBACK-A", type: "SLAG" } });
+  const materialB = await prisma.material.create({ data: { name: "TEST-SUITE-SHARED-FALLBACK-B", type: "SLAG" } });
   const sharedFallback = await prisma.silo.create({
-    data: { plantId, name: "TEST-SUITE-SHARED-FALLBACK-SILO", materialType: "CEMENT", materialId: null, capacityTons: 500, currentLevelTons: 1.5 },
+    data: { plantId, name: "TEST-SUITE-SHARED-FALLBACK-SILO", materialType: "SLAG", materialId: null, capacityTons: 500, currentLevelTons: 1.5 },
   });
   try {
     const ticketId = await makeTicket([
@@ -782,14 +784,18 @@ test("a request with no bound snapshot (legacy/null) authorizes nothing at compl
 test("approving or rejecting a request is refused once its ticket is terminal, even if the request row is still PENDING (BL-FU-P2-01)", async () => {
   await resetSilo(50);
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
-  // A PENDING row inserted directly, bypassing the normal expire-on-
-  // completion path, to simulate the inconsistent-data scenario the
-  // review describes rather than the (already-covered) normal race.
+  const completion = await completeBatchTicket(ticketId, {});
+  assert.equal(completion.status, "SUCCESS"); // ticket is now COMPLETE
+
+  // A PENDING row inserted directly AFTER the ticket is already
+  // terminal — bypassing requestShortageOverride's own terminal-ticket
+  // lock — to simulate the inconsistent/legacy-data scenario the review
+  // describes. Creating it before completion would just get it expired
+  // by the normal path (already covered elsewhere); this is deliberately
+  // the case that path can't see.
   const staleRequest = await prisma.shortageOverrideRequest.create({
     data: { batchTicketId: ticketId, reason: "simulates stale/inconsistent data", status: "PENDING", requestedById: adminUserId },
   });
-  const completion = await completeBatchTicket(ticketId, {});
-  assert.equal(completion.status, "SUCCESS"); // ticket is now COMPLETE; staleRequest was created after completeBatchTicket's own read, so it's untouched by the expire logic — exactly the inconsistency being tested
 
   const approval = await approveShortageOverrideRequest(staleRequest.id, adminUserId);
   assert.equal(approval.status, "NOT_PENDING");
@@ -888,9 +894,16 @@ test("applyReclaimCredit credits the ORIGINAL storage even if the material's ass
     assert.equal(await siloLevel(siloId), 50); // credited back to the ORIGINAL silo
     assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: newSilo.id } })).currentLevelTons, 0); // the new one untouched
   } finally {
-    // Restores the shared fixture's own assignment — not cleanup of an
-    // auxiliary fixture, so this stays here (newSilo itself is cleaned
-    // up generically in after(), P2-02, sixth review).
+    // newSilo shares `materialId` with the shared siloId fixture by
+    // design (that's the whole point of this test) — unlike the other
+    // auxiliary fixtures this suite creates (which always use their own
+    // distinct materialId), leaving it alive until the generic end-of-
+    // suite sweep would make findMatchingSilo's own-assigned lookup
+    // (plantId + materialId) genuinely ambiguous between it and siloId
+    // for every test that runs afterward — not inert residue, active
+    // corruption of a shared fixture's resolution. Deleted here,
+    // immediately, before restoring siloId's own assignment.
+    await cleanupDelete(() => prisma.silo.delete({ where: { id: newSilo.id } }));
     await prisma.silo.update({ where: { id: siloId }, data: { materialId } }).catch(() => {});
   }
 });
