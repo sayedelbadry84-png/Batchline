@@ -115,13 +115,23 @@ export async function releaseBatchTicket(formData: FormData) {
   if (!(await isPlantInScope(plantId, reservation.siteId))) return;
   if (!(await isPlantActive(plantId))) return;
 
-  const ticket = await releaseTicketForReservation(reservationId, requestedVolume, plantId);
-  if (!ticket) return;
+  const result = await releaseTicketForReservation(reservationId, requestedVolume, plantId);
+  if (result.status !== "OK") {
+    // Not silently doing nothing (RMR-P2-07) — a rejection this specific
+    // (as opposed to the picker simply offering a stale/invalid option,
+    // already guarded above) is worth a record even though the UI itself
+    // stays a silent no-op, matching every other rejected action in this
+    // file.
+    if (result.status === "STORAGE_NOT_CONFIGURED") {
+      await logAudit({ module: "Production", recordId: reservationId, reasonCode: "RELEASE_STORAGE_NOT_CONFIGURED", afterValue: result.material });
+    }
+    return;
+  }
 
   revalidatePath("/production");
   revalidatePath("/operator");
   revalidatePath("/reservations");
-  redirect(`${returnPrefix}/${ticket.id}`);
+  redirect(`${returnPrefix}/${result.ticket.id}`);
 }
 
 // A walk-in sale — a customer at the yard with no prior booking. Creates
@@ -177,12 +187,17 @@ export async function createManualRelease(formData: FormData) {
     reasonCode: "MANUAL_BOOKING_CREATED",
   });
 
-  const ticket = await releaseTicketForReservation(reservation.id, volumeM3, plantId);
-  if (!ticket) return;
+  const result = await releaseTicketForReservation(reservation.id, volumeM3, plantId);
+  if (result.status !== "OK") {
+    if (result.status === "STORAGE_NOT_CONFIGURED") {
+      await logAudit({ module: "Production", recordId: reservation.id, reasonCode: "RELEASE_STORAGE_NOT_CONFIGURED", afterValue: result.material });
+    }
+    return;
+  }
 
   revalidatePath("/production");
   revalidatePath("/reservations");
-  redirect(`/production/${ticket.id}`);
+  redirect(`/production/${result.ticket.id}`);
 }
 
 export async function recordActuals(formData: FormData) {
