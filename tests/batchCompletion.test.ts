@@ -680,7 +680,7 @@ test("applyReclaimCredit never credits an inventoryTracked:false material (P1-04
     const completion = await completeBatchTicket(ticketId, {});
     assert.equal(completion.status, "SUCCESS");
 
-    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date(), reclaimedVolumeM3: 2 } });
+    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "CLOSED", batchTime: new Date(), reclaimedVolumeM3: 2 } });
     tripIds.push(trip.id);
 
     const ticketWithComponents = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId }, include: { components: { include: { material: true } } } });
@@ -714,7 +714,7 @@ test("applyReclaimCredit credits only the fraction of what was ACTUALLY deducted
   assert.equal(completion.status, "SUCCESS"); // only 0.5t actually applied — all that was on hand
   assert.equal(await siloLevel(siloId), 0);
 
-  const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date(), reclaimedVolumeM3: 5 } });
+  const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "CLOSED", batchTime: new Date(), reclaimedVolumeM3: 5 } });
   tripIds.push(trip.id);
   const ticketWithComponents = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId }, include: { components: { include: { material: true } } } });
   const creditResult = await prisma.$transaction((tx) =>
@@ -738,7 +738,7 @@ test("applyReclaimCredit credits the ORIGINAL storage even if the material's ass
     // the material happens to point now.
     await prisma.silo.update({ where: { id: siloId }, data: { materialId: null } });
 
-    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date(), reclaimedVolumeM3: 5 } });
+    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "CLOSED", batchTime: new Date(), reclaimedVolumeM3: 5 } });
     tripIds.push(trip.id);
     const ticketWithComponents = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId }, include: { components: { include: { material: true } } } });
     const creditResult = await prisma.$transaction((tx) =>
@@ -768,7 +768,7 @@ test("applyReclaimCredit reports failure when the original storage no longer exi
     // later reclaim credit to land on.
     await prisma.silo.delete({ where: { id: throwawaySilo.id } });
 
-    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date(), reclaimedVolumeM3: 5 } });
+    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "CLOSED", batchTime: new Date(), reclaimedVolumeM3: 5 } });
     tripIds.push(trip.id);
     const ticketWithComponents = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId }, include: { components: { include: { material: true } } } });
     const creditResult = await prisma.$transaction((tx) =>
@@ -799,7 +799,7 @@ test("a capacity failure rolls back every reclaim credit already applied in the 
     // crediting the full 2t back would overflow its 10t capacity.
     await prisma.silo.update({ where: { id: secondSilo.id }, data: { currentLevelTons: 9 } });
 
-    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "LOADING", batchTime: new Date(), reclaimedVolumeM3: 5 } });
+    const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId, driverId, status: "CLOSED", batchTime: new Date(), reclaimedVolumeM3: 5 } });
     tripIds.push(trip.id);
     const ticketWithComponents = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId }, include: { components: { include: { material: true } } } });
 
