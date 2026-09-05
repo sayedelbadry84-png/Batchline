@@ -1,32 +1,32 @@
 // Real PostgreSQL integration tests for the reservation mix-revision
 // copy-on-write feature (src/lib/reservationMixRevisions.ts,
-// src/lib/reservationRelease.ts's active-revision read, and its
-// downstream integration with completion/reversal). Same
-// TEST_DATABASE_URL-must-differ-from-DATABASE_URL safety gate, fixture
-// naming ("TEST-SUITE-..."), and generic-sweep teardown as
-// tests/batchCompletion.test.ts — see that file's own header comment for
-// the full rationale; not repeated here.
+// src/lib/reservationRelease.ts's active-revision read and material-
+// eligibility preflight, and its downstream integration with
+// completion/reversal). Same TEST_DATABASE_URL-must-differ-from-
+// DATABASE_URL safety gate as tests/batchCompletion.test.ts — see that
+// file's own header comment for the full rationale; not repeated here.
 //
-// Scope note: this file proves the DOMAIN layer (the 10 scenarios below).
-// Four of the spec's 15 scenarios live above the domain layer and are not
-// reachable from a plain node:test process the way this suite runs:
-//   - permission refusal (#8) and plant/site-scope refusal (#9) are
-//     enforced in the Server Action wrapper
-//     (production/reservationMixActions.ts), which calls getCurrentUser()
-//     — a real Next.js request-scoped cookie read this harness has no
-//     session for. What CAN be proven without a session is the
-//     underlying pure logic those wrappers call — canPerformAction's role
-//     grant and isSiteInScope's comparison — so both are exercised
-//     directly below as a partial substitute, with live-browser
-//     verification covering the actual end-to-end refusal.
-//   - the audit trail (#13) is written by the same Server Action wrapper,
-//     for the same reason not callable here — verified live instead.
-//   - UI button gating (#14) and Arabic/English rendering (#15) are
-//     browser-rendered concerns; the two dictionaries are proven
-//     structurally identical in shape by `tsc`/`next build` already
-//     passing (English is typed directly off the Arabic dictionary's
-//     shape elsewhere in this codebase), and verified live in the
-//     browser for actual rendering.
+// Fixture isolation (BATCHLINE_RESERVATION_MIX_REVIEW.md, RMR-P2-03):
+// every fixture this file creates uses the "TEST-SUITE-RMR-" prefix,
+// distinct from batchCompletion.test.ts's own "TEST-SUITE-" fixtures, and
+// every created id is tracked explicitly in the arrays/variables below.
+// Teardown deletes ONLY those tracked ids, in FK-safe order — it never
+// does a name-prefix sweep (the previous draft's `WHERE name STARTSWITH
+// 'TEST-SUITE-'` scan matched ANY suite's rows sharing that broader
+// prefix, so it could delete another file's still-live fixtures if the
+// two ever ran concurrently, or mask this file's own leaks behind
+// whatever the other suite happened to leave around). The residue
+// assertion at the end mirrors that: it only counts rows under THIS
+// file's own unique prefix.
+//
+// Scope note: this file proves the DOMAIN layer. Permission refusal,
+// plant/site-scope denial at the Server Action layer, and Arabic/English
+// rendering are not reachable from a plain node:test process (no
+// session/cookie context) — the reachable parts (canPerformAction's role
+// grant, isSiteInScope's comparison) are exercised directly below as a
+// partial substitute, with live-browser verification covering the actual
+// end-to-end refusal and the out-of-scope notFound() page behavior
+// (RMR-P1-01).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -45,6 +45,7 @@ const { PrismaClient } = await import("@prisma/client");
 const { completeBatchTicket, reverseBatchTicket } = await import("../src/lib/batchCompletion");
 const { releaseTicketForReservation } = await import("../src/lib/reservationRelease");
 const { getEffectiveMix, saveReservationMixRevision, cancelActiveReservationMixRevision } = await import("../src/lib/reservationMixRevisions");
+const { getRemainingVolumeM3 } = await import("../src/lib/reservations");
 const { canPerformAction } = await import("../src/lib/permissions");
 const { isSiteInScope } = await import("../src/lib/siteScope");
 
@@ -61,6 +62,10 @@ let cementMaterialId: string;
 let waterMaterialId: string;
 let cementSiloId: string;
 let waterHopperId: string;
+// RMR-P2-02 fixtures — three ways a component can be ineligible.
+let unsupportedTypeMaterialId: string; // a type resolveTicketComponents doesn't know how to resolve at all
+let admixtureNoSgMaterialId: string; // a real, supported type, but missing a property that type requires
+let unavailableAggregateMaterialId: string; // a real, supported, well-formed material with no storage anywhere at this plant
 let mixId: string;
 let projectId: string;
 let customerId: string;
@@ -68,34 +73,55 @@ let adminUserId: string;
 
 const reservationIds: string[] = [];
 const ticketIds: string[] = [];
+const materialIds: string[] = []; // every Material this file creates, for teardown
+const siloIds: string[] = [];
+const hopperIds: string[] = [];
 
 before(async () => {
-  const site = await prisma.site.create({ data: { code: `TEST-SUITE-RMR-${Date.now()}`, name: "TEST-SUITE-SITE", city: "Test", country: "Test" } });
+  const site = await prisma.site.create({ data: { code: `TEST-SUITE-RMR-${Date.now()}`, name: "TEST-SUITE-RMR-SITE", city: "Test", country: "Test" } });
   siteId = site.id;
-  const plant = await prisma.plant.create({ data: { siteId, name: "TEST-SUITE-PLANT" } });
+  const plant = await prisma.plant.create({ data: { siteId, name: "TEST-SUITE-RMR-PLANT" } });
   plantId = plant.id;
 
-  const cement = await prisma.material.create({ data: { name: "TEST-SUITE-CEMENT", type: "CEMENT" } });
+  const cement = await prisma.material.create({ data: { name: "TEST-SUITE-RMR-CEMENT", type: "CEMENT" } });
   cementMaterialId = cement.id;
+  materialIds.push(cementMaterialId);
   const cementSilo = await prisma.silo.create({
-    data: { plantId, name: "TEST-SUITE-SILO", materialType: "CEMENT", materialId: cementMaterialId, capacityTons: 500, currentLevelTons: 100, minThresholdPct: 15 },
+    data: { plantId, name: "TEST-SUITE-RMR-SILO", materialType: "CEMENT", materialId: cementMaterialId, capacityTons: 500, currentLevelTons: 100, minThresholdPct: 15 },
   });
   cementSiloId = cementSilo.id;
+  siloIds.push(cementSiloId);
 
-  const water = await prisma.material.create({ data: { name: "TEST-SUITE-WATER", type: "WATER" } });
+  const water = await prisma.material.create({ data: { name: "TEST-SUITE-RMR-WATER", type: "WATER" } });
   waterMaterialId = water.id;
+  materialIds.push(waterMaterialId);
   const waterHopper = await prisma.hopper.create({
-    data: { plantId, name: "TEST-SUITE-WATER-HOPPER", aggregateType: "WATER", materialId: waterMaterialId, capacityTons: 500, currentLevelTons: 100, minThresholdPct: 15 },
+    data: { plantId, name: "TEST-SUITE-RMR-WATER-HOPPER", aggregateType: "WATER", materialId: waterMaterialId, capacityTons: 500, currentLevelTons: 100, minThresholdPct: 15 },
   });
   waterHopperId = waterHopper.id;
+  hopperIds.push(waterHopperId);
 
-  const customer = await prisma.customer.create({ data: { legalName: "TEST-SUITE-CUSTOMER", creditLimit: 999999 } });
+  const unsupportedType = await prisma.material.create({ data: { name: "TEST-SUITE-RMR-EXOTIC", type: "TEST-SUITE-RMR-EXOTIC-TYPE" } });
+  unsupportedTypeMaterialId = unsupportedType.id;
+  materialIds.push(unsupportedTypeMaterialId);
+
+  const admixtureNoSg = await prisma.material.create({ data: { name: "TEST-SUITE-RMR-ADMIXTURE-NO-SG", type: "ADMIXTURE", specificGravity: null } });
+  admixtureNoSgMaterialId = admixtureNoSg.id;
+  materialIds.push(admixtureNoSgMaterialId);
+
+  // A real SAND-type material with no Hopper anywhere at this plant —
+  // resolveTicketComponents can never find storage for it.
+  const unavailableAggregate = await prisma.material.create({ data: { name: "TEST-SUITE-RMR-UNAVAILABLE-SAND", type: "SAND" } });
+  unavailableAggregateMaterialId = unavailableAggregate.id;
+  materialIds.push(unavailableAggregateMaterialId);
+
+  const customer = await prisma.customer.create({ data: { legalName: "TEST-SUITE-RMR-CUSTOMER", creditLimit: 999999 } });
   customerId = customer.id;
-  const project = await prisma.project.create({ data: { name: "TEST-SUITE-PROJECT", customerId, siteAddress: "Test Address" } });
+  const project = await prisma.project.create({ data: { name: "TEST-SUITE-RMR-PROJECT", customerId, siteAddress: "Test Address" } });
   projectId = project.id;
   const mix = await prisma.mixDesign.create({
     data: {
-      code: `TEST-SUITE-MIX-${Date.now()}`,
+      code: `TEST-SUITE-RMR-MIX-${Date.now()}`,
       grade: "C25",
       slumpTargetMm: 100,
       wcRatio: WATER_PER_M3 / CEMENT_PER_M3,
@@ -105,13 +131,30 @@ before(async () => {
   mixId = mix.id;
 
   const admin = await prisma.user.create({
-    data: { email: `test-suite-rmr-admin-${Date.now()}@example.invalid`, name: "TEST-SUITE-ADMIN", passwordHash: "not-a-real-hash", role: "ADMIN" },
+    data: { email: `test-suite-rmr-admin-${Date.now()}@example.invalid`, name: "TEST-SUITE-RMR-ADMIN", passwordHash: "not-a-real-hash", role: "ADMIN" },
   });
   adminUserId = admin.id;
 });
 
 async function deleteMovements(where: NonNullable<Parameters<typeof prisma.inventoryMovement.findMany>[0]>["where"]) {
   await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_movement_immutability = 'on'`, prisma.inventoryMovement.deleteMany({ where })]);
+}
+
+// The DB-level immutability triggers added for this feature (RMR-P1-02)
+// block a plain delete/update of ReservationMixRevision(Component) rows —
+// this file's own teardown is the one legitimate reason to bypass that,
+// same shape as deleteMovements above for InventoryMovement, under a
+// distinct setting name so the two tables' escape hatches can never be
+// confused.
+async function deleteRevisionRows(reservationId: string) {
+  await prisma.$transaction([
+    prisma.$executeRaw`SET LOCAL app.bypass_reservation_mix_revision_immutability = 'on'`,
+    prisma.reservationMixRevisionComponent.deleteMany({ where: { revision: { reservationId } } }),
+  ]);
+  await prisma.$transaction([
+    prisma.$executeRaw`SET LOCAL app.bypass_reservation_mix_revision_immutability = 'on'`,
+    prisma.reservationMixRevision.deleteMany({ where: { reservationId } }),
+  ]);
 }
 
 function isRecordNotFound(e: unknown): boolean {
@@ -128,7 +171,7 @@ async function cleanupDelete(fn: () => Promise<unknown>): Promise<void> {
 async function makeReservation(overrides: Partial<{ status: string; requestedVolumeM3: number }> = {}) {
   const reservation = await prisma.reservation.create({
     data: {
-      reservationNumber: `TEST-SUITE-RES-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      reservationNumber: `TEST-SUITE-RMR-RES-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       projectId,
       siteId,
       mixId,
@@ -150,18 +193,17 @@ after(async () => {
     await cleanupDelete(() => prisma.batchTicket.delete({ where: { id } }));
   }
   for (const id of reservationIds) {
-    await prisma.reservationMixRevisionComponent.deleteMany({ where: { revision: { reservationId: id } } });
-    await prisma.reservationMixRevision.deleteMany({ where: { reservationId: id } });
+    await prisma.auditEvent.deleteMany({ where: { recordId: id } });
+    await deleteRevisionRows(id);
     await cleanupDelete(() => prisma.reservation.delete({ where: { id } }));
   }
-  await deleteMovements({ OR: [{ storageId: cementSiloId }, { storageId: waterHopperId }] });
+  await deleteMovements({ storageId: { in: siloIds.concat(hopperIds) } });
+  if (materialIds.length > 0) await deleteMovements({ materialId: { in: materialIds } });
+  if (materialIds.length > 0) await prisma.batchComponentActual.deleteMany({ where: { materialId: { in: materialIds } } });
 
-  const leftoverMaterialIds = (await prisma.material.findMany({ where: { name: { startsWith: "TEST-SUITE-" } }, select: { id: true } })).map((m) => m.id);
-  if (leftoverMaterialIds.length > 0) await deleteMovements({ materialId: { in: leftoverMaterialIds } });
-  if (leftoverMaterialIds.length > 0) await prisma.batchComponentActual.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } });
-  await cleanupDelete(() => prisma.hopper.delete({ where: { id: waterHopperId } }));
-  await cleanupDelete(() => prisma.silo.delete({ where: { id: cementSiloId } }));
-  if (leftoverMaterialIds.length > 0) await cleanupDelete(() => prisma.material.deleteMany({ where: { id: { in: leftoverMaterialIds } } }));
+  for (const id of hopperIds) await cleanupDelete(() => prisma.hopper.delete({ where: { id } }));
+  for (const id of siloIds) await cleanupDelete(() => prisma.silo.delete({ where: { id } }));
+  if (materialIds.length > 0) await cleanupDelete(() => prisma.material.deleteMany({ where: { id: { in: materialIds } } }));
 
   await cleanupDelete(() => prisma.mixDesign.delete({ where: { id: mixId } }));
   await cleanupDelete(() => prisma.project.delete({ where: { id: projectId } }));
@@ -170,15 +212,17 @@ after(async () => {
   await cleanupDelete(() => prisma.site.delete({ where: { id: siteId } }));
   await cleanupDelete(() => prisma.user.delete({ where: { id: adminUserId } }));
 
+  // Only THIS file's own unique prefix — never the bare "TEST-SUITE-"
+  // shared with batchCompletion.test.ts (RMR-P2-03).
   const residue = await Promise.all([
-    prisma.material.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
-    prisma.reservation.count({ where: { reservationNumber: { startsWith: "TEST-SUITE-" } } }),
-    prisma.mixDesign.count({ where: { code: { startsWith: "TEST-SUITE-" } } }),
-    prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
-    prisma.plant.count({ where: { name: { startsWith: "TEST-SUITE-" } } }),
-    prisma.batchTicket.count({ where: { ticketNumber: { startsWith: "TEST-SUITE-" } } }),
+    prisma.material.count({ where: { name: { startsWith: "TEST-SUITE-RMR-" } } }),
+    prisma.reservation.count({ where: { reservationNumber: { startsWith: "TEST-SUITE-RMR-" } } }),
+    prisma.mixDesign.count({ where: { code: { startsWith: "TEST-SUITE-RMR-" } } }),
+    prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-RMR-" } } }),
+    prisma.plant.count({ where: { name: { startsWith: "TEST-SUITE-RMR-" } } }),
+    prisma.user.count({ where: { name: { startsWith: "TEST-SUITE-RMR-" } } }),
   ]);
-  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-* fixtures after teardown: [material, reservation, mix, site, plant, ticket] = ${JSON.stringify(residue)}`);
+  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-RMR-* fixtures after teardown: [material, reservation, mix, site, plant, user] = ${JSON.stringify(residue)}`);
 
   await prisma.$disconnect();
 });
@@ -188,6 +232,14 @@ function revisedComponents() {
     { materialId: cementMaterialId, designMassKgPerM3: REVISED_CEMENT_PER_M3 },
     { materialId: waterMaterialId, designMassKgPerM3: REVISED_WATER_PER_M3 },
   ];
+}
+
+async function expectReleaseOk(reservationId: string, volume: number) {
+  const result = await releaseTicketForReservation(reservationId, volume, plantId);
+  assert.equal(result.status, "OK");
+  if (result.status !== "OK") throw new Error("unreachable");
+  ticketIds.push(result.ticket.id);
+  return result.ticket;
 }
 
 // ---- 1. Editing a reservation's mix never touches MixComponent --------
@@ -225,33 +277,42 @@ test("a second reservation on the same mix design is unaffected by the first res
 test("a ticket released before the edit keeps its original components; a ticket released after uses the revision", async () => {
   const reservationId = await makeReservation({ requestedVolumeM3: 20 });
 
-  const beforeTicket = await releaseTicketForReservation(reservationId, 5, plantId);
-  assert.ok(beforeTicket);
-  ticketIds.push(beforeTicket!.id);
+  const beforeTicket = await expectReleaseOk(reservationId, 5);
 
   const saved = await saveReservationMixRevision(reservationId, { reason: "revise for remaining volume", actorId: adminUserId, components: revisedComponents() });
   assert.equal(saved.status, "OK");
 
-  const afterTicket = await releaseTicketForReservation(reservationId, 5, plantId);
-  assert.ok(afterTicket);
-  ticketIds.push(afterTicket!.id);
+  const afterTicket = await expectReleaseOk(reservationId, 5);
 
-  const beforeActuals = await prisma.batchComponentActual.findMany({ where: { batchTicketId: beforeTicket!.id } });
-  const afterActuals = await prisma.batchComponentActual.findMany({ where: { batchTicketId: afterTicket!.id } });
+  const beforeActuals = await prisma.batchComponentActual.findMany({ where: { batchTicketId: beforeTicket.id } });
+  const afterActuals = await prisma.batchComponentActual.findMany({ where: { batchTicketId: afterTicket.id } });
 
-  assert.equal(beforeTicket!.reservationMixRevisionId, null);
+  assert.equal(beforeTicket.reservationMixRevisionId, null);
   const beforeCement = beforeActuals.find((a) => a.materialId === cementMaterialId)!;
   assert.equal(beforeCement.targetMassKg, CEMENT_PER_M3 * 5);
 
-  assert.equal(afterTicket!.reservationMixRevisionId, saved.status === "OK" ? saved.revisionId : null);
+  assert.equal(afterTicket.reservationMixRevisionId, saved.status === "OK" ? saved.revisionId : null);
   const afterCement = afterActuals.find((a) => a.materialId === cementMaterialId)!;
   assert.equal(afterCement.targetMassKg, REVISED_CEMENT_PER_M3 * 5);
 
   // Re-confirm the earlier ticket truly never changed after the later
   // release, not just before it — same "frozen once issued" guarantee
   // checked from the other side.
-  const beforeCementAgain = (await prisma.batchComponentActual.findMany({ where: { batchTicketId: beforeTicket!.id } })).find((a) => a.materialId === cementMaterialId)!;
+  const beforeCementAgain = (await prisma.batchComponentActual.findMany({ where: { batchTicketId: beforeTicket.id } })).find((a) => a.materialId === cementMaterialId)!;
   assert.equal(beforeCementAgain.targetMassKg, CEMENT_PER_M3 * 5);
+});
+
+// ---- 5. Partial fulfillment: totals must reflect remaining volume only (RMR-P2-05)
+
+test("the remaining volume used for future-total display shrinks after a ticket is released, not the full original booking", async () => {
+  const reservationId = await makeReservation({ requestedVolumeM3: 20 });
+  const remainingBefore = await getRemainingVolumeM3(reservationId, 20, prisma);
+  assert.equal(remainingBefore, 20);
+
+  await expectReleaseOk(reservationId, 8);
+
+  const remainingAfter = await getRemainingVolumeM3(reservationId, 20, prisma);
+  assert.equal(remainingAfter, 12, "the reservation-mix editor's own totals column is scaled by exactly this number, not the full 20 m³ requested");
 });
 
 // ---- 6/7. Inventory deduction and reversal use the modified quantities
@@ -261,14 +322,12 @@ test("completion deducts the revised quantities, and reversal credits back exact
   const saved = await saveReservationMixRevision(reservationId, { reason: "heavier mix for this pour", actorId: adminUserId, components: revisedComponents() });
   assert.equal(saved.status, "OK");
 
-  const ticket = await releaseTicketForReservation(reservationId, 4, plantId);
-  assert.ok(ticket);
-  ticketIds.push(ticket!.id);
+  const ticket = await expectReleaseOk(reservationId, 4);
 
   const cementBefore = (await prisma.silo.findUniqueOrThrow({ where: { id: cementSiloId } })).currentLevelTons;
   const waterBefore = (await prisma.hopper.findUniqueOrThrow({ where: { id: waterHopperId } })).currentLevelTons;
 
-  const completion = await completeBatchTicket(ticket!.id, {});
+  const completion = await completeBatchTicket(ticket.id, {});
   assert.equal(completion.status, "SUCCESS");
 
   const expectedCementDeductionTons = (REVISED_CEMENT_PER_M3 * 4) / 1000;
@@ -278,7 +337,7 @@ test("completion deducts the revised quantities, and reversal credits back exact
   assert.ok(Math.abs(cementAfterComplete - (cementBefore - expectedCementDeductionTons)) < 1e-6);
   assert.ok(Math.abs(waterAfterComplete - (waterBefore - expectedWaterDeductionTons)) < 1e-6);
 
-  const reversal = await reverseBatchTicket(ticket!.id, { actorId: adminUserId, reason: "TEST-SUITE-REVERSAL" });
+  const reversal = await reverseBatchTicket(ticket.id, { actorId: adminUserId, reason: "TEST-SUITE-RMR-REVERSAL" });
   assert.equal(reversal.status, "SUCCESS");
 
   const cementAfterReversal = (await prisma.silo.findUniqueOrThrow({ where: { id: cementSiloId } })).currentLevelTons;
@@ -295,36 +354,76 @@ test("a cancelled reservation refuses a mix revision", async () => {
   assert.equal(result.status, "INVALID_STATE");
 });
 
+// ---- RMR-P2-01: cancel must also refuse a terminal reservation --------
+
+test("cancelling the active revision of a now-terminal reservation is refused, not silently applied", async () => {
+  const reservationId = await makeReservation();
+  const saved = await saveReservationMixRevision(reservationId, { reason: "will become stale", actorId: adminUserId, components: revisedComponents() });
+  assert.equal(saved.status, "OK");
+
+  // The reservation goes terminal (e.g. delivered/cancelled) sometime
+  // after the revision was created — a forged/late cancel request must
+  // not be able to touch it once that's happened.
+  await prisma.reservation.update({ where: { id: reservationId }, data: { status: "CANCELLED" } });
+
+  const result = await cancelActiveReservationMixRevision(reservationId, { actorId: adminUserId });
+  assert.equal(result.status, "INVALID_STATE");
+
+  const stillActive = await prisma.reservationMixRevision.findFirst({ where: { reservationId, status: "ACTIVE" } });
+  assert.ok(stillActive, "the revision must remain ACTIVE — the cancel attempt must be a complete no-op on a terminal reservation");
+});
+
 // ---- 11. Concurrent save-vs-release never yields mixed components ------
 
 test("a concurrent revision save and ticket release never produce a ticket with mixed old/new components", async () => {
   const reservationId = await makeReservation({ requestedVolumeM3: 20 });
 
-  const [saveResult, ticket] = await Promise.all([
+  const [saveResult, releaseResult] = await Promise.all([
     saveReservationMixRevision(reservationId, { reason: "race condition check", actorId: adminUserId, components: revisedComponents() }),
     releaseTicketForReservation(reservationId, 5, plantId),
   ]);
   assert.equal(saveResult.status, "OK");
 
-  // releaseTicketForReservation swallows a serialization conflict and
-  // returns null (see its own comment) — a real caller would just retry,
-  // so this test does too, to reach a ticket to actually inspect.
-  const finalTicket = ticket ?? (await releaseTicketForReservation(reservationId, 5, plantId));
-  assert.ok(finalTicket);
-  ticketIds.push(finalTicket!.id);
+  // A genuine Serializable conflict is a possible, typed outcome here
+  // (RMR-P2-07) — a real caller just retries, so this test does too, to
+  // reach a ticket to actually inspect.
+  const finalTicket = releaseResult.status === "OK" ? releaseResult.ticket : await expectReleaseOk(reservationId, 5);
+  if (releaseResult.status === "OK") ticketIds.push(releaseResult.ticket.id);
 
-  const actuals = await prisma.batchComponentActual.findMany({ where: { batchTicketId: finalTicket!.id } });
+  const actuals = await prisma.batchComponentActual.findMany({ where: { batchTicketId: finalTicket.id } });
   const cementActual = actuals.find((a) => a.materialId === cementMaterialId)!;
   const waterActual = actuals.find((a) => a.materialId === waterMaterialId)!;
 
-  if (finalTicket!.reservationMixRevisionId) {
-    assert.equal(finalTicket!.reservationMixRevisionId, saveResult.status === "OK" ? saveResult.revisionId : null);
-    assert.equal(cementActual.targetMassKg, REVISED_CEMENT_PER_M3 * finalTicket!.volumeM3);
-    assert.equal(waterActual.targetMassKg, REVISED_WATER_PER_M3 * finalTicket!.volumeM3);
+  if (finalTicket.reservationMixRevisionId) {
+    assert.equal(finalTicket.reservationMixRevisionId, saveResult.status === "OK" ? saveResult.revisionId : null);
+    assert.equal(cementActual.targetMassKg, REVISED_CEMENT_PER_M3 * finalTicket.volumeM3);
+    assert.equal(waterActual.targetMassKg, REVISED_WATER_PER_M3 * finalTicket.volumeM3);
   } else {
-    assert.equal(cementActual.targetMassKg, CEMENT_PER_M3 * finalTicket!.volumeM3);
-    assert.equal(waterActual.targetMassKg, WATER_PER_M3 * finalTicket!.volumeM3);
+    assert.equal(cementActual.targetMassKg, CEMENT_PER_M3 * finalTicket.volumeM3);
+    assert.equal(waterActual.targetMassKg, WATER_PER_M3 * finalTicket.volumeM3);
   }
+});
+
+// ---- RMR-P2-06: concurrent save-vs-save must never leave two ACTIVE ---
+
+test("two concurrent saves against a reservation with no existing revision both succeed and leave exactly one ACTIVE revision", async () => {
+  const reservationId = await makeReservation();
+
+  const [r1, r2] = await Promise.all([
+    saveReservationMixRevision(reservationId, { reason: "concurrent save A", actorId: adminUserId, components: revisedComponents() }),
+    saveReservationMixRevision(reservationId, { reason: "concurrent save B", actorId: adminUserId, components: revisedComponents() }),
+  ]);
+  // Both succeed — a P2002 collision on (reservationId, revisionNumber)
+  // is now retried (withRevisionRetry), not left to surface as an
+  // untyped error (RMR-P2-06).
+  assert.equal(r1.status, "OK");
+  assert.equal(r2.status, "OK");
+
+  const activeRevisions = await prisma.reservationMixRevision.findMany({ where: { reservationId, status: "ACTIVE" } });
+  assert.equal(activeRevisions.length, 1, "the database's own partial unique index guarantees this even if the app logic alone did not");
+
+  const revisionNumbers = [r1, r2].map((r) => (r.status === "OK" ? r.revisionNumber : null)).sort((a, b) => (a ?? 0) - (b ?? 0));
+  assert.deepEqual(revisionNumbers, [1, 2]);
 });
 
 // ---- 12. Reset-to-original (cancel revision) works, never touching the main mix
@@ -351,6 +450,100 @@ test("cancelling the active revision reverts getEffectiveMix to the original mix
   // this codebase (completeBatchTicket, reverseBatchTicket, etc.).
   const secondCancel = await cancelActiveReservationMixRevision(reservationId, { actorId: adminUserId });
   assert.equal(secondCancel.status, "NO_ACTIVE_REVISION");
+});
+
+// ---- RMR-P2-02: material eligibility is validated -----------------------
+
+test("saving a revision refuses a material whose type resolveTicketComponents doesn't know how to resolve", async () => {
+  const reservationId = await makeReservation();
+  const result = await saveReservationMixRevision(reservationId, {
+    reason: "add an exotic material",
+    actorId: adminUserId,
+    components: [{ materialId: cementMaterialId, designMassKgPerM3: CEMENT_PER_M3 }, { materialId: unsupportedTypeMaterialId, designMassKgPerM3: 1 }],
+  });
+  assert.equal(result.status, "UNSUPPORTED_MATERIAL_TYPE");
+  if (result.status === "UNSUPPORTED_MATERIAL_TYPE") assert.equal(result.materialId, unsupportedTypeMaterialId);
+});
+
+test("saving a revision refuses an admixture with no specific gravity on file", async () => {
+  const reservationId = await makeReservation();
+  const result = await saveReservationMixRevision(reservationId, {
+    reason: "add an admixture missing SG",
+    actorId: adminUserId,
+    components: [{ materialId: cementMaterialId, designMassKgPerM3: CEMENT_PER_M3 }, { materialId: admixtureNoSgMaterialId, designMassKgPerM3: 1 }],
+  });
+  assert.equal(result.status, "MISSING_SPECIFIC_GRAVITY");
+  if (result.status === "MISSING_SPECIFIC_GRAVITY") assert.equal(result.materialId, admixtureNoSgMaterialId);
+});
+
+test("releasing a ticket against a revision whose material has nowhere to draw from at this plant is refused with a typed, attributable reason", async () => {
+  const reservationId = await makeReservation({ requestedVolumeM3: 20 });
+  const saved = await saveReservationMixRevision(reservationId, {
+    reason: "add a material this plant can't actually supply",
+    actorId: adminUserId,
+    components: [...revisedComponents(), { materialId: unavailableAggregateMaterialId, designMassKgPerM3: 50 }],
+  });
+  assert.equal(saved.status, "OK");
+
+  const result = await releaseTicketForReservation(reservationId, 5, plantId);
+  assert.equal(result.status, "STORAGE_NOT_CONFIGURED");
+  if (result.status === "STORAGE_NOT_CONFIGURED") assert.equal(result.material, "TEST-SUITE-RMR-UNAVAILABLE-SAND");
+
+  // No half-created ticket is left behind — the whole release is one
+  // transaction, and the preflight check aborts it before any
+  // BatchTicket row is ever inserted.
+  const orphanTicket = await prisma.batchTicket.findFirst({ where: { reservationId } });
+  assert.equal(orphanTicket, null);
+});
+
+// ---- RMR-P2-04: audit creation is atomic with the recipe change --------
+
+test("saving and cancelling a revision each write their AuditEvent atomically with the change itself", async () => {
+  const reservationId = await makeReservation();
+
+  const saved = await saveReservationMixRevision(reservationId, { reason: "TEST-SUITE-RMR-AUDIT-CHECK", actorId: adminUserId, components: revisedComponents() });
+  assert.equal(saved.status, "OK");
+  const saveAudit = await prisma.auditEvent.findFirst({ where: { recordId: reservationId, reasonCode: "RESERVATION_MIX_REVISED" }, orderBy: { createdAt: "desc" } });
+  assert.ok(saveAudit, "a save must never commit without its own audit row");
+  assert.equal(saveAudit!.actorId, adminUserId);
+  assert.ok(saveAudit!.afterValue?.includes("TEST-SUITE-RMR-AUDIT-CHECK"));
+
+  const cancelled = await cancelActiveReservationMixRevision(reservationId, { actorId: adminUserId });
+  assert.equal(cancelled.status, "OK");
+  const cancelAudit = await prisma.auditEvent.findFirst({ where: { recordId: reservationId, reasonCode: "RESERVATION_MIX_REVISION_CANCELLED" }, orderBy: { createdAt: "desc" } });
+  assert.ok(cancelAudit, "a cancel must never commit without its own audit row");
+  assert.equal(cancelAudit!.actorId, adminUserId);
+});
+
+// ---- RMR-P1-02: revision history is immutable at the database itself --
+
+test("a ReservationMixRevision row cannot be deleted or have its frozen fields updated directly, even bypassing the app", async () => {
+  const reservationId = await makeReservation();
+  const saved = await saveReservationMixRevision(reservationId, { reason: "immutability probe", actorId: adminUserId, components: revisedComponents() });
+  assert.equal(saved.status, "OK");
+  if (saved.status !== "OK") throw new Error("unreachable");
+
+  await assert.rejects(
+    () => prisma.reservationMixRevision.delete({ where: { id: saved.revisionId } }),
+    /permanent history|immutable/i,
+    "the database trigger must block a direct delete, not just the app's own code paths",
+  );
+  await assert.rejects(
+    () => prisma.reservationMixRevision.update({ where: { id: saved.revisionId }, data: { reason: "rewritten" } }),
+    /immutable/i,
+    "a frozen field (reason) must never be changeable after creation, even by a direct update",
+  );
+  await assert.rejects(
+    () => prisma.reservationMixRevisionComponent.updateMany({ where: { revisionId: saved.revisionId }, data: { note: "rewritten" } }),
+    /immutable/i,
+  );
+
+  // The lifecycle fields (status/resolvedAt/resolvedById) are NOT
+  // frozen — cancelActiveReservationMixRevision above (and every save's
+  // own supersede step) already proves this path works; this is just
+  // confirming the trigger's allow-list is exactly that, not broader.
+  const cancelled = await cancelActiveReservationMixRevision(reservationId, { actorId: adminUserId });
+  assert.equal(cancelled.status, "OK");
 });
 
 // ---- 8/9 (partial — see file header). Pure permission/scope logic ------
