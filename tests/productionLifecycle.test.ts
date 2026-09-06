@@ -1,10 +1,11 @@
 // Real PostgreSQL integration tests for the production/trip lifecycle
 // domain layer (src/lib/tripAssignment.ts, src/lib/tripLifecycle.ts,
-// src/lib/tripDispatch.ts's claimTripSlot) — the first production-
-// lifecycle review (BATCHLINE_PRODUCTION_LIFECYCLE_REVIEW_ROUND1.md).
-// Same TEST_DATABASE_URL-must-differ-from-DATABASE_URL safety gate as
-// tests/batchCompletion.test.ts and tests/reservationMixRevision.test.ts
-// — see those files' own header comments for the full rationale.
+// src/lib/tripDispatch.ts) — first written for the first production-
+// lifecycle review (BATCHLINE_PRODUCTION_LIFECYCLE_REVIEW_ROUND1.md) and
+// extended for the second (…ROUND2.md). Same TEST_DATABASE_URL-must-
+// differ-from-DATABASE_URL safety gate as tests/batchCompletion.test.ts
+// and tests/reservationMixRevision.test.ts — see those files' own header
+// comments for the full rationale.
 //
 // Fixture isolation: every fixture this file creates uses the
 // "TEST-SUITE-PL-" prefix, distinct from every other suite's own prefix.
@@ -17,10 +18,13 @@
 // quality/actions.ts) are not reachable from a plain node:test process —
 // every fix that needed to be independently testable was extracted into
 // a pure domain function that takes its actor/scope as plain parameters
-// (reassignTrip, advanceTripState, closeTripFullForId,
-// closeTripWithReturnForId, approveWasteIncidentMemo,
+// (startTripForTicket, reassignTrip, advanceTripState, closeTripFullForId,
+// closeTripWithReturnForId, decideWasteIncidentMemo,
 // setDrumReturnFateForId), matching the same split already established
-// for closeReservationForId/releaseTicketForReservation.
+// for closeReservationForId/releaseTicketForReservation. dispatchTrip
+// below calls startTripForTicket directly — the one real production
+// domain command — rather than hand-assembling a paraphrase of it
+// (PL-R2-P2-06, second production-lifecycle review).
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -36,20 +40,26 @@ if (process.env.TEST_DATABASE_URL === process.env.DATABASE_URL) {
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 const { PrismaClient } = await import("@prisma/client");
-const { claimTripSlot } = await import("../src/lib/tripDispatch");
-const { claimTripResources, reassignTrip } = await import("../src/lib/tripAssignment");
+const { startTripForTicket } = await import("../src/lib/tripDispatch");
+const { reassignTrip } = await import("../src/lib/tripAssignment");
 const {
   advanceTripState,
   closeTripFullForId,
   closeTripWithReturnForId,
-  approveWasteIncidentMemo,
+  decideWasteIncidentMemo,
   setDrumReturnFateForId,
 } = await import("../src/lib/tripLifecycle");
 const { completeBatchTicket, cancelBatchTicket } = await import("../src/lib/batchCompletion");
-const { closeReservationForId } = await import("../src/lib/reservations");
-const { withRetry } = await import("../src/lib/inventoryLedger");
+const { closeReservationForId, getRemainingVolumeM3 } = await import("../src/lib/reservations");
+const { releaseTicketForReservation } = await import("../src/lib/reservationRelease");
 
 const prisma = new PrismaClient();
+// A second, independent connection — needed for the genuine two-
+// connection races below (Plant transfer vs. dispatch, and the crew
+// advisory lock under plain READ COMMITTED) where two real backends
+// must hold locks against each other, not just two logical calls
+// sharing one connection pool.
+const prisma2 = new PrismaClient();
 
 let siteId: string;
 let plantId: string;
@@ -171,11 +181,31 @@ after(async () => {
   assert.equal(leftoverSites, 0, "productionLifecycle.test.ts left residue behind");
 
   await prisma.$disconnect();
+  await prisma2.$disconnect();
 });
+
+// Polls pg_stat_activity to PROVE a backend is genuinely blocked waiting
+// on a real Postgres lock, rather than a fixed-duration sleep guessing
+// that it probably is by now — same pattern already established in
+// tests/reservationMixRevision.test.ts's own waitUntilBlockedOnLock. A
+// generous ceiling (10s) so a genuinely broken lock fails the test
+// instead of hanging forever.
+async function waitUntilBlockedOn(queryFragment: string, timeoutMs = 10000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await prisma.$queryRawUnsafe<{ pid: number }[]>(
+      `SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE '%' || $1 || '%' AND pid <> pg_backend_pid()`,
+      queryFragment,
+    );
+    if (rows.length > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for a backend to be observed genuinely blocked on: ${queryFragment}`);
+}
 
 // ---- Fixture helpers --------------------------------------------------
 
-async function makeReservation(overrides: Partial<{ siteId: string; deliveryMethod: string; minPumpReachM: number }> = {}) {
+async function makeReservation(overrides: Partial<{ siteId: string; deliveryMethod: string; minPumpReachM: number; requestedVolumeM3: number }> = {}) {
   const now = new Date();
   const reservation = await prisma.reservation.create({
     data: {
@@ -183,8 +213,8 @@ async function makeReservation(overrides: Partial<{ siteId: string; deliveryMeth
       projectId,
       siteId: overrides.siteId ?? siteId,
       mixId,
-      requestedVolumeM3: 16,
-      originalVolumeM3: 16,
+      requestedVolumeM3: overrides.requestedVolumeM3 ?? 16,
+      originalVolumeM3: overrides.requestedVolumeM3 ?? 16,
       pourWindowStart: now,
       status: "CONFIRMED",
       initialApprovedAt: now,
@@ -233,8 +263,13 @@ async function makeDriver(overrides: Partial<{ plantId: string; status: string }
 }
 
 async function makePump(overrides: Partial<{ plantId: string; status: string; reachM: number | null }> = {}) {
+  // "reachM" in overrides, not `overrides.reachM ?? 30` — an explicit
+  // `reachM: null` (a pump with genuinely unknown reach, PL-R2-P2-03)
+  // must NOT fall through to the 30 default the way `??` would collapse
+  // it to.
+  const reachM = "reachM" in overrides ? overrides.reachM : 30;
   const pump = await prisma.pump.create({
-    data: { plantId: overrides.plantId ?? plantId, code: `TEST-SUITE-PL-PMP-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`, pumpType: "LINE", hourlyRate: 100, status: overrides.status ?? "ACTIVE", reachM: overrides.reachM ?? 30 },
+    data: { plantId: overrides.plantId ?? plantId, code: `TEST-SUITE-PL-PMP-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`, pumpType: "LINE", hourlyRate: 100, status: overrides.status ?? "ACTIVE", reachM },
   });
   pumpIds.push(pump.id);
   return pump.id;
@@ -248,77 +283,53 @@ async function makeCrew(role: "OPERATOR" | "HELPER", overrides: Partial<{ plantI
   return crew.id;
 }
 
-// Mirrors startTrip's own real transaction body (production/actions.ts)
-// — the REAL claimTripSlot + claimTripResources + trip.create sequence,
-// not a paraphrase of it.
+// Calls the REAL production domain command (src/lib/tripDispatch.ts) —
+// the exact function startTrip's own Server Action calls, not a
+// hand-assembled paraphrase of claimTripSlot+claimTripResources+
+// trip.create that could silently diverge from it (PL-R2-P2-06, second
+// production-lifecycle review). truckId/driverId/pump* are the only
+// per-call choices; volume, delivery method, and minimum reach all come
+// from the real ticket/reservation rows this file's own fixtures
+// created, exactly as startTripForTicket itself reads them.
 async function dispatchTrip(
   ticketId: string,
   opts: {
     truckId: string;
     driverId: string;
     allowedSiteId?: string | null;
-    isPumpDelivery?: boolean;
     pumpId?: string | null;
     pumpOperatorId?: string | null;
     pumpAssistantId?: string | null;
-    minPumpReachM?: number | null;
-    loadVolumeM3: number;
   },
 ) {
-  // withRetry, matching startTrip's own real transaction (production/
-  // actions.ts) — a Serializable transaction whose own busy-checks read
-  // rows a concurrent winner just committed can hit a genuine Postgres
-  // serialization failure on its pre-commit snapshot rather than a clean
-  // typed busy result; retrying re-runs the whole attempt fresh.
-  return withRetry(() =>
-    prisma.$transaction(
-      async (tx) => {
-      const claim = await claimTripSlot(tx, {
-        ticketId,
-        truckId: opts.truckId,
-        pumpId: opts.pumpId ?? null,
-        pumpOperatorId: opts.pumpOperatorId ?? null,
-        pumpAssistantId: opts.pumpAssistantId ?? null,
-        allowedSiteId: opts.allowedSiteId,
-      });
-      if (claim.status !== "OK") return claim;
-
-      const resources = await claimTripResources(tx, {
-        siteId: claim.siteId,
-        truckId: opts.truckId,
-        driverId: opts.driverId,
-        loadVolumeM3: opts.loadVolumeM3,
-        isPumpDelivery: opts.isPumpDelivery ?? false,
-        pumpId: opts.pumpId ?? null,
-        pumpOperatorId: opts.pumpOperatorId ?? null,
-        pumpAssistantId: opts.pumpAssistantId ?? null,
-        minPumpReachM: opts.minPumpReachM ?? null,
-      });
-      if (resources.status !== "OK") return resources;
-
-      const trip = await tx.trip.create({
-        data: {
-          batchTicketId: ticketId,
-          truckId: opts.truckId,
-          driverId: opts.driverId,
-          pumpId: opts.pumpId ?? null,
-          pumpOperatorId: opts.pumpOperatorId ?? null,
-          pumpOperatorName: resources.pumpOperatorName,
-          pumpAssistantId: opts.pumpAssistantId ?? null,
-          pumpAssistantName: resources.pumpAssistantName,
-          status: "LOADING",
-          batchTime: new Date(),
-        },
-      });
-      return { status: "OK" as const, tripId: trip.id };
-      },
-      { isolationLevel: "Serializable" },
-    ),
-  );
+  return startTripForTicket(ticketId, {
+    truckId: opts.truckId,
+    driverId: opts.driverId,
+    pumpId: opts.pumpId ?? null,
+    pumpOperatorId: opts.pumpOperatorId ?? null,
+    pumpAssistantId: opts.pumpAssistantId ?? null,
+    allowedSiteId: opts.allowedSiteId ?? null,
+    actorId: adminUserId,
+    actorRole: "ADMIN",
+  });
 }
 
 function actor(role = "ADMIN") {
   return { actorId: adminUserId, actorRole: role };
+}
+
+// Walks a freshly-dispatched (LOADING) trip all the way to DISCHARGING —
+// reads the trip's own CURRENT status before each advanceTripState call
+// and passes it as expectedStatus, since that's now a required part of
+// the command (PL-R2-P1-01, second production-lifecycle review). Used
+// by every test below that just needs a trip AT DISCHARGING to exercise
+// close/return/quality behavior, not the advance mechanism itself.
+async function advanceToDischarging(tripId: string): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    const trip = await prisma.trip.findUniqueOrThrow({ where: { id: tripId }, select: { status: true } });
+    const result = await advanceTripState(tripId, trip.status as "LOADING" | "IN_TRANSIT" | "ON_SITE", { allowedSiteId: siteId, ...actor() });
+    if (result.status !== "OK") throw new Error(`advanceToDischarging: unexpected ${result.status} from status ${trip.status}`);
+  }
 }
 
 // ======================================================================
@@ -331,7 +342,7 @@ test("reassignTrip refuses a site-A operator reassigning a site-B trip, and chan
   const ticketB = await makeTicket(resB, { plantId: plantBId });
   const truckB = await makeTruck({ plantId: plantBId });
   const driverB = await makeDriver({ plantId: plantBId });
-  const dispatch = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, loadVolumeM3: 8 });
+  const dispatch = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
@@ -364,7 +375,7 @@ test("reassignTrip succeeds for an in-scope operator and writes one atomic audit
   const ticket = await makeTicket(res);
   const truck1 = await makeTruck();
   const driver1 = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck1, driverId: driver1, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck1, driverId: driver1, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
@@ -388,13 +399,13 @@ test("reassignTrip refuses an out-of-service truck, a busy driver, and a trip th
   const truck1 = await makeTruck();
   const driver1 = await makeDriver();
   const driver2 = await makeDriver();
-  const dispatchA = await dispatchTrip(ticketA, { truckId: truck1, driverId: driver1, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatchA = await dispatchTrip(ticketA, { truckId: truck1, driverId: driver1, allowedSiteId: siteId });
   assert.equal(dispatchA.status, "OK");
   if (dispatchA.status !== "OK") return;
   tripIds.push(dispatchA.tripId);
 
   const truck2 = await makeTruck();
-  const dispatchB = await dispatchTrip(ticketB, { truckId: truck2, driverId: driver2, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatchB = await dispatchTrip(ticketB, { truckId: truck2, driverId: driver2, allowedSiteId: siteId });
   assert.equal(dispatchB.status, "OK");
   if (dispatchB.status !== "OK") return;
   tripIds.push(dispatchB.tripId);
@@ -409,7 +420,7 @@ test("reassignTrip refuses an out-of-service truck, a busy driver, and a trip th
   assert.equal(outOfServiceResult.status, "TRUCK_OUT_OF_SERVICE");
 
   // Trip already past LOADING — advance it, then reassignment must refuse.
-  const advanceResult = await advanceTripState(dispatchB.tripId, { allowedSiteId: siteId, ...actor() });
+  const advanceResult = await advanceTripState(dispatchB.tripId, "LOADING", { allowedSiteId: siteId, ...actor() });
   assert.equal(advanceResult.status, "OK");
   const notLoadingResult = await reassignTrip(dispatchB.tripId, { truckId: truck2, driverId: driver2, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() });
   assert.equal(notLoadingResult.status, "NOT_LOADING");
@@ -420,7 +431,7 @@ test("reassignTrip refuses a truck whose rated capacity is smaller than the tick
   const ticket = await makeTicket(res, { volumeM3: 10 });
   const truck1 = await makeTruck();
   const driver1 = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck1, driverId: driver1, loadVolumeM3: 10, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck1, driverId: driver1, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
@@ -442,7 +453,7 @@ test("claimTripSlot refuses dispatch out of the actor's own site scope", async (
   const truckB = await makeTruck({ plantId: plantBId });
   const driverB = await makeDriver({ plantId: plantBId });
 
-  const result = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, loadVolumeM3: 8, allowedSiteId: siteId });
+  const result = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId });
   assert.equal(result.status, "OUT_OF_SCOPE");
 });
 
@@ -474,8 +485,8 @@ test("two concurrent dispatches for the same truck: exactly one succeeds, the ot
   const driverB = await makeDriver();
 
   const [resultA, resultB] = await Promise.all([
-    dispatchTripOrRejected(ticketA, { truckId: truck, driverId: driverA, loadVolumeM3: 8, allowedSiteId: siteId }),
-    dispatchTripOrRejected(ticketB, { truckId: truck, driverId: driverB, loadVolumeM3: 8, allowedSiteId: siteId }),
+    dispatchTripOrRejected(ticketA, { truckId: truck, driverId: driverA, allowedSiteId: siteId }),
+    dispatchTripOrRejected(ticketB, { truckId: truck, driverId: driverB, allowedSiteId: siteId }),
   ]);
   const oks = [resultA, resultB].filter((r) => r.status === "OK");
   const losers = [resultA, resultB].filter((r) => r.status !== "OK");
@@ -494,8 +505,8 @@ test("two concurrent dispatches for the same driver (different trucks): exactly 
   const driver = await makeDriver();
 
   const [resultA, resultB] = await Promise.all([
-    dispatchTripOrRejected(ticketA, { truckId: truckA, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId }),
-    dispatchTripOrRejected(ticketB, { truckId: truckB, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId }),
+    dispatchTripOrRejected(ticketA, { truckId: truckA, driverId: driver, allowedSiteId: siteId }),
+    dispatchTripOrRejected(ticketB, { truckId: truckB, driverId: driver, allowedSiteId: siteId }),
   ]);
   const oks = [resultA, resultB].filter((r) => r.status === "OK");
   const losers = [resultA, resultB].filter((r) => r.status !== "OK");
@@ -511,13 +522,13 @@ test("dispatch refuses a pump delivery with no pump, an out-of-reach pump, and t
   const truck1 = await makeTruck();
   const driver1 = await makeDriver();
 
-  const noPumpResult = await dispatchTrip(ticket1, { truckId: truck1, driverId: driver1, loadVolumeM3: 8, isPumpDelivery: true, allowedSiteId: siteId });
+  const noPumpResult = await dispatchTrip(ticket1, { truckId: truck1, driverId: driver1, allowedSiteId: siteId });
   assert.equal(noPumpResult.status, "PUMP_REQUIRED");
 
   const shortPump = await makePump({ reachM: 20 });
   const ticket2 = await makeTicket(res);
   const truck2 = await makeTruck();
-  const shortReachResult = await dispatchTrip(ticket2, { truckId: truck2, driverId: driver1, loadVolumeM3: 8, isPumpDelivery: true, pumpId: shortPump, minPumpReachM: 40, allowedSiteId: siteId });
+  const shortReachResult = await dispatchTrip(ticket2, { truckId: truck2, driverId: driver1, pumpId: shortPump, allowedSiteId: siteId });
   assert.equal(shortReachResult.status, "PUMP_INSUFFICIENT_REACH");
 
   const goodPump = await makePump({ reachM: 50 });
@@ -527,15 +538,34 @@ test("dispatch refuses a pump delivery with no pump, an out-of-reach pump, and t
   const samePersonResult = await dispatchTrip(ticket3, {
     truckId: truck3,
     driverId: driver1,
-    loadVolumeM3: 8,
-    isPumpDelivery: true,
     pumpId: goodPump,
-    minPumpReachM: 40,
     pumpOperatorId: crewMember,
     pumpAssistantId: crewMember,
     allowedSiteId: siteId,
   });
   assert.equal(samePersonResult.status, "PUMP_CREW_SAME_PERSON");
+});
+
+test("dispatch refuses a pump delivery with no operator, and a pump with unknown reach can never satisfy a stated minimum", async () => {
+  const res = await makeReservation({ deliveryMethod: "PUMP", minPumpReachM: 40 });
+  const goodPump = await makePump({ reachM: 50 });
+  const driver1 = await makeDriver();
+
+  const ticket1 = await makeTicket(res);
+  const truck1 = await makeTruck();
+  const noOperatorResult = await dispatchTrip(ticket1, { truckId: truck1, driverId: driver1, pumpId: goodPump, allowedSiteId: siteId });
+  assert.equal(noOperatorResult.status, "PUMP_OPERATOR_REQUIRED");
+
+  // A pump whose reach was simply never recorded must never satisfy a
+  // stated minimum (PL-R2-P2-03, second production-lifecycle review) —
+  // the old check only rejected a KNOWN reach below the minimum,
+  // silently passing an unknown one.
+  const unknownReachPump = await makePump({ reachM: null });
+  const operator = await makeCrew("OPERATOR");
+  const ticket2 = await makeTicket(res);
+  const truck2 = await makeTruck();
+  const unknownReachResult = await dispatchTrip(ticket2, { truckId: truck2, driverId: driver1, pumpId: unknownReachPump, pumpOperatorId: operator, allowedSiteId: siteId });
+  assert.equal(unknownReachResult.status, "PUMP_REACH_UNKNOWN");
 });
 
 // ======================================================================
@@ -586,17 +616,28 @@ test("advanceTripState walks LOADING -> IN_TRANSIT -> ON_SITE -> DISCHARGING and
   const ticket = await makeTicket(res);
   const truck = await makeTruck();
   const driver = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
 
-  for (const expectedNext of ["IN_TRANSIT", "ON_SITE", "DISCHARGING"]) {
-    const result = await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
+  const sequence: ["LOADING" | "IN_TRANSIT" | "ON_SITE", string][] = [
+    ["LOADING", "IN_TRANSIT"],
+    ["IN_TRANSIT", "ON_SITE"],
+    ["ON_SITE", "DISCHARGING"],
+  ];
+  for (const [expectedCurrent, expectedNext] of sequence) {
+    const result = await advanceTripState(dispatch.tripId, expectedCurrent, { allowedSiteId: siteId, ...actor() });
     assert.equal(result.status, "OK");
     if (result.status === "OK") assert.equal(result.next, expectedNext);
   }
-  const noNext = await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
+  // DISCHARGING is not a real AdvanceableTripStatus — the Server Action
+  // layer itself (trips/actions.ts) already refuses anything outside
+  // LOADING/IN_TRANSIT/ON_SITE before ever reaching this domain function,
+  // so this exact call is unreachable through a real typed caller. The
+  // cast proves the defensive NEXT_STATUS lookup itself still refuses
+  // cleanly if it were ever reached some other way.
+  const noNext = await advanceTripState(dispatch.tripId, "DISCHARGING" as "LOADING", { allowedSiteId: siteId, ...actor() });
   assert.equal(noNext.status, "NO_NEXT_STATE");
 });
 
@@ -606,12 +647,12 @@ test("advanceTripState and closeTripFullForId both refuse a DRIVER acting on som
   const truck = await makeTruck();
   const driver = await makeDriver();
   const otherDriver = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
 
-  const result = await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, requireOwnDriverEmployeeId: otherDriver, ...actor("DRIVER") });
+  const result = await advanceTripState(dispatch.tripId, "LOADING", { allowedSiteId: siteId, requireOwnDriverEmployeeId: otherDriver, ...actor("DRIVER") });
   assert.equal(result.status, "NOT_FOUND");
   const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
   assert.equal(trip.status, "LOADING");
@@ -622,7 +663,7 @@ test("closeTripFullForId refuses a crafted close straight from LOADING, and clos
   const ticket = await makeTicket(res);
   const truck = await makeTruck();
   const driver = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
@@ -630,7 +671,7 @@ test("closeTripFullForId refuses a crafted close straight from LOADING, and clos
   const craftedClose = await closeTripFullForId(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
   assert.equal(craftedClose.status, "NOT_DISCHARGING");
 
-  for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
+  await advanceToDischarging(dispatch.tripId);
   const close = await closeTripFullForId(dispatch.tripId, { allowedSiteId: siteId, ...actor(), deliverySignedBy: "TEST-SUITE-PL-SIGNATURE" });
   assert.equal(close.status, "OK");
 
@@ -654,14 +695,14 @@ test("finalizing a reservation is deferred until every sibling ticket's trip has
   const truckB = await makeTruck();
   const driverA = await makeDriver();
   const driverB = await makeDriver();
-  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, loadVolumeM3: 8, allowedSiteId: siteId });
-  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, allowedSiteId: siteId });
+  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId });
   assert.equal(dispatchA.status, "OK");
   assert.equal(dispatchB.status, "OK");
   if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
   tripIds.push(dispatchA.tripId, dispatchB.tripId);
 
-  for (let i = 0; i < 3; i++) await advanceTripState(dispatchA.tripId, { allowedSiteId: siteId, ...actor() });
+  await advanceToDischarging(dispatchA.tripId);
   const closeA = await closeTripFullForId(dispatchA.tripId, { allowedSiteId: siteId, ...actor() });
   assert.equal(closeA.status, "OK");
 
@@ -675,7 +716,7 @@ test("finalizing a reservation is deferred until every sibling ticket's trip has
   const closeReservationResult = await closeReservationForId(res, { actorId: adminUserId, actorRole: "ADMIN", allowedSiteId: siteId, closeReasonCode: "TEST-SUITE-PL-EARLY-CLOSE", closeNote: null });
   assert.equal(closeReservationResult.status, "OK");
 
-  for (let i = 0; i < 3; i++) await advanceTripState(dispatchB.tripId, { allowedSiteId: siteId, ...actor() });
+  await advanceToDischarging(dispatchB.tripId);
   const closeB = await closeTripFullForId(dispatchB.tripId, { allowedSiteId: siteId, ...actor() });
   assert.equal(closeB.status, "OK");
 
@@ -691,15 +732,15 @@ test("two final trips of the same reservation closing concurrently leave exactly
   const truckB = await makeTruck();
   const driverA = await makeDriver();
   const driverB = await makeDriver();
-  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, loadVolumeM3: 8, allowedSiteId: siteId });
-  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, allowedSiteId: siteId });
+  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId });
   assert.equal(dispatchA.status, "OK");
   assert.equal(dispatchB.status, "OK");
   if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
   tripIds.push(dispatchA.tripId, dispatchB.tripId);
 
-  for (let i = 0; i < 3; i++) await advanceTripState(dispatchA.tripId, { allowedSiteId: siteId, ...actor() });
-  for (let i = 0; i < 3; i++) await advanceTripState(dispatchB.tripId, { allowedSiteId: siteId, ...actor() });
+  await advanceToDischarging(dispatchA.tripId);
+  await advanceToDischarging(dispatchB.tripId);
 
   const [closeA, closeB] = await Promise.all([
     closeTripFullForId(dispatchA.tripId, { allowedSiteId: siteId, ...actor() }),
@@ -717,6 +758,92 @@ test("two final trips of the same reservation closing concurrently leave exactly
 });
 
 // ======================================================================
+// PL-R2-P1-01 — a duplicate concurrent advance request must never apply
+// the same stale user intent twice (LOADING -> IN_TRANSIT -> ON_SITE
+// instead of the intended single LOADING -> IN_TRANSIT).
+// ======================================================================
+
+test("two concurrent advance requests both carrying expectedStatus LOADING: exactly one succeeds, the trip never skips a state", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  const [resultA, resultB] = await Promise.all([
+    advanceTripState(dispatch.tripId, "LOADING", { allowedSiteId: siteId, ...actor() }),
+    advanceTripState(dispatch.tripId, "LOADING", { allowedSiteId: siteId, ...actor() }),
+  ]);
+  const statuses = [resultA.status, resultB.status].sort();
+  assert.deepEqual(statuses, ["OK", "STALE_STATE"], "a duplicate request (double-click, retry, replay) must be told its belief was stale, not silently advance a second time");
+
+  const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+  assert.equal(trip.status, "IN_TRANSIT", "must land on IN_TRANSIT exactly once, never skip straight to ON_SITE");
+});
+
+// ======================================================================
+// PL-R2-P1-03 — lifecycle authorization must share a real Plant row
+// lock with the supported Plant-transfer path (plants/actions.ts's
+// updatePlant), not just re-read Plant.siteId without locking it.
+// ======================================================================
+
+test("advanceTripState re-checks site authorization against the POST-transfer Plant row, never a value read before a concurrent transfer committed", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  let releaseTransferPause: () => void;
+  const transferPaused = new Promise<void>((resolve) => {
+    releaseTransferPause = resolve;
+  });
+
+  try {
+    // A real Plant-transfer, on its own connection — updatePlant's own
+    // single UPDATE statement already takes an equivalent row lock for
+    // the duration of its transaction; wrapping it explicitly and
+    // pausing right after the write (before commit) holds that exact
+    // lock open so the assertion below can prove the other side
+    // genuinely waits on it, not just races it.
+    const transferTx = prisma2.$transaction(async (tx) => {
+      await tx.plant.update({ where: { id: plantId }, data: { siteId: siteBId } });
+      await transferPaused;
+    });
+
+    // advanceTripState locks the Trip (uncontested) then tries to lock
+    // the ticket's own Plant row (src/lib/siteScope.ts's
+    // lockPlantSiteId) — which the paused transfer above is already
+    // holding, so this genuinely blocks rather than racing on timing.
+    const advancePromise = advanceTripState(dispatch.tripId, "LOADING", { allowedSiteId: siteId, ...actor() });
+    await waitUntilBlockedOn(`FROM "Plant"`);
+
+    releaseTransferPause!();
+    await transferTx;
+
+    const result = await advancePromise;
+    // The plant now belongs to siteBId — an actor whose own allowed
+    // scope is siteId (site A) must be refused, exactly as if the trip
+    // had always belonged to a different site, never authorized against
+    // the value that was true before the transfer committed.
+    assert.equal(result.status, "NOT_FOUND");
+
+    const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+    assert.equal(trip.status, "LOADING", "a refused authorization check must never have advanced the trip");
+  } finally {
+    // Restore the shared fixture plant's site — every other test in
+    // this file assumes plantId belongs to siteId.
+    await prisma.plant.update({ where: { id: plantId }, data: { siteId } });
+  }
+});
+
+// ======================================================================
 // PL-P1-06 — a quality rejection is provisional: closing the trip never
 // reduces billed volume on its own, and the audit trail always carries
 // the real actor/role.
@@ -727,12 +854,12 @@ test("closeTripWithReturnForId never reduces volumeDeliveredM3 on its own, even 
   const ticket = await makeTicket(res, { volumeM3: 8 });
   const truck = await makeTruck();
   const driver = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
 
-  for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
+  await advanceToDischarging(dispatch.tripId);
 
   // A DRIVER (not Quality/Admin) is exactly who this finding is about —
   // closing with a quality rejection must never self-authorize a billing
@@ -762,17 +889,17 @@ test("closeTripWithReturnForId never reduces volumeDeliveredM3 on its own, even 
   assert.equal(audit.actorId, adminUserId);
 });
 
-test("approveWasteIncidentMemo applies the billing reduction exactly once, atomically, with the real approving actor", async () => {
+test("decideWasteIncidentMemo(APPROVE) applies the billing reduction exactly once, atomically, with the real approving actor", async () => {
   const res = await makeReservation();
   const ticket = await makeTicket(res, { volumeM3: 8 });
   const truck = await makeTruck();
   const driver = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
 
-  for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
+  await advanceToDischarging(dispatch.tripId);
   const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 3, reasonCode: "QUALITY_REJECTED", fate: null });
   assert.equal(close.status, "OK");
   const memo = await prisma.wasteIncidentMemo.findFirstOrThrow({ where: { batchTicketId: ticket } });
@@ -780,16 +907,182 @@ test("approveWasteIncidentMemo applies the billing reduction exactly once, atomi
   const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
   drumReturnIds.push(drumReturn.id);
 
-  const approval = await approveWasteIncidentMemo(memo.id, { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", approvalNote: "TEST-SUITE-PL-confirmed contamination" });
+  const approval = await decideWasteIncidentMemo(memo.id, "APPROVE", { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", decisionNote: "TEST-SUITE-PL-confirmed contamination" });
   assert.equal(approval.status, "OK");
 
   const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
   assert.equal(trip.volumeDeliveredM3, 5); // 8 - 3
 
-  const duplicateApproval = await approveWasteIncidentMemo(memo.id, { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", approvalNote: "TEST-SUITE-PL-second-attempt" });
+  const duplicateApproval = await decideWasteIncidentMemo(memo.id, "APPROVE", { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", decisionNote: "TEST-SUITE-PL-second-attempt" });
   assert.equal(duplicateApproval.status, "ALREADY_DECIDED");
   const tripAfterDuplicate = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
   assert.equal(tripAfterDuplicate.volumeDeliveredM3, 5, "a second approval attempt must never reduce the billed volume twice");
+});
+
+// ======================================================================
+// PL-R2-P1-02 — quality decisions reconcile the owning Reservation
+// atomically: a single-ticket reservation stays non-terminal while a
+// quality memo is unresolved, approval reopens/adjusts it so the
+// shortfall can actually be released, and denial finalizes it untouched.
+// ======================================================================
+
+test("a single-ticket reservation stays non-terminal while its quality memo is PENDING, then reopens for the shortfall once approved, permitting exactly the replacement volume", async () => {
+  const res = await makeReservation({ requestedVolumeM3: 8 });
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  await advanceToDischarging(dispatch.tripId);
+  const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 3, reasonCode: "QUALITY_REJECTED", fate: null });
+  assert.equal(close.status, "OK");
+  const memo = await prisma.wasteIncidentMemo.findFirstOrThrow({ where: { batchTicketId: ticket } });
+  wasteMemoIds.push(memo.id);
+  const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
+  drumReturnIds.push(drumReturn.id);
+
+  // Full provisional volume (8) already equals requestedVolumeM3 (8), but
+  // the memo is still PENDING — this reservation must NOT finalize yet.
+  let reservation = await prisma.reservation.findUniqueOrThrow({ where: { id: res } });
+  assert.equal(reservation.status, "CONFIRMED", "must not finalize DELIVERED while a quality memo is still unresolved");
+
+  // Simulates a row already in the exact bad state the OLD code could
+  // produce (finalized DELIVERED despite a PENDING memo, before this
+  // review's fix existed) — the review explicitly requires that approval
+  // can repair such a row, not only prevent new ones. A real caller can
+  // never reach DELIVERED-with-a-PENDING-memo through the current code
+  // (reconcileReservationDeliveryState's own PENDING gate blocks it at
+  // every close), so this direct write stands in for pre-existing data.
+  await prisma.reservation.update({ where: { id: res }, data: { status: "DELIVERED" } });
+
+  const approval = await decideWasteIncidentMemo(memo.id, "APPROVE", { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", decisionNote: "TEST-SUITE-PL-confirmed contamination" });
+  assert.equal(approval.status, "OK");
+
+  // Approval reduces accepted volume to 5 of 8 requested — a reservation
+  // that was (wrongly) DELIVERED must reopen to IN_PRODUCTION so the
+  // shortfall can actually be released, never stay stuck DELIVERED-but-short.
+  reservation = await prisma.reservation.findUniqueOrThrow({ where: { id: res } });
+  assert.equal(reservation.status, "IN_PRODUCTION", "must reopen so the shortfall can actually be released");
+
+  const remaining = await getRemainingVolumeM3(res, reservation.requestedVolumeM3);
+  assert.equal(remaining, 3);
+
+  // The replacement ticket can actually be released now that the
+  // reservation is IN_PRODUCTION again — proving this isn't just a
+  // status flip with no real operational effect.
+  const replacement = await releaseTicketForReservation(res, remaining, plantId, { id: adminUserId, role: "ADMIN", allowedSiteId: siteId });
+  assert.equal(replacement.status, "OK");
+  if (replacement.status === "OK") ticketIds.push(replacement.ticket.id);
+});
+
+test("denying a waste memo leaves the delivered volume unchanged and finalizes the reservation once otherwise complete", async () => {
+  const res = await makeReservation({ requestedVolumeM3: 8 });
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  await advanceToDischarging(dispatch.tripId);
+  const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 3, reasonCode: "QUALITY_REJECTED", fate: null });
+  assert.equal(close.status, "OK");
+  const memo = await prisma.wasteIncidentMemo.findFirstOrThrow({ where: { batchTicketId: ticket } });
+  wasteMemoIds.push(memo.id);
+  const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
+  drumReturnIds.push(drumReturn.id);
+
+  const denial = await decideWasteIncidentMemo(memo.id, "DENY", { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", decisionNote: "TEST-SUITE-PL-inspection found no defect" });
+  assert.equal(denial.status, "OK");
+
+  const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+  assert.equal(trip.volumeDeliveredM3, 8, "a denied suspicion never reduces billed volume");
+  const reservation = await prisma.reservation.findUniqueOrThrow({ where: { id: res } });
+  assert.equal(reservation.status, "DELIVERED", "resolving the memo (even by denial) unblocks finalization once the ticket was otherwise complete");
+
+  const memoAfter = await prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id: memo.id } });
+  assert.equal(memoAfter.status, "REJECTED");
+
+  // Duplicate/racing decision on an already-decided memo.
+  const duplicateDenial = await decideWasteIncidentMemo(memo.id, "DENY", { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", decisionNote: "TEST-SUITE-PL-second-attempt" });
+  assert.equal(duplicateDenial.status, "ALREADY_DECIDED");
+});
+
+test("concurrent approve-vs-deny on the same memo has exactly one winner", async () => {
+  const res = await makeReservation({ requestedVolumeM3: 8 });
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  await advanceToDischarging(dispatch.tripId);
+  const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 3, reasonCode: "QUALITY_REJECTED", fate: null });
+  assert.equal(close.status, "OK");
+  const memo = await prisma.wasteIncidentMemo.findFirstOrThrow({ where: { batchTicketId: ticket } });
+  wasteMemoIds.push(memo.id);
+  const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
+  drumReturnIds.push(drumReturn.id);
+
+  const [approveResult, denyResult] = await Promise.all([
+    decideWasteIncidentMemo(memo.id, "APPROVE", { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", decisionNote: "TEST-SUITE-PL-race-approve" }),
+    decideWasteIncidentMemo(memo.id, "DENY", { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", decisionNote: "TEST-SUITE-PL-race-deny" }),
+  ]);
+  const statuses = [approveResult.status, denyResult.status].sort();
+  assert.deepEqual(statuses, ["ALREADY_DECIDED", "OK"]);
+});
+
+test("a multi-ticket reservation's totals and terminal status reconcile correctly after a quality approval on one of its tickets", async () => {
+  const res = await makeReservation({ requestedVolumeM3: 16 });
+  const ticketA = await makeTicket(res, { volumeM3: 8 });
+  const ticketB = await makeTicket(res, { volumeM3: 8 });
+  const truckA = await makeTruck();
+  const truckB = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, allowedSiteId: siteId });
+  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId });
+  assert.equal(dispatchA.status, "OK");
+  assert.equal(dispatchB.status, "OK");
+  if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
+  tripIds.push(dispatchA.tripId, dispatchB.tripId);
+
+  await advanceToDischarging(dispatchA.tripId);
+  const closeA = await closeTripWithReturnForId(dispatchA.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 2, reasonCode: "QUALITY_REJECTED", fate: null });
+  assert.equal(closeA.status, "OK");
+  const memo = await prisma.wasteIncidentMemo.findFirstOrThrow({ where: { batchTicketId: ticketA } });
+  wasteMemoIds.push(memo.id);
+  const drumReturnA = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatchA.tripId } });
+  drumReturnIds.push(drumReturnA.id);
+
+  await advanceToDischarging(dispatchB.tripId);
+  const closeB = await closeTripFullForId(dispatchB.tripId, { allowedSiteId: siteId, ...actor() });
+  assert.equal(closeB.status, "OK");
+
+  // Ticket A's memo is still PENDING — even with ticket B fully closed,
+  // 8 (B) + 8 (A, provisional) already reaches 16, but finalization must
+  // still wait on the unresolved memo.
+  let reservation = await prisma.reservation.findUniqueOrThrow({ where: { id: res } });
+  assert.equal(reservation.status, "CONFIRMED");
+
+  const approval = await decideWasteIncidentMemo(memo.id, "APPROVE", { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", decisionNote: "TEST-SUITE-PL-confirmed" });
+  assert.equal(approval.status, "OK");
+
+  // Now 6 (A, reduced) + 8 (B) = 14 of 16 — still short. This reservation
+  // was never wrongly finalized DELIVERED in the first place (A's memo
+  // was already blocking it), so there's nothing to reopen — it simply
+  // stays CONFIRMED, which is just as releasable as IN_PRODUCTION
+  // (releaseTicketForReservation accepts either).
+  reservation = await prisma.reservation.findUniqueOrThrow({ where: { id: res } });
+  assert.equal(reservation.status, "CONFIRMED");
+  const remaining = await getRemainingVolumeM3(res, reservation.requestedVolumeM3);
+  assert.equal(remaining, 2);
 });
 
 test("closeTripWithReturnForId records the real actor/role for a non-quality PARTIAL_CREDIT return too", async () => {
@@ -797,12 +1090,12 @@ test("closeTripWithReturnForId records the real actor/role for a non-quality PAR
   const ticket = await makeTicket(res, { volumeM3: 8 });
   const truck = await makeTruck();
   const driver = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
 
-  for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
+  await advanceToDischarging(dispatch.tripId);
   // Fresh trip (batchTime ~ now) + a return volume above the plant's
   // default 0.2 m3 absorption threshold, no quality rejection -> PARTIAL_CREDIT.
   const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("PLANT_OPERATOR"), returnedVolumeM3: 2, reasonCode: "OVER_ORDERED", fate: "DUMPED" });
@@ -828,11 +1121,16 @@ test("closeTripWithReturnForId rejects an invalid reasonCode, fate, or volume be
   const badReason = await closeTripWithReturnForId("nonexistent-trip-id", { allowedSiteId: null, ...actor(), returnedVolumeM3: 2, reasonCode: "TEST-SUITE-PL-MADE-UP-REASON", fate: null });
   assert.equal(badReason.status, "INVALID_REASON_CODE");
 
-  const badFate = await closeTripWithReturnForId("nonexistent-trip-id", { allowedSiteId: null, ...actor(), returnedVolumeM3: 2, reasonCode: null, fate: "TEST-SUITE-PL-MADE-UP-FATE" });
+  // A reason is mandatory for every returned quantity (PL-R2-P2-04,
+  // second production-lifecycle review) — null used to be accepted.
+  const nullReason = await closeTripWithReturnForId("nonexistent-trip-id", { allowedSiteId: null, ...actor(), returnedVolumeM3: 2, reasonCode: null, fate: null });
+  assert.equal(nullReason.status, "INVALID_REASON_CODE");
+
+  const badFate = await closeTripWithReturnForId("nonexistent-trip-id", { allowedSiteId: null, ...actor(), returnedVolumeM3: 2, reasonCode: "OTHER", fate: "TEST-SUITE-PL-MADE-UP-FATE" });
   assert.equal(badFate.status, "INVALID_FATE");
 
   for (const bad of [0, -1, Infinity, NaN]) {
-    const badVolume = await closeTripWithReturnForId("nonexistent-trip-id", { allowedSiteId: null, ...actor(), returnedVolumeM3: bad, reasonCode: null, fate: null });
+    const badVolume = await closeTripWithReturnForId("nonexistent-trip-id", { allowedSiteId: null, ...actor(), returnedVolumeM3: bad, reasonCode: "OTHER", fate: null });
     assert.equal(badVolume.status, "INVALID_VOLUME");
   }
 });
@@ -842,12 +1140,12 @@ test("setDrumReturnFateForId is a one-way decision, refused after the material w
   const ticket = await makeTicket(res, { volumeM3: 8 });
   const truck = await makeTruck();
   const driver = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
 
-  for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
+  await advanceToDischarging(dispatch.tripId);
   const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor(), returnedVolumeM3: 2, reasonCode: "OVER_ORDERED", fate: null });
   assert.equal(close.status, "OK");
   const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
@@ -878,12 +1176,12 @@ test("setDrumReturnFateForId refuses a FULL_WASTE return — there is nothing le
   const ticket = await makeTicket(res, { volumeM3: 8 });
   const truck = await makeTruck();
   const driver = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
 
-  for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
+  await advanceToDischarging(dispatch.tripId);
   // Backdate batchTime past the plant's default 90-minute drum timer so
   // the disposition math computes FULL_WASTE without a real 90-minute wait.
   await prisma.trip.update({ where: { id: dispatch.tripId }, data: { batchTime: new Date(Date.now() - 120 * 60000) } });
@@ -906,7 +1204,7 @@ test("the database itself rejects an illegal Trip status, a duplicate open trip 
   const ticket = await makeTicket(res);
   const truck = await makeTruck();
   const driver = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
@@ -938,15 +1236,84 @@ test("the database itself blocks updating or deleting an AuditEvent row outside 
   const ticket = await makeTicket(res);
   const truck = await makeTruck();
   const driver = await makeDriver();
-  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId });
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
 
-  await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
+  await advanceTripState(dispatch.tripId, "LOADING", { allowedSiteId: siteId, ...actor() });
   const audit = await prisma.auditEvent.findFirstOrThrow({ where: { recordId: dispatch.tripId } });
 
   await assert.rejects(() => prisma.auditEvent.update({ where: { id: audit.id }, data: { afterValue: "TEST-SUITE-PL-TAMPERED" } }), /immutable/i);
   await assert.rejects(() => prisma.auditEvent.delete({ where: { id: audit.id } }), /immutable/i);
+});
 
+test("the database itself requires a return reason, bounds moisturePct, and bounds volumes across tables", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+  await advanceToDischarging(dispatch.tripId);
+
+  // PL-R2-P2-04 — a null reasonCode at the raw-SQL level, bypassing the
+  // domain layer's own mandatory check entirely.
+  await assert.rejects(
+    () => prisma.$executeRawUnsafe(`INSERT INTO "DrumReturn" (id, "tripId", "returnedVolumeM3", "minutesSinceBatch", disposition) VALUES ($1, $2, 1, 0, 'NO_CHARGE')`, `test-suite-pl-dr-${Date.now()}`, dispatch.tripId),
+    /null value|not-null|violates/i,
+  );
+
+  const component = await prisma.batchComponentActual.findFirstOrThrow({ where: { batchTicketId: ticket } });
+  await assert.rejects(() => prisma.batchComponentActual.update({ where: { id: component.id }, data: { moisturePct: 150 } }), /constraint|check/i);
+  await assert.rejects(() => prisma.batchComponentActual.update({ where: { id: component.id }, data: { moisturePct: -1 } }), /constraint|check/i);
+
+  // Cross-table bounds a plain CHECK constraint can't express on its own.
+  await assert.rejects(() => prisma.trip.update({ where: { id: dispatch.tripId }, data: { volumeDeliveredM3: 999 } }), /exceed/i);
+
+  const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor(), returnedVolumeM3: 2, reasonCode: "OTHER", fate: null });
+  assert.equal(close.status, "OK");
+  const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
+  drumReturnIds.push(drumReturn.id);
+  await assert.rejects(() => prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 999 } }), /exceed/i);
+});
+
+// ======================================================================
+// PL-R2-P2-05 — the cross-column pump-crew collision trigger must be a
+// genuine, independent database backstop: correct even when both
+// callers use plain READ COMMITTED (Postgres's own default), not only
+// when every caller happens to use Serializable isolation.
+// ======================================================================
+
+test("the pump-crew collision trigger serializes two genuinely concurrent READ COMMITTED connections, using its own advisory lock", async () => {
+  const res = await makeReservation({ deliveryMethod: "PUMP" });
+  const ticketA = await makeTicket(res);
+  const ticketB = await makeTicket(res);
+  const truckA = await makeTruck();
+  const truckB = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const pumpA = await makePump();
+  const pumpB = await makePump();
+  const crewMember = await makeCrew("OPERATOR");
+
+  // Two separate connections (prisma, prisma2), neither requesting
+  // Serializable isolation — plain default READ COMMITTED, the case the
+  // prior version of this trigger explicitly could not handle safely on
+  // its own (its own comment said so).
+  const [resultA, resultB] = await Promise.allSettled([
+    prisma.trip.create({ data: { batchTicketId: ticketA, truckId: truckA, driverId: driverA, pumpId: pumpA, pumpOperatorId: crewMember, status: "LOADING", batchTime: new Date() } }),
+    prisma2.trip.create({ data: { batchTicketId: ticketB, truckId: truckB, driverId: driverB, pumpId: pumpB, pumpOperatorId: crewMember, status: "LOADING", batchTime: new Date() } }),
+  ]);
+
+  const fulfilled = [resultA, resultB].filter((r) => r.status === "fulfilled");
+  const rejected = [resultA, resultB].filter((r) => r.status === "rejected");
+  assert.equal(fulfilled.length, 1, "exactly one of the two concurrent trips may claim this crew member");
+  assert.equal(rejected.length, 1);
+  if (rejected[0].status === "rejected") assert.match(String(rejected[0].reason), /already the operator or assistant/i);
+  for (const r of fulfilled) {
+    if (r.status === "fulfilled") tripIds.push(r.value.id);
+  }
 });
