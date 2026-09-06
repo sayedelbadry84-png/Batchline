@@ -12,11 +12,32 @@ import { postSiloMovement, postHopperMovement, postChemicalTankMovement } from "
 // reclaim credit-back) to commit or roll back together atomically.
 type Tx = Prisma.TransactionClient;
 
-export type DispatchClaimResult = { status: "OK" } | { status: "NOT_DISPATCHABLE" } | { status: "TRUCK_BUSY" } | { status: "PUMP_BUSY" } | { status: "CREW_BUSY" };
+export type DispatchClaimResult =
+  | { status: "OK"; plantId: string; siteId: string }
+  | { status: "NOT_DISPATCHABLE" }
+  | { status: "OUT_OF_SCOPE" }
+  | { status: "TRUCK_BUSY" }
+  | { status: "PUMP_BUSY" }
+  | { status: "CREW_BUSY" };
 
 export async function claimTripSlot(
   tx: Tx,
-  params: { ticketId: string; truckId: string; pumpId?: string | null; pumpOperatorId?: string | null; pumpAssistantId?: string | null },
+  params: {
+    ticketId: string;
+    truckId: string;
+    pumpId?: string | null;
+    pumpOperatorId?: string | null;
+    pumpAssistantId?: string | null;
+    // Optional — an existing caller (see the "dispatch and reversal are
+    // mutually exclusive" test) that never passes this gets no scope
+    // check at all, same as before this field existed. startTrip
+    // (production/actions.ts) always passes the actor's own
+    // effectiveSiteId(user) now (PL-P1-03, first production-lifecycle
+    // review): the ticket's own site is re-verified fresh, inside this
+    // same lock, rather than only by a pre-transaction read that a
+    // concurrent plant reassignment could have already invalidated.
+    allowedSiteId?: string | null;
+  },
 ): Promise<DispatchClaimResult> {
   // Re-verify status/reversedAt fresh, inside the caller's own
   // Serializable transaction — a plain pre-transaction read would miss a
@@ -26,8 +47,14 @@ export async function claimTripSlot(
   // concurrent, Postgres aborts one of them with a serialization failure
   // regardless. Either way, dispatch and reversal can never both succeed
   // for the same ticket.
-  const freshTicket = await tx.batchTicket.findUnique({ where: { id: params.ticketId }, select: { status: true, reversedAt: true } });
+  const freshTicket = await tx.batchTicket.findUnique({
+    where: { id: params.ticketId },
+    select: { status: true, reversedAt: true, plantId: true, plant: { select: { siteId: true } } },
+  });
   if (!freshTicket || freshTicket.status !== "COMPLETE" || freshTicket.reversedAt) return { status: "NOT_DISPATCHABLE" };
+  if (params.allowedSiteId !== undefined && params.allowedSiteId !== null && freshTicket.plant.siteId !== params.allowedSiteId) {
+    return { status: "OUT_OF_SCOPE" };
+  }
 
   const truckBusy = await tx.trip.findFirst({ where: { truckId: params.truckId, status: { not: "CLOSED" } } });
   if (truckBusy) return { status: "TRUCK_BUSY" };
@@ -46,7 +73,7 @@ export async function claimTripSlot(
     if (crewBusy) return { status: "CREW_BUSY" };
   }
 
-  return { status: "OK" };
+  return { status: "OK", plantId: freshTicket.plantId, siteId: freshTicket.plant.siteId };
 }
 
 export type ReclaimCreditResult = { status: "OK" } | { status: "CREDIT_FAILED"; reason: string };

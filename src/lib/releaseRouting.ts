@@ -24,3 +24,19 @@ export function releaseFailurePath(target: ReleaseReturnTarget, params: URLSearc
   const base = target === "operator" ? "/operator" : "/production";
   return `${base}?${params.toString()}`;
 }
+
+// startTrip's own returnTo field (production/actions.ts) — same open-
+// redirect shape as returnPrefix above (PL-P2-02, first production-
+// lifecycle review): Next's redirect() accepts an absolute external URL,
+// so a form field read straight into it is an authenticated open
+// redirect. Same closed two-value fix; "trips" (the desktop Trip Board)
+// is the default for anything else the form didn't send.
+export type TripReturnTarget = "trips" | "operator";
+
+export function parseTripReturnTarget(value: FormDataEntryValue | null): TripReturnTarget {
+  return value === "operator" ? "operator" : "trips";
+}
+
+export function tripReturnPath(target: TripReturnTarget): string {
+  return target === "operator" ? "/operator" : "/trips";
+}

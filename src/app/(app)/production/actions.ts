@@ -10,8 +10,9 @@ import { AGGREGATE_TYPES } from "@/lib/storageMatching";
 import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain, cancelBatchTicket as cancelBatchTicketDomain } from "@/lib/batchCompletion";
 import { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } from "@/lib/batchComponentEdits";
 import { claimTripSlot, applyReclaimCredit } from "@/lib/tripDispatch";
+import { claimTripResources, reassignTrip } from "@/lib/tripAssignment";
 import { releaseTicketForReservation } from "@/lib/reservationRelease";
-import { parseReturnTarget, releaseSuccessPath, releaseFailurePath } from "@/lib/releaseRouting";
+import { parseReturnTarget, releaseSuccessPath, releaseFailurePath, parseTripReturnTarget, tripReturnPath } from "@/lib/releaseRouting";
 import {
   requestShortageOverride as requestShortageOverrideDomain,
   approveShortageOverrideRequest as approveShortageOverrideRequestDomain,
@@ -81,6 +82,13 @@ async function maybeAutoRequisitionMaterial(
 // reservation remains — the same ceiling the release form's own input
 // max enforces client-side (production/page.tsx); this is the real gate.
 const MAX_LOAD_M3 = 15;
+
+// A sanity ceiling for a weighed aggregate moisture reading (PL-P2-06) —
+// not a typical real-world value (moisture content is usually a few
+// percent of dry mass), just the widest bound past which a reading is
+// certainly a data-entry error rather than a real measurement, so it's
+// dropped the same way a negative or non-finite one already is.
+const MOISTURE_PCT_MAX = 100;
 
 // A reservation's requested volume is a target, not a single truck load —
 // a 200 m³ pour goes out as many partial tickets (one per truck), each
@@ -280,7 +288,23 @@ export async function recordActuals(formData: FormData) {
     // is 0, which would otherwise record a real (and wildly wrong) reading.
     if (rawActual === null || rawActual === "") continue;
 
-    const moisturePct = AGGREGATE_TYPES.has(c.material.type) && rawMoisture !== null ? Number(rawMoisture) : null;
+    // Same "blank means unknown, not zero" reasoning as actual mass above
+    // (PL-P2-06) — the old version's `rawMoisture !== null` check let a
+    // submitted-but-empty field (FormData returns "", never null, for an
+    // empty input) coerce straight to Number("") === 0, recording a real
+    // "measured bone-dry" reading for a field the operator just left
+    // blank. MOISTURE_PCT_MAX (100) is a sanity ceiling, not a real-world
+    // typical value — moisture content this app records is a percentage
+    // of dry mass, so it's bounded but not tightly; a genuinely invalid
+    // reading (negative, non-finite, or absurdly large) is dropped rather
+    // than written, same as a bad actual mass is skipped rather than
+    // recorded.
+    let moisturePct: number | null = null;
+    if (AGGREGATE_TYPES.has(c.material.type) && rawMoisture !== null && rawMoisture !== "") {
+      const parsedMoisture = Number(rawMoisture);
+      if (!Number.isFinite(parsedMoisture) || parsedMoisture < 0 || parsedMoisture > MOISTURE_PCT_MAX) continue;
+      moisturePct = parsedMoisture;
+    }
     const enteredMass = Number(rawActual);
     // A negative weighed mass (typo, scale glitch) would later be summed
     // into `currentLevelTons - massTons` in completeBatch and INCREASE the
@@ -321,6 +345,7 @@ export async function recordActualField(formData: FormData) {
 
   const value = Number(rawValue);
   if (!Number.isFinite(value) || value < 0) return;
+  if (field === "moisture" && value > MOISTURE_PCT_MAX) return;
 
   const component = await prisma.batchComponentActual.findUnique({
     where: { id: componentId },
@@ -542,93 +567,49 @@ export async function startTrip(formData: FormData) {
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   const truckId = String(formData.get("truckId") ?? "");
   const driverId = String(formData.get("driverId") ?? "");
-  // Field view sends "/operator" so an operator who just dispatched a
-  // truck lands back on their own ticket list, not the desktop Trip Board.
-  const returnTo = String(formData.get("returnTo") ?? "/trips");
+  // A closed two-value target, not a raw path (PL-P2-02): the old version
+  // read a form-supplied `returnTo` straight into redirect(), which
+  // Next.js will follow even to an absolute external URL — an
+  // authenticated open redirect for any caller who submits something
+  // other than the one value the field view's own form ever sends.
+  const returnTarget = parseTripReturnTarget(formData.get("returnTarget"));
   if (!batchTicketId || !truckId || !driverId) return;
 
+  const allowedSiteId = effectiveSiteId(user);
+
+  // Cheap pre-transaction read — the page only ever renders this form
+  // once the ticket is COMPLETE and in scope (see production/[id]/page.tsx's
+  // showAssignForm), so this is just a fast-path check for an obviously
+  // stale/crafted request. This also fixes a real sequencing bug:
+  // completeBatch deducts inventory using each component's PRE-reclaim
+  // target mass; only requiring COMPLETE before dispatch guarantees that
+  // deduction has already happened by the time the reclaim credit-back
+  // below runs, so the two stay consistent. The AUTHORITATIVE re-check of
+  // every one of these — ticket state, site scope, and every resource's
+  // own existence/status/site/capacity/reach/busy state — happens fresh,
+  // inside the Serializable transaction below, via claimTripSlot and
+  // claimTripResources (PL-P1-01, PL-P1-03: the old version validated
+  // truck/pump/crew entirely OUTSIDE the transaction — stale by commit
+  // time — and never checked whether the driver already had another open
+  // trip at all).
   const ticket = await prisma.batchTicket.findUnique({
     where: { id: batchTicketId },
     include: { reservation: true, components: { include: { material: true } }, plant: true },
   });
   if (!ticket) return;
-  // The page only ever renders this form once the ticket is COMPLETE (see
-  // production/[id]/page.tsx's showAssignForm) — re-checked here server-side
-  // for the same reason every other "the picker already filtered this"
-  // check in the app is re-verified against a crafted/stale request. This
-  // also fixes a real sequencing bug: completeBatch deducts inventory using
-  // each component's PRE-reclaim target mass; only requiring COMPLETE
-  // before dispatch guarantees that deduction has already happened by the
-  // time the reclaim credit-back below runs, so the two stay consistent.
-  // reversedAt: a reversed ticket keeps status COMPLETE (see
-  // reverseBatchTicket in src/lib/batchCompletion.ts — its whole point is
-  // to keep the historical status intact rather than inventing a new
-  // terminal one), so the status check alone doesn't catch it. This is
-  // the cheap pre-check; the real guarantee against a concurrent reversal
-  // is the fresh re-read inside the Serializable transaction below.
   if (ticket.status !== "COMPLETE" || ticket.reversedAt) return;
-  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
-
-  const truck = await prisma.truck.findUnique({ where: { id: truckId }, include: { plant: true } });
-  if (!truck || truck.status === "OUT_OF_SERVICE" || truck.status === "MAINTENANCE") return;
-  if (truck.plant.siteId !== ticket.plant.siteId) return;
-  // A drum physically can't carry more than its rated capacity — without
-  // this, a ticket cut for more volume than any assigned truck can hold
-  // would silently create a trip nobody can actually deliver as ordered.
-  if (ticket.volumeM3 > truck.drumCapacityM3) return;
-
-  const driver = await prisma.employee.findUnique({ where: { id: driverId } });
-  if (!driver || driver.status !== "ACTIVE" || driver.role !== "DRIVER") return;
+  if (!(await isPlantInScope(ticket.plantId, allowedSiteId))) return;
 
   // Pump crew/unit only apply when the reservation was booked for pump
   // delivery — ignore anything submitted for a chute delivery so a stray
-  // pump doesn't attach itself to a trip that never used one.
+  // pump doesn't attach itself to a trip that never used one. Existence,
+  // status, site, reach, and role are all re-verified fresh inside the
+  // transaction below (claimTripResources) rather than trusted from the
+  // picker here.
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
   const pumpId = isPumpDelivery ? String(formData.get("pumpId") ?? "").trim() || null : null;
-  const pumpOperatorIdInput = isPumpDelivery ? String(formData.get("pumpOperatorId") ?? "").trim() || null : null;
-  const pumpAssistantIdInput = isPumpDelivery ? String(formData.get("pumpAssistantId") ?? "").trim() || null : null;
-  // A pump-delivery reservation with no pump actually assigned is an
-  // incomplete dispatch, not a valid one — reject rather than silently
-  // starting a trip that can't be discharged.
-  if (isPumpDelivery && !pumpId) return;
-
-  // Re-verify the submitted pump server-side, same reasoning as the
-  // truck checks above — a stale/crafted picker value shouldn't be
-  // trusted for existence, service status, site, or reach.
-  if (isPumpDelivery && pumpId) {
-    const pump = await prisma.pump.findUnique({ where: { id: pumpId }, include: { plant: true } });
-    if (!pump || pump.status === "OUT_OF_SERVICE" || pump.status === "MAINTENANCE") return;
-    if (pump.plant.siteId !== ticket.plant.siteId) return;
-    if (pump.reachM != null && ticket.reservation.minPumpReachM != null && pump.reachM < ticket.reservation.minPumpReachM) return;
-  }
-
-  // The select offers the company-wide active roster (crew can work a
-  // different plant's pump the same day — see the picker's own comment) —
-  // re-verify the submitted id against that same company-wide set server-
-  // side rather than trusting the picker, same reasoning as the truck-busy
-  // check above. A stray id (stale page, crew member deactivated meanwhile)
-  // is dropped rather than trusted.
-  let pumpOperatorId: string | null = null;
-  let pumpAssistantId: string | null = null;
-  let pumpOperatorName: string | null = null;
-  let pumpAssistantName: string | null = null;
-  if (isPumpDelivery && (pumpOperatorIdInput || pumpAssistantIdInput)) {
-    const crew = await prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" } });
-    if (pumpOperatorIdInput) {
-      const match = crew.find((c) => c.id === pumpOperatorIdInput && c.role === "OPERATOR");
-      if (match) {
-        pumpOperatorId = match.id;
-        pumpOperatorName = match.name;
-      }
-    }
-    if (pumpAssistantIdInput) {
-      const match = crew.find((c) => c.id === pumpAssistantIdInput && c.role === "HELPER");
-      if (match) {
-        pumpAssistantId = match.id;
-        pumpAssistantName = match.name;
-      }
-    }
-  }
+  const pumpOperatorId = isPumpDelivery ? String(formData.get("pumpOperatorId") ?? "").trim() || null : null;
+  const pumpAssistantId = isPumpDelivery ? String(formData.get("pumpAssistantId") ?? "").trim() || null : null;
 
   // If the chosen truck is still carrying reclaimed material from its
   // last CLOSED trip (same mix, not yet consumed — see getAvailableReclaimForTruck),
@@ -652,9 +633,28 @@ export async function startTrip(formData: FormData) {
       async (tx) => {
         // Same claim used by the "dispatch and reversal can never both
         // succeed" test in tests/batchCompletion.test.ts — this is the
-        // real production code path, not a paraphrase of it.
-        const claim = await claimTripSlot(tx, { ticketId: batchTicketId, truckId, pumpId, pumpOperatorId, pumpAssistantId });
+        // real production code path, not a paraphrase of it. Now also
+        // re-checks the ticket's own site against the actor's allowed
+        // scope, fresh, inside this same lock (PL-P1-01/03).
+        const claim = await claimTripSlot(tx, { ticketId: batchTicketId, truckId, pumpId, pumpOperatorId, pumpAssistantId, allowedSiteId });
         if (claim.status !== "OK") throw new Error(claim.status);
+
+        // Full resource validation — existence, service status, site,
+        // capacity, reach, and busy state for the truck, driver, and any
+        // pump/crew — all re-verified fresh here, inside the transaction
+        // (PL-P1-02/03), not from the pre-transaction read above.
+        const resources = await claimTripResources(tx, {
+          siteId: claim.siteId,
+          truckId,
+          driverId,
+          loadVolumeM3: ticket.volumeM3,
+          isPumpDelivery,
+          pumpId,
+          pumpOperatorId,
+          pumpAssistantId,
+          minPumpReachM: ticket.reservation.minPumpReachM,
+        });
+        if (resources.status !== "OK") throw new Error(resources.status);
 
         const created = await tx.trip.create({
           data: {
@@ -662,8 +662,8 @@ export async function startTrip(formData: FormData) {
             truckId,
             driverId,
             pumpId,
-            pumpOperatorName,
-            pumpAssistantName,
+            pumpOperatorName: resources.pumpOperatorName,
+            pumpAssistantName: resources.pumpAssistantName,
             pumpOperatorId,
             pumpAssistantId,
             status: "LOADING",
@@ -703,6 +703,12 @@ export async function startTrip(formData: FormData) {
           });
         }
 
+        // Written in the SAME transaction as the trip itself (PL-P2-03)
+        // — a version that logged this after commit meant a successful
+        // dispatch could exist with no matching audit event if that
+        // later, separate write ever failed.
+        await tx.auditEvent.create({ data: { actorId: user!.id, role: user!.role, module: "Fleet", recordId: created.id, afterValue: "LOADING", reasonCode: "TRIP_STARTED" } });
+
         return created;
       },
       { ...TX_OPTIONS, isolationLevel: "Serializable" },
@@ -710,8 +716,6 @@ export async function startTrip(formData: FormData) {
   } catch {
     return;
   }
-
-  await logAudit({ module: "Fleet", recordId: trip.id, afterValue: "LOADING", reasonCode: "TRIP_STARTED" });
 
   // Real push notification (see src/lib/push.ts) the instant this driver
   // is actually dispatched — the whole point of the driver app knowing
@@ -749,13 +753,22 @@ export async function startTrip(formData: FormData) {
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath("/operator");
   revalidatePath("/trips");
-  redirect(returnTo);
+  redirect(tripReturnPath(returnTarget));
 }
 
 // A truck, driver, or pump crew name picked wrong at dispatch shouldn't
 // need the trip cancelled and re-started — correctable up until it actually
 // leaves the yard (status LOADING), same "pre-dispatch only" boundary the
 // reservation editor uses for its own fields.
+//
+// PL-P1-01/PL-P1-02 (first production-lifecycle review): the old version
+// never checked the trip's own site against the actor's allowed scope at
+// all — a plant-scoped operator who knew or guessed another site's trip
+// id could reassign it — and validated almost nothing about the chosen
+// resources beyond whether the truck itself was already busy. Every
+// check below now runs fresh, inside the same row-locked transaction
+// that writes the reassignment, via claimTripResources (the same shared
+// validator startTrip itself uses).
 export async function updateTripAssignment(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "updateTripAssignment");
@@ -765,69 +778,24 @@ export async function updateTripAssignment(formData: FormData) {
   const driverId = String(formData.get("driverId") ?? "");
   if (!tripId || !truckId || !driverId) return;
 
-  const trip = await prisma.trip.findUnique({
-    where: { id: tripId },
-    include: { batchTicket: { include: { reservation: true } } },
+  const pumpId = String(formData.get("pumpId") ?? "").trim() || null;
+  const pumpOperatorId = String(formData.get("pumpOperatorId") ?? "").trim() || null;
+  const pumpAssistantId = String(formData.get("pumpAssistantId") ?? "").trim() || null;
+
+  const result = await reassignTrip(tripId, {
+    truckId,
+    driverId,
+    pumpId,
+    pumpOperatorId,
+    pumpAssistantId,
+    allowedSiteId: effectiveSiteId(user),
+    actorId: user!.id,
+    actorRole: user!.role,
   });
-  if (!trip || trip.status !== "LOADING") return;
+  if (result.status !== "OK") return;
 
-  const isPumpDelivery = trip.batchTicket.reservation.deliveryMethod === "PUMP";
-  const pumpId = isPumpDelivery ? String(formData.get("pumpId") ?? "").trim() || null : null;
-  const pumpOperatorIdInput = isPumpDelivery ? String(formData.get("pumpOperatorId") ?? "").trim() || null : null;
-  const pumpAssistantIdInput = isPumpDelivery ? String(formData.get("pumpAssistantId") ?? "").trim() || null : null;
-
-  if (isPumpDelivery && pumpId && trip.batchTicket.reservation.minPumpReachM != null) {
-    const pump = await prisma.pump.findUnique({ where: { id: pumpId } });
-    if (pump?.reachM != null && pump.reachM < trip.batchTicket.reservation.minPumpReachM) return;
-  }
-
-  let pumpOperatorId: string | null = null;
-  let pumpAssistantId: string | null = null;
-  let pumpOperatorName: string | null = null;
-  let pumpAssistantName: string | null = null;
-  if (isPumpDelivery && (pumpOperatorIdInput || pumpAssistantIdInput)) {
-    const crew = await prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" } });
-    if (pumpOperatorIdInput) {
-      const match = crew.find((c) => c.id === pumpOperatorIdInput && c.role === "OPERATOR");
-      if (match) {
-        pumpOperatorId = match.id;
-        pumpOperatorName = match.name;
-      }
-    }
-    if (pumpAssistantIdInput) {
-      const match = crew.find((c) => c.id === pumpAssistantIdInput && c.role === "HELPER");
-      if (match) {
-        pumpAssistantId = match.id;
-        pumpAssistantName = match.name;
-      }
-    }
-  }
-
-  // Same Serializable-transaction fix as startTrip above — re-checking
-  // truck-busy and writing the reassignment outside one transaction let two
-  // concurrent reassignments both see the truck as free and both take it.
-  try {
-    await prisma.$transaction(
-      async (tx) => {
-        const truckBusy = await tx.trip.findFirst({
-          where: { truckId, status: { not: "CLOSED" }, id: { not: tripId } },
-        });
-        if (truckBusy) throw new Error("TRUCK_BUSY");
-
-        await tx.trip.update({
-          where: { id: tripId },
-          data: { truckId, driverId, pumpId, pumpOperatorId, pumpOperatorName, pumpAssistantId, pumpAssistantName },
-        });
-      },
-      { ...TX_OPTIONS, isolationLevel: "Serializable" },
-    );
-  } catch {
-    return;
-  }
-
-  await logAudit({ module: "Fleet", recordId: tripId, afterValue: `${truckId}/${driverId}`, reasonCode: "TRIP_ASSIGNMENT_UPDATED" });
-
-  revalidatePath(`/production/${trip.batchTicketId}`);
+  const trip = await prisma.trip.findUnique({ where: { id: tripId }, select: { batchTicketId: true } });
+  revalidatePath(`/production/${trip?.batchTicketId}`);
   revalidatePath("/operator");
   revalidatePath("/trips");
 }
@@ -843,7 +811,11 @@ export async function addTicketComponent(formData: FormData) {
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
   const materialId = String(formData.get("materialId") ?? "");
   const targetMassKg = Number(formData.get("targetMassKg") ?? 0);
-  if (!batchTicketId || !materialId || !targetMassKg || targetMassKg <= 0) return;
+  // !Number.isFinite catches Infinity too (PL-P2-06) — the old
+  // `!targetMassKg || targetMassKg <= 0` check alone let an Infinity
+  // target mass through (it's truthy and > 0), which would then flow
+  // straight into a real inventory deduction at completion time.
+  if (!batchTicketId || !materialId || !targetMassKg || targetMassKg <= 0 || !Number.isFinite(targetMassKg)) return;
 
   const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId } });
   if (!ticket || ticket.status === "COMPLETE" || ticket.status === "CANCELLED") return;
@@ -893,55 +865,6 @@ export async function deleteTicketComponent(formData: FormData) {
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);
-}
-
-// Only ever safe before anything has actually been dispatched (no Trip on
-// file yet — a Trip's own FK to this ticket is what would otherwise break).
-// If the ticket had already reached COMPLETE, its components' mass was
-// deducted from inventory in completeBatch — reverse that deduction here
-// before deleting, the mirror image of that same deduction loop.
-// A COMPLETE ticket is never deleted any more — see reverseBatchTicket
-// below. It posted real InventoryMovement rows when it completed; hard-
-// deleting it would destroy that posting history, and the old reversal
-// branch this replaced re-resolved "the CURRENT matching silo/hopper" via
-// findMatchingSilo/findMatchingHopper rather than the storage actually
-// used at completion time — if the assignment changed since, it credited
-// the wrong store. Only RELEASED/BATCHING tickets (which never posted
-// anything) reach this delete path now, so no reversal logic is needed
-// here at all.
-export async function deleteBatchTicket(formData: FormData) {
-  const user = await getCurrentUser();
-  await requireActionPermission(user, "production", "deleteTicket");
-
-  const id = String(formData.get("id") ?? "");
-  if (!id) return;
-
-  const ticket = await prisma.batchTicket.findUnique({ where: { id }, include: { trip: true } });
-  if (!ticket || ticket.trip || ticket.status === "COMPLETE") return;
-  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
-
-  // A ShortageOverrideRequest's FK to BatchTicket is ON DELETE RESTRICT —
-  // deliberately, so deleting a ticket never silently erases an approval
-  // decision's history — but that means a raw, unhandled foreign-key
-  // violation was the actual behavior for any ticket with one on file
-  // (pending, approved, rejected, or already consumed), found by a later
-  // external review (FR-P2-01). Same silent-refusal convention every
-  // other guard in this function already uses rather than a typed error
-  // state, since this action has never surfaced one.
-  const hasOverrideRequest = await prisma.shortageOverrideRequest.findFirst({ where: { batchTicketId: id }, select: { id: true } });
-  if (hasOverrideRequest) return;
-
-  // Components cascade-delete with the ticket (see BatchComponentActual's
-  // onDelete: Cascade in schema.prisma).
-  await prisma.batchTicket.delete({ where: { id } });
-
-  await logAudit({ module: "Production", recordId: id, afterValue: ticket.ticketNumber, reasonCode: "TICKET_DELETED" });
-
-  revalidatePath("/production");
-  revalidatePath("/reservations");
-  revalidatePath("/warehouses");
-  revalidatePath("/");
-  redirect("/production");
 }
 
 // Typed result so CancelBatchTicketForm.tsx can show why a cancellation

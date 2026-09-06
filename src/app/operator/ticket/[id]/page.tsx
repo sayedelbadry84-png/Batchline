@@ -273,7 +273,7 @@ export default async function OperatorTicketPage({
       {ticket.status === "COMPLETE" && !ticket.trip && (
         <form action={startTrip} className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm">
           <input type="hidden" name="batchTicketId" value={ticket.id} />
-          <input type="hidden" name="returnTo" value="/operator" />
+          <input type="hidden" name="returnTarget" value="operator" />
           <h2 className="font-display text-base font-semibold">{d.assignTitle}</h2>
           <EquipmentAssignPicker
             equipment={{ name: "truckId", label: d.truck, placeholder: d.selectTruck, required: true, className: mobileSelect, options: truckOptions }}
