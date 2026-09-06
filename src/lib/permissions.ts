@@ -435,6 +435,10 @@ export const ACTION_ROLES = {
     createCertificate: ["QUALITY_SUPERVISOR", "ADMIN"],
     updateCertificate: ["QUALITY_SUPERVISOR", "ADMIN"],
     approveWasteMemo: ["QUALITY_SUPERVISOR", "ADMIN"],
+    // The denial half of the same decision (PL-R2-P1-02, second
+    // production-lifecycle review) — same authority as approving, since
+    // both are Quality's own call on a suspected rejection.
+    rejectWasteMemo: ["QUALITY_SUPERVISOR", "ADMIN"],
     recordWasteMemoNote: ["QUALITY_SUPERVISOR", "ADMIN"],
     createInstrument: ["QUALITY_SUPERVISOR", "ADMIN"],
     recordCalibration: ["QUALITY_SUPERVISOR", "ADMIN"],

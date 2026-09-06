@@ -1,6 +1,10 @@
 import "server-only";
 import type { Prisma } from "@prisma/client";
-import { postSiloMovement, postHopperMovement, postChemicalTankMovement } from "@/lib/inventoryLedger";
+import { prisma } from "@/lib/prisma";
+import { postSiloMovement, postHopperMovement, postChemicalTankMovement, withRetry } from "@/lib/inventoryLedger";
+import { claimTripResources, type TripResourceResult } from "@/lib/tripAssignment";
+import { getAvailableReclaimForTruck } from "@/lib/reclaim";
+import { lockPlantSiteId } from "@/lib/siteScope";
 
 // The claim core of startTrip (production/actions.ts), extracted so
 // tests can exercise the REAL guard startTrip uses — the CR-01 fresh
@@ -49,10 +53,20 @@ export async function claimTripSlot(
   // for the same ticket.
   const freshTicket = await tx.batchTicket.findUnique({
     where: { id: params.ticketId },
-    select: { status: true, reversedAt: true, plantId: true, plant: { select: { siteId: true } } },
+    select: { status: true, reversedAt: true, plantId: true },
   });
   if (!freshTicket || freshTicket.status !== "COMPLETE" || freshTicket.reversedAt) return { status: "NOT_DISPATCHABLE" };
-  if (params.allowedSiteId !== undefined && params.allowedSiteId !== null && freshTicket.plant.siteId !== params.allowedSiteId) {
+
+  // Locked, not just joined (PL-R2-P1-03, second production-lifecycle
+  // review) — updatePlant (plants/actions.ts) lets an ADMIN move this
+  // exact Plant to a different site at any time; a plain read of its
+  // siteId here could already be stale by the time this transaction
+  // commits, even under Serializable isolation ("operator action, then
+  // transfer" is a legitimate serial order). Locking forces the two to
+  // actually contend for the same row.
+  const plantSiteId = await lockPlantSiteId(tx, freshTicket.plantId);
+  if (plantSiteId === null) return { status: "NOT_DISPATCHABLE" };
+  if (params.allowedSiteId !== undefined && params.allowedSiteId !== null && plantSiteId !== params.allowedSiteId) {
     return { status: "OUT_OF_SCOPE" };
   }
 
@@ -73,7 +87,7 @@ export async function claimTripSlot(
     if (crewBusy) return { status: "CREW_BUSY" };
   }
 
-  return { status: "OK", plantId: freshTicket.plantId, siteId: freshTicket.plant.siteId };
+  return { status: "OK", plantId: freshTicket.plantId, siteId: plantSiteId };
 }
 
 export type ReclaimCreditResult = { status: "OK" } | { status: "CREDIT_FAILED"; reason: string };
@@ -158,4 +172,146 @@ export async function applyReclaimCredit(
   }
 
   return { status: "OK" };
+}
+
+const TX_OPTIONS = { timeout: 15000 };
+
+// Thrown from inside startTripForTicket's transaction to unwind (and
+// roll back everything already written in it, including the just-
+// created Trip) to a typed result — a plain `return` here would let
+// Prisma COMMIT the transaction with the trip already created despite
+// the reclaim credit failing. Never escapes this file. Same pattern as
+// ReleaseAbort in src/lib/reservationRelease.ts.
+class StartTripAbort extends Error {
+  constructor(public result: Extract<StartTripResult, { status: "RECLAIM_CREDIT_FAILED" }>) {
+    super(result.status);
+  }
+}
+
+export type StartTripResult =
+  | { status: "OK"; tripId: string }
+  | { status: "NOT_DISPATCHABLE" }
+  | { status: "OUT_OF_SCOPE" }
+  | { status: "TRUCK_BUSY" }
+  | { status: "PUMP_BUSY" }
+  | { status: "CREW_BUSY" }
+  | Exclude<TripResourceResult, { status: "OK" }>
+  | { status: "RECLAIM_CREDIT_FAILED"; reason: string };
+
+// The one real start-trip domain command — extracted out of startTrip
+// (production/actions.ts) so the Server Action and the integration
+// suite both call the exact same production transaction, not two copies
+// that can silently diverge (PL-R2-P2-06, second production-lifecycle
+// review: the test file used to hand-assemble its own
+// claimTripSlot+claimTripResources+trip.create sequence, which omitted
+// reclaim consumption/credit and the atomic start audit entirely). No
+// session/formData access, so it's callable from tests directly, same
+// split as every other domain command in this app.
+export async function startTripForTicket(
+  ticketId: string,
+  params: {
+    truckId: string;
+    driverId: string;
+    pumpId: string | null;
+    pumpOperatorId: string | null;
+    pumpAssistantId: string | null;
+    allowedSiteId: string | null;
+    actorId: string;
+    actorRole: string;
+  },
+): Promise<StartTripResult> {
+  try {
+    return await withRetry(() =>
+      prisma.$transaction(
+        async (tx) => {
+        const claim = await claimTripSlot(tx, {
+          ticketId,
+          truckId: params.truckId,
+          pumpId: params.pumpId,
+          pumpOperatorId: params.pumpOperatorId,
+          pumpAssistantId: params.pumpAssistantId,
+          allowedSiteId: params.allowedSiteId,
+        });
+        if (claim.status !== "OK") return claim;
+
+        const ticket = await tx.batchTicket.findUniqueOrThrow({
+          where: { id: ticketId },
+          include: { reservation: true, components: { include: { material: true } } },
+        });
+        const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
+
+        const resources = await claimTripResources(tx, {
+          siteId: claim.siteId,
+          truckId: params.truckId,
+          driverId: params.driverId,
+          loadVolumeM3: ticket.volumeM3,
+          isPumpDelivery,
+          pumpId: params.pumpId,
+          pumpOperatorId: params.pumpOperatorId,
+          pumpAssistantId: params.pumpAssistantId,
+          minPumpReachM: ticket.reservation.minPumpReachM,
+        });
+        if (resources.status !== "OK") return resources;
+
+        // If the chosen truck is still carrying reclaimed material from
+        // its last CLOSED trip (same mix, not yet consumed), top it up
+        // instead of drawing full fresh materials — see
+        // getAvailableReclaimForTruck's own comment (reclaim.ts). The
+        // ticket's own volumeM3 (what the customer is billed/ticketed
+        // for) is never touched.
+        const availableReclaim = await getAvailableReclaimForTruck(params.truckId, ticket.mixId);
+        const reclaimedVolumeM3 = availableReclaim ? Math.min(availableReclaim.volumeM3, ticket.volumeM3) : null;
+
+        const created = await tx.trip.create({
+          data: {
+            batchTicketId: ticketId,
+            truckId: params.truckId,
+            driverId: params.driverId,
+            pumpId: params.pumpId,
+            pumpOperatorName: resources.pumpOperatorName,
+            pumpAssistantName: resources.pumpAssistantName,
+            pumpOperatorId: params.pumpOperatorId,
+            pumpAssistantId: params.pumpAssistantId,
+            status: "LOADING",
+            batchTime: ticket.batchCompletedAt ?? new Date(),
+            reclaimedVolumeM3,
+          },
+        });
+
+        if (availableReclaim && reclaimedVolumeM3) {
+          const freshFraction = 1 - reclaimedVolumeM3 / ticket.volumeM3;
+          const reclaimedFraction = 1 - freshFraction;
+
+          const creditResult = await applyReclaimCredit(tx, {
+            batchTicketId: ticketId,
+            tripId: created.id,
+            components: ticket.components,
+            reclaimedFraction,
+            actorId: params.actorId,
+          });
+          if (creditResult.status !== "OK") throw new StartTripAbort({ status: "RECLAIM_CREDIT_FAILED", reason: creditResult.reason });
+
+          await tx.drumReturn.update({
+            where: { id: availableReclaim.drumReturnId },
+            data: { consumedAt: new Date(), consumedInTripId: created.id },
+          });
+        }
+
+        // Written in the SAME transaction as the trip itself (PL-P2-03)
+        // — a version that logged this after commit meant a successful
+        // dispatch could exist with no matching audit event if that
+        // later, separate write ever failed.
+        await tx.auditEvent.create({
+          data: { actorId: params.actorId, role: params.actorRole, module: "Fleet", recordId: created.id, afterValue: "LOADING", reasonCode: "TRIP_STARTED" },
+        });
+
+        return { status: "OK" as const, tripId: created.id };
+        },
+        { ...TX_OPTIONS, isolationLevel: "Serializable" },
+      ),
+    );
+  } catch (e) {
+    if (e instanceof StartTripAbort) return e.result;
+    throw e;
+  }
 }

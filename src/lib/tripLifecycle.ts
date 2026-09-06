@@ -1,10 +1,11 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import { finalizeReservationIfDelivered } from "@/lib/reservations";
+import { reconcileReservationDeliveryState } from "@/lib/reservations";
+import { lockPlantSiteId } from "@/lib/siteScope";
 
 // See the same note on production/actions.ts's own TX_OPTIONS — a close
 // can touch the Trip row, a DrumReturn, a WasteIncidentMemo, an
-// AuditEvent, and (via finalizeReservationIfDelivered) the Reservation
+// AuditEvent, and (via reconcileReservationDeliveryState) the Reservation
 // row plus a fresh read of every one of its sibling tickets/trips, all in
 // one transaction. 15s gives real headroom on a cold Neon connection.
 const TX_OPTIONS = { timeout: 15000 };
@@ -26,30 +27,52 @@ export const RETURN_FATES = new Set(["DUMPED", "RECLAIMED"]);
 
 type OwnershipOpts = { allowedSiteId: string | null; requireOwnDriverEmployeeId?: string | null };
 
-export type AdvanceTripResult = { status: "OK"; next: string } | { status: "NOT_FOUND" } | { status: "NO_NEXT_STATE" };
+export type AdvanceableTripStatus = "LOADING" | "IN_TRANSIT" | "ON_SITE";
+
+export type AdvanceTripResult = { status: "OK"; next: string } | { status: "NOT_FOUND" } | { status: "STALE_STATE" } | { status: "NO_NEXT_STATE" };
 
 // Extracted out of advanceTrip (trips/actions.ts) — a pure domain
 // function, no session/formData access, so it's callable from tests
-// directly. The old version read the trip's status, computed `next`, and
-// wrote an unconditional update by ID with no row lock between the read
-// and the write — a stale request racing a concurrent advance/close
-// could overwrite a newer state (PL-P1-05). Locking the row first and
-// re-reading inside that lock, same pattern as closeReservationForId,
-// makes the read-compute-write sequence atomic instead.
-export async function advanceTripState(tripId: string, opts: OwnershipOpts & { actorId: string; actorRole: string }): Promise<AdvanceTripResult> {
+// directly. Locks the row first and re-reads inside that lock, same
+// pattern as closeReservationForId, so the read-compute-write sequence
+// is atomic — that alone stops a STALE overwrite/regression (PL-P1-05),
+// but it does not stop a genuine DUPLICATE request from applying twice:
+// request A locks a LOADING trip and advances it to IN_TRANSIT; request
+// B (a double-click, a retry, a replayed offline action) waits on the
+// same row, then — once A commits — sees the now-current IN_TRANSIT and
+// advances that same stale user intent again, straight to ON_SITE
+// (PL-R2-P1-01, second production-lifecycle review).
+//
+// expectedStatus makes the caller's own intended source state part of
+// the command, compared against the freshly LOCKED row — never trusted
+// as authority on its own (a hidden form field is not a permission), just
+// an optimistic-concurrency token: if the trip has already moved on from
+// what the caller believed it was acting on, this returns STALE_STATE
+// instead of silently advancing past the state the caller actually meant
+// to act on.
+export async function advanceTripState(
+  tripId: string,
+  expectedStatus: AdvanceableTripStatus,
+  opts: OwnershipOpts & { actorId: string; actorRole: string },
+): Promise<AdvanceTripResult> {
   return prisma.$transaction(async (tx) => {
     const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Trip" WHERE "id" = ${tripId} FOR UPDATE`;
     if (locked.length === 0) return { status: "NOT_FOUND" as const };
 
-    const trip = await tx.trip.findUniqueOrThrow({ where: { id: tripId }, include: { batchTicket: { select: { plant: { select: { siteId: true } } } } } });
+    const trip = await tx.trip.findUniqueOrThrow({ where: { id: tripId }, select: { status: true, driverId: true, batchTicket: { select: { plantId: true } } } });
+    // Locked, not just joined — see lockPlantSiteId's own comment
+    // (siteScope.ts) for why (PL-R2-P1-03, second production-lifecycle
+    // review).
+    const plantSiteId = await lockPlantSiteId(tx, trip.batchTicket.plantId);
     // Out-of-scope and "not your own trip" both resolve to NOT_FOUND —
     // same "a scope mismatch behaves like not-found" convention as every
     // other domain function in this app (closeReservationForId,
     // releaseTicketForReservation): never disclose whether the record
     // exists to a caller with no authority over it.
-    if (opts.allowedSiteId !== null && trip.batchTicket.plant.siteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
+    if (opts.allowedSiteId !== null && plantSiteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
     if (opts.requireOwnDriverEmployeeId && trip.driverId !== opts.requireOwnDriverEmployeeId) return { status: "NOT_FOUND" as const };
 
+    if (trip.status !== expectedStatus) return { status: "STALE_STATE" as const };
     const next = NEXT_STATUS[trip.status];
     if (!next) return { status: "NO_NEXT_STATE" as const };
 
@@ -69,7 +92,7 @@ export type CloseTripFullResult = { status: "OK" } | { status: "NOT_FOUND" } | {
 // but nothing stopped a crafted request from closing straight out of
 // LOADING — and the reservation finalization that follows now happens
 // INSIDE the same transaction as the trip's own status flip (see
-// finalizeReservationIfDelivered), instead of a later, separate,
+// reconcileReservationDeliveryState), instead of a later, separate,
 // unconditional update that could overwrite an already-terminal
 // (CANCELLED) reservation or race a sibling trip's own concurrent close.
 //
@@ -85,8 +108,10 @@ export async function closeTripFullForId(
     const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Trip" WHERE "id" = ${tripId} FOR UPDATE`;
     if (locked.length === 0) return { status: "NOT_FOUND" as const };
 
-    const trip = await tx.trip.findUniqueOrThrow({ where: { id: tripId }, include: { batchTicket: { include: { plant: true } } } });
-    if (opts.allowedSiteId !== null && trip.batchTicket.plant.siteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
+    const trip = await tx.trip.findUniqueOrThrow({ where: { id: tripId }, include: { batchTicket: true } });
+    // Locked, not just joined (PL-R2-P1-03).
+    const plantSiteId = await lockPlantSiteId(tx, trip.batchTicket.plantId);
+    if (opts.allowedSiteId !== null && plantSiteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
     if (opts.requireOwnDriverEmployeeId && trip.driverId !== opts.requireOwnDriverEmployeeId) return { status: "NOT_FOUND" as const };
     // Recommended default (section 6 of the review): only a trip actually
     // at DISCHARGING may close as a full load — matches what the UI's own
@@ -106,7 +131,7 @@ export async function closeTripFullForId(
       data: { actorId: opts.actorId, role: opts.actorRole, module: "Fleet", recordId: tripId, field: "status", afterValue: "CLOSED", reasonCode: "TRIP_CLOSED_FULL_LOAD" },
     });
 
-    await finalizeReservationIfDelivered(tx, trip.batchTicket.reservationId);
+    await reconcileReservationDeliveryState(tx, trip.batchTicket.reservationId);
     return { status: "OK" as const };
   }, TX_OPTIONS);
 }
@@ -148,7 +173,11 @@ export async function closeTripWithReturnForId(
   },
 ): Promise<CloseTripWithReturnResult> {
   if (!Number.isFinite(opts.returnedVolumeM3) || opts.returnedVolumeM3 <= 0) return { status: "INVALID_VOLUME" };
-  if (opts.reasonCode !== null && !RETURN_REASON_CODES.has(opts.reasonCode)) return { status: "INVALID_REASON_CODE" };
+  // A reason is mandatory for every returned quantity (the owner's own
+  // recommended default, Round 1 section 6) — the domain used to accept
+  // a null reasonCode as valid, and the database CHECK explicitly
+  // permitted it too (PL-R2-P2-04, second production-lifecycle review).
+  if (opts.reasonCode === null || !RETURN_REASON_CODES.has(opts.reasonCode)) return { status: "INVALID_REASON_CODE" };
   if (opts.fate !== null && !RETURN_FATES.has(opts.fate)) return { status: "INVALID_FATE" };
 
   return prisma.$transaction(async (tx) => {
@@ -156,7 +185,9 @@ export async function closeTripWithReturnForId(
     if (locked.length === 0) return { status: "NOT_FOUND" as const };
 
     const trip = await tx.trip.findUniqueOrThrow({ where: { id: tripId }, include: { batchTicket: { include: { plant: true } } } });
-    if (opts.allowedSiteId !== null && trip.batchTicket.plant.siteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
+    // Locked, not just joined (PL-R2-P1-03).
+    const plantSiteId = await lockPlantSiteId(tx, trip.batchTicket.plantId);
+    if (opts.allowedSiteId !== null && plantSiteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
     if (opts.requireOwnDriverEmployeeId && trip.driverId !== opts.requireOwnDriverEmployeeId) return { status: "NOT_FOUND" as const };
     if (trip.status !== "DISCHARGING") return { status: "NOT_DISCHARGING" as const };
     // A truck can't return more concrete than the ticket loaded it with —
@@ -223,49 +254,66 @@ export async function closeTripWithReturnForId(
       },
     });
 
-    await finalizeReservationIfDelivered(tx, trip.batchTicket.reservationId);
+    await reconcileReservationDeliveryState(tx, trip.batchTicket.reservationId);
     return { status: "OK" as const };
   }, TX_OPTIONS);
 }
 
-export type ApproveWasteIncidentMemoResult = { status: "OK" } | { status: "NOT_FOUND" } | { status: "ALREADY_DECIDED" };
+export type DecideWasteIncidentMemoResult = { status: "OK" } | { status: "NOT_FOUND" } | { status: "ALREADY_DECIDED" };
 
-// Extracted out of approveWasteMemo (quality/actions.ts) — the OTHER half
-// of the PL-P1-06 fix. closeTripWithReturnForId above never reduces
-// Trip.volumeDeliveredM3 for a quality rejection any more; this is the
-// one place that now does, atomically with Quality (or Admin) actually
-// approving the WasteIncidentMemo that rejection created — never before
-// that approval exists, and never twice for the same memo (the `status
-// !== "PENDING"` guard is the atomic claim: a second approval attempt,
-// or one racing a reject, simply finds the memo already decided).
-export async function approveWasteIncidentMemo(
+// Extracted out of approveWasteMemo (quality/actions.ts) — the OTHER
+// half of the PL-P1-06 fix, now a single command owning memo state, Trip
+// volume, Reservation state, and audit atomically (PL-R2-P1-02, second
+// production-lifecycle review — the review's own recommended shape).
+// closeTripWithReturnForId above never reduces Trip.volumeDeliveredM3
+// for a quality rejection any more; APPROVE here is the one place that
+// now does, atomically with Quality (or Admin) actually approving the
+// WasteIncidentMemo that rejection created. DENY leaves the delivered
+// volume unchanged — a real denial path where a false suspicion can
+// actually be resolved (previously PENDING was the only reachable
+// non-APPROVED state, with no way out of it). Never decides the same
+// memo twice (the `status !== "PENDING"` guard is the atomic claim: a
+// second decision attempt, or one racing a denial, simply finds the
+// memo already decided) — and either decision reconciles the owning
+// Reservation's delivery state in the SAME transaction, so a single-
+// ticket reservation that was finalized DELIVERED on the strength of a
+// full provisional volume never sits DELIVERED-but-short with no way to
+// release the shortfall once Quality actually approves the rejection.
+export async function decideWasteIncidentMemo(
   memoId: string,
-  opts: { allowedSiteId: string | null; actorId: string; actorRole: string; approvalNote: string },
-): Promise<ApproveWasteIncidentMemoResult> {
+  decision: "APPROVE" | "DENY",
+  opts: { allowedSiteId: string | null; actorId: string; actorRole: string; decisionNote: string },
+): Promise<DecideWasteIncidentMemoResult> {
   return prisma.$transaction(async (tx) => {
     const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "WasteIncidentMemo" WHERE "id" = ${memoId} FOR UPDATE`;
     if (locked.length === 0) return { status: "NOT_FOUND" as const };
 
-    const memo = await tx.wasteIncidentMemo.findUniqueOrThrow({ where: { id: memoId }, include: { batchTicket: { include: { plant: true, trip: true } } } });
-    if (opts.allowedSiteId !== null && memo.batchTicket.plant.siteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
+    const memo = await tx.wasteIncidentMemo.findUniqueOrThrow({ where: { id: memoId }, include: { batchTicket: { include: { trip: true } } } });
+    // Locked, not just joined (PL-R2-P1-03).
+    const plantSiteId = await lockPlantSiteId(tx, memo.batchTicket.plantId);
+    if (opts.allowedSiteId !== null && plantSiteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
     if (memo.status !== "PENDING") return { status: "ALREADY_DECIDED" as const };
 
     await tx.wasteIncidentMemo.update({
       where: { id: memoId },
-      data: { status: "APPROVED", approvalNote: opts.approvalNote, approvedAt: new Date(), approvedById: opts.actorId },
+      data: { status: decision === "APPROVE" ? "APPROVED" : "REJECTED", approvalNote: opts.decisionNote, approvedAt: new Date(), approvedById: opts.actorId },
     });
 
-    // The actual customer-billing reduction, deferred until exactly this
-    // moment rather than applied the instant a driver logged the return.
-    // Clamped at 0 and computed off the trip's OWN current
-    // volumeDeliveredM3 (not a fresh recompute from the ticket) so this
-    // stays correct even if it somehow runs more than once in sequence
-    // for a ticket with more than one wasted-volume memo over its life.
-    const trip = memo.batchTicket.trip;
-    if (trip) {
-      const reduced = Math.max(0, (trip.volumeDeliveredM3 ?? memo.batchTicket.volumeM3) - memo.wastedVolumeM3);
-      await tx.trip.update({ where: { id: trip.id }, data: { volumeDeliveredM3: reduced } });
+    if (decision === "APPROVE") {
+      // The actual customer-billing reduction, deferred until exactly
+      // this moment rather than applied the instant a driver logged the
+      // return. Clamped at 0 and computed off the trip's OWN current
+      // volumeDeliveredM3 (not a fresh recompute from the ticket) so this
+      // stays correct even if it somehow runs more than once in sequence
+      // for a ticket with more than one wasted-volume memo over its life.
+      const trip = memo.batchTicket.trip;
+      if (trip) {
+        const reduced = Math.max(0, (trip.volumeDeliveredM3 ?? memo.batchTicket.volumeM3) - memo.wastedVolumeM3);
+        await tx.trip.update({ where: { id: trip.id }, data: { volumeDeliveredM3: reduced } });
+      }
     }
+    // DENY: the delivered volume stays exactly as the trip close already
+    // set it — a denied suspicion never reduces billed volume.
 
     await tx.auditEvent.create({
       data: {
@@ -273,10 +321,17 @@ export async function approveWasteIncidentMemo(
         role: opts.actorRole,
         module: "Quality",
         recordId: memoId,
-        afterValue: `${memo.wastedVolumeM3} m3 — ${memo.reasonCode} — ${opts.approvalNote}`,
-        reasonCode: "WASTE_MEMO_APPROVED",
+        afterValue: `${memo.wastedVolumeM3} m3 — ${memo.reasonCode} — ${opts.decisionNote}`,
+        reasonCode: decision === "APPROVE" ? "WASTE_MEMO_APPROVED" : "WASTE_MEMO_REJECTED",
       },
     });
+
+    // Either decision resolves this memo out of PENDING, which is what
+    // was blocking finalization (see reconcileReservationDeliveryState's
+    // own comment) — reconciling here lets a single-ticket reservation
+    // finalize (deny) or reopen for the shortfall (approve) atomically
+    // with the decision itself.
+    await reconcileReservationDeliveryState(tx, memo.batchTicket.reservationId);
 
     return { status: "OK" as const };
   });
@@ -302,8 +357,10 @@ export async function setDrumReturnFateForId(
     const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "DrumReturn" WHERE "id" = ${drumReturnId} FOR UPDATE`;
     if (locked.length === 0) return { status: "NOT_FOUND" as const };
 
-    const drumReturn = await tx.drumReturn.findUniqueOrThrow({ where: { id: drumReturnId }, include: { trip: { include: { batchTicket: { include: { plant: true } } } } } });
-    if (opts.allowedSiteId !== null && drumReturn.trip.batchTicket.plant.siteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
+    const drumReturn = await tx.drumReturn.findUniqueOrThrow({ where: { id: drumReturnId }, include: { trip: { include: { batchTicket: true } } } });
+    // Locked, not just joined (PL-R2-P1-03).
+    const plantSiteId = await lockPlantSiteId(tx, drumReturn.trip.batchTicket.plantId);
+    if (opts.allowedSiteId !== null && plantSiteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
     if (drumReturn.disposition === "FULL_WASTE") return { status: "NOT_ELIGIBLE" as const };
     if (drumReturn.consumedAt) return { status: "ALREADY_CONSUMED" as const };
     if (drumReturn.fate) return { status: "ALREADY_SET" as const };

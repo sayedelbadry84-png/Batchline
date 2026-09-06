@@ -188,30 +188,57 @@ export async function isReservationFullyDelivered(reservationId: string, db: Db 
   return reservation.batchTickets.every((t) => t.trip?.status === "CLOSED");
 }
 
-const NON_FINALIZABLE_RESERVATION_STATUSES = new Set(["DELIVERED", "CANCELLED"]);
-
-// Shared by closeTripFullForId/closeTripWithReturnForId (src/lib/
-// tripLifecycle.ts) — folds the reservation-finalization step (PL-P1-05,
-// first production-lifecycle review) into the SAME transaction as the
-// trip close that might trigger it, rather than a separate, later,
-// unconditional update against a plain snapshot read. Takes the
-// Reservation row lock first: two sibling trips of the same split-load
-// reservation closing concurrently each take this same lock in their own
-// transaction, so whichever commits first is the only one that can see
-// its own trip's fresh CLOSED status when it re-reads — the second one
-// then sees BOTH trips closed (including the first's, already committed)
-// and is the one that actually flips the reservation, exactly once.
-// Refuses to overwrite a reservation that's already terminal (DELIVERED
-// or CANCELLED) — the old unconditional update could otherwise stamp
-// DELIVERED over a reservation a different, concurrent action had just
-// cancelled.
-export async function finalizeReservationIfDelivered(tx: Prisma.TransactionClient, reservationId: string): Promise<void> {
+// Shared by closeTripFullForId/closeTripWithReturnForId/
+// decideWasteIncidentMemo (src/lib/tripLifecycle.ts) — folds the
+// reservation-finalization step (PL-P1-05, first production-lifecycle
+// review) into the SAME transaction as whatever trip close or quality
+// decision might trigger it, rather than a separate, later, unconditional
+// update against a plain snapshot read. Takes the Reservation row lock
+// first: two sibling trips of the same split-load reservation closing
+// concurrently each take this same lock in their own transaction, so
+// whichever commits first is the only one that can see its own trip's
+// fresh CLOSED status when it re-reads — the second one then sees BOTH
+// trips closed (including the first's, already committed) and is the one
+// that actually flips the reservation, exactly once. Never touches an
+// already-CANCELLED reservation.
+//
+// PL-R2-P1-02, second production-lifecycle review — this used to be a
+// one-way "flip to DELIVERED" only, which produced a real bug: a quality-
+// rejected single-ticket reservation was finalized DELIVERED the instant
+// its trip closed (full ticket volume, provisionally), and later Quality
+// approval reduced the accepted volume without ever touching the
+// reservation — leaving it DELIVERED and short, with no way to release
+// the replacement quantity (releaseTicketForReservation only accepts
+// CONFIRMED/IN_PRODUCTION). Two fixes close this:
+//
+// 1. A reservation is never finalized DELIVERED while any of its tickets
+//    has a PENDING WasteIncidentMemo — the delivery decision is
+//    genuinely unresolved until Quality decides, not just provisionally
+//    complete.
+// 2. If a reservation is ALREADY DELIVERED (via this same natural path —
+//    closedAt null, i.e. never manually closed early by
+//    closeReservationForId) but a later approved reduction now makes it
+//    fall short of requestedVolumeM3, it's reopened to IN_PRODUCTION so
+//    the shortfall can actually be released. A reservation that was
+//    manually closed early (closedAt set) is never reopened this way —
+//    that was a deliberate, accountable decision, not a side effect of
+//    delivery-volume bookkeeping.
+export async function reconcileReservationDeliveryState(tx: Prisma.TransactionClient, reservationId: string): Promise<void> {
   const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Reservation" WHERE "id" = ${reservationId} FOR UPDATE`;
   if (locked.length === 0) return;
 
-  const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId }, select: { status: true } });
-  if (NON_FINALIZABLE_RESERVATION_STATUSES.has(reservation.status)) return;
-  if (!(await isReservationFullyDelivered(reservationId, tx))) return;
+  const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId }, select: { status: true, closedAt: true } });
+  if (reservation.status === "CANCELLED") return;
 
-  await tx.reservation.update({ where: { id: reservationId }, data: { status: "DELIVERED" } });
+  const hasPendingQualityMemo = await tx.wasteIncidentMemo.findFirst({ where: { status: "PENDING", batchTicket: { reservationId } } });
+  const fullyDelivered = !hasPendingQualityMemo && (await isReservationFullyDelivered(reservationId, tx));
+
+  if (fullyDelivered) {
+    if (reservation.status !== "DELIVERED") await tx.reservation.update({ where: { id: reservationId }, data: { status: "DELIVERED" } });
+    return;
+  }
+
+  if (reservation.status === "DELIVERED" && reservation.closedAt === null) {
+    await tx.reservation.update({ where: { id: reservationId }, data: { status: "IN_PRODUCTION" } });
+  }
 }
