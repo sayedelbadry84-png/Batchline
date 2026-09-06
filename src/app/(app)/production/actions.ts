@@ -121,7 +121,7 @@ export async function releaseBatchTicket(formData: FormData) {
   if (!(await isPlantInScope(plantId, reservation.siteId))) return;
   if (!(await isPlantActive(plantId))) return;
 
-  const result = await releaseTicketForReservation(reservationId, requestedVolume, plantId, { id: user!.id, role: user!.role });
+  const result = await releaseTicketForReservation(reservationId, requestedVolume, plantId, { id: user!.id, role: user!.role, allowedSiteId: siteId });
   if (result.status !== "OK") {
     // Not silently doing nothing (RMR-P2-07, RMR-R2-P2-03) — logged for
     // every non-OK outcome, and surfaced as a visible banner on the
@@ -201,7 +201,12 @@ export async function createManualRelease(formData: FormData) {
     reasonCode: "MANUAL_BOOKING_CREATED",
   });
 
-  const result = await releaseTicketForReservation(reservation.id, volumeM3, plantId, { id: user!.id, role: user!.role });
+  // effectiveSiteId(user!) here, not the form's own `siteId` — that's
+  // the site the operator CHOSE to book against (already validated
+  // in scope above), not the actor's own authority; allowedSiteId must
+  // always be server-derived from the session, never form data
+  // (RMR-R5-P1-01).
+  const result = await releaseTicketForReservation(reservation.id, volumeM3, plantId, { id: user!.id, role: user!.role, allowedSiteId: effectiveSiteId(user!) });
   if (result.status !== "OK") {
     // Operational decision (RMR-R2-P2-03): the reservation created just
     // above is KEPT, not rolled back or auto-cancelled — it's a real,

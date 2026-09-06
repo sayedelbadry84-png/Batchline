@@ -265,17 +265,21 @@ export async function closeReservation(formData: FormData) {
   const closeNote = String(formData.get("closeNote") ?? "").trim() || null;
   if (!id || !closeReasonCode) return;
 
-  // Scope is still checked here, up front, from the picker's own listed
-  // options — a cheap, informative reject before ever taking the row
-  // lock. closeReservationForId's own transaction re-checks terminal
-  // state fresh once it has the lock (RMR-R4-P1-01); it doesn't re-check
-  // site scope again, since that's a session concern the domain layer
-  // deliberately never touches.
+  // Scope is still checked here too, up front, from the picker's own
+  // listed options — a cheap, informative reject before ever taking the
+  // row lock. But that alone isn't enough (RMR-R5-P1-01): this read and
+  // the lock closeReservationForId takes are two separate round trips,
+  // and the reservation could be reassigned to a different site in that
+  // gap. The allowedSiteId passed below is re-checked AFTER the lock,
+  // against the same freshly-read row the terminal-state check itself
+  // uses — this is the actual authoritative check; the one here is only
+  // a fast, friendly pre-reject.
+  const allowedSiteId = effectiveSiteId(user);
   const reservation = await prisma.reservation.findUnique({ where: { id }, select: { siteId: true } });
   if (!reservation) return;
-  if (!isSiteInScope(reservation.siteId, effectiveSiteId(user))) return;
+  if (!isSiteInScope(reservation.siteId, allowedSiteId)) return;
 
-  await closeReservationForId(id, { actorId: user!.id, actorRole: user!.role, closeReasonCode, closeNote });
+  await closeReservationForId(id, { actorId: user!.id, actorRole: user!.role, allowedSiteId, closeReasonCode, closeNote });
 
   revalidatePath("/reservations");
   revalidatePath("/production");
