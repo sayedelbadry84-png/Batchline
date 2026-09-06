@@ -11,6 +11,7 @@ import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain, ca
 import { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } from "@/lib/batchComponentEdits";
 import { claimTripSlot, applyReclaimCredit } from "@/lib/tripDispatch";
 import { releaseTicketForReservation } from "@/lib/reservationRelease";
+import { parseReturnTarget, releaseSuccessPath, releaseFailurePath } from "@/lib/releaseRouting";
 import {
   requestShortageOverride as requestShortageOverrideDomain,
   approveShortageOverrideRequest as approveShortageOverrideRequestDomain,
@@ -96,8 +97,13 @@ export async function releaseBatchTicket(formData: FormData) {
   const requestedVolume = Number(formData.get("volumeM3") ?? 0);
   // Lets the mobile field view (/operator) land back on its own ticket
   // detail page instead of the desktop one after releasing — same action,
-  // same business logic, just a different "where do I keep working" target.
-  const returnPrefix = String(formData.get("returnPrefix") ?? "/production");
+  // same business logic, just a different "where do I keep working"
+  // target. An allow-listed symbol, not a raw path (RMR-R4-P2-01): the
+  // old version concatenated a form-supplied `returnPrefix` string
+  // straight into the redirect target, which is an open redirect for
+  // any authenticated caller who submits something other than the two
+  // values the UI itself ever sends.
+  const returnTarget = parseReturnTarget(formData.get("returnTarget"));
   if (!reservationId || !plantId || !requestedVolume || requestedVolume <= 0) return;
   if (requestedVolume > MAX_LOAD_M3) return;
 
@@ -115,12 +121,13 @@ export async function releaseBatchTicket(formData: FormData) {
   if (!(await isPlantInScope(plantId, reservation.siteId))) return;
   if (!(await isPlantActive(plantId))) return;
 
-  const result = await releaseTicketForReservation(reservationId, requestedVolume, plantId);
+  const result = await releaseTicketForReservation(reservationId, requestedVolume, plantId, { id: user!.id, role: user!.role });
   if (result.status !== "OK") {
     // Not silently doing nothing (RMR-P2-07, RMR-R2-P2-03) — logged for
     // every non-OK outcome, and surfaced as a visible banner on the
-    // returning page (production/page.tsx reads releaseError) rather
-    // than just a silent reload with no explanation.
+    // returning page (production/page.tsx and the operator home page
+    // both read releaseError) rather than just a silent reload with no
+    // explanation.
     await logAudit({
       module: "Production",
       recordId: reservationId,
@@ -129,23 +136,16 @@ export async function releaseBatchTicket(formData: FormData) {
     });
     const params = new URLSearchParams({ releaseError: result.status });
     if (result.status === "STORAGE_NOT_CONFIGURED") params.set("releaseErrorMaterial", result.material);
-    redirect(`${returnPrefix}?${params.toString()}`);
+    redirect(releaseFailurePath(returnTarget, params));
   }
 
-  // Logged here, not inside releaseTicketForReservation itself — that
-  // function is meant to run directly from tests with no session
-  // context, and logAudit's own getCurrentUser() call needs a real one.
-  await logAudit({
-    module: "Production",
-    recordId: result.ticket.id,
-    afterValue: `${result.ticket.ticketNumber} — ${result.ticket.volumeM3} m3`,
-    reasonCode: "BATCH_RELEASED",
-  });
-
+  // The successful-release BATCH_RELEASED audit event is written inside
+  // releaseTicketForReservation itself now, atomically with the ticket
+  // (RMR-R4-P2-02) — nothing left to log here on success.
   revalidatePath("/production");
   revalidatePath("/operator");
   revalidatePath("/reservations");
-  redirect(`${returnPrefix}/${result.ticket.id}`);
+  redirect(releaseSuccessPath(returnTarget, result.ticket.id));
 }
 
 // A walk-in sale — a customer at the yard with no prior booking. Creates
@@ -201,7 +201,7 @@ export async function createManualRelease(formData: FormData) {
     reasonCode: "MANUAL_BOOKING_CREATED",
   });
 
-  const result = await releaseTicketForReservation(reservation.id, volumeM3, plantId);
+  const result = await releaseTicketForReservation(reservation.id, volumeM3, plantId, { id: user!.id, role: user!.role });
   if (result.status !== "OK") {
     // Operational decision (RMR-R2-P2-03): the reservation created just
     // above is KEPT, not rolled back or auto-cancelled — it's a real,
@@ -228,15 +228,9 @@ export async function createManualRelease(formData: FormData) {
     redirect(`/production?${params.toString()}`);
   }
 
-  // Same reasoning as releaseBatchTicket's own post-release logAudit
-  // call — releaseTicketForReservation itself stays session-free.
-  await logAudit({
-    module: "Production",
-    recordId: result.ticket.id,
-    afterValue: `${result.ticket.ticketNumber} — ${result.ticket.volumeM3} m3`,
-    reasonCode: "BATCH_RELEASED",
-  });
-
+  // Same as releaseBatchTicket — the BATCH_RELEASED audit event is
+  // written inside releaseTicketForReservation itself, atomically with
+  // the ticket (RMR-R4-P2-02).
   revalidatePath("/production");
   revalidatePath("/reservations");
   redirect(`/production/${result.ticket.id}`);

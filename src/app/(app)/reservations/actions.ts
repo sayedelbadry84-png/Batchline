@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
-import { getReleasedVolumeM3 } from "@/lib/reservations";
+import { getReleasedVolumeM3, closeReservationForId } from "@/lib/reservations";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { getCustomerOutstandingBalance } from "@/lib/billing";
 import { isPumpAvailable } from "@/lib/pumpSchedule";
@@ -265,29 +265,17 @@ export async function closeReservation(formData: FormData) {
   const closeNote = String(formData.get("closeNote") ?? "").trim() || null;
   if (!id || !closeReasonCode) return;
 
-  const reservation = await prisma.reservation.findUnique({ where: { id } });
+  // Scope is still checked here, up front, from the picker's own listed
+  // options — a cheap, informative reject before ever taking the row
+  // lock. closeReservationForId's own transaction re-checks terminal
+  // state fresh once it has the lock (RMR-R4-P1-01); it doesn't re-check
+  // site scope again, since that's a session concern the domain layer
+  // deliberately never touches.
+  const reservation = await prisma.reservation.findUnique({ where: { id }, select: { siteId: true } });
   if (!reservation) return;
-  if (["DELIVERED", "CANCELLED"].includes(reservation.status)) return;
-  const effSiteId = effectiveSiteId(user);
-  if (!isSiteInScope(reservation.siteId, effSiteId)) return;
+  if (!isSiteInScope(reservation.siteId, effectiveSiteId(user))) return;
 
-  await prisma.reservation.update({
-    where: { id },
-    data: {
-      status: "DELIVERED",
-      closedAt: new Date(),
-      closedById: user!.id,
-      closeReasonCode,
-      closeNote,
-    },
-  });
-
-  await logAudit({
-    module: "Reservations",
-    recordId: id,
-    afterValue: `DELIVERED (closed early — ${closeReasonCode})`,
-    reasonCode: "RESERVATION_CLOSED",
-  });
+  await closeReservationForId(id, { actorId: user!.id, actorRole: user!.role, closeReasonCode, closeNote });
 
   revalidatePath("/reservations");
   revalidatePath("/production");
