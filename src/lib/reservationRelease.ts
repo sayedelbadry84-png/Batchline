@@ -3,7 +3,6 @@ import type { BatchTicket } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getRemainingVolumeM3 } from "@/lib/reservations";
 import { withSequentialNumber } from "@/lib/sequence";
-import { logAudit } from "@/lib/audit";
 import { resolveTicketComponents } from "@/lib/batchCompletion";
 import { withRetry } from "@/lib/inventoryLedger";
 
@@ -57,6 +56,16 @@ class ReleaseAbort extends Error {
 // a plant deactivated in the gap between that outer check and this
 // transaction actually running could create a ticket for — and silently
 // reopen — a reservation that had already gone terminal (RMR-R2-P1-02).
+//
+// Deliberately does NOT call logAudit itself on success (an earlier
+// version did) — logAudit's own getCurrentUser() call reads cookies()
+// via next/headers, which throws outside a real Next.js request/action
+// context. That's exactly the context this function is designed to run
+// in directly from tests (see the file-level comment above), so the
+// audit write for a successful release belongs to the two Server Action
+// callers instead — same split completeBatchTicket/reverseBatchTicket
+// already use, where the domain function stays pure and the wrapper
+// logs.
 export async function releaseTicketForReservation(reservationId: string, requestedVolume: number, plantId: string): Promise<ReleaseTicketResult> {
   try {
     const ticket = await withRetry(() =>
@@ -182,13 +191,6 @@ export async function releaseTicketForReservation(reservationId: string, request
         { ...TX_OPTIONS, isolationLevel: "Serializable" },
       ),
     );
-
-    await logAudit({
-      module: "Production",
-      recordId: ticket.id,
-      afterValue: `${ticket.ticketNumber} — ${ticket.volumeM3} m3`,
-      reasonCode: "BATCH_RELEASED",
-    });
 
     return { status: "OK", ticket };
   } catch (e) {

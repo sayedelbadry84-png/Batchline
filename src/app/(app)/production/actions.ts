@@ -132,6 +132,16 @@ export async function releaseBatchTicket(formData: FormData) {
     redirect(`${returnPrefix}?${params.toString()}`);
   }
 
+  // Logged here, not inside releaseTicketForReservation itself — that
+  // function is meant to run directly from tests with no session
+  // context, and logAudit's own getCurrentUser() call needs a real one.
+  await logAudit({
+    module: "Production",
+    recordId: result.ticket.id,
+    afterValue: `${result.ticket.ticketNumber} — ${result.ticket.volumeM3} m3`,
+    reasonCode: "BATCH_RELEASED",
+  });
+
   revalidatePath("/production");
   revalidatePath("/operator");
   revalidatePath("/reservations");
@@ -217,6 +227,15 @@ export async function createManualRelease(formData: FormData) {
     if (result.status === "STORAGE_NOT_CONFIGURED") params.set("releaseErrorMaterial", result.material);
     redirect(`/production?${params.toString()}`);
   }
+
+  // Same reasoning as releaseBatchTicket's own post-release logAudit
+  // call — releaseTicketForReservation itself stays session-free.
+  await logAudit({
+    module: "Production",
+    recordId: result.ticket.id,
+    afterValue: `${result.ticket.ticketNumber} — ${result.ticket.volumeM3} m3`,
+    reasonCode: "BATCH_RELEASED",
+  });
 
   revalidatePath("/production");
   revalidatePath("/reservations");
