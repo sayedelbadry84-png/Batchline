@@ -90,6 +90,7 @@ export default async function DriverTripPage({
       {["LOADING", "IN_TRANSIT", "ON_SITE"].includes(trip.status) && (
         <form action={driverAdvanceTrip}>
           <input type="hidden" name="tripId" value={trip.id} />
+          <input type="hidden" name="expectedStatus" value={trip.status} />
           <button className="w-full rounded-md bg-accent px-4 py-3 text-base font-medium text-white">
             {d.nextAction[trip.status as keyof typeof d.nextAction]}
           </button>
@@ -182,6 +183,12 @@ export default async function DriverTripPage({
               placeholder={d.returnedVolume}
               className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
             />
+            <select name="reasonCode" required defaultValue="" className="rounded-md border border-border bg-surface px-3 py-2 text-sm">
+              <option value="" disabled>{d.returnReasonPlaceholder}</option>
+              {Object.entries(dict.returnReasons).map(([k, label]) => (
+                <option key={k} value={k}>{label}</option>
+              ))}
+            </select>
             <button className="rounded-md bg-warn-soft px-4 py-2.5 text-sm font-medium text-warn">
               {d.confirmReturnButton}
             </button>

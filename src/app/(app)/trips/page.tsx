@@ -116,6 +116,7 @@ export default async function TripsPage() {
                   {t.status !== "DISCHARGING" ? (
                     <form action={advanceTrip}>
                       <input type="hidden" name="tripId" value={t.id} />
+                      <input type="hidden" name="expectedStatus" value={t.status} />
                       <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">
                         {t.status === "LOADING" ? m.depart : t.status === "IN_TRANSIT" ? m.arrived : m.startDischarge}
                       </button>

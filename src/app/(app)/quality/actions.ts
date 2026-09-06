@@ -9,7 +9,7 @@ import { withSequentialNumber } from "@/lib/sequence";
 import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { computeMaterialLabTestResults, MATERIAL_LAB_TEST_TYPE_KEYS, type MaterialLabTestType } from "@/lib/materialLabTests";
-import { approveWasteIncidentMemo } from "@/lib/tripLifecycle";
+import { decideWasteIncidentMemo } from "@/lib/tripLifecycle";
 
 function dateOrNull(formData: FormData, key: string): Date | null {
   const raw = formData.get(key);
@@ -282,9 +282,11 @@ export async function updateCertificate(formData: FormData) {
 
 // Signs off on an auto-created WasteIncidentMemo (see closeTripWithReturn
 // in trips/actions.ts, which creates one whenever a load is closed with
-// reasonCode QUALITY_REJECTED) — a real state transition distinct from the
-// return-billing reduction, which already applied regardless of this
-// approval.
+// reasonCode QUALITY_REJECTED) — a real state transition that now also
+// applies the actual billing reduction and reconciles the owning
+// Reservation atomically (see decideWasteIncidentMemo's own comment,
+// src/lib/tripLifecycle.ts — PL-R2-P1-02, second production-lifecycle
+// review).
 export async function approveWasteMemo(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "quality", "approveWasteMemo");
@@ -292,16 +294,42 @@ export async function approveWasteMemo(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   // A written finding is mandatory — reasonCode alone is just the coarse
   // category picked at return-close time, not an actual QA explanation of
-  // what was wrong with the load. No note, no approval.
-  const approvalNote = String(formData.get("approvalNote") ?? "").trim();
-  if (!id || !approvalNote) return;
+  // what was wrong with the load. No note, no decision.
+  const decisionNote = String(formData.get("approvalNote") ?? "").trim();
+  if (!id || !decisionNote) return;
 
-  const result = await approveWasteIncidentMemo(id, { allowedSiteId: effectiveSiteId(user), actorId: user!.id, actorRole: user!.role, approvalNote });
+  const result = await decideWasteIncidentMemo(id, "APPROVE", { allowedSiteId: effectiveSiteId(user), actorId: user!.id, actorRole: user!.role, decisionNote });
   if (result.status !== "OK") return;
 
   const memo = await prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id } });
   revalidatePath("/quality");
   revalidatePath(`/production/${memo.batchTicketId}`);
+  revalidatePath("/reservations");
+}
+
+// The denial half of the same decision (PL-R2-P1-02) — a suspected
+// quality rejection that Quality actually reviews and finds unfounded
+// previously had no way out of PENDING at all. Denying leaves the
+// delivered volume exactly as the trip close already set it (never
+// reduced) and, same as approval, reconciles the owning Reservation in
+// the same transaction — resolving this memo out of PENDING is what was
+// blocking a single-ticket reservation from finalizing in the first
+// place.
+export async function denyWasteMemo(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "quality", "rejectWasteMemo");
+
+  const id = String(formData.get("id") ?? "");
+  const decisionNote = String(formData.get("approvalNote") ?? "").trim();
+  if (!id || !decisionNote) return;
+
+  const result = await decideWasteIncidentMemo(id, "DENY", { allowedSiteId: effectiveSiteId(user), actorId: user!.id, actorRole: user!.role, decisionNote });
+  if (result.status !== "OK") return;
+
+  const memo = await prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id } });
+  revalidatePath("/quality");
+  revalidatePath(`/production/${memo.batchTicketId}`);
+  revalidatePath("/reservations");
 }
 
 // Backfills a written finding onto a memo that was approved before that

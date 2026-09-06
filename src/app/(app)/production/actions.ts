@@ -5,14 +5,12 @@ import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
-import { getAvailableReclaimForTruck } from "@/lib/reclaim";
 import { AGGREGATE_TYPES } from "@/lib/storageMatching";
 import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain, cancelBatchTicket as cancelBatchTicketDomain } from "@/lib/batchCompletion";
 import { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } from "@/lib/batchComponentEdits";
-import { claimTripSlot, applyReclaimCredit } from "@/lib/tripDispatch";
-import { claimTripResources, reassignTrip } from "@/lib/tripAssignment";
+import { startTripForTicket } from "@/lib/tripDispatch";
+import { reassignTrip } from "@/lib/tripAssignment";
 import { releaseTicketForReservation } from "@/lib/reservationRelease";
-import { withRetry } from "@/lib/inventoryLedger";
 import { parseReturnTarget, releaseSuccessPath, releaseFailurePath, parseTripReturnTarget, tripReturnPath } from "@/lib/releaseRouting";
 import {
   requestShortageOverride as requestShortageOverrideDomain,
@@ -24,13 +22,6 @@ import { REQUISITION_APPROVAL_ROLES, SHORTAGE_OVERRIDE_DECISION_ROLES } from "@/
 import { notify, notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-
-// See the same note on billing/actions.ts's own TX_OPTIONS — completeBatch's
-// per-component silo/hopper/tank lookups+updates are several sequential
-// round trips to Neon, which can comfortably exceed Prisma's 5s default
-// interactive-transaction timeout, especially on a cold connection. 15s
-// gives real headroom without masking a genuinely broken/looping query.
-const TX_OPTIONS = { timeout: 15000 };
 
 // Raw-material counterpart to issueSparePartToOrder's shortfall handling —
 // called from completeBatch right after a silo/hopper/tank's level is
@@ -576,157 +567,36 @@ export async function startTrip(formData: FormData) {
   const returnTarget = parseTripReturnTarget(formData.get("returnTarget"));
   if (!batchTicketId || !truckId || !driverId) return;
 
-  const allowedSiteId = effectiveSiteId(user);
-
-  // Cheap pre-transaction read — the page only ever renders this form
-  // once the ticket is COMPLETE and in scope (see production/[id]/page.tsx's
-  // showAssignForm), so this is just a fast-path check for an obviously
-  // stale/crafted request. This also fixes a real sequencing bug:
-  // completeBatch deducts inventory using each component's PRE-reclaim
-  // target mass; only requiring COMPLETE before dispatch guarantees that
-  // deduction has already happened by the time the reclaim credit-back
-  // below runs, so the two stay consistent. The AUTHORITATIVE re-check of
-  // every one of these — ticket state, site scope, and every resource's
-  // own existence/status/site/capacity/reach/busy state — happens fresh,
-  // inside the Serializable transaction below, via claimTripSlot and
-  // claimTripResources (PL-P1-01, PL-P1-03: the old version validated
-  // truck/pump/crew entirely OUTSIDE the transaction — stale by commit
-  // time — and never checked whether the driver already had another open
-  // trip at all).
-  const ticket = await prisma.batchTicket.findUnique({
-    where: { id: batchTicketId },
-    include: { reservation: true, components: { include: { material: true } }, plant: true },
-  });
+  // Cheap pre-transaction read, purely to know whether this is a pump
+  // delivery so the right form fields get parsed — the page only ever
+  // renders this form once the ticket is COMPLETE and in scope (see
+  // production/[id]/page.tsx's showAssignForm), so this is just a fast-
+  // path check for an obviously stale/crafted request. The AUTHORITATIVE
+  // re-check of every one of these — ticket state, site scope (including
+  // a concurrent Plant transfer, PL-R2-P1-03), and every resource's own
+  // existence/status/site/capacity/reach/busy state — happens fresh,
+  // inside startTripForTicket's own transaction (src/lib/tripDispatch.ts),
+  // the one real domain command the Server Action and the integration
+  // suite both call (PL-R2-P2-06).
+  const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId }, select: { reservation: { select: { deliveryMethod: true } } } });
   if (!ticket) return;
-  if (ticket.status !== "COMPLETE" || ticket.reversedAt) return;
-  if (!(await isPlantInScope(ticket.plantId, allowedSiteId))) return;
 
-  // Pump crew/unit only apply when the reservation was booked for pump
-  // delivery — ignore anything submitted for a chute delivery so a stray
-  // pump doesn't attach itself to a trip that never used one. Existence,
-  // status, site, reach, and role are all re-verified fresh inside the
-  // transaction below (claimTripResources) rather than trusted from the
-  // picker here.
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
   const pumpId = isPumpDelivery ? String(formData.get("pumpId") ?? "").trim() || null : null;
   const pumpOperatorId = isPumpDelivery ? String(formData.get("pumpOperatorId") ?? "").trim() || null : null;
   const pumpAssistantId = isPumpDelivery ? String(formData.get("pumpAssistantId") ?? "").trim() || null : null;
 
-  // If the chosen truck is still carrying reclaimed material from its
-  // last CLOSED trip (same mix, not yet consumed — see getAvailableReclaimForTruck),
-  // top it up instead of drawing full fresh materials: shrink every
-  // component's target mass by the reclaimed share and mark that earlier
-  // return consumed, atomically with creating this trip. The ticket's own
-  // volumeM3 (what the customer is billed/ticketed for) is never touched.
-  const availableReclaim = await getAvailableReclaimForTruck(truckId, ticket.mixId);
-  const reclaimedVolumeM3 = availableReclaim ? Math.min(availableReclaim.volumeM3, ticket.volumeM3) : null;
-
-  // Serializable: the plain findFirst-then-create this used to be let two
-  // concurrent "start trip" submissions for the same truck both read "not
-  // busy" before either commit, assigning the same truck to two open trips
-  // at once. claimTripResources' own row lock on the truck (and driver/
-  // pump/crew) serializes the two transactions against each other, but a
-  // transaction that was already mid-flight when the winner committed can
-  // still hit a genuine Postgres serialization failure on its OWN plain
-  // (non-locked) busy-check reads, which reflect its snapshot from before
-  // the winner ever committed — not a bug in the check itself, just what
-  // Serializable isolation guarantees. withRetry (src/lib/inventoryLedger.ts,
-  // the same helper every other write-transaction in this app already
-  // uses for this exact class of conflict) re-runs the whole attempt from
-  // scratch on a fresh snapshot, so a genuinely losing caller gets a clean
-  // typed busy result instead of failing outright and needing a manual
-  // resubmit.
-  let trip;
-  try {
-    trip = await withRetry(() =>
-      prisma.$transaction(
-        async (tx) => {
-        // Same claim used by the "dispatch and reversal can never both
-        // succeed" test in tests/batchCompletion.test.ts — this is the
-        // real production code path, not a paraphrase of it. Now also
-        // re-checks the ticket's own site against the actor's allowed
-        // scope, fresh, inside this same lock (PL-P1-01/03).
-        const claim = await claimTripSlot(tx, { ticketId: batchTicketId, truckId, pumpId, pumpOperatorId, pumpAssistantId, allowedSiteId });
-        if (claim.status !== "OK") throw new Error(claim.status);
-
-        // Full resource validation — existence, service status, site,
-        // capacity, reach, and busy state for the truck, driver, and any
-        // pump/crew — all re-verified fresh here, inside the transaction
-        // (PL-P1-02/03), not from the pre-transaction read above.
-        const resources = await claimTripResources(tx, {
-          siteId: claim.siteId,
-          truckId,
-          driverId,
-          loadVolumeM3: ticket.volumeM3,
-          isPumpDelivery,
-          pumpId,
-          pumpOperatorId,
-          pumpAssistantId,
-          minPumpReachM: ticket.reservation.minPumpReachM,
-        });
-        if (resources.status !== "OK") throw new Error(resources.status);
-
-        const created = await tx.trip.create({
-          data: {
-            batchTicketId,
-            truckId,
-            driverId,
-            pumpId,
-            pumpOperatorName: resources.pumpOperatorName,
-            pumpAssistantName: resources.pumpAssistantName,
-            pumpOperatorId,
-            pumpAssistantId,
-            status: "LOADING",
-            batchTime: ticket.batchCompletedAt ?? new Date(),
-            reclaimedVolumeM3,
-          },
-        });
-
-        if (availableReclaim && reclaimedVolumeM3) {
-          const freshFraction = 1 - reclaimedVolumeM3 / ticket.volumeM3;
-          const reclaimedFraction = 1 - freshFraction;
-
-          // Derives credits from the ticket's own immutable
-          // BATCH_COMPLETION ledger rows, never recomputed from the
-          // recipe/current component mass and never re-resolved against
-          // whatever storage is CURRENTLY assigned to the material — see
-          // applyReclaimCredit's own comment (tripDispatch.ts) for the
-          // three bugs a fourth external review (P1-04) found in the
-          // previous inline version of this block, and why extracting it
-          // (matching claimTripSlot's own extraction, same file) was part
-          // of the fix: that review also found the reclaim test suite
-          // only ever exercised a bare postSiloMovement call with a
-          // reclaim-shaped payload, never the real code path — extracting
-          // it here is what lets tests call the REAL logic directly.
-          const creditResult = await applyReclaimCredit(tx, {
-            batchTicketId,
-            tripId: created.id,
-            components: ticket.components,
-            reclaimedFraction,
-            actorId: user!.id,
-          });
-          if (creditResult.status !== "OK") throw new Error(`RECLAIM_CREDIT_FAILED:${creditResult.reason}`);
-
-          await tx.drumReturn.update({
-            where: { id: availableReclaim.drumReturnId },
-            data: { consumedAt: new Date(), consumedInTripId: created.id },
-          });
-        }
-
-        // Written in the SAME transaction as the trip itself (PL-P2-03)
-        // — a version that logged this after commit meant a successful
-        // dispatch could exist with no matching audit event if that
-        // later, separate write ever failed.
-        await tx.auditEvent.create({ data: { actorId: user!.id, role: user!.role, module: "Fleet", recordId: created.id, afterValue: "LOADING", reasonCode: "TRIP_STARTED" } });
-
-        return created;
-        },
-        { ...TX_OPTIONS, isolationLevel: "Serializable" },
-      ),
-    );
-  } catch {
-    return;
-  }
+  const result = await startTripForTicket(batchTicketId, {
+    truckId,
+    driverId,
+    pumpId,
+    pumpOperatorId,
+    pumpAssistantId,
+    allowedSiteId: effectiveSiteId(user),
+    actorId: user!.id,
+    actorRole: user!.role,
+  });
+  if (result.status !== "OK") return;
 
   // Real push notification (see src/lib/push.ts) the instant this driver
   // is actually dispatched — the whole point of the driver app knowing
@@ -734,12 +604,13 @@ export async function startTrip(formData: FormData) {
   // open it. A driver with no linked User account (or none subscribed to
   // push yet) simply gets nothing here — same silent no-op notify() and
   // sendPushToUser() already are in every other case.
+  const dispatched = await prisma.batchTicket.findUniqueOrThrow({ where: { id: batchTicketId }, select: { ticketNumber: true, volumeM3: true, reservation: { select: { reservationNumber: true } } } });
   const driverUser = await prisma.user.findUnique({ where: { employeeId: driverId } });
   if (driverUser) {
     await notify([driverUser.id], {
-      title: ticket.reservation.reservationNumber,
-      body: `${ticket.ticketNumber} — ${ticket.volumeM3} m³`,
-      link: `/driver/trip/${trip.id}`,
+      title: dispatched.reservation.reservationNumber,
+      body: `${dispatched.ticketNumber} — ${dispatched.volumeM3} m³`,
+      link: `/driver/trip/${result.tripId}`,
       module: "Fleet",
     });
   }
@@ -753,8 +624,8 @@ export async function startTrip(formData: FormData) {
     const pumpCrewUsers = await prisma.user.findMany({ where: { pumpCrewMemberId: { in: pumpCrewIds } } });
     if (pumpCrewUsers.length > 0) {
       await notify(pumpCrewUsers.map((u) => u.id), {
-        title: ticket.reservation.reservationNumber,
-        body: `${ticket.ticketNumber} — ${ticket.volumeM3} m³`,
+        title: dispatched.reservation.reservationNumber,
+        body: `${dispatched.ticketNumber} — ${dispatched.volumeM3} m³`,
         link: "/pump-crew",
         module: "Fleet",
       });

@@ -3,15 +3,13 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser } from "@/lib/session";
+import { effectiveSiteId } from "@/lib/siteScope";
 import { uploadFile, deleteFile } from "@/lib/blob";
 import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import {
-  advanceTrip as advanceTripBase,
-  closeTripFull as closeTripFullBase,
-  closeTripWithReturn as closeTripWithReturnBase,
-} from "@/app/(app)/trips/actions";
+import { advanceTrip as advanceTripBase } from "@/app/(app)/trips/actions";
+import { closeTripFullForId, closeTripWithReturnForId } from "@/lib/tripLifecycle";
 
 // Every driver action is scoped to the logged-in session's own Employee
 // record — a driver can only touch their own trips, not one assigned to
@@ -113,20 +111,43 @@ export async function uploadDeliveryPhoto(formData: FormData) {
   revalidatePath(`/driver/trip/${tripId}`);
 }
 
+// Calls the pure domain command directly (src/lib/tripLifecycle.ts)
+// rather than the trips/actions.ts Server Action wrapper — that wrapper
+// stays void-returning since desktop trips/page.tsx binds it straight to
+// a plain <form action>, which React only accepts a void-returning
+// action for. This action needs the actual typed result to know whether
+// the close really happened (PL-R2-P2-01, second production-lifecycle
+// review — see the comment below).
 export async function confirmDeliveryFull(formData: FormData) {
+  const user = await getCurrentUser();
   const tripId = String(formData.get("tripId") ?? "");
   const signedBy = String(formData.get("signedBy") ?? "").trim();
   if (!tripId || !signedBy) return;
   await requireOwnTrip(tripId);
 
-  // The signature is written ATOMICALLY with the close itself now
-  // (PL-P1-05, first production-lifecycle review) — passed through to
-  // closeTripFullBase's own domain call rather than stamped here first in
-  // a separate write. The old order let a signature land on file with no
-  // actual close if closeTripFullBase then refused (e.g. the trip wasn't
-  // really DISCHARGING any more).
-  formData.set("deliverySignedBy", signedBy);
-  await closeTripFullBase(formData);
+  // The signature is written ATOMICALLY with the close itself (PL-P1-05,
+  // first production-lifecycle review) — passed straight into the
+  // domain call rather than stamped here first in a separate write, so a
+  // signature can never land on file with no actual close behind it.
+  const result = await closeTripFullForId(tripId, {
+    allowedSiteId: effectiveSiteId(user),
+    requireOwnDriverEmployeeId: user!.employeeId,
+    actorId: user!.id,
+    actorRole: user!.role,
+    deliverySignedBy: signedBy,
+  });
+  // This used to write DELIVERY_CONFIRMED_FULL and redirect to
+  // "delivered" unconditionally, regardless of whether the close
+  // actually happened — a driver whose trip had already moved on, or
+  // wasn't actually DISCHARGING any more, would still see (and get
+  // audited as) a successful delivery confirmation for a trip that never
+  // closed. Only a real OK writes that audit and leaves the confirmation
+  // screen; anything else sends the driver back to the trip's own page,
+  // where its actual (unclosed) state is what renders.
+  if (result.status !== "OK") {
+    revalidatePath(`/driver/trip/${tripId}`);
+    redirect(`/driver/trip/${tripId}`);
+  }
   await logAudit({ module: "Fleet", recordId: tripId, afterValue: signedBy, reasonCode: "DELIVERY_CONFIRMED_FULL" });
 
   revalidatePath("/driver");
@@ -134,14 +155,32 @@ export async function confirmDeliveryFull(formData: FormData) {
 }
 
 export async function confirmDeliveryWithReturn(formData: FormData) {
+  const user = await getCurrentUser();
   const tripId = String(formData.get("tripId") ?? "");
   const signedBy = String(formData.get("signedBy") ?? "").trim();
   if (!tripId || !signedBy) return;
   await requireOwnTrip(tripId);
 
+  const returnedVolumeM3 = Number(formData.get("returnedVolumeM3") ?? 0);
+  const reasonCode = String(formData.get("reasonCode") ?? "").trim() || null;
+  const fate = String(formData.get("fate") ?? "").trim() || null;
+
   // Same atomic-signature fix as confirmDeliveryFull above.
-  formData.set("deliverySignedBy", signedBy);
-  await closeTripWithReturnBase(formData);
+  const result = await closeTripWithReturnForId(tripId, {
+    allowedSiteId: effectiveSiteId(user),
+    requireOwnDriverEmployeeId: user!.employeeId,
+    actorId: user!.id,
+    actorRole: user!.role,
+    returnedVolumeM3,
+    reasonCode,
+    fate,
+    deliverySignedBy: signedBy,
+  });
+  // Same false-success fix as confirmDeliveryFull above (PL-R2-P2-01).
+  if (result.status !== "OK") {
+    revalidatePath(`/driver/trip/${tripId}`);
+    redirect(`/driver/trip/${tripId}`);
+  }
   await logAudit({ module: "Fleet", recordId: tripId, afterValue: signedBy, reasonCode: "DELIVERY_CONFIRMED_WITH_RETURN" });
 
   revalidatePath("/driver");

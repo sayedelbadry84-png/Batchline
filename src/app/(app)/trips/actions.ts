@@ -2,8 +2,10 @@
 
 import { getCurrentUser, requireRole, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId } from "@/lib/siteScope";
-import { advanceTripState, closeTripFullForId, closeTripWithReturnForId, setDrumReturnFateForId } from "@/lib/tripLifecycle";
+import { advanceTripState, closeTripFullForId, closeTripWithReturnForId, setDrumReturnFateForId, type AdvanceableTripStatus } from "@/lib/tripLifecycle";
 import { revalidatePath } from "next/cache";
+
+const ADVANCEABLE_STATUSES: readonly AdvanceableTripStatus[] = ["LOADING", "IN_TRANSIT", "ON_SITE"];
 
 // DRIVER is allowed on all three trip-close/advance actions below — the
 // driver app's wrappers (see src/app/driver/actions.ts) call straight
@@ -21,9 +23,17 @@ export async function advanceTrip(formData: FormData) {
   requireRole(user, ["PLANT_OPERATOR", "ADMIN", "DRIVER"]);
 
   const tripId = String(formData.get("tripId") ?? "");
-  if (!tripId) return;
+  // The status the UI believed this trip was in when the button was
+  // rendered — never trusted as authority on its own (see
+  // advanceTripState's own comment, PL-R2-P1-01), just an optimistic-
+  // concurrency token compared against the freshly locked row. An
+  // unrecognized/missing value can never match a real trip status, so it
+  // naturally falls through to STALE_STATE rather than needing its own
+  // guard here.
+  const expectedStatus = String(formData.get("expectedStatus") ?? "");
+  if (!tripId || !ADVANCEABLE_STATUSES.includes(expectedStatus as AdvanceableTripStatus)) return;
 
-  await advanceTripState(tripId, {
+  await advanceTripState(tripId, expectedStatus as AdvanceableTripStatus, {
     allowedSiteId: effectiveSiteId(user),
     requireOwnDriverEmployeeId: user!.role === "DRIVER" ? user!.employeeId : null,
     actorId: user!.id,

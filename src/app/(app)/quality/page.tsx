@@ -9,6 +9,7 @@ import {
   createCertificate,
   updateCertificate,
   approveWasteMemo,
+  denyWasteMemo,
   recordWasteMemoNote,
   saveCapaRecord,
   closeCapaRecord,
@@ -437,7 +438,10 @@ export default async function QualityPage({
                     className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
                   />
                 </div>
-                <button className="rounded-md border border-good bg-good-soft px-3 py-1.5 text-xs font-medium text-good hover:opacity-80">
+                <button formAction={denyWasteMemo} className="rounded-md border border-critical bg-critical-soft px-3 py-1.5 text-xs font-medium text-critical hover:opacity-80">
+                  {m.wasteMemos.deny}
+                </button>
+                <button formAction={approveWasteMemo} className="rounded-md border border-good bg-good-soft px-3 py-1.5 text-xs font-medium text-good hover:opacity-80">
                   {m.wasteMemos.approve}
                 </button>
               </div>
