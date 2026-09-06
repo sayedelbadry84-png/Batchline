@@ -14,11 +14,17 @@ const ACTION_STATUS_CHIP: Record<string, string> = {
   COMPLETE: "bg-good-soft text-good",
 };
 
-export default async function OperatorHomePage() {
+export default async function OperatorHomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ releaseError?: string; releaseErrorMaterial?: string }>;
+}) {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
   if (user.role !== "PLANT_OPERATOR" && user.role !== "ADMIN") redirect("/");
   if (!user.plantId || !user.plant) redirect("/");
+
+  const { releaseError, releaseErrorMaterial } = await searchParams;
 
   // A site can run more than one production line (Plant) sharing the same
   // yard/stock — an operator's account is still linked to one line
@@ -32,11 +38,32 @@ export default async function OperatorHomePage() {
   const o = dict.operator;
   const m = dict.modules.production;
 
+  // Same typed reasons and localized text as production/page.tsx's own
+  // banner (RMR-R4-P2-01) — a release failure from this field view used
+  // to redirect to a route that doesn't exist (/operator/ticket with no
+  // id) and show nothing at all.
+  const releaseErrorText =
+    releaseError === "STORAGE_NOT_CONFIGURED"
+      ? m.releaseError.STORAGE_NOT_CONFIGURED(releaseErrorMaterial ?? "")
+      : releaseError === "INVALID_STATE"
+        ? m.releaseError.INVALID_STATE
+        : releaseError === "NOT_FOUND"
+          ? m.releaseError.NOT_FOUND
+          : releaseError === "NO_REMAINING_VOLUME"
+            ? m.releaseError.NO_REMAINING_VOLUME
+            : null;
+
   const [readyReservationsRaw, actionTickets] = await Promise.all([
     prisma.reservation.findMany({
       where: {
         status: { in: ["CONFIRMED", "IN_PRODUCTION"] },
         siteId,
+        // Missing here before (RMR-R4-P2-01) — this list could show a
+        // release button for a reservation the domain function would
+        // correctly refuse as INVALID_STATE, since only status was
+        // checked, not the two sign-offs release itself also requires.
+        initialApprovedAt: { not: null },
+        finalApprovedAt: { not: null },
       },
       include: {
         project: { include: { customer: true } },
@@ -86,6 +113,10 @@ export default async function OperatorHomePage() {
         </div>
       </div>
 
+      {releaseErrorText && (
+        <p className="rounded-md border border-critical/40 bg-critical-soft px-3 py-2 text-sm text-critical">{releaseErrorText}</p>
+      )}
+
       <div className="flex flex-col gap-3">
         <div className="font-mono text-xs text-ink-muted uppercase">{o.actionTitle}</div>
         {actionTickets.map((t) => (
@@ -124,7 +155,7 @@ export default async function OperatorHomePage() {
             className="flex flex-col gap-2 rounded-xl border border-border bg-surface p-4 shadow-sm"
           >
             <input type="hidden" name="reservationId" value={r.id} />
-            <input type="hidden" name="returnPrefix" value="/operator/ticket" />
+            <input type="hidden" name="returnTarget" value="operator" />
             <div>
               <span className="font-medium">{r.project.name}</span>
               <div className="font-mono text-xs text-ink-muted" dir="ltr">{r.reservationNumber}</div>
