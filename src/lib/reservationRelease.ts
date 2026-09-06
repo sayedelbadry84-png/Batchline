@@ -37,7 +37,18 @@ class ReleaseAbort extends Error {
   }
 }
 
-export type ReleaseActor = { id: string; role: string };
+// allowedSiteId is still session-derived data, not session ACCESS — this
+// function never calls getCurrentUser()/cookies() itself; the caller
+// computes effectiveSiteId(user) and passes the plain value in. null
+// means unrestricted (ADMIN), same convention as isSiteInScope. Defense
+// in depth (RMR-R5-P1-01): the caller's own outer scope check reads the
+// reservation's siteId before this function ever takes its lock, so a
+// site reassignment landing in that gap would otherwise go unchecked —
+// the chosen plant already has to match the reservation's site (below),
+// which prevents the same race indirectly, but re-checking the actor's
+// own scope explicitly, after the lock, is clearer and doesn't depend on
+// that indirect relationship holding.
+export type ReleaseActor = { id: string; role: string; allowedSiteId: string | null };
 
 // The actual ticket-creation logic shared by releaseBatchTicket (a
 // planned, pre-approved reservation) and createManualRelease (a walk-in
@@ -83,6 +94,10 @@ export async function releaseTicketForReservation(reservationId: string, request
             where: { id: reservationId },
             include: { mix: { include: { components: true } } },
           });
+
+          if (actor.allowedSiteId !== null && reservation.siteId !== actor.allowedSiteId) {
+            throw new ReleaseAbort({ status: "NOT_FOUND" });
+          }
 
           const isApproved = reservation.initialApprovedAt != null && reservation.finalApprovedAt != null;
           if (!isApproved || !RELEASABLE_RESERVATION_STATUSES.has(reservation.status)) {

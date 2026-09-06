@@ -107,9 +107,7 @@ export type CloseReservationResult = { status: "OK" } | { status: "NOT_FOUND" } 
 // outside a transaction, with no lock: closing a reservation and
 // releasing a ticket against that same reservation (production/actions.ts)
 // could interleave with no coordination at all between them
-// (RMR-R4-P1-01). Site/permission scope stays the caller's own
-// responsibility (a session concern), same split as
-// releaseTicketForReservation.
+// (RMR-R4-P1-01).
 //
 // Takes the exact same row lock releaseTicketForReservation takes on
 // this Reservation, in the same order (lock first, then read/validate) —
@@ -117,9 +115,22 @@ export type CloseReservationResult = { status: "OK" } | { status: "NOT_FOUND" } 
 // reaches the row first blocks the other until it commits, and the
 // second one then re-reads guaranteed-fresh state instead of racing
 // against a snapshot taken before the first one's write.
+//
+// allowedSiteId IS still session-derived data, not a session ACCESS —
+// this function never calls getCurrentUser()/cookies() itself, the
+// caller computes effectiveSiteId(user) and passes the plain value in
+// (RMR-R5-P1-01). Keeping session access out of the domain function
+// never meant authorization facts couldn't be inputs to it: the
+// caller's own outer scope check (reservations/actions.ts) reads the
+// reservation's siteId BEFORE this function ever takes its lock, so a
+// site reassignment landing in that gap would otherwise let the old
+// site's user close a reservation that had already moved to a site they
+// have no authority over. Re-checked here, after the lock, against the
+// SAME freshly-read row the terminal-state check itself uses — null
+// means unrestricted (ADMIN), same convention as isSiteInScope.
 export async function closeReservationForId(
   reservationId: string,
-  opts: { actorId: string; actorRole: string; closeReasonCode: string; closeNote: string | null },
+  opts: { actorId: string; actorRole: string; allowedSiteId: string | null; closeReasonCode: string; closeNote: string | null },
 ): Promise<CloseReservationResult> {
   return prisma.$transaction(
     async (tx) => {
@@ -127,6 +138,7 @@ export async function closeReservationForId(
       if (locked.length === 0) return { status: "NOT_FOUND" as const };
 
       const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+      if (opts.allowedSiteId !== null && reservation.siteId !== opts.allowedSiteId) return { status: "NOT_FOUND" as const };
       if (TERMINAL_RESERVATION_STATUSES.has(reservation.status)) return { status: "INVALID_STATE" as const };
 
       await tx.reservation.update({
