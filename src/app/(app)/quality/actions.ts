@@ -9,6 +9,7 @@ import { withSequentialNumber } from "@/lib/sequence";
 import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { computeMaterialLabTestResults, MATERIAL_LAB_TEST_TYPE_KEYS, type MaterialLabTestType } from "@/lib/materialLabTests";
+import { approveWasteIncidentMemo } from "@/lib/tripLifecycle";
 
 function dateOrNull(formData: FormData, key: string): Date | null {
   const raw = formData.get(key);
@@ -294,23 +295,11 @@ export async function approveWasteMemo(formData: FormData) {
   // what was wrong with the load. No note, no approval.
   const approvalNote = String(formData.get("approvalNote") ?? "").trim();
   if (!id || !approvalNote) return;
-  if (!(await wasteMemoInScope(id, effectiveSiteId(user)))) return;
 
-  const existing = await prisma.wasteIncidentMemo.findUnique({ where: { id } });
-  if (!existing || existing.status !== "PENDING") return;
+  const result = await approveWasteIncidentMemo(id, { allowedSiteId: effectiveSiteId(user), actorId: user!.id, actorRole: user!.role, approvalNote });
+  if (result.status !== "OK") return;
 
-  const memo = await prisma.wasteIncidentMemo.update({
-    where: { id },
-    data: { status: "APPROVED", approvalNote, approvedAt: new Date(), approvedById: user!.id },
-  });
-
-  await logAudit({
-    module: "Quality",
-    recordId: id,
-    afterValue: `${memo.wastedVolumeM3} m3 — ${memo.reasonCode} — ${approvalNote}`,
-    reasonCode: "WASTE_MEMO_APPROVED",
-  });
-
+  const memo = await prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id } });
   revalidatePath("/quality");
   revalidatePath(`/production/${memo.batchTicketId}`);
 }

@@ -169,8 +169,14 @@ export async function closeReservationForId(
   );
 }
 
-export async function isReservationFullyDelivered(reservationId: string): Promise<boolean> {
-  const reservation = await prisma.reservation.findUnique({
+// Accepts an optional transaction client (see getReleasedVolumeM3's own
+// comment) so a caller that needs this read and the reservation's own
+// terminal-state update to be atomic — see finalizeReservationIfDelivered
+// in src/lib/tripLifecycle.ts — can pass its own locked `tx` through
+// instead of racing a plain snapshot read against a sibling trip's own
+// concurrent close.
+export async function isReservationFullyDelivered(reservationId: string, db: Db = prisma): Promise<boolean> {
+  const reservation = await db.reservation.findUnique({
     where: { id: reservationId },
     include: { batchTickets: { where: { status: { not: "CANCELLED" } }, include: { trip: true } } },
   });
@@ -180,4 +186,32 @@ export async function isReservationFullyDelivered(reservationId: string): Promis
   if (released < reservation.requestedVolumeM3 - VOLUME_EPSILON_M3) return false;
 
   return reservation.batchTickets.every((t) => t.trip?.status === "CLOSED");
+}
+
+const NON_FINALIZABLE_RESERVATION_STATUSES = new Set(["DELIVERED", "CANCELLED"]);
+
+// Shared by closeTripFullForId/closeTripWithReturnForId (src/lib/
+// tripLifecycle.ts) — folds the reservation-finalization step (PL-P1-05,
+// first production-lifecycle review) into the SAME transaction as the
+// trip close that might trigger it, rather than a separate, later,
+// unconditional update against a plain snapshot read. Takes the
+// Reservation row lock first: two sibling trips of the same split-load
+// reservation closing concurrently each take this same lock in their own
+// transaction, so whichever commits first is the only one that can see
+// its own trip's fresh CLOSED status when it re-reads — the second one
+// then sees BOTH trips closed (including the first's, already committed)
+// and is the one that actually flips the reservation, exactly once.
+// Refuses to overwrite a reservation that's already terminal (DELIVERED
+// or CANCELLED) — the old unconditional update could otherwise stamp
+// DELIVERED over a reservation a different, concurrent action had just
+// cancelled.
+export async function finalizeReservationIfDelivered(tx: Prisma.TransactionClient, reservationId: string): Promise<void> {
+  const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Reservation" WHERE "id" = ${reservationId} FOR UPDATE`;
+  if (locked.length === 0) return;
+
+  const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId }, select: { status: true } });
+  if (NON_FINALIZABLE_RESERVATION_STATUSES.has(reservation.status)) return;
+  if (!(await isReservationFullyDelivered(reservationId, tx))) return;
+
+  await tx.reservation.update({ where: { id: reservationId }, data: { status: "DELIVERED" } });
 }

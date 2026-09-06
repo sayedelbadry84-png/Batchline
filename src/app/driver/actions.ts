@@ -119,7 +119,13 @@ export async function confirmDeliveryFull(formData: FormData) {
   if (!tripId || !signedBy) return;
   await requireOwnTrip(tripId);
 
-  await prisma.trip.update({ where: { id: tripId }, data: { deliverySignedBy: signedBy, deliverySignedAt: new Date() } });
+  // The signature is written ATOMICALLY with the close itself now
+  // (PL-P1-05, first production-lifecycle review) — passed through to
+  // closeTripFullBase's own domain call rather than stamped here first in
+  // a separate write. The old order let a signature land on file with no
+  // actual close if closeTripFullBase then refused (e.g. the trip wasn't
+  // really DISCHARGING any more).
+  formData.set("deliverySignedBy", signedBy);
   await closeTripFullBase(formData);
   await logAudit({ module: "Fleet", recordId: tripId, afterValue: signedBy, reasonCode: "DELIVERY_CONFIRMED_FULL" });
 
@@ -133,7 +139,8 @@ export async function confirmDeliveryWithReturn(formData: FormData) {
   if (!tripId || !signedBy) return;
   await requireOwnTrip(tripId);
 
-  await prisma.trip.update({ where: { id: tripId }, data: { deliverySignedBy: signedBy, deliverySignedAt: new Date() } });
+  // Same atomic-signature fix as confirmDeliveryFull above.
+  formData.set("deliverySignedBy", signedBy);
   await closeTripWithReturnBase(formData);
   await logAudit({ module: "Fleet", recordId: tripId, afterValue: signedBy, reasonCode: "DELIVERY_CONFIRMED_WITH_RETURN" });
 
