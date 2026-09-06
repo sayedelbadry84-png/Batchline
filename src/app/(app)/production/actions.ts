@@ -12,6 +12,7 @@ import { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComp
 import { claimTripSlot, applyReclaimCredit } from "@/lib/tripDispatch";
 import { claimTripResources, reassignTrip } from "@/lib/tripAssignment";
 import { releaseTicketForReservation } from "@/lib/reservationRelease";
+import { withRetry } from "@/lib/inventoryLedger";
 import { parseReturnTarget, releaseSuccessPath, releaseFailurePath, parseTripReturnTarget, tripReturnPath } from "@/lib/releaseRouting";
 import {
   requestShortageOverride as requestShortageOverrideDomain,
@@ -623,14 +624,23 @@ export async function startTrip(formData: FormData) {
   // Serializable: the plain findFirst-then-create this used to be let two
   // concurrent "start trip" submissions for the same truck both read "not
   // busy" before either commit, assigning the same truck to two open trips
-  // at once. Under Serializable isolation, Postgres detects the read-write
-  // conflict between the two transactions and aborts one with P2034 — that
-  // one falls through to the silent-return below, same as every other
-  // rejected submission in this action, and the caller just needs to retry.
+  // at once. claimTripResources' own row lock on the truck (and driver/
+  // pump/crew) serializes the two transactions against each other, but a
+  // transaction that was already mid-flight when the winner committed can
+  // still hit a genuine Postgres serialization failure on its OWN plain
+  // (non-locked) busy-check reads, which reflect its snapshot from before
+  // the winner ever committed — not a bug in the check itself, just what
+  // Serializable isolation guarantees. withRetry (src/lib/inventoryLedger.ts,
+  // the same helper every other write-transaction in this app already
+  // uses for this exact class of conflict) re-runs the whole attempt from
+  // scratch on a fresh snapshot, so a genuinely losing caller gets a clean
+  // typed busy result instead of failing outright and needing a manual
+  // resubmit.
   let trip;
   try {
-    trip = await prisma.$transaction(
-      async (tx) => {
+    trip = await withRetry(() =>
+      prisma.$transaction(
+        async (tx) => {
         // Same claim used by the "dispatch and reversal can never both
         // succeed" test in tests/batchCompletion.test.ts — this is the
         // real production code path, not a paraphrase of it. Now also
@@ -710,8 +720,9 @@ export async function startTrip(formData: FormData) {
         await tx.auditEvent.create({ data: { actorId: user!.id, role: user!.role, module: "Fleet", recordId: created.id, afterValue: "LOADING", reasonCode: "TRIP_STARTED" } });
 
         return created;
-      },
-      { ...TX_OPTIONS, isolationLevel: "Serializable" },
+        },
+        { ...TX_OPTIONS, isolationLevel: "Serializable" },
+      ),
     );
   } catch {
     return;

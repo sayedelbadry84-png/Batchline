@@ -1,6 +1,7 @@
 import "server-only";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { withRetry } from "@/lib/inventoryLedger";
 
 type Tx = Prisma.TransactionClient;
 
@@ -150,8 +151,16 @@ export async function reassignTrip(
   tripId: string,
   opts: { truckId: string; driverId: string; pumpId: string | null; pumpOperatorId: string | null; pumpAssistantId: string | null; allowedSiteId: string | null; actorId: string; actorRole: string },
 ): Promise<ReassignTripResult> {
-  return prisma.$transaction(
-    async (tx) => {
+  // withRetry (src/lib/inventoryLedger.ts) — same reasoning as
+  // startTrip's own dispatch transaction (production/actions.ts): a
+  // transaction that was already mid-flight when a concurrent
+  // reassignment or dispatch for the same resource committed can hit a
+  // genuine Postgres serialization failure on its own pre-commit
+  // snapshot rather than a clean typed busy result: retrying re-runs the
+  // whole attempt against a fresh snapshot instead of failing outright.
+  return withRetry(() =>
+    prisma.$transaction(
+      async (tx) => {
       const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Trip" WHERE "id" = ${tripId} FOR UPDATE`;
       if (locked.length === 0) return { status: "NOT_FOUND" as const };
 
@@ -196,8 +205,9 @@ export async function reassignTrip(
         data: { actorId: opts.actorId, role: opts.actorRole, module: "Fleet", recordId: tripId, afterValue: `${opts.truckId}/${opts.driverId}`, reasonCode: "TRIP_ASSIGNMENT_UPDATED" },
       });
 
-      return { status: "OK" as const };
-    },
-    { ...TX_OPTIONS, isolationLevel: "Serializable" },
+        return { status: "OK" as const };
+      },
+      { ...TX_OPTIONS, isolationLevel: "Serializable" },
+    ),
   );
 }

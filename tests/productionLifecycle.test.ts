@@ -47,6 +47,7 @@ const {
 } = await import("../src/lib/tripLifecycle");
 const { completeBatchTicket, cancelBatchTicket } = await import("../src/lib/batchCompletion");
 const { closeReservationForId } = await import("../src/lib/reservations");
+const { withRetry } = await import("../src/lib/inventoryLedger");
 
 const prisma = new PrismaClient();
 
@@ -264,8 +265,14 @@ async function dispatchTrip(
     loadVolumeM3: number;
   },
 ) {
-  return prisma.$transaction(
-    async (tx) => {
+  // withRetry, matching startTrip's own real transaction (production/
+  // actions.ts) — a Serializable transaction whose own busy-checks read
+  // rows a concurrent winner just committed can hit a genuine Postgres
+  // serialization failure on its pre-commit snapshot rather than a clean
+  // typed busy result; retrying re-runs the whole attempt fresh.
+  return withRetry(() =>
+    prisma.$transaction(
+      async (tx) => {
       const claim = await claimTripSlot(tx, {
         ticketId,
         truckId: opts.truckId,
@@ -304,8 +311,9 @@ async function dispatchTrip(
         },
       });
       return { status: "OK" as const, tripId: trip.id };
-    },
-    { isolationLevel: "Serializable" },
+      },
+      { isolationLevel: "Serializable" },
+    ),
   );
 }
 
