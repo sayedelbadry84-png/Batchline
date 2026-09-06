@@ -45,7 +45,7 @@ const { PrismaClient } = await import("@prisma/client");
 const { completeBatchTicket, reverseBatchTicket, isValidSpecificGravity } = await import("../src/lib/batchCompletion");
 const { releaseTicketForReservation } = await import("../src/lib/reservationRelease");
 const { getEffectiveMix, saveReservationMixRevision, cancelActiveReservationMixRevision } = await import("../src/lib/reservationMixRevisions");
-const { getRemainingVolumeM3 } = await import("../src/lib/reservations");
+const { getRemainingVolumeM3, closeReservationForId } = await import("../src/lib/reservations");
 const { canPerformAction } = await import("../src/lib/permissions");
 const { isSiteInScope } = await import("../src/lib/siteScope");
 
@@ -261,8 +261,16 @@ function revisedComponents() {
   ];
 }
 
+// releaseTicketForReservation's audit write now needs an actor identity
+// (RMR-R4-P2-02) — every test call supplies this fixture admin, since
+// nothing here cares which specific user's name ends up on the audit
+// row, only that the release itself behaves correctly.
+function testActor() {
+  return { id: adminUserId, role: "ADMIN" };
+}
+
 async function expectReleaseOk(reservationId: string, volume: number) {
-  const result = await releaseTicketForReservation(reservationId, volume, plantId);
+  const result = await releaseTicketForReservation(reservationId, volume, plantId, testActor());
   assert.equal(result.status, "OK");
   if (result.status !== "OK") throw new Error("unreachable");
   ticketIds.push(result.ticket.id);
@@ -424,7 +432,7 @@ test("release refuses a reservation that went terminal (closed early) after it s
   // released against it again.
   await prisma.reservation.update({ where: { id: reservationId }, data: { status: "DELIVERED" } });
 
-  const result = await releaseTicketForReservation(reservationId, 5, plantId);
+  const result = await releaseTicketForReservation(reservationId, 5, plantId, testActor());
   assert.equal(result.status, "INVALID_STATE");
 
   // The reservation must not have been silently reopened either.
@@ -436,7 +444,7 @@ test("release refuses a reservation whose approval was revoked (e.g. by a concur
   const reservationId = await makeReservation();
   await prisma.reservation.update({ where: { id: reservationId }, data: { initialApprovedAt: null, initialApprovedById: null, finalApprovedAt: null, finalApprovedById: null } });
 
-  const result = await releaseTicketForReservation(reservationId, 5, plantId);
+  const result = await releaseTicketForReservation(reservationId, 5, plantId, testActor());
   assert.equal(result.status, "INVALID_STATE");
 });
 
@@ -444,16 +452,144 @@ test("release refuses a station that was deactivated, or that doesn't belong to 
   const reservationId = await makeReservation();
 
   const deactivatedPlant = await prisma.plant.create({ data: { siteId, name: "TEST-SUITE-RMR-DEACTIVATED-PLANT", status: "FROZEN" } });
-  const deactivatedResult = await releaseTicketForReservation(reservationId, 5, deactivatedPlant.id);
+  const deactivatedResult = await releaseTicketForReservation(reservationId, 5, deactivatedPlant.id, testActor());
   assert.equal(deactivatedResult.status, "INVALID_STATE");
   await cleanupPlant(deactivatedPlant.id);
 
   const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-RMR-OTHER-${Date.now()}`, name: "TEST-SUITE-RMR-OTHER-SITE", city: "Test", country: "Test" } });
   const otherSitePlant = await prisma.plant.create({ data: { siteId: otherSite.id, name: "TEST-SUITE-RMR-OTHER-SITE-PLANT" } });
-  const wrongSiteResult = await releaseTicketForReservation(reservationId, 5, otherSitePlant.id);
+  const wrongSiteResult = await releaseTicketForReservation(reservationId, 5, otherSitePlant.id, testActor());
   assert.equal(wrongSiteResult.status, "INVALID_STATE");
   await cleanupPlant(otherSitePlant.id);
   await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+});
+
+// ---- RMR-R4-P1-01: release uses a positive allow-list, not a terminal -
+// ---- blacklist — a status blacklist would also let a REQUESTED or ------
+// ---- ON_HOLD reservation through if it somehow carried both approvals --
+
+test("release refuses an approved reservation whose status is ON_HOLD, not just DELIVERED/CANCELLED", async () => {
+  const reservationId = await makeReservation({ status: "ON_HOLD" });
+  const result = await releaseTicketForReservation(reservationId, 5, plantId, testActor());
+  assert.equal(result.status, "INVALID_STATE");
+});
+
+test("release refuses an approved reservation carrying a status this domain doesn't recognize as releasable at all", async () => {
+  // status is a free-string column, not a real Postgres enum (same
+  // convention as every other status/type column in this schema) — a
+  // future status this allow-list was never updated for must still be
+  // refused, not fall through a blacklist that only names today's two
+  // terminal values.
+  const reservationId = await makeReservation({ status: "TEST-SUITE-RMR-FUTURE-STATUS" });
+  const result = await releaseTicketForReservation(reservationId, 5, plantId, testActor());
+  assert.equal(result.status, "INVALID_STATE");
+});
+
+// ---- RMR-R4-P2-02: a successful release and its BATCH_RELEASED audit --
+// ---- event are one atomic transaction, never one without the other ----
+
+test("a successful release writes its BATCH_RELEASED audit event in the same transaction, with the right actor and ticket id", async () => {
+  const reservationId = await makeReservation({ requestedVolumeM3: 20 });
+  const ticket = await expectReleaseOk(reservationId, 5);
+
+  const auditRow = await prisma.auditEvent.findFirst({ where: { module: "Production", recordId: ticket.id, reasonCode: "BATCH_RELEASED" } });
+  assert.ok(auditRow, "the successful release must have its own BATCH_RELEASED audit row");
+  assert.equal(auditRow!.actorId, adminUserId);
+  assert.match(auditRow!.afterValue ?? "", new RegExp(ticket.ticketNumber.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("if the successful-release audit write fails, the whole release rolls back — no ticket, no reservation transition survives", async () => {
+  const reservationId = await makeReservation({ requestedVolumeM3: 20 });
+  const before = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+
+  // A nonexistent actor id violates AuditEvent.actorId's own FK the
+  // moment the audit insert (inside the same transaction as the ticket)
+  // runs — a real, deterministic way to force that one specific write to
+  // fail without touching anything else about the transaction.
+  const badActor = { id: "test-suite-rmr-nonexistent-actor", role: "ADMIN" };
+  await assert.rejects(() => releaseTicketForReservation(reservationId, 5, plantId, badActor));
+
+  const ticketsAfter = await prisma.batchTicket.findMany({ where: { reservationId } });
+  assert.equal(ticketsAfter.length, 0, "no ticket should have been committed once the audit insert failed");
+
+  const reservationAfter = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+  assert.equal(reservationAfter.status, before.status, "the reservation's own status transition must have rolled back too");
+});
+
+// ---- RMR-R4-P1-01: release and closeReservationForId share one real ---
+// ---- database lock on the Reservation row, not just a fresh read ------
+
+test("closeReservationForId genuinely blocks on a real row lock while another transaction holds it, then sees fresh state once it lets go", async () => {
+  const reservationId = await makeReservation({ requestedVolumeM3: 20, status: "IN_PRODUCTION" });
+
+  let lockAcquiredResolve: () => void;
+  const lockAcquired = new Promise<void>((resolve) => {
+    lockAcquiredResolve = resolve;
+  });
+  let letGoResolve: () => void;
+  const letGo = new Promise<void>((resolve) => {
+    letGoResolve = resolve;
+  });
+
+  // Manually holds the EXACT same "SELECT ... FOR UPDATE" lock
+  // releaseTicketForReservation itself takes as the first thing it does
+  // inside its own transaction — on a real, separate connection pulled
+  // from the same pool (an interactive $transaction pins its own
+  // connection for its whole duration), paused mid-transaction via a
+  // real awaited signal, not a sleep. This is the barrier the review
+  // asked for: the actual synchronization mechanism under test is
+  // Postgres's own row lock, not JS timing.
+  const holderPromise = prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Reservation" WHERE "id" = ${reservationId} FOR UPDATE`;
+      lockAcquiredResolve();
+      await letGo;
+    },
+    { timeout: 20000 },
+  );
+
+  await lockAcquired;
+
+  let closeSettled = false;
+  const closePromise = closeReservationForId(reservationId, { actorId: adminUserId, actorRole: "ADMIN", closeReasonCode: "OTHER", closeNote: null }).then((r) => {
+    closeSettled = true;
+    return r;
+  });
+
+  // Give the event loop a moment to run closePromise's own microtasks if
+  // it were ever going to resolve on its own — this isn't guessing at
+  // WHETHER the lock works (that's guaranteed by Postgres), only
+  // confirming it hasn't resolved yet before we let go of it.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(closeSettled, false, "closeReservationForId must still be blocked while another transaction holds the reservation's row lock");
+
+  letGoResolve!();
+  await holderPromise;
+  const closeResult = await closePromise;
+  assert.equal(closeResult.status, "OK");
+
+  const reservationAfter = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+  assert.equal(reservationAfter.status, "DELIVERED");
+});
+
+test("release, then close, in that order — a clean serial order once release has already committed", async () => {
+  const reservationId = await makeReservation({ requestedVolumeM3: 20 });
+  const ticket = await expectReleaseOk(reservationId, 5);
+
+  const closeResult = await closeReservationForId(reservationId, { actorId: adminUserId, actorRole: "ADMIN", closeReasonCode: "OTHER", closeNote: null });
+  assert.equal(closeResult.status, "OK");
+
+  const reservationAfter = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+  assert.equal(reservationAfter.status, "DELIVERED");
+  // Closing early never retroactively touches a ticket already released.
+  const ticketAfter = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticket.id } });
+  assert.equal(ticketAfter.status, "RELEASED");
+});
+
+test("closeReservationForId itself refuses an already-terminal reservation, and never touches an unrelated one", async () => {
+  const reservationId = await makeReservation({ status: "CANCELLED" });
+  const result = await closeReservationForId(reservationId, { actorId: adminUserId, actorRole: "ADMIN", closeReasonCode: "OTHER", closeNote: null });
+  assert.equal(result.status, "INVALID_STATE");
 });
 
 // ---- RMR-R2-P2-01: concurrent releases against the same reservation ---
@@ -463,7 +599,7 @@ test("release refuses a station that was deactivated, or that doesn't belong to 
 test("two concurrent releases together never dispatch more than the reservation's remaining volume", async () => {
   const reservationId = await makeReservation({ requestedVolumeM3: 10 });
 
-  const [r1, r2] = await Promise.all([releaseTicketForReservation(reservationId, 8, plantId), releaseTicketForReservation(reservationId, 8, plantId)]);
+  const [r1, r2] = await Promise.all([releaseTicketForReservation(reservationId, 8, plantId, testActor()), releaseTicketForReservation(reservationId, 8, plantId, testActor())]);
   // Neither call should throw an unhandled P2034 out to the caller —
   // Promise.all above would already have rejected this whole test if one
   // had. Each resolves to either a real ticket or a clean typed
@@ -484,7 +620,7 @@ test("a concurrent revision save and ticket release never produce a ticket with 
 
   const [saveResult, releaseResult] = await Promise.all([
     saveReservationMixRevision(reservationId, { reason: "race condition check", actorId: adminUserId, components: revisedComponents() }),
-    releaseTicketForReservation(reservationId, 5, plantId),
+    releaseTicketForReservation(reservationId, 5, plantId, testActor()),
   ]);
   assert.equal(saveResult.status, "OK");
 
@@ -591,7 +727,7 @@ test("releasing a ticket against a revision whose material has nowhere to draw f
   });
   assert.equal(saved.status, "OK");
 
-  const result = await releaseTicketForReservation(reservationId, 5, plantId);
+  const result = await releaseTicketForReservation(reservationId, 5, plantId, testActor());
   assert.equal(result.status, "STORAGE_NOT_CONFIGURED");
   if (result.status === "STORAGE_NOT_CONFIGURED") assert.equal(result.material, "TEST-SUITE-RMR-UNAVAILABLE-SAND");
 
