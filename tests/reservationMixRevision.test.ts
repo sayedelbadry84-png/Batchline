@@ -140,6 +140,14 @@ async function deleteMovements(where: NonNullable<Parameters<typeof prisma.inven
   await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_movement_immutability = 'on'`, prisma.inventoryMovement.deleteMany({ where })]);
 }
 
+// Same shape as deleteMovements above, for the AuditEvent immutability
+// trigger added this round (PL-P2-03, first production-lifecycle
+// review) — this file's own teardown is the one legitimate reason to
+// bypass it, under its own distinct setting name.
+async function deleteAuditEvents(recordId: string) {
+  await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`, prisma.auditEvent.deleteMany({ where: { recordId } })]);
+}
+
 // The DB-level immutability triggers added for this feature (RMR-P1-02)
 // block a plain delete/update of ReservationMixRevision(Component) rows —
 // this file's own teardown is the one legitimate reason to bypass that,
@@ -212,7 +220,7 @@ after(async () => {
     await cleanupDelete(() => prisma.batchTicket.delete({ where: { id } }));
   }
   for (const id of reservationIds) {
-    await prisma.auditEvent.deleteMany({ where: { recordId: id } });
+    await deleteAuditEvents(id);
     await deleteRevisionRows(id);
     await cleanupDelete(() => prisma.reservation.delete({ where: { id } }));
   }

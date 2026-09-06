@@ -7,7 +7,7 @@
 // server-derived allow-list.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseReturnTarget, releaseSuccessPath, releaseFailurePath } from "../src/lib/releaseRouting";
+import { parseReturnTarget, releaseSuccessPath, releaseFailurePath, parseTripReturnTarget, tripReturnPath } from "../src/lib/releaseRouting";
 
 test("parseReturnTarget only ever returns 'operator' for the exact literal value the operator form sends", () => {
   assert.equal(parseReturnTarget("operator"), "operator");
@@ -36,4 +36,25 @@ test("releaseFailurePath returns to the real page for each target, not a route t
   // (no id), a route that doesn't exist. It must be the real operator
   // home page instead.
   assert.equal(releaseFailurePath("operator", params), "/operator?releaseError=INVALID_STATE");
+});
+
+// PL-P2-02, first production-lifecycle review — startTrip's own returnTo
+// field had the exact same open-redirect shape as returnPrefix above.
+test("parseTripReturnTarget only ever returns 'operator' for the exact literal value the field view sends", () => {
+  assert.equal(parseTripReturnTarget("operator"), "operator");
+});
+
+test("parseTripReturnTarget falls back to 'trips' for anything else, including an attempted open-redirect payload", () => {
+  assert.equal(parseTripReturnTarget("trips"), "trips");
+  assert.equal(parseTripReturnTarget(null), "trips");
+  assert.equal(parseTripReturnTarget(""), "trips");
+  assert.equal(parseTripReturnTarget("https://evil.example/phish"), "trips");
+  assert.equal(parseTripReturnTarget("//evil.example"), "trips");
+  assert.equal(parseTripReturnTarget("/operator"), "trips");
+  assert.equal(parseTripReturnTarget("Operator"), "trips"); // case-sensitive, no fuzzy match
+});
+
+test("tripReturnPath builds a fixed, known route for each target — never an arbitrary one", () => {
+  assert.equal(tripReturnPath("trips"), "/trips");
+  assert.equal(tripReturnPath("operator"), "/operator");
 });
