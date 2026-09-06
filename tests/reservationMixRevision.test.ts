@@ -265,8 +265,16 @@ function revisedComponents() {
 // (RMR-R4-P2-02) — every test call supplies this fixture admin, since
 // nothing here cares which specific user's name ends up on the audit
 // row, only that the release itself behaves correctly.
+// allowedSiteId: null (unrestricted, matching a real ADMIN) is the right
+// default for every test that isn't specifically about site scope —
+// the dedicated cross-site tests below pass their own scoped actor
+// instead of this one.
 function testActor() {
-  return { id: adminUserId, role: "ADMIN" };
+  return { id: adminUserId, role: "ADMIN", allowedSiteId: null as string | null };
+}
+
+function testCloseActor() {
+  return { actorId: adminUserId, actorRole: "ADMIN", allowedSiteId: null as string | null };
 }
 
 async function expectReleaseOk(reservationId: string, volume: number) {
@@ -412,15 +420,15 @@ test("cancelling the active revision of a now-terminal reservation is refused, n
 // ---- state INSIDE its own transaction, not just via the caller's ------
 // ---- earlier, now-possibly-stale outer check ---------------------------
 //
-// A literal concurrent close-vs-release race (the reservation closing in
-// the exact gap between an outer pre-check and this transaction
-// starting) can't be reproduced deterministically without a hook into
-// the transaction's own timing, which doesn't exist here. What CAN be
-// proven deterministically — and is the actual guarantee the fix
-// provides — is that the check really happens fresh, every time,
-// wherever the state already changed before releaseTicketForReservation
-// was ever called: if it were only checked once by the caller (the old
-// bug), these would all still succeed.
+// The tests immediately below prove the fresh-read guarantee by changing
+// state BEFORE ever calling releaseTicketForReservation — sufficient on
+// its own (if the check only ran once, in the caller, these would all
+// still incorrectly succeed), but not a literal concurrency proof. The
+// actual concurrent close-wins-vs-release race (RMR-R5-P2-01), where the
+// two genuinely contend for the same row lock in real time, is covered
+// separately further down this file, once the row-lock mechanism itself
+// (RMR-R4-P1-01) has been introduced — see
+// waitUntilBlockedOnLock/"when close commits DELIVERED first...".
 
 test("release refuses a reservation that went terminal (closed early) after it still had remaining volume", async () => {
   const reservationId = await makeReservation({ requestedVolumeM3: 20 });
@@ -462,6 +470,18 @@ test("release refuses a station that was deactivated, or that doesn't belong to 
   assert.equal(wrongSiteResult.status, "INVALID_STATE");
   await cleanupPlant(otherSitePlant.id);
   await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+});
+
+// RMR-R5-P1-01, defense in depth on the release side too: the caller's
+// own site authority is re-checked after the lock as well, not derived
+// only indirectly from the chosen plant belonging to the reservation's
+// site.
+test("release refuses when the caller's own allowed site differs from the reservation's real site, independent of which plant was chosen", async () => {
+  const reservationId = await makeReservation();
+  const result = await releaseTicketForReservation(reservationId, 5, plantId, { id: adminUserId, role: "PLANT_OPERATOR", allowedSiteId: "test-suite-rmr-some-other-site-id" });
+  assert.equal(result.status, "NOT_FOUND");
+  const ticketsAfter = await prisma.batchTicket.findMany({ where: { reservationId } });
+  assert.equal(ticketsAfter.length, 0);
 });
 
 // ---- RMR-R4-P1-01: release uses a positive allow-list, not a terminal -
@@ -506,7 +526,7 @@ test("if the successful-release audit write fails, the whole release rolls back 
   // moment the audit insert (inside the same transaction as the ticket)
   // runs — a real, deterministic way to force that one specific write to
   // fail without touching anything else about the transaction.
-  const badActor = { id: "test-suite-rmr-nonexistent-actor", role: "ADMIN" };
+  const badActor = { id: "test-suite-rmr-nonexistent-actor", role: "ADMIN", allowedSiteId: null };
   await assert.rejects(() => releaseTicketForReservation(reservationId, 5, plantId, badActor));
 
   const ticketsAfter = await prisma.batchTicket.findMany({ where: { reservationId } });
@@ -518,6 +538,29 @@ test("if the successful-release audit write fails, the whole release rolls back 
 
 // ---- RMR-R4-P1-01: release and closeReservationForId share one real ---
 // ---- database lock on the Reservation row, not just a fresh read ------
+//
+// RMR-R5-P2-01: an earlier version of this file asserted "the waiter
+// hasn't resolved after 300ms" as proof of blocking — that only proves
+// the promise hadn't settled within an arbitrary window, not that it
+// was genuinely waiting on Postgres's own lock. Every test below instead
+// polls pg_stat_activity until it OBSERVES a backend actually in a
+// Lock-wait state for this specific row lock, then makes its assertion —
+// a database-observable fact, not a timing guess. The poll itself has no
+// fixed sleep for the outcome under test, only a bounded ceiling so a
+// genuinely broken lock fails the test instead of hanging the suite
+// forever.
+async function waitUntilBlockedOnLock(timeoutMs = 10000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await prisma.$queryRaw<{ pid: number }[]>`
+      SELECT pid FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock' AND query ILIKE '%"Reservation"%FOR UPDATE%' AND pid <> pg_backend_pid()
+    `;
+    if (rows.length > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for a backend to be observed genuinely blocked on the Reservation row lock");
+}
 
 test("closeReservationForId genuinely blocks on a real row lock while another transaction holds it, then sees fresh state once it lets go", async () => {
   const reservationId = await makeReservation({ requestedVolumeM3: 20, status: "IN_PRODUCTION" });
@@ -532,13 +575,11 @@ test("closeReservationForId genuinely blocks on a real row lock while another tr
   });
 
   // Manually holds the EXACT same "SELECT ... FOR UPDATE" lock
-  // releaseTicketForReservation itself takes as the first thing it does
-  // inside its own transaction — on a real, separate connection pulled
-  // from the same pool (an interactive $transaction pins its own
-  // connection for its whole duration), paused mid-transaction via a
-  // real awaited signal, not a sleep. This is the barrier the review
-  // asked for: the actual synchronization mechanism under test is
-  // Postgres's own row lock, not JS timing.
+  // releaseTicketForReservation/closeReservationForId themselves take as
+  // the first thing they do inside their own transaction — on a real,
+  // separate connection pulled from the same pool (an interactive
+  // $transaction pins its own connection for its whole duration), paused
+  // mid-transaction via a real awaited signal, not a sleep.
   const holderPromise = prisma.$transaction(
     async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "Reservation" WHERE "id" = ${reservationId} FOR UPDATE`;
@@ -551,16 +592,12 @@ test("closeReservationForId genuinely blocks on a real row lock while another tr
   await lockAcquired;
 
   let closeSettled = false;
-  const closePromise = closeReservationForId(reservationId, { actorId: adminUserId, actorRole: "ADMIN", closeReasonCode: "OTHER", closeNote: null }).then((r) => {
+  const closePromise = closeReservationForId(reservationId, { ...testCloseActor(), closeReasonCode: "OTHER", closeNote: null }).then((r) => {
     closeSettled = true;
     return r;
   });
 
-  // Give the event loop a moment to run closePromise's own microtasks if
-  // it were ever going to resolve on its own — this isn't guessing at
-  // WHETHER the lock works (that's guaranteed by Postgres), only
-  // confirming it hasn't resolved yet before we let go of it.
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await waitUntilBlockedOnLock();
   assert.equal(closeSettled, false, "closeReservationForId must still be blocked while another transaction holds the reservation's row lock");
 
   letGoResolve!();
@@ -572,11 +609,131 @@ test("closeReservationForId genuinely blocks on a real row lock while another tr
   assert.equal(reservationAfter.status, "DELIVERED");
 });
 
+// ---- RMR-R5-P1-01: an actor's site authority is re-checked AFTER the --
+// ---- lock, against freshly-read data, not a snapshot taken before it --
+
+test("closeReservationForId refuses a reservation that moved to a different site while close was already waiting on the lock", async () => {
+  const reservationId = await makeReservation();
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-RMR-MOVE-${Date.now()}`, name: "TEST-SUITE-RMR-MOVE-SITE", city: "Test", country: "Test" } });
+
+  let lockAcquiredResolve: () => void;
+  const lockAcquired = new Promise<void>((resolve) => {
+    lockAcquiredResolve = resolve;
+  });
+  let letGoResolve: () => void;
+  const letGo = new Promise<void>((resolve) => {
+    letGoResolve = resolve;
+  });
+
+  // Holds the row, reassigns it to a DIFFERENT site, then commits — all
+  // while close (below) is already genuinely blocked waiting on this
+  // same lock, simulating a reservation moving sites in the exact gap
+  // between the caller's own outer scope pre-check and the lock.
+  const holderPromise = prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Reservation" WHERE "id" = ${reservationId} FOR UPDATE`;
+      lockAcquiredResolve();
+      await letGo;
+      await tx.reservation.update({ where: { id: reservationId }, data: { siteId: otherSite.id } });
+    },
+    { timeout: 20000 },
+  );
+
+  await lockAcquired;
+
+  let closeSettled = false;
+  const closePromise = closeReservationForId(reservationId, { actorId: adminUserId, actorRole: "ADMIN", allowedSiteId: siteId, closeReasonCode: "OTHER", closeNote: null }).then((r) => {
+    closeSettled = true;
+    return r;
+  });
+
+  await waitUntilBlockedOnLock();
+  assert.equal(closeSettled, false);
+
+  letGoResolve!();
+  await holderPromise;
+  const closeResult = await closePromise;
+
+  assert.equal(closeResult.status, "NOT_FOUND", "close must refuse once it sees the reservation now belongs to a different site than the caller's own authority");
+
+  const reservationAfter = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+  assert.equal(reservationAfter.status, "CONFIRMED", "the reservation must remain untouched — not closed under the caller's now-stale site authority");
+  assert.equal(reservationAfter.siteId, otherSite.id);
+
+  const auditRows = await prisma.auditEvent.findMany({ where: { recordId: reservationId, reasonCode: "RESERVATION_CLOSED" } });
+  assert.equal(auditRows.length, 0, "no close audit event must exist for a close that was actually refused");
+
+  await prisma.reservation.update({ where: { id: reservationId }, data: { siteId } });
+  await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+});
+
+// ---- RMR-R5-P2-01: the actual close-wins-vs-release race -------------
+
+test("when close commits DELIVERED first while release is genuinely waiting on the same lock, release refuses and creates no ticket", async () => {
+  const reservationId = await makeReservation({ requestedVolumeM3: 20 });
+
+  let closeHasLockResolve: () => void;
+  const closeHasLock = new Promise<void>((resolve) => {
+    closeHasLockResolve = resolve;
+  });
+  let letCloseCommitResolve: () => void;
+  const letCloseCommit = new Promise<void>((resolve) => {
+    letCloseCommitResolve = resolve;
+  });
+
+  // A deterministic stand-in for closeReservationForId's own transaction
+  // (the exact same lock, the exact same writes) — used here specifically
+  // because this test needs to pause it right before its own commit, to
+  // guarantee close wins this particular race rather than leaving the
+  // ordering to chance (the review's own required shape: "Connection A
+  // begins the real close transaction, locks the reservation, writes
+  // DELIVERED, and pauses before commit"). The "whichever happens to win"
+  // version is covered by the reverse-order test below instead.
+  const closeHolderPromise = prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Reservation" WHERE "id" = ${reservationId} FOR UPDATE`;
+      await tx.reservation.update({
+        where: { id: reservationId },
+        data: { status: "DELIVERED", closedAt: new Date(), closedById: adminUserId, closeReasonCode: "OTHER", closeNote: null },
+      });
+      await tx.auditEvent.create({
+        data: { actorId: adminUserId, role: "ADMIN", module: "Reservations", recordId: reservationId, afterValue: "DELIVERED (closed early — OTHER)", reasonCode: "RESERVATION_CLOSED" },
+      });
+      closeHasLockResolve();
+      await letCloseCommit;
+    },
+    { timeout: 20000 },
+  );
+
+  await closeHasLock;
+
+  let releaseSettled = false;
+  const releasePromise = releaseTicketForReservation(reservationId, 5, plantId, testActor()).then((r) => {
+    releaseSettled = true;
+    return r;
+  });
+
+  await waitUntilBlockedOnLock();
+  assert.equal(releaseSettled, false, "release must be genuinely blocked while close's transaction is still open, not yet committed");
+
+  letCloseCommitResolve!();
+  await closeHolderPromise;
+  const releaseResult = await releasePromise;
+
+  assert.equal(releaseResult.status, "INVALID_STATE", "release must refuse once close has committed DELIVERED first");
+
+  const ticketsAfter = await prisma.batchTicket.findMany({ where: { reservationId } });
+  assert.equal(ticketsAfter.length, 0, "release must not have created any ticket once it lost to a close that already committed");
+
+  const reservationAfter = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+  assert.equal(reservationAfter.status, "DELIVERED");
+});
+
 test("release, then close, in that order — a clean serial order once release has already committed", async () => {
   const reservationId = await makeReservation({ requestedVolumeM3: 20 });
   const ticket = await expectReleaseOk(reservationId, 5);
 
-  const closeResult = await closeReservationForId(reservationId, { actorId: adminUserId, actorRole: "ADMIN", closeReasonCode: "OTHER", closeNote: null });
+  const closeResult = await closeReservationForId(reservationId, { ...testCloseActor(), closeReasonCode: "OTHER", closeNote: null });
   assert.equal(closeResult.status, "OK");
 
   const reservationAfter = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId } });
@@ -588,7 +745,7 @@ test("release, then close, in that order — a clean serial order once release h
 
 test("closeReservationForId itself refuses an already-terminal reservation, and never touches an unrelated one", async () => {
   const reservationId = await makeReservation({ status: "CANCELLED" });
-  const result = await closeReservationForId(reservationId, { actorId: adminUserId, actorRole: "ADMIN", closeReasonCode: "OTHER", closeNote: null });
+  const result = await closeReservationForId(reservationId, { ...testCloseActor(), closeReasonCode: "OTHER", closeNote: null });
   assert.equal(result.status, "INVALID_STATE");
 });
 
