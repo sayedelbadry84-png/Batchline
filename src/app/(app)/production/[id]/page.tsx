@@ -12,7 +12,6 @@ import {
   updateTripAssignment,
   addTicketComponent,
   deleteTicketComponent,
-  deleteBatchTicket,
 } from "../actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
@@ -76,7 +75,6 @@ export default async function BatchTicketPage({
         shortageSnapshot: ticket.shortageOverrideRequests[0].shortageSnapshot as ShortageSnapshotEntry[] | null,
       }
     : null;
-  const hasAnyOverrideRequest = ticket.shortageOverrideRequests.length > 0;
   const canEditComponents = !isTerminal;
   const componentMaterialIds = new Set(ticket.components.map((c) => c.materialId));
   const addableMaterials = materials.filter((mt) => !componentMaterialIds.has(mt.id));
@@ -489,21 +487,20 @@ export default async function BatchTicketPage({
         </div>
       )}
 
-      {/* deleteBatchTicket now refuses a COMPLETE ticket outright (it has
-          real posted inventory movements — see reverseBatchTicket in
-          production/actions.ts) rather than silently no-op-ing, so the
-          button is hidden for that state the same way it's already hidden
-          once a trip exists. It also can't actually delete a ticket with a
-          ShortageOverrideRequest on file (that request's own FK is ON
-          DELETE RESTRICT, deliberately, so an approval decision's history
-          is never silently erased) — CancelBatchTicketForm replaces it in
-          that case instead of sitting next to a button that would just
-          silently do nothing (P2-01, fourth review). Both use !isTerminal,
-          not a COMPLETE-only check — a CANCELLED ticket (reachable now
-          that cancelBatchTicket exists) was still showing the cancel form,
-          which would just fail with INVALID_STATE on submit (P2-03, sixth
-          review). */}
-      {!ticket.trip && !isTerminal && hasAnyOverrideRequest && (
+      {/* The only way to remove a non-terminal, not-yet-dispatched ticket
+          now (PL-P1-04, first production-lifecycle review) — a separate
+          hard-delete action used to sit here instead whenever the ticket
+          had no ShortageOverrideRequest on file, but its own pre-check
+          ran outside any transaction or row lock, so a concurrent
+          completeBatchTicket claim landing in that gap could post real
+          inventory movements and still have the row hard-deleted out from
+          under them. cancelBatchTicket already claims the row atomically
+          and never posts or reverses inventory, so it now covers this
+          entire scope on its own. !isTerminal, not a COMPLETE-only check
+          — a CANCELLED ticket was still showing this form otherwise,
+          which would just fail with INVALID_STATE on submit (P2-03,
+          sixth review). */}
+      {!ticket.trip && !isTerminal && (
         <CancelBatchTicketForm
           ticketId={ticket.id}
           messages={{
@@ -523,18 +520,6 @@ export default async function BatchTicketPage({
           inputClassName={`${ui.input} w-full`}
           buttonClassName="self-start rounded-md border border-critical px-4 py-2 text-sm font-medium text-critical hover:bg-critical-soft"
         />
-      )}
-      {!ticket.trip && !isTerminal && !hasAnyOverrideRequest && (
-        <form action={deleteBatchTicket} className={`${ui.card} flex items-center justify-between`}>
-          <input type="hidden" name="id" value={ticket.id} />
-          <div>
-            <h2 className="font-display text-lg font-semibold">{d.deleteTicket}</h2>
-            <p className="text-sm text-ink-muted">{d.deleteTicketHint}</p>
-          </div>
-          <button type="submit" className="rounded-md border border-critical px-4 py-2 text-sm font-medium text-critical hover:bg-critical-soft">
-            {d.deleteTicket}
-          </button>
-        </form>
       )}
 
       {/* ADMIN-only (production.reverseBatch in src/lib/permissions.ts) —

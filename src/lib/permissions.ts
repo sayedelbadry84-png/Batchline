@@ -215,13 +215,19 @@ export const ACTION_ROLES = {
     requestShortageOverride: ["PLANT_OPERATOR", "ADMIN"],
     approveShortageOverrideRequest: SHORTAGE_OVERRIDE_DECISION_ROLES,
     rejectShortageOverrideRequest: SHORTAGE_OVERRIDE_DECISION_ROLES,
-    deleteTicket: ["PLANT_OPERATOR", "ADMIN"],
-    // Soft-cancel (P2-01, fourth review) — the path for a non-terminal
-    // ticket that has a ShortageOverrideRequest on file, which deleteTicket
-    // can no longer actually delete (that request's own FK is ON DELETE
-    // RESTRICT, deliberately, so an approval decision's history is never
-    // silently erased). Same roster as deleteTicket — this replaces that
-    // action for those tickets, not a bigger or smaller authority.
+    // Soft-cancel — the only way to remove a non-terminal, not-yet-
+    // dispatched ticket now (PL-P1-04, first production-lifecycle
+    // review): a real hard-delete Server Action used to exist alongside
+    // this one for a ticket with no ShortageOverrideRequest on file, but
+    // its own pre-check (trip/status) ran outside any transaction or row
+    // lock, so a concurrent completeBatchTicket claim landing in that gap
+    // could post real inventory movements and THEN still have the row
+    // hard-deleted out from under them — orphaning ledger/audit
+    // references with no ticket left to explain them. cancelBatchTicket
+    // already claims the row atomically (the same updateMany-where-not-
+    // terminal pattern completeBatchTicket itself uses) and never posts
+    // or reverses inventory, so retiring the separate hard-delete path
+    // entirely closes the race rather than just tightening its timing.
     cancelTicket: ["PLANT_OPERATOR", "ADMIN"],
     // Reversing a completed ticket undoes real posted inventory movements
     // — a materially bigger, rarer action than completing or deleting one,
