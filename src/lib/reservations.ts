@@ -96,6 +96,67 @@ export async function reservationsDueForReminder(siteId: string | null) {
   });
 }
 
+const TERMINAL_RESERVATION_STATUSES = new Set(["DELIVERED", "CANCELLED"]);
+
+export type CloseReservationResult = { status: "OK" } | { status: "NOT_FOUND" } | { status: "INVALID_STATE" };
+
+// Extracted out of closeReservation (reservations/actions.ts), matching
+// the releaseTicketForReservation extraction — a pure domain function,
+// no session/formData access, callable directly from tests. The old
+// version was a plain findUnique + unconditional update, entirely
+// outside a transaction, with no lock: closing a reservation and
+// releasing a ticket against that same reservation (production/actions.ts)
+// could interleave with no coordination at all between them
+// (RMR-R4-P1-01). Site/permission scope stays the caller's own
+// responsibility (a session concern), same split as
+// releaseTicketForReservation.
+//
+// Takes the exact same row lock releaseTicketForReservation takes on
+// this Reservation, in the same order (lock first, then read/validate) —
+// that's what actually makes the two mutually exclusive: whichever
+// reaches the row first blocks the other until it commits, and the
+// second one then re-reads guaranteed-fresh state instead of racing
+// against a snapshot taken before the first one's write.
+export async function closeReservationForId(
+  reservationId: string,
+  opts: { actorId: string; actorRole: string; closeReasonCode: string; closeNote: string | null },
+): Promise<CloseReservationResult> {
+  return prisma.$transaction(
+    async (tx) => {
+      const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Reservation" WHERE "id" = ${reservationId} FOR UPDATE`;
+      if (locked.length === 0) return { status: "NOT_FOUND" as const };
+
+      const reservation = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+      if (TERMINAL_RESERVATION_STATUSES.has(reservation.status)) return { status: "INVALID_STATE" as const };
+
+      await tx.reservation.update({
+        where: { id: reservationId },
+        data: {
+          status: "DELIVERED",
+          closedAt: new Date(),
+          closedById: opts.actorId,
+          closeReasonCode: opts.closeReasonCode,
+          closeNote: opts.closeNote,
+        },
+      });
+
+      await tx.auditEvent.create({
+        data: {
+          actorId: opts.actorId,
+          role: opts.actorRole,
+          module: "Reservations",
+          recordId: reservationId,
+          afterValue: `DELIVERED (closed early — ${opts.closeReasonCode})`,
+          reasonCode: "RESERVATION_CLOSED",
+        },
+      });
+
+      return { status: "OK" as const };
+    },
+    { timeout: 15000 },
+  );
+}
+
 export async function isReservationFullyDelivered(reservationId: string): Promise<boolean> {
   const reservation = await prisma.reservation.findUnique({
     where: { id: reservationId },
