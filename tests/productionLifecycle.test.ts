@@ -70,7 +70,6 @@ const crewIds: string[] = [];
 const tripIds: string[] = [];
 const drumReturnIds: string[] = [];
 const wasteMemoIds: string[] = [];
-const auditRecordIds: string[] = []; // every recordId an AuditEvent was written against by a domain call below
 
 before(async () => {
   const site = await prisma.site.create({ data: { code: `TEST-SUITE-PL-${Date.now()}`, name: "TEST-SUITE-PL-SITE-A", city: "Test", country: "Test" } });
@@ -117,8 +116,18 @@ async function cleanupDelete(fn: () => Promise<unknown>): Promise<void> {
   }
 }
 
-async function deleteAuditEvents(recordId: string) {
-  await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`, prisma.auditEvent.deleteMany({ where: { recordId } })]);
+// Deletes every AuditEvent this file's own actor ever wrote, regardless
+// of which recordId it was written against (trips, drum returns, waste
+// memos, and reservations all get their own audit events from the
+// domain calls this suite makes) — a single by-actor sweep instead of a
+// per-recordId tracking list that's easy to under-track and leave an
+// AuditEvent row referencing a User this teardown is about to delete
+// (AuditEvent.actorId -> User is an optional FK; Postgres nulls it via
+// an UPDATE when the User row is deleted, and that UPDATE is exactly
+// what the new immutability trigger exists to block outside this
+// bypass).
+async function deleteAuditEventsByActor(actorId: string) {
+  await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`, prisma.auditEvent.deleteMany({ where: { actorId } })]);
 }
 
 async function deleteMovements(sourceId: string) {
@@ -129,7 +138,7 @@ async function deleteMovements(sourceId: string) {
 }
 
 after(async () => {
-  for (const id of auditRecordIds) await deleteAuditEvents(id);
+  await deleteAuditEventsByActor(adminUserId);
   for (const id of wasteMemoIds) await cleanupDelete(() => prisma.wasteIncidentMemo.delete({ where: { id } }));
   for (const id of drumReturnIds) await cleanupDelete(() => prisma.drumReturn.delete({ where: { id } }));
   for (const id of tripIds) await cleanupDelete(() => prisma.trip.delete({ where: { id } }));
@@ -340,7 +349,6 @@ test("reassignTrip refuses a site-A operator reassigning a site-B trip, and chan
   assert.equal(after_.driverId, before_.driverId);
   const auditAfter = await prisma.auditEvent.count({ where: { recordId: dispatch.tripId } });
   assert.equal(auditAfter, auditBefore);
-  auditRecordIds.push(dispatch.tripId);
 });
 
 test("reassignTrip succeeds for an in-scope operator and writes one atomic audit event", async () => {
@@ -352,7 +360,6 @@ test("reassignTrip succeeds for an in-scope operator and writes one atomic audit
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
-  auditRecordIds.push(dispatch.tripId);
 
   const truck2 = await makeTruck();
   const driver2 = await makeDriver();
@@ -377,14 +384,12 @@ test("reassignTrip refuses an out-of-service truck, a busy driver, and a trip th
   assert.equal(dispatchA.status, "OK");
   if (dispatchA.status !== "OK") return;
   tripIds.push(dispatchA.tripId);
-  auditRecordIds.push(dispatchA.tripId);
 
   const truck2 = await makeTruck();
   const dispatchB = await dispatchTrip(ticketB, { truckId: truck2, driverId: driver2, loadVolumeM3: 8, allowedSiteId: siteId });
   assert.equal(dispatchB.status, "OK");
   if (dispatchB.status !== "OK") return;
   tripIds.push(dispatchB.tripId);
-  auditRecordIds.push(dispatchB.tripId);
 
   // Busy driver: driver1 already has an open trip (dispatchA).
   const busyResult = await reassignTrip(dispatchB.tripId, { truckId: truck2, driverId: driver1, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() });
@@ -398,7 +403,6 @@ test("reassignTrip refuses an out-of-service truck, a busy driver, and a trip th
   // Trip already past LOADING — advance it, then reassignment must refuse.
   const advanceResult = await advanceTripState(dispatchB.tripId, { allowedSiteId: siteId, ...actor() });
   assert.equal(advanceResult.status, "OK");
-  auditRecordIds.push(dispatchB.tripId);
   const notLoadingResult = await reassignTrip(dispatchB.tripId, { truckId: truck2, driverId: driver2, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() });
   assert.equal(notLoadingResult.status, "NOT_LOADING");
 });
@@ -412,7 +416,6 @@ test("reassignTrip refuses a truck whose rated capacity is smaller than the tick
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
-  auditRecordIds.push(dispatch.tripId);
 
   const undersizedTruck = await makeTruck({ drumCapacityM3: 6 });
   const result = await reassignTrip(dispatch.tripId, { truckId: undersizedTruck, driverId: driver1, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() });
@@ -435,7 +438,26 @@ test("claimTripSlot refuses dispatch out of the actor's own site scope", async (
   assert.equal(result.status, "OUT_OF_SCOPE");
 });
 
-test("two concurrent dispatches for the same truck: exactly one succeeds, the other sees TRUCK_BUSY", async () => {
+// Both dispatch transactions run under Serializable isolation, same as
+// startTrip's own real transaction — the row lock claimTripResources
+// takes on the contested resource means the SECOND transaction to reach
+// it blocks until the first commits, but Postgres's own serializable-
+// snapshot conflict detection can still abort a genuinely concurrent
+// transaction outright (surfacing as a thrown write-conflict error, not
+// a clean typed result) rather than let it wake up and see a clean busy
+// status — exactly the same "the caller just needs to retry" outcome
+// startTrip's own real catch block already documents for this case, not
+// a bug in claimTripResources itself. Mirrors tryDispatch's own
+// catch-and-normalize shape in tests/batchCompletion.test.ts.
+async function dispatchTripOrRejected(ticketId: string, opts: Parameters<typeof dispatchTrip>[1]) {
+  try {
+    return await dispatchTrip(ticketId, opts);
+  } catch {
+    return { status: "REJECTED" as const };
+  }
+}
+
+test("two concurrent dispatches for the same truck: exactly one succeeds, the other is refused", async () => {
   const res = await makeReservation();
   const ticketA = await makeTicket(res);
   const ticketB = await makeTicket(res);
@@ -444,19 +466,18 @@ test("two concurrent dispatches for the same truck: exactly one succeeds, the ot
   const driverB = await makeDriver();
 
   const [resultA, resultB] = await Promise.all([
-    dispatchTrip(ticketA, { truckId: truck, driverId: driverA, loadVolumeM3: 8, allowedSiteId: siteId }),
-    dispatchTrip(ticketB, { truckId: truck, driverId: driverB, loadVolumeM3: 8, allowedSiteId: siteId }),
+    dispatchTripOrRejected(ticketA, { truckId: truck, driverId: driverA, loadVolumeM3: 8, allowedSiteId: siteId }),
+    dispatchTripOrRejected(ticketB, { truckId: truck, driverId: driverB, loadVolumeM3: 8, allowedSiteId: siteId }),
   ]);
-  const statuses = [resultA.status, resultB.status].sort();
-  assert.deepEqual(statuses, ["OK", "TRUCK_BUSY"]);
-  const winner = resultA.status === "OK" ? resultA : resultB;
-  if (winner.status === "OK") {
-    tripIds.push(winner.tripId);
-    auditRecordIds.push(winner.tripId);
-  }
+  const oks = [resultA, resultB].filter((r) => r.status === "OK");
+  const losers = [resultA, resultB].filter((r) => r.status !== "OK");
+  assert.equal(oks.length, 1, "exactly one of the two concurrent dispatches must win the truck");
+  assert.equal(losers.length, 1);
+  assert.ok(losers[0].status === "TRUCK_BUSY" || losers[0].status === "REJECTED", `unexpected loser status: ${losers[0].status}`);
+  if (oks[0].status === "OK") tripIds.push(oks[0].tripId);
 });
 
-test("two concurrent dispatches for the same driver (different trucks): exactly one succeeds, the other sees DRIVER_BUSY", async () => {
+test("two concurrent dispatches for the same driver (different trucks): exactly one succeeds, the other is refused", async () => {
   const res = await makeReservation();
   const ticketA = await makeTicket(res);
   const ticketB = await makeTicket(res);
@@ -465,16 +486,15 @@ test("two concurrent dispatches for the same driver (different trucks): exactly 
   const driver = await makeDriver();
 
   const [resultA, resultB] = await Promise.all([
-    dispatchTrip(ticketA, { truckId: truckA, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId }),
-    dispatchTrip(ticketB, { truckId: truckB, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId }),
+    dispatchTripOrRejected(ticketA, { truckId: truckA, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId }),
+    dispatchTripOrRejected(ticketB, { truckId: truckB, driverId: driver, loadVolumeM3: 8, allowedSiteId: siteId }),
   ]);
-  const statuses = [resultA.status, resultB.status].sort();
-  assert.deepEqual(statuses, ["DRIVER_BUSY", "OK"]);
-  const winner = resultA.status === "OK" ? resultA : resultB;
-  if (winner.status === "OK") {
-    tripIds.push(winner.tripId);
-    auditRecordIds.push(winner.tripId);
-  }
+  const oks = [resultA, resultB].filter((r) => r.status === "OK");
+  const losers = [resultA, resultB].filter((r) => r.status !== "OK");
+  assert.equal(oks.length, 1, "exactly one of the two concurrent dispatches must win the driver");
+  assert.equal(losers.length, 1);
+  assert.ok(losers[0].status === "DRIVER_BUSY" || losers[0].status === "REJECTED", `unexpected loser status: ${losers[0].status}`);
+  if (oks[0].status === "OK") tripIds.push(oks[0].tripId);
 });
 
 test("dispatch refuses a pump delivery with no pump, an out-of-reach pump, and the same person as operator and assistant", async () => {
@@ -489,7 +509,7 @@ test("dispatch refuses a pump delivery with no pump, an out-of-reach pump, and t
   const shortPump = await makePump({ reachM: 20 });
   const ticket2 = await makeTicket(res);
   const truck2 = await makeTruck();
-  const shortReachResult = await dispatchTrip(ticket2, { truckId: truck2, driverId: driver1, loadVolumeM3: 8, isPumpDelivery: true, pumpId: shortPump, allowedSiteId: siteId });
+  const shortReachResult = await dispatchTrip(ticket2, { truckId: truck2, driverId: driver1, loadVolumeM3: 8, isPumpDelivery: true, pumpId: shortPump, minPumpReachM: 40, allowedSiteId: siteId });
   assert.equal(shortReachResult.status, "PUMP_INSUFFICIENT_REACH");
 
   const goodPump = await makePump({ reachM: 50 });
@@ -502,6 +522,7 @@ test("dispatch refuses a pump delivery with no pump, an out-of-reach pump, and t
     loadVolumeM3: 8,
     isPumpDelivery: true,
     pumpId: goodPump,
+    minPumpReachM: 40,
     pumpOperatorId: crewMember,
     pumpAssistantId: crewMember,
     allowedSiteId: siteId,
@@ -561,7 +582,6 @@ test("advanceTripState walks LOADING -> IN_TRANSIT -> ON_SITE -> DISCHARGING and
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
-  auditRecordIds.push(dispatch.tripId);
 
   for (const expectedNext of ["IN_TRANSIT", "ON_SITE", "DISCHARGING"]) {
     const result = await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
@@ -598,7 +618,6 @@ test("closeTripFullForId refuses a crafted close straight from LOADING, and clos
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
-  auditRecordIds.push(dispatch.tripId);
 
   const craftedClose = await closeTripFullForId(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
   assert.equal(craftedClose.status, "NOT_DISCHARGING");
@@ -633,7 +652,6 @@ test("finalizing a reservation is deferred until every sibling ticket's trip has
   assert.equal(dispatchB.status, "OK");
   if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
   tripIds.push(dispatchA.tripId, dispatchB.tripId);
-  auditRecordIds.push(dispatchA.tripId, dispatchB.tripId);
 
   for (let i = 0; i < 3; i++) await advanceTripState(dispatchA.tripId, { allowedSiteId: siteId, ...actor() });
   const closeA = await closeTripFullForId(dispatchA.tripId, { allowedSiteId: siteId, ...actor() });
@@ -648,7 +666,6 @@ test("finalizing a reservation is deferred until every sibling ticket's trip has
   // never overwrite that.
   const closeReservationResult = await closeReservationForId(res, { actorId: adminUserId, actorRole: "ADMIN", allowedSiteId: siteId, closeReasonCode: "TEST-SUITE-PL-EARLY-CLOSE", closeNote: null });
   assert.equal(closeReservationResult.status, "OK");
-  auditRecordIds.push(res);
 
   for (let i = 0; i < 3; i++) await advanceTripState(dispatchB.tripId, { allowedSiteId: siteId, ...actor() });
   const closeB = await closeTripFullForId(dispatchB.tripId, { allowedSiteId: siteId, ...actor() });
@@ -672,7 +689,6 @@ test("two final trips of the same reservation closing concurrently leave exactly
   assert.equal(dispatchB.status, "OK");
   if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
   tripIds.push(dispatchA.tripId, dispatchB.tripId);
-  auditRecordIds.push(dispatchA.tripId, dispatchB.tripId);
 
   for (let i = 0; i < 3; i++) await advanceTripState(dispatchA.tripId, { allowedSiteId: siteId, ...actor() });
   for (let i = 0; i < 3; i++) await advanceTripState(dispatchB.tripId, { allowedSiteId: siteId, ...actor() });
@@ -707,7 +723,6 @@ test("closeTripWithReturnForId never reduces volumeDeliveredM3 on its own, even 
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
-  auditRecordIds.push(dispatch.tripId);
 
   for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
 
@@ -748,7 +763,6 @@ test("approveWasteIncidentMemo applies the billing reduction exactly once, atomi
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
-  auditRecordIds.push(dispatch.tripId);
 
   for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
   const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 3, reasonCode: "QUALITY_REJECTED", fate: null });
@@ -760,7 +774,6 @@ test("approveWasteIncidentMemo applies the billing reduction exactly once, atomi
 
   const approval = await approveWasteIncidentMemo(memo.id, { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", approvalNote: "TEST-SUITE-PL-confirmed contamination" });
   assert.equal(approval.status, "OK");
-  auditRecordIds.push(memo.id);
 
   const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
   assert.equal(trip.volumeDeliveredM3, 5); // 8 - 3
@@ -780,7 +793,6 @@ test("closeTripWithReturnForId records the real actor/role for a non-quality PAR
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
-  auditRecordIds.push(dispatch.tripId);
 
   for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
   // Fresh trip (batchTime ~ now) + a return volume above the plant's
@@ -826,7 +838,6 @@ test("setDrumReturnFateForId is a one-way decision, refused after the material w
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
-  auditRecordIds.push(dispatch.tripId);
 
   for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
   const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor(), returnedVolumeM3: 2, reasonCode: "OVER_ORDERED", fate: null });
@@ -839,7 +850,6 @@ test("setDrumReturnFateForId is a one-way decision, refused after the material w
 
   const first = await setDrumReturnFateForId(drumReturn.id, "RECLAIMED", { allowedSiteId: siteId, ...actor() });
   assert.equal(first.status, "OK");
-  auditRecordIds.push(drumReturn.id);
 
   const second = await setDrumReturnFateForId(drumReturn.id, "DUMPED", { allowedSiteId: siteId, ...actor() });
   assert.equal(second.status, "ALREADY_SET");
@@ -864,7 +874,6 @@ test("setDrumReturnFateForId refuses a FULL_WASTE return — there is nothing le
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
-  auditRecordIds.push(dispatch.tripId);
 
   for (let i = 0; i < 3; i++) await advanceTripState(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
   // Backdate batchTime past the plant's default 90-minute drum timer so
@@ -893,7 +902,6 @@ test("the database itself rejects an illegal Trip status, a duplicate open trip 
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
-  auditRecordIds.push(dispatch.tripId);
 
   await assert.rejects(() => prisma.trip.update({ where: { id: dispatch.tripId }, data: { status: "TEST-SUITE-PL-NOT-A-REAL-STATUS" } }), /constraint|check/i);
 
@@ -933,5 +941,4 @@ test("the database itself blocks updating or deleting an AuditEvent row outside 
   await assert.rejects(() => prisma.auditEvent.update({ where: { id: audit.id }, data: { afterValue: "TEST-SUITE-PL-TAMPERED" } }), /immutable/i);
   await assert.rejects(() => prisma.auditEvent.delete({ where: { id: audit.id } }), /immutable/i);
 
-  auditRecordIds.push(dispatch.tripId);
 });

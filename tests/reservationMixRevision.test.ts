@@ -143,9 +143,16 @@ async function deleteMovements(where: NonNullable<Parameters<typeof prisma.inven
 // Same shape as deleteMovements above, for the AuditEvent immutability
 // trigger added this round (PL-P2-03, first production-lifecycle
 // review) — this file's own teardown is the one legitimate reason to
-// bypass it, under its own distinct setting name.
-async function deleteAuditEvents(recordId: string) {
-  await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`, prisma.auditEvent.deleteMany({ where: { recordId } })]);
+// bypass it, under its own distinct setting name. By actor, not by
+// recordId: this file's domain calls write AuditEvent rows against a mix
+// of recordIds (reservationId from closeReservationForId/
+// saveReservationMixRevision, but ALSO ticketId from
+// releaseTicketForReservation's own atomic audit) — a per-reservationId
+// sweep alone misses the ticket-keyed rows and leaves adminUserId still
+// referenced when the User delete below tries to null that FK, which the
+// trigger then blocks as an UPDATE outside the bypass.
+async function deleteAuditEventsByActor(actorId: string) {
+  await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`, prisma.auditEvent.deleteMany({ where: { actorId } })]);
 }
 
 // The DB-level immutability triggers added for this feature (RMR-P1-02)
@@ -220,7 +227,6 @@ after(async () => {
     await cleanupDelete(() => prisma.batchTicket.delete({ where: { id } }));
   }
   for (const id of reservationIds) {
-    await deleteAuditEvents(id);
     await deleteRevisionRows(id);
     await cleanupDelete(() => prisma.reservation.delete({ where: { id } }));
   }
@@ -245,6 +251,7 @@ after(async () => {
   await cleanupDelete(() => prisma.customer.delete({ where: { id: customerId } }));
   await cleanupDelete(() => prisma.plant.delete({ where: { id: plantId } }));
   await cleanupDelete(() => prisma.site.delete({ where: { id: siteId } }));
+  await deleteAuditEventsByActor(adminUserId);
   await cleanupDelete(() => prisma.user.delete({ where: { id: adminUserId } }));
 
   // Only THIS file's own unique prefix — never the bare "TEST-SUITE-"
