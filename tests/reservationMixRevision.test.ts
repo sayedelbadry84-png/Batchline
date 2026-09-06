@@ -176,6 +176,7 @@ async function cleanupPlant(plantId: string): Promise<void> {
 }
 
 async function makeReservation(overrides: Partial<{ status: string; requestedVolumeM3: number }> = {}) {
+  const now = new Date();
   const reservation = await prisma.reservation.create({
     data: {
       reservationNumber: `TEST-SUITE-RMR-RES-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -184,8 +185,19 @@ async function makeReservation(overrides: Partial<{ status: string; requestedVol
       mixId,
       requestedVolumeM3: overrides.requestedVolumeM3 ?? 20,
       originalVolumeM3: overrides.requestedVolumeM3 ?? 20,
-      pourWindowStart: new Date(),
+      pourWindowStart: now,
       status: overrides.status ?? "CONFIRMED",
+      // releaseTicketForReservation now re-checks approval itself
+      // (RMR-R2-P1-02), not just the caller — every fixture must
+      // represent a genuinely release-ready reservation by default, same
+      // as a real one only ever reaches CONFIRMED/IN_PRODUCTION once
+      // both sign-offs are on file. The one test that needs an
+      // unapproved reservation creates one normally and then explicitly
+      // revokes approval afterward, rather than skipping it here.
+      initialApprovedAt: now,
+      initialApprovedById: adminUserId,
+      finalApprovedAt: now,
+      finalApprovedById: adminUserId,
     },
   });
   reservationIds.push(reservation.id);
@@ -204,6 +216,15 @@ after(async () => {
     await deleteRevisionRows(id);
     await cleanupDelete(() => prisma.reservation.delete({ where: { id } }));
   }
+
+  // The fixture MixDesign's own MixComponent rows (created via a nested
+  // `create` in `before()`) reference cementMaterialId/waterMaterialId —
+  // both also in materialIds below. MixComponent.mix is ON DELETE
+  // CASCADE, so deleting the mix here removes those rows first; deleting
+  // the materials themselves before this (the previous order) left them
+  // still referenced, tripping MixComponent_materialId_fkey.
+  await cleanupDelete(() => prisma.mixDesign.delete({ where: { id: mixId } }));
+
   await deleteMovements({ storageId: { in: siloIds.concat(hopperIds) } });
   if (materialIds.length > 0) await deleteMovements({ materialId: { in: materialIds } });
   if (materialIds.length > 0) await prisma.batchComponentActual.deleteMany({ where: { materialId: { in: materialIds } } });
@@ -212,7 +233,6 @@ after(async () => {
   for (const id of siloIds) await cleanupDelete(() => prisma.silo.delete({ where: { id } }));
   if (materialIds.length > 0) await cleanupDelete(() => prisma.material.deleteMany({ where: { id: { in: materialIds } } }));
 
-  await cleanupDelete(() => prisma.mixDesign.delete({ where: { id: mixId } }));
   await cleanupDelete(() => prisma.project.delete({ where: { id: projectId } }));
   await cleanupDelete(() => prisma.customer.delete({ where: { id: customerId } }));
   await cleanupDelete(() => prisma.plant.delete({ where: { id: plantId } }));
@@ -621,11 +641,32 @@ test("isValidSpecificGravity rejects negative, zero, infinite, and NaN values, a
 });
 
 test("the database itself refuses to store a Material with a negative, zero, infinite, or NaN specific gravity", async () => {
-  for (const bad of [-1.1, 0, Infinity, -Infinity, NaN]) {
+  // -1.1 and 0 are ordinary JS numbers and go through the Prisma client
+  // directly. Infinity/-Infinity/NaN do NOT — JS's own Infinity/NaN
+  // aren't valid JSON, and Prisma's own parameter binding silently
+  // coerces them to NULL before the value ever reaches Postgres, which
+  // then trivially satisfies the constraint's own "IS NULL" branch and
+  // proves nothing about the constraint itself. Raw SQL with the literal
+  // written directly into the statement is the only way to be sure the
+  // value Postgres actually evaluates is the one being tested.
+  for (const bad of [-1.1, 0]) {
     await assert.rejects(
       () => prisma.material.create({ data: { name: `TEST-SUITE-RMR-BAD-SG-${Date.now()}-${Math.random()}`, type: "ADMIXTURE", specificGravity: bad } }),
       /specificGravity|constraint/i,
       `specificGravity=${bad} must be rejected by the database CHECK constraint`,
+    );
+  }
+  for (const literal of ["'Infinity'::float8", "'-Infinity'::float8", "'NaN'::float8"]) {
+    const id = `test-suite-rmr-badsg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    await assert.rejects(
+      () =>
+        prisma.$executeRawUnsafe(
+          `INSERT INTO "Material" (id, name, type, "specificGravity", "createdAt", "updatedAt") VALUES ($1, $2, 'ADMIXTURE', ${literal}, now(), now())`,
+          id,
+          `TEST-SUITE-RMR-BAD-SG-${id}`,
+        ),
+      /specificGravity|constraint/i,
+      `specificGravity=${literal} must be rejected by the database CHECK constraint`,
     );
   }
   // A real, valid positive value still works — the constraint isn't
