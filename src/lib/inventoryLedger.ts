@@ -231,11 +231,37 @@ export function postChemicalTankMovement(tx: Tx, input: MovementInput): Promise<
   return postMovement(tx, "CHEMICAL_TANK", "ChemicalTank", "currentLevelLiters", "capacityLiters", true, input);
 }
 
+// A write conflict/deadlock detected on a normal Prisma Client call
+// (model methods, or an interactive $transaction as a whole) surfaces as
+// P2034. The exact same underlying Postgres condition detected on a raw
+// query instead (e.g. reservationRelease.ts's own `SELECT ... FOR
+// UPDATE`, used to lock the Reservation row — RMR-R4-P1-01) is wrapped
+// differently: Prisma reports THAT as P2010 ("Raw query failed"), with
+// the real Postgres SQLSTATE inside `meta.code` rather than in the
+// top-level `code` Prisma normally uses for its own conflict class.
+// 40001 is serialization_failure, 40P01 is deadlock_detected — both mean
+// the same transient contention P2034 represents for a non-raw call,
+// so both retry the same way. Confirmed for real in CI: two concurrent
+// releases each taking that same row lock produced exactly this P2010/
+// 40001 shape, and — before this — neither retried, so one of the two
+// legitimately-concurrent calls just failed outright instead of
+// resolving to a real ticket or a clean NO_REMAINING_VOLUME.
+function isSerializationConflict(e: unknown): boolean {
+  if (typeof e !== "object" || e === null || !("code" in e)) return false;
+  const code = (e as { code?: string }).code;
+  if (code === "P2034") return true;
+  if (code === "P2010") {
+    const innerCode = (e as { meta?: { code?: string } }).meta?.code;
+    return innerCode === "40001" || innerCode === "40P01";
+  }
+  return false;
+}
+
 // Bounded, jittered retry for the one class of error that's genuinely
 // worth retrying automatically: a Postgres write conflict or deadlock
-// (Prisma error code P2034) between two transactions racing the same
-// rows. Any other error (including DomainError above) propagates
-// immediately — those are real outcomes, not transient contention.
+// between two transactions racing the same rows. Any other error
+// (including DomainError above) propagates immediately — those are real
+// outcomes, not transient contention.
 export async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -243,8 +269,7 @@ export async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promi
       return await fn();
     } catch (e) {
       lastError = e;
-      const isConflict = typeof e === "object" && e !== null && "code" in e && (e as { code?: string }).code === "P2034";
-      if (!isConflict || attempt === maxAttempts - 1) throw e;
+      if (!isSerializationConflict(e) || attempt === maxAttempts - 1) throw e;
       const jitterMs = 25 + Math.random() * 50 * (attempt + 1);
       await new Promise((resolve) => setTimeout(resolve, jitterMs));
     }
