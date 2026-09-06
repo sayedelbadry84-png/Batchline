@@ -12,11 +12,13 @@ import { withRetry } from "@/lib/inventoryLedger";
 // timeout, especially on a cold connection.
 const TX_OPTIONS = { timeout: 15000 };
 
-// A reservation this far along can never be released against again —
-// same terminal set closeReservation's own guard uses
-// (reservations/actions.ts). Checked fresh, inside the transaction, not
-// just once by the caller beforehand (RMR-R2-P1-02).
-const TERMINAL_RESERVATION_STATUSES = new Set(["DELIVERED", "CANCELLED"]);
+// A positive allow-list, not a terminal blacklist — a blacklist of just
+// DELIVERED/CANCELLED would also let a REQUESTED or ON_HOLD reservation
+// through the domain function if it somehow carried both approvals (or
+// any future status this schema adds later), since neither is in that
+// blacklist either. Only these two statuses are ever release-ready
+// (RMR-R4-P1-01).
+const RELEASABLE_RESERVATION_STATUSES = new Set(["CONFIRMED", "IN_PRODUCTION"]);
 
 export type ReleaseTicketResult =
   | { status: "OK"; ticket: BatchTicket }
@@ -35,6 +37,8 @@ class ReleaseAbort extends Error {
   }
 }
 
+export type ReleaseActor = { id: string; role: string };
+
 // The actual ticket-creation logic shared by releaseBatchTicket (a
 // planned, pre-approved reservation) and createManualRelease (a walk-in
 // sale that self-approves on the way in) — extracted out of
@@ -50,35 +54,38 @@ class ReleaseAbort extends Error {
 // time, by whoever's releasing it. The caller's own OUTER checks
 // (approval, site/plant scope, plant active) are a UX-level pre-check
 // only now — every one of them is re-verified fresh, inside the same
-// transaction that creates the ticket, below. Without that, a
-// concurrent close/cancel, a revoked approval (editing a reservation's
-// volume/mix/site clears its signoffs — see reservations/actions.ts), or
-// a plant deactivated in the gap between that outer check and this
-// transaction actually running could create a ticket for — and silently
-// reopen — a reservation that had already gone terminal (RMR-R2-P1-02).
+// transaction that creates the ticket, below.
 //
-// Deliberately does NOT call logAudit itself on success (an earlier
-// version did) — logAudit's own getCurrentUser() call reads cookies()
-// via next/headers, which throws outside a real Next.js request/action
-// context. That's exactly the context this function is designed to run
-// in directly from tests (see the file-level comment above), so the
-// audit write for a successful release belongs to the two Server Action
-// callers instead — same split completeBatchTicket/reverseBatchTicket
-// already use, where the domain function stays pure and the wrapper
-// logs.
-export async function releaseTicketForReservation(reservationId: string, requestedVolume: number, plantId: string): Promise<ReleaseTicketResult> {
+// A fresh read alone isn't enough, though (RMR-R4-P1-01): if the
+// reservation is already IN_PRODUCTION, the old code never wrote to the
+// Reservation row at all in the success path (the status update was
+// skipped exactly because it was already IN_PRODUCTION) — meaning
+// Postgres's own Serializable conflict detection, which works by
+// finding a read/write cycle between transactions, had nothing to
+// detect against a concurrent closeReservation() committing DELIVERED
+// in that same window: a plain read here and an unrelated write there
+// aren't a conflict, they're just two transactions that both happened
+// to run. The explicit SELECT ... FOR UPDATE below makes the Reservation
+// row itself the shared lock: closeReservationForId (src/lib/
+// reservations.ts) takes the exact same lock before its own state check,
+// so the two can never interleave — whichever gets there first blocks
+// the other until it commits, and the second one then sees the fresh,
+// already-committed state.
+export async function releaseTicketForReservation(reservationId: string, requestedVolume: number, plantId: string, actor: ReleaseActor): Promise<ReleaseTicketResult> {
   try {
     const ticket = await withRetry(() =>
       prisma.$transaction(
         async (tx) => {
-          const reservation = await tx.reservation.findUnique({
+          const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Reservation" WHERE "id" = ${reservationId} FOR UPDATE`;
+          if (locked.length === 0) throw new ReleaseAbort({ status: "NOT_FOUND" });
+
+          const reservation = await tx.reservation.findUniqueOrThrow({
             where: { id: reservationId },
             include: { mix: { include: { components: true } } },
           });
-          if (!reservation) throw new ReleaseAbort({ status: "NOT_FOUND" });
 
           const isApproved = reservation.initialApprovedAt != null && reservation.finalApprovedAt != null;
-          if (!isApproved || TERMINAL_RESERVATION_STATUSES.has(reservation.status)) {
+          if (!isApproved || !RELEASABLE_RESERVATION_STATUSES.has(reservation.status)) {
             throw new ReleaseAbort({ status: "INVALID_STATE" });
           }
 
@@ -92,17 +99,12 @@ export async function releaseTicketForReservation(reservationId: string, request
           // separate round trips with no lock between them — two
           // concurrent releases for the same reservation could both read
           // the same "remaining" figure and both create a ticket,
-          // together dispatching more than was ever requested. Serializable
-          // makes Postgres detect that read-write conflict and abort one
-          // of the two competing transactions (withRetry above then
-          // retries the aborted one automatically). The reservation's own
-          // active mix revision read below rides the same guarantee: a
-          // concurrent save/cancel of a revision
-          // (src/lib/reservationMixRevisions.ts, also Serializable) and
-          // this release can never produce a ticket whose components are
-          // mixed between an old and a new revision — whichever of the
-          // two transactions commits first is what the other sees, or
-          // Postgres aborts one outright if they were truly concurrent.
+          // together dispatching more than was ever requested. The row
+          // lock taken above already serializes this against a SECOND
+          // release for the same reservation too (both would try to lock
+          // the same row; the second waits, then sees this one's already-
+          // committed ticket when it re-reads remaining volume) — this is
+          // no longer resting on Serializable's conflict detection alone.
           const remaining = await getRemainingVolumeM3(reservationId, reservation.requestedVolumeM3, tx);
           const volumeM3 = Math.min(requestedVolume, remaining);
           if (volumeM3 <= 0) throw new ReleaseAbort({ status: "NO_REMAINING_VOLUME" });
@@ -185,6 +187,28 @@ export async function releaseTicketForReservation(reservationId: string, request
           if (reservation.status !== "IN_PRODUCTION") {
             await tx.reservation.update({ where: { id: reservationId }, data: { status: "IN_PRODUCTION" } });
           }
+
+          // Written in the SAME transaction as the ticket itself
+          // (RMR-R4-P2-02) — a version that logged this after the
+          // transaction committed meant a successful release could exist
+          // with no matching audit event if that later, separate write
+          // ever failed, and (since the redirect never happens when an
+          // action throws) an operator could reasonably retry and
+          // release a second ticket while volume remained. actor is
+          // passed in by the two Server Action callers, which already
+          // have it from their own session — this function itself never
+          // touches getCurrentUser()/cookies(), so it stays callable
+          // directly from tests with no request context.
+          await tx.auditEvent.create({
+            data: {
+              actorId: actor.id,
+              role: actor.role,
+              module: "Production",
+              recordId: created.id,
+              afterValue: `${created.ticketNumber} — ${created.volumeM3} m3`,
+              reasonCode: "BATCH_RELEASED",
+            },
+          });
 
           return created;
         },
