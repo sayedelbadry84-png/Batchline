@@ -1885,3 +1885,198 @@ test("the pump-crew collision trigger serializes two genuinely concurrent READ C
     if (r.status === "fulfilled") tripIds.push(r.value.id);
   }
 });
+
+// ======================================================================
+// PL-R4-P2-04, fourth production-lifecycle review — reassignTrip itself
+// (not just startTripForTicket/advanceTripState, already covered above)
+// needs its own concurrency coverage: a Plant transfer racing a
+// reassignment, and reassignments racing each other for the same truck,
+// driver, or pump crew member. reassignTrip uses Serializable isolation
+// + withRetry (src/lib/tripAssignment.ts's own comment on why), so a
+// plain Promise.all is enough to prove exactly one side wins — Postgres's
+// own write-skew detection under true SERIALIZABLE aborts the loser with
+// a serialization failure, which withRetry re-runs against a fresh
+// snapshot that then correctly sees the resource as busy. No manual
+// latch is needed for the same-resource races below; the Plant-transfer
+// race still needs one, same reasoning as the existing Plant-transfer
+// tests above.
+// ======================================================================
+
+test("a concurrent Plant transfer also blocks and is correctly re-checked by reassignTrip", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck1 = await makeTruck();
+  const driver1 = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck1, driverId: driver1, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+  const truck2 = await makeTruck();
+  const driver2 = await makeDriver();
+
+  let signalTransferLocked: () => void;
+  const transferLocked = new Promise<void>((resolve) => {
+    signalTransferLocked = resolve;
+  });
+  let releaseTransfer: () => void;
+  const holdTransfer = new Promise<void>((resolve) => {
+    releaseTransfer = resolve;
+  });
+
+  try {
+    const transferTx = prisma2.$transaction(async (tx) => {
+      await tx.plant.update({ where: { id: plantId }, data: { siteId: siteBId } });
+      signalTransferLocked();
+      await holdTransfer;
+    });
+    await transferLocked;
+
+    // reassignTrip locks the Trip (uncontested) then tries to lock the
+    // ticket's own Plant row (lockPlantSiteId) — held by the transfer
+    // above, so this genuinely blocks.
+    const reassignPromise = reassignTrip(dispatch.tripId, {
+      truckId: truck2,
+      driverId: driver2,
+      pumpId: null,
+      pumpOperatorId: null,
+      pumpAssistantId: null,
+      allowedSiteId: siteId,
+      ...actor(),
+    });
+    await waitUntilBlockedOn(`FROM "Plant"`);
+
+    releaseTransfer!();
+    await transferTx;
+
+    const result = await reassignPromise;
+    assert.equal(result.status, "NOT_FOUND", "the plant now belongs to a different site than the actor's own allowed scope");
+
+    const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+    assert.equal(trip.truckId, truck1, "a refused authorization check must never have reassigned the trip");
+  } finally {
+    releaseTransfer!();
+    await prisma.plant.update({ where: { id: plantId }, data: { siteId } });
+  }
+});
+
+test("two concurrent reassignments contending for the same truck have exactly one winner, and the loser sees TRUCK_BUSY", async () => {
+  const res = await makeReservation();
+  const ticketA = await makeTicket(res);
+  const ticketB = await makeTicket(res);
+  const truckA = await makeTruck();
+  const truckB = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const sharedTruck = await makeTruck();
+  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, allowedSiteId: siteId });
+  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId });
+  assert.equal(dispatchA.status, "OK");
+  assert.equal(dispatchB.status, "OK");
+  if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
+  tripIds.push(dispatchA.tripId, dispatchB.tripId);
+
+  const [resultA, resultB] = await Promise.all([
+    reassignTrip(dispatchA.tripId, { truckId: sharedTruck, driverId: driverA, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() }),
+    reassignTrip(dispatchB.tripId, { truckId: sharedTruck, driverId: driverB, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() }),
+  ]);
+  const statuses = [resultA.status, resultB.status].sort();
+  assert.deepEqual(statuses, ["OK", "TRUCK_BUSY"], "exactly one reassignment may claim the shared truck");
+
+  const [tripA, tripB] = await Promise.all([
+    prisma.trip.findUniqueOrThrow({ where: { id: dispatchA.tripId } }),
+    prisma.trip.findUniqueOrThrow({ where: { id: dispatchB.tripId } }),
+  ]);
+  const claimants = [tripA, tripB].filter((t) => t.truckId === sharedTruck);
+  assert.equal(claimants.length, 1, "the shared truck must end up assigned to exactly one of the two trips");
+});
+
+test("two concurrent reassignments contending for the same driver have exactly one winner, and the loser sees DRIVER_BUSY", async () => {
+  const res = await makeReservation();
+  const ticketA = await makeTicket(res);
+  const ticketB = await makeTicket(res);
+  const truckA = await makeTruck();
+  const truckB = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const sharedDriver = await makeDriver();
+  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, allowedSiteId: siteId });
+  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId });
+  assert.equal(dispatchA.status, "OK");
+  assert.equal(dispatchB.status, "OK");
+  if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
+  tripIds.push(dispatchA.tripId, dispatchB.tripId);
+
+  const [resultA, resultB] = await Promise.all([
+    reassignTrip(dispatchA.tripId, { truckId: truckA, driverId: sharedDriver, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() }),
+    reassignTrip(dispatchB.tripId, { truckId: truckB, driverId: sharedDriver, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() }),
+  ]);
+  const statuses = [resultA.status, resultB.status].sort();
+  assert.deepEqual(statuses, ["DRIVER_BUSY", "OK"], "exactly one reassignment may claim the shared driver");
+
+  const [tripA, tripB] = await Promise.all([
+    prisma.trip.findUniqueOrThrow({ where: { id: dispatchA.tripId } }),
+    prisma.trip.findUniqueOrThrow({ where: { id: dispatchB.tripId } }),
+  ]);
+  const claimants = [tripA, tripB].filter((t) => t.driverId === sharedDriver);
+  assert.equal(claimants.length, 1, "the shared driver must end up assigned to exactly one of the two trips");
+});
+
+test("two concurrent reassignments cross-claiming the same pump crew member (operator on one, assistant on the other) have exactly one winner", async () => {
+  const res = await makeReservation({ deliveryMethod: "PUMP" });
+  const ticketA = await makeTicket(res);
+  const ticketB = await makeTicket(res);
+  const truckA = await makeTruck();
+  const truckB = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const pumpA = await makePump();
+  const pumpB = await makePump();
+  const operatorA = await makeCrew("OPERATOR");
+  const operatorB = await makeCrew("OPERATOR");
+  const sharedCrewMember = await makeCrew("OPERATOR");
+  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, allowedSiteId: siteId, pumpId: pumpA, pumpOperatorId: operatorA });
+  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId, pumpId: pumpB, pumpOperatorId: operatorB });
+  assert.equal(dispatchA.status, "OK");
+  assert.equal(dispatchB.status, "OK");
+  if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
+  tripIds.push(dispatchA.tripId, dispatchB.tripId);
+
+  // Cross-column on purpose (PL-R4-P2-04's own wording): the shared crew
+  // member becomes trip A's OPERATOR and trip B's ASSISTANT — the
+  // collision trigger must catch this even though it's two different
+  // columns on two different trips, not the same column twice.
+  //
+  // Promise.allSettled, not Promise.all: unlike the truck/driver races
+  // above (whose only busy check is claimTripResources' own plain read,
+  // so Serializable write-skew detection turns the loser into a clean
+  // typed status), the crew collision backstop is the advisory-lock
+  // trigger itself (trip_check_pump_crew_collision, PL-R2-P2-05) — it
+  // BLOCKS the second UPDATE until the first commits, then re-checks and
+  // RAISES an exception, which surfaces as a rejected promise, not a
+  // typed CREW_BUSY result (same shape the existing READ-COMMITTED
+  // crew-collision test above already proves for a plain trip.create).
+  // claimTripResources' own plain-read busy check can still win the race
+  // in either transaction's favor depending on timing, so the loser may
+  // legitimately come back as either shape.
+  const [resultA, resultB] = await Promise.allSettled([
+    reassignTrip(dispatchA.tripId, { truckId: truckA, driverId: driverA, pumpId: pumpA, pumpOperatorId: sharedCrewMember, pumpAssistantId: null, allowedSiteId: siteId, ...actor() }),
+    reassignTrip(dispatchB.tripId, { truckId: truckB, driverId: driverB, pumpId: pumpB, pumpOperatorId: operatorB, pumpAssistantId: sharedCrewMember, allowedSiteId: siteId, ...actor() }),
+  ]);
+  const winners = [resultA, resultB].filter((r) => r.status === "fulfilled" && r.value.status === "OK");
+  const losers = [resultA, resultB].filter((r) => !(r.status === "fulfilled" && r.value.status === "OK"));
+  assert.equal(winners.length, 1, "exactly one reassignment may claim the shared crew member");
+  assert.equal(losers.length, 1);
+  const loser = losers[0];
+  if (loser.status === "rejected") {
+    assert.match(String(loser.reason), /already the operator or assistant/i);
+  } else {
+    assert.equal(loser.value.status, "CREW_BUSY");
+  }
+
+  const [tripA, tripB] = await Promise.all([
+    prisma.trip.findUniqueOrThrow({ where: { id: dispatchA.tripId } }),
+    prisma.trip.findUniqueOrThrow({ where: { id: dispatchB.tripId } }),
+  ]);
+  const claimants = [tripA, tripB].filter((t) => t.pumpOperatorId === sharedCrewMember || t.pumpAssistantId === sharedCrewMember);
+  assert.equal(claimants.length, 1, "the shared crew member must end up assigned to exactly one of the two trips, in exactly one role");
+});
