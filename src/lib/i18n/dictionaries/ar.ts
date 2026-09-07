@@ -118,7 +118,8 @@ const ar = {
     emptyAction: "لا شيء يحتاج إجراء الآن.",
     backToList: "العودة للواجهة الميدانية",
     offlineBanner: "لا يوجد اتصال — القراءات التي تُدخلها الآن تُحفظ على هذا الجهاز وستتم مزامنتها تلقائياً عند عودة الاتصال.",
-    offlinePending: (n: number) => `${n} قراءة بانتظار المزامنة…`,
+    offlinePendingOne: "1 قراءة بانتظار المزامنة…",
+    offlinePendingOther: "{n} قراءة بانتظار المزامنة…",
     offlineSynced: "تمت المزامنة.",
   },
   driver: {

@@ -120,7 +120,15 @@ const en: typeof ar = {
     emptyAction: "Nothing needs action right now.",
     backToList: "Back to field view",
     offlineBanner: "No connection — readings you enter now are saved on this device and will sync automatically once you're back online.",
-    offlinePending: (n: number) => `${n} reading${n === 1 ? "" : "s"} waiting to sync…`,
+    // Split into two fixed strings, not a function (PL-R5-P1-02, fifth
+    // production-lifecycle review): OfflineSyncBanner is a Client
+    // Component reading a client-only pending count, and a function prop
+    // crossing the Server→Client boundary is not serializable — the
+    // {n} placeholder is filled in client-side instead (see
+    // OfflineSyncBanner.tsx). offlinePendingOther covers every count
+    // other than exactly 1, same split the old ternary made.
+    offlinePendingOne: "1 reading waiting to sync…",
+    offlinePendingOther: "{n} readings waiting to sync…",
     offlineSynced: "Synced.",
   },
   driver: {

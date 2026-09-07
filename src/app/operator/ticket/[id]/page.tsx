@@ -11,6 +11,7 @@ import { CompleteBatchForm } from "@/components/CompleteBatchForm";
 import { StartTripForm } from "@/components/StartTripForm";
 import { ShortageOverridePanel, type ShortageSnapshotEntry } from "@/components/ShortageOverridePanel";
 import { canPerformAction } from "@/lib/permissions";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -29,9 +30,15 @@ export default async function OperatorTicketPage({
   const m = dict.modules.production;
   const d = m.detail;
 
-  const ticket = await prisma.batchTicket.findUnique({
-    where: { id },
+  // PL-R5-P1-03, fifth production-lifecycle review: this checked
+  // authentication and role, but never whether THIS ticket belongs to
+  // the operator's own site — same unscoped-read gap as the desktop
+  // production detail page (see that page's own comment).
+  const allowedSiteId = effectiveSiteId(user);
+  const ticket = await prisma.batchTicket.findFirst({
+    where: { id, ...plantScopeWhere(allowedSiteId) },
     include: {
+      plant: { select: { siteId: true } },
       reservation: { include: { project: { include: { customer: true } } } },
       mix: { include: { components: true } },
       components: { include: { material: true } },
@@ -60,12 +67,13 @@ export default async function OperatorTicketPage({
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
 
-  // Company-wide, not scoped to this ticket's own plant — see the same
-  // comment in production/[id]/page.tsx.
+  // Truck/pump scoped to this ticket's own SITE (not just its plant);
+  // driver/pump-crew stay company-wide — see the same comment and
+  // PL-R5-P2-05 reasoning in production/[id]/page.tsx.
   const [trucksRaw, drivers, pumps, pumpCrew] = ticket.status === "COMPLETE" && !ticket.trip
     ? await Promise.all([
         prisma.truck.findMany({
-          where: { status: "ACTIVE", trips: { none: { status: { not: "CLOSED" } } } },
+          where: { status: "ACTIVE", plant: { siteId: ticket.plant.siteId }, trips: { none: { status: { not: "CLOSED" } } } },
           orderBy: { code: "asc" },
           // Each truck's own most recent CLOSED trip — see the same badge
           // in production/[id]/page.tsx and getAvailableReclaimForTruck
@@ -81,7 +89,7 @@ export default async function OperatorTicketPage({
         }),
         prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" } }),
         isPumpDelivery
-          ? prisma.pump.findMany({ where: { status: "ACTIVE" }, orderBy: { code: "asc" } })
+          ? prisma.pump.findMany({ where: { status: "ACTIVE", plant: { siteId: ticket.plant.siteId } }, orderBy: { code: "asc" } })
           : Promise.resolve([]),
         isPumpDelivery
           ? prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } })
@@ -143,7 +151,7 @@ export default async function OperatorTicketPage({
         )}
       </div>
 
-      <OfflineSyncBanner labels={{ offline: o.offlineBanner, pending: o.offlinePending, synced: o.offlineSynced }} />
+      <OfflineSyncBanner labels={{ offline: o.offlineBanner, pendingOne: o.offlinePendingOne, pendingOther: o.offlinePendingOther, synced: o.offlineSynced }} />
 
       <form action={recordActuals} className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm">
         <input type="hidden" name="batchTicketId" value={ticket.id} />
@@ -275,7 +283,6 @@ export default async function OperatorTicketPage({
           batchTicketId={ticket.id}
           returnTarget="operator"
           isPumpDelivery={isPumpDelivery}
-          minPumpReachM={ticket.reservation.minPumpReachM}
           trucksAvailable={trucks.length > 0}
           truckOptions={truckOptions}
           driverOptions={driverOptions}
@@ -296,7 +303,7 @@ export default async function OperatorTicketPage({
             selectPumpOperator: d.selectPumpOperator,
             pumpAssistant: d.pumpAssistant,
             none: dict.field.none,
-            minPumpReachNote: d.minPumpReachNote,
+            minPumpReachNote: ticket.reservation.minPumpReachM == null ? null : d.minPumpReachNote(ticket.reservation.minPumpReachM),
             startTripButton: d.startTrip,
             errors: d.dispatchErrors,
           }}

@@ -18,7 +18,11 @@ const HANDLERS: Record<string, (fields: Record<string, string>) => Promise<void>
 export function OfflineSyncBanner({
   labels,
 }: {
-  labels: { offline: string; pending: (n: number) => string; synced: string };
+  // pendingOther carries a literal "{n}" placeholder, filled in below —
+  // not a function prop (PL-R5-P1-02, fifth production-lifecycle
+  // review): a function crossing the Server→Client boundary from the
+  // page that renders this Client Component is not serializable.
+  labels: { offline: string; pendingOne: string; pendingOther: string; synced: string };
 }) {
   // Lazy initializers (not a synchronous setState in the effect body) —
   // guarded for SSR, where navigator/localStorage don't exist.
@@ -62,7 +66,11 @@ export function OfflineSyncBanner({
         !isOnline ? "border-warn/30 bg-warn-soft text-warn" : "border-good/30 bg-good-soft text-good"
       }`}
     >
-      {!isOnline ? labels.offline : pendingCount > 0 ? labels.pending(pendingCount) : labels.synced}
+      {!isOnline
+        ? labels.offline
+        : pendingCount > 0
+          ? (pendingCount === 1 ? labels.pendingOne : labels.pendingOther.replace("{n}", String(pendingCount)))
+          : labels.synced}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { getCurrentUser, requirePageAccess } from "@/lib/session";
 import { canPerformAction } from "@/lib/permissions";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
 import {
   recordActuals,
@@ -41,10 +42,20 @@ export default async function BatchTicketPage({
   const m = dict.modules.production;
   const d = m.detail;
 
+  // PL-R5-P1-03, fifth production-lifecycle review: this loader used to
+  // fetch the ticket by id alone — module access was checked, but not
+  // whether this SPECIFIC ticket belongs to the acting user's own site,
+  // so a plant-scoped user who knew or guessed another site's ticket id
+  // could still read its full detail (customer, project, trip, returns,
+  // shortage overrides). findFirst + plantScopeWhere folds that same
+  // scope check the write actions already re-check into the read itself
+  // — a cross-site id now behaves exactly like a nonexistent one.
+  const allowedSiteId = effectiveSiteId(user);
   const [ticket, materials] = await Promise.all([
-    prisma.batchTicket.findUnique({
-      where: { id },
+    prisma.batchTicket.findFirst({
+      where: { id, ...plantScopeWhere(allowedSiteId) },
       include: {
+        plant: { select: { siteId: true } },
         reservation: { include: { project: { include: { customer: true } } } },
         mix: { include: { components: true } },
         components: { include: { material: true } },
@@ -89,17 +100,23 @@ export default async function BatchTicketPage({
   const [trucksRaw, drivers, pumps, pumpCrew] = showAssignForm || showEditTripForm
     ? await Promise.all([
         prisma.truck.findMany({
-          // Company-wide, not scoped to this ticket's own plant — a truck
-          // (or driver, pump, pump crew member below) commonly works more
-          // than one plant, so whoever is dispatching should be able to
-          // pull any of them in, not just the ones nominally registered
-          // here. A truck already on an open trip elsewhere still can't be
-          // assigned here too — matches the guarantee the Fleet page's own
-          // intro text makes ("can't be double-booked from Production").
-          // When editing an existing trip, that trip's own truck doesn't
-          // count as "busy" against itself.
+          // Scoped to this ticket's own SITE, not its specific plant — a
+          // truck commonly works more than one plant, so whoever is
+          // dispatching can still pull in any truck registered at ANY
+          // plant sharing this ticket's site, not just the one nominally
+          // registered here. But never a truck from a DIFFERENT site:
+          // claimTripResources' own TRUCK_OUT_OF_SCOPE check has always
+          // enforced exactly that boundary — this picker used to offer
+          // company-wide choices the domain guard would then always
+          // refuse for a cross-site pick (PL-R5-P2-05, fifth production-
+          // lifecycle review). A truck already on an open trip elsewhere
+          // still can't be assigned here too — matches the guarantee the
+          // Fleet page's own intro text makes ("can't be double-booked
+          // from Production"). When editing an existing trip, that trip's
+          // own truck doesn't count as "busy" against itself.
           where: {
             status: "ACTIVE",
+            plant: { siteId: ticket.plant.siteId },
             trips: { none: { status: { not: "CLOSED" }, ...(ticket.trip ? { id: { not: ticket.trip.id } } : {}) } },
           },
           orderBy: { code: "asc" },
@@ -117,9 +134,13 @@ export default async function BatchTicketPage({
             },
           },
         }),
+        // Drivers and pump crew stay company-wide on purpose — unlike
+        // truck/pump, claimTripResources never checks either against the
+        // ticket's site (PL-R5-P2-05's own finding was specific to truck
+        // and pump; drivers and crew genuinely do work across sites).
         prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" } }),
         isPumpDelivery
-          ? prisma.pump.findMany({ where: { status: "ACTIVE" }, orderBy: { code: "asc" } })
+          ? prisma.pump.findMany({ where: { status: "ACTIVE", plant: { siteId: ticket.plant.siteId } }, orderBy: { code: "asc" } })
           : Promise.resolve([]),
         isPumpDelivery
           ? prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } })
@@ -373,7 +394,6 @@ export default async function BatchTicketPage({
         <StartTripForm
           batchTicketId={ticket.id}
           isPumpDelivery={isPumpDelivery}
-          minPumpReachM={ticket.reservation.minPumpReachM}
           trucksAvailable={trucks.length > 0}
           truckOptions={truckOptions}
           driverOptions={driverOptions}
@@ -394,7 +414,7 @@ export default async function BatchTicketPage({
             selectPumpOperator: d.selectPumpOperator,
             pumpAssistant: d.pumpAssistant,
             none: dict.field.none,
-            minPumpReachNote: d.minPumpReachNote,
+            minPumpReachNote: ticket.reservation.minPumpReachM == null ? null : d.minPumpReachNote(ticket.reservation.minPumpReachM),
             startTripButton: d.startTrip,
             errors: d.dispatchErrors,
           }}

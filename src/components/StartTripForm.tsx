@@ -21,7 +21,14 @@ export type StartTripMessages = {
   selectPumpOperator: string;
   pumpAssistant: string;
   none: string;
-  minPumpReachNote: (m: number) => string;
+  // A pre-formatted string, not a function (PL-R5-P1-02, fifth
+  // production-lifecycle review): this is a Client Component, and a
+  // function prop crossing the Server→Client boundary is not
+  // serializable — Next.js accepts it silently at build time but fails
+  // at runtime the first time this form actually renders for a
+  // pump-delivery ticket with a minimum reach set, which `next build`
+  // alone can never catch. Null when there's no minimum reach to show.
+  minPumpReachNote: string | null;
   startTripButton: string;
   errors: Record<string, string>;
 };
@@ -36,7 +43,6 @@ export function StartTripForm({
   batchTicketId,
   returnTarget,
   isPumpDelivery,
-  minPumpReachM,
   trucksAvailable,
   truckOptions,
   driverOptions,
@@ -56,7 +62,6 @@ export function StartTripForm({
   // desktop production detail page.
   returnTarget?: "operator";
   isPumpDelivery: boolean;
-  minPumpReachM: number | null;
   trucksAvailable: boolean;
   truckOptions: EquipmentOption[];
   driverOptions: Option[];
@@ -96,7 +101,7 @@ export function StartTripForm({
               ]}
             />
           </div>
-          {minPumpReachM != null && <p className="mt-1 text-xs text-ink-muted">{messages.minPumpReachNote(minPumpReachM)}</p>}
+          {messages.minPumpReachNote && <p className="mt-1 text-xs text-ink-muted">{messages.minPumpReachNote}</p>}
         </div>
       )}
       <button type="submit" disabled={isPending} className={`${buttonClassName} self-start`}>
