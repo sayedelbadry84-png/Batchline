@@ -315,6 +315,19 @@ export async function decideWasteIncidentMemo(
     // DENY: the delivered volume stays exactly as the trip close already
     // set it — a denied suspicion never reduces billed volume.
 
+    // Either decision resolves this memo out of PENDING, which is what
+    // was blocking finalization (see reconcileReservationDeliveryState's
+    // own comment) — reconciling here lets a single-ticket reservation
+    // finalize (deny) or reopen for the shortfall (approve) atomically
+    // with the decision itself. Runs BEFORE the audit insert (PL-R4-P2-01,
+    // fourth production-lifecycle review): the audit write used to be
+    // last-but-one, so a failure-injection test aimed at it never actually
+    // exercised reconciliation's own write, making its rollback claim
+    // false. The audit insert is still the true last write, so it still
+    // proves the whole transaction — memo, Trip, AND reconciliation —
+    // rolls back together.
+    await reconcileReservationDeliveryState(tx, memo.batchTicket.reservationId);
+
     await tx.auditEvent.create({
       data: {
         actorId: opts.actorId,
@@ -325,13 +338,6 @@ export async function decideWasteIncidentMemo(
         reasonCode: decision === "APPROVE" ? "WASTE_MEMO_APPROVED" : "WASTE_MEMO_REJECTED",
       },
     });
-
-    // Either decision resolves this memo out of PENDING, which is what
-    // was blocking finalization (see reconcileReservationDeliveryState's
-    // own comment) — reconciling here lets a single-ticket reservation
-    // finalize (deny) or reopen for the shortfall (approve) atomically
-    // with the decision itself.
-    await reconcileReservationDeliveryState(tx, memo.batchTicket.reservationId);
 
     return { status: "OK" as const };
   });

@@ -1535,7 +1535,7 @@ model WasteIncidentMemo {
   batchTicket    BatchTicket @relation(fields: [batchTicketId], references: [id])
   wastedVolumeM3 Float
   reasonCode     String
-  status         String      @default("PENDING") // PENDING, APPROVED
+  status         String      @default("PENDING") // PENDING, APPROVED, REJECTED
   // The written explanation of what was actually found wrong with the
   // load — required at approval time (see approveWasteMemo in
   // quality/actions.ts), since reasonCode alone is just the coarse
