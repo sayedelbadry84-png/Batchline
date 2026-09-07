@@ -130,6 +130,22 @@ const en: typeof ar = {
     offlinePendingOne: "1 reading waiting to sync…",
     offlinePendingOther: "{n} readings waiting to sync…",
     offlineSynced: "Synced.",
+    // PL-R6-P2-02, sixth production-lifecycle review: a queued reading
+    // that comes back REJECTED on replay (the ticket went COMPLETE/
+    // CANCELLED while offline, a stale component, an out-of-range value)
+    // used to be silently dequeued and counted as flushed — real,
+    // invisible measurement loss. These stay visible instead, with the
+    // actual field/value and why, until a supervisor dismisses them.
+    offlineRejectedOne: "1 reading couldn't be saved — needs review:",
+    offlineRejectedOther: "{n} readings couldn't be saved — needs review:",
+    offlineRejectedField: { actual: "Actual mass", moisture: "Moisture %" },
+    offlineRejectedReasons: {
+      MISSING_FIELDS: "the request was incomplete",
+      INVALID_VALUE: "the value was out of range",
+      NOT_FOUND: "the component no longer exists or is out of scope",
+      TERMINAL: "the ticket was completed or cancelled before this could save",
+    },
+    offlineRejectedDismiss: "Dismiss",
   },
   driver: {
     brand: "Batchline Driver",
@@ -547,6 +563,11 @@ const en: typeof ar = {
         toleranceNote: (v: number) => `±${v}% tolerance`,
         saveReadings: "Save readings",
         moistureHint: "Moisture % adjusts the batched aggregate mass automatically in a real weighing integration (design formula: batched = design × (1 + moisture%)); here it is recorded alongside the scale reading for the audit trail.",
+        // Tooltip on AutoSaveField's rejection mark (PL-R6-P2-02, sixth
+        // production-lifecycle review) — a genuine business rejection
+        // (ticket went terminal, stale component, out-of-range value),
+        // never shown for a network failure, which queues/retries instead.
+        autosaveRejected: "Not saved — this reading was rejected. Re-check the value or the ticket's status.",
         completeTitle: "Complete batch",
         completeIntro: "Deducts actual (or target, if unweighed) mass from the plant's silo and hopper levels — the same numbers the Silos screen shows.",
         completeButton: "Complete & deduct inventory",

@@ -87,7 +87,9 @@ export default async function OperatorTicketPage({
             },
           },
         }),
-        prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" } }),
+        // status: "ACTIVE" — see the same PL-R6-P2-03 comment in
+        // production/[id]/page.tsx.
+        prisma.employee.findMany({ where: { role: "DRIVER", status: "ACTIVE" }, orderBy: { name: "asc" } }),
         isPumpDelivery
           ? prisma.pump.findMany({ where: { status: "ACTIVE", plant: { siteId: ticket.plant.siteId } }, orderBy: { code: "asc" } })
           : Promise.resolve([]),
@@ -151,7 +153,19 @@ export default async function OperatorTicketPage({
         )}
       </div>
 
-      <OfflineSyncBanner labels={{ offline: o.offlineBanner, pendingOne: o.offlinePendingOne, pendingOther: o.offlinePendingOther, synced: o.offlineSynced }} />
+      <OfflineSyncBanner
+        labels={{
+          offline: o.offlineBanner,
+          pendingOne: o.offlinePendingOne,
+          pendingOther: o.offlinePendingOther,
+          synced: o.offlineSynced,
+          rejectedOne: o.offlineRejectedOne,
+          rejectedOther: o.offlineRejectedOther,
+          fieldLabels: o.offlineRejectedField,
+          reasonLabels: o.offlineRejectedReasons,
+          dismiss: o.offlineRejectedDismiss,
+        }}
+      />
 
       <form action={recordActuals} className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm">
         <input type="hidden" name="batchTicketId" value={ticket.id} />
@@ -179,6 +193,7 @@ export default async function OperatorTicketPage({
                   defaultValue={c.actualMassKg ?? undefined}
                   disabled={ticket.status === "COMPLETE"}
                   className="w-full rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
+                  rejectedLabel={d.autosaveRejected}
                 />
                 {AGGREGATE_TYPES.has(c.material.type) && (
                   <AutoSaveField
@@ -192,6 +207,7 @@ export default async function OperatorTicketPage({
                     defaultValue={c.moisturePct ?? undefined}
                     disabled={ticket.status === "COMPLETE"}
                     className="w-24 shrink-0 rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
+                    rejectedLabel={d.autosaveRejected}
                   />
                 )}
               </div>

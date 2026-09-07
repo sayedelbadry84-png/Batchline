@@ -138,7 +138,13 @@ export default async function BatchTicketPage({
         // truck/pump, claimTripResources never checks either against the
         // ticket's site (PL-R5-P2-05's own finding was specific to truck
         // and pump; drivers and crew genuinely do work across sites).
-        prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" } }),
+        // status: "ACTIVE" filters the same way trucks/pumps already do
+        // above (PL-R6-P2-03, sixth production-lifecycle review) —
+        // claimTripResources always rejects an inactive driver with
+        // DRIVER_INACTIVE, so offering one here was a guaranteed-to-fail
+        // choice, the same picker/domain mismatch already fixed for
+        // cross-site trucks and pumps.
+        prisma.employee.findMany({ where: { role: "DRIVER", status: "ACTIVE" }, orderBy: { name: "asc" } }),
         isPumpDelivery
           ? prisma.pump.findMany({ where: { status: "ACTIVE", plant: { siteId: ticket.plant.siteId } }, orderBy: { code: "asc" } })
           : Promise.resolve([]),
@@ -253,6 +259,7 @@ export default async function BatchTicketPage({
                       defaultValue={c.actualMassKg ?? undefined}
                       disabled={ticket.status === "COMPLETE"}
                       className="w-24 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs disabled:opacity-60"
+                      rejectedLabel={d.autosaveRejected}
                     />
                   </td>
                   <td className={ui.td}>
@@ -266,6 +273,7 @@ export default async function BatchTicketPage({
                         defaultValue={c.moisturePct ?? undefined}
                         disabled={ticket.status === "COMPLETE"}
                         className="w-20 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs disabled:opacity-60"
+                        rejectedLabel={d.autosaveRejected}
                       />
                     ) : (
                       <span className="text-ink-faint">—</span>
