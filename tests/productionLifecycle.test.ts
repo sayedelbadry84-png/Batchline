@@ -81,6 +81,12 @@ const crewIds: string[] = [];
 const tripIds: string[] = [];
 const drumReturnIds: string[] = [];
 const wasteMemoIds: string[] = [];
+// Dedicated Plant rows created by individual tests below (PL-R5-P2-06's
+// selected-truck/pump transfer races need a truck/pump on its OWN plant,
+// separate from the shared fixture plant every other test's ticket
+// lives on) — deleted after truckIds/pumpIds, before the two fixture
+// plants, same FK-safe ordering as the rest of this teardown.
+const extraPlantIds: string[] = [];
 
 before(async () => {
   const site = await prisma.site.create({ data: { code: `TEST-SUITE-PL-${Date.now()}`, name: "TEST-SUITE-PL-SITE-A", city: "Test", country: "Test" } });
@@ -163,6 +169,7 @@ after(async () => {
   for (const id of employeeIds) await cleanupDelete(() => prisma.employee.delete({ where: { id } }));
   for (const id of pumpIds) await cleanupDelete(() => prisma.pump.delete({ where: { id } }));
   for (const id of crewIds) await cleanupDelete(() => prisma.pumpCrewMember.delete({ where: { id } }));
+  for (const id of extraPlantIds) await cleanupDelete(() => prisma.plant.delete({ where: { id } }));
 
   await cleanupDelete(() => prisma.mixDesign.delete({ where: { id: mixId } }));
   await cleanupDelete(() => prisma.silo.delete({ where: { id: siloId } }));
@@ -201,6 +208,27 @@ async function waitUntilBlockedOn(queryFragment: string, timeoutMs = 10000): Pro
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for a backend to be observed genuinely blocked on: ${queryFragment}`);
+}
+
+type Outcome<T> = { status: "fulfilled"; value: T } | { status: "rejected"; reason: unknown };
+
+// PL-R5-P1-01, fifth production-lifecycle review: a PrismaPromise is
+// LAZY — merely holding a reference to `prisma.trip.update(...)` does not
+// send the query. The four lock-order tests below used to poll
+// pg_stat_activity for a blocked backend before ever attaching a
+// `.then`/await to the competing query, so there was sometimes no
+// competing backend for the poll to observe at all, and the held
+// transaction (Prisma's own 5s default interactive-transaction timeout)
+// could close before the competing query was even dispatched. Wrapping
+// the query in `.then(...)` immediately — right where it's created, not
+// after the poll — both starts it eagerly and attaches a rejection
+// handler up front, so an expected database rejection can never surface
+// as an `unhandledRejection` while this settles.
+function startObserved<T>(query: Promise<T>): Promise<Outcome<T>> {
+  return query.then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    (reason) => ({ status: "rejected" as const, reason }),
+  );
 }
 
 // ---- Fixture helpers --------------------------------------------------
@@ -1625,6 +1653,88 @@ test("the database itself refuses to lower a DrumReturn's returnedVolumeM3 below
   await prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 3 } });
 });
 
+// PL-R5-P2-02, fifth production-lifecycle review: drum_return_check_
+// volume_bound reads Trip.batchTicketId without locking it, relying on
+// an application-only convention that this identity FK never changes —
+// true of every real code path, but not enforced by the database itself
+// until the Round-5 migration below. These three tests prove that
+// enforcement directly: re-parenting a Trip/DrumReturn/WasteIncidentMemo
+// to a different owner is now rejected outright, closing the gap a
+// direct SQL/maintenance write could otherwise have exploited (a real
+// two-connection race test is unnecessary for this specific fix, unlike
+// the volume-bound triggers above — immutability makes the race
+// impossible rather than merely serializing it).
+test("the database itself refuses to re-parent a Trip to a different BatchTicket", async () => {
+  const res = await makeReservation();
+  const ticketA = await makeTicket(res, { volumeM3: 8 });
+  const ticketB = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticketA, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  const readBatchTicketId = () => prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId }, select: { batchTicketId: true } });
+  await assertRejectedAndUnchanged(() => prisma.trip.update({ where: { id: dispatch.tripId }, data: { batchTicketId: ticketB } }), readBatchTicketId);
+});
+
+test("the database itself refuses to re-parent a DrumReturn to a different Trip", async () => {
+  const res = await makeReservation();
+  const ticketA = await makeTicket(res, { volumeM3: 8 });
+  const ticketB = await makeTicket(res, { volumeM3: 8 });
+  const truckA = await makeTruck();
+  const truckB = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, allowedSiteId: siteId });
+  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId });
+  assert.equal(dispatchA.status, "OK");
+  assert.equal(dispatchB.status, "OK");
+  if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
+  tripIds.push(dispatchA.tripId, dispatchB.tripId);
+  await advanceToDischarging(dispatchA.tripId);
+  const close = await closeTripWithReturnForId(dispatchA.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 2, reasonCode: "OVER_ORDERED", fate: null });
+  assert.equal(close.status, "OK");
+  const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatchA.tripId } });
+  drumReturnIds.push(drumReturn.id);
+
+  const readTripId = () => prisma.drumReturn.findUniqueOrThrow({ where: { id: drumReturn.id }, select: { tripId: true } });
+  await assertRejectedAndUnchanged(() => prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { tripId: dispatchB.tripId } }), readTripId);
+});
+
+test("the database itself refuses to re-parent a WasteIncidentMemo to a different DrumReturn or BatchTicket", async () => {
+  const res = await makeReservation();
+  const ticketA = await makeTicket(res, { volumeM3: 8 });
+  const ticketB = await makeTicket(res, { volumeM3: 8 });
+  const truckA = await makeTruck();
+  const truckB = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, allowedSiteId: siteId });
+  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId });
+  assert.equal(dispatchA.status, "OK");
+  assert.equal(dispatchB.status, "OK");
+  if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
+  tripIds.push(dispatchA.tripId, dispatchB.tripId);
+  await advanceToDischarging(dispatchA.tripId);
+  await advanceToDischarging(dispatchB.tripId);
+  const closeA = await closeTripWithReturnForId(dispatchA.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 2, reasonCode: "QUALITY_REJECTED", fate: null });
+  assert.equal(closeA.status, "OK");
+  const closeB = await closeTripWithReturnForId(dispatchB.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 2, reasonCode: "OVER_ORDERED", fate: null });
+  assert.equal(closeB.status, "OK");
+  const drumReturnA = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatchA.tripId } });
+  drumReturnIds.push(drumReturnA.id);
+  const drumReturnB = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatchB.tripId } });
+  drumReturnIds.push(drumReturnB.id);
+  const memo = await prisma.wasteIncidentMemo.findFirstOrThrow({ where: { batchTicketId: ticketA } });
+  wasteMemoIds.push(memo.id);
+
+  const readIdentity = () => prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id: memo.id }, select: { drumReturnId: true, batchTicketId: true } });
+  await assertRejectedAndUnchanged(() => prisma.wasteIncidentMemo.update({ where: { id: memo.id }, data: { drumReturnId: drumReturnB.id } }), readIdentity);
+  await assertRejectedAndUnchanged(() => prisma.wasteIncidentMemo.update({ where: { id: memo.id }, data: { batchTicketId: ticketB } }), readIdentity);
+});
+
 // ======================================================================
 // PL-R4-P1-02, fourth production-lifecycle review — the sequential bound
 // tests above only prove each trigger correct in isolation; they say
@@ -1662,24 +1772,31 @@ test("BatchTicket/Trip bound: a parent volumeM3 reduction holding the lock first
     // No Trip has claimed any of it yet, so lowering to 3 passes
     // batch_ticket_check_volume_lower_bound's own check (dependent max is
     // still 0) — this transaction's own UPDATE holds BatchTicket's row
-    // lock until it commits.
+    // lock until it commits. An explicit 20s timeout (well past
+    // waitUntilBlockedOn's own 10s ceiling) — Prisma's 5s default
+    // interactive-transaction timeout was what actually closed this
+    // transaction out from under the test (PL-R5-P1-01).
     const parentTx = prisma2.$transaction(async (tx) => {
       await tx.batchTicket.update({ where: { id: ticket }, data: { volumeM3: 3 } });
       signalParentLocked();
       await holdParent;
-    });
+    }, { timeout: 20_000 });
     await parentLocked;
 
     // trip_check_volume_bounds now takes FOR UPDATE on the BatchTicket
     // row before comparing — genuinely blocked behind the parent
-    // transaction above, not racing it.
-    const childPromise = prisma.trip.update({ where: { id: dispatch.tripId }, data: { volumeDeliveredM3: 5 } });
-    await waitUntilBlockedOn(`SET "volumeDeliveredM3"`);
+    // transaction above, not racing it. startObserved (not a bare
+    // reference) both sends the query eagerly and attaches its rejection
+    // handler up front, so waitUntilBlockedOn is guaranteed something to
+    // actually observe (PL-R5-P1-01).
+    const childOutcome = startObserved(prisma.trip.update({ where: { id: dispatch.tripId }, data: { volumeDeliveredM3: 5 } }));
+    await waitUntilBlockedOn(`SET "volumeDeliveredM3"`, 8_000);
 
     releaseParent!();
     await parentTx;
 
-    await assert.rejects(childPromise, "5 exceeds the now-committed volumeM3 of 3");
+    const outcome = await childOutcome;
+    assert.equal(outcome.status, "rejected", "5 exceeds the now-committed volumeM3 of 3");
 
     const finalTicket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticket }, select: { volumeM3: true } });
     assert.equal(finalTicket.volumeM3, 3);
@@ -1718,16 +1835,17 @@ test("BatchTicket/Trip bound: a Trip increase holding the parent lock first make
       await tx.trip.update({ where: { id: dispatch.tripId }, data: { volumeDeliveredM3: 6 } });
       signalChildLocked();
       await holdChild;
-    });
+    }, { timeout: 20_000 });
     await childLocked;
 
-    const parentPromise = prisma.batchTicket.update({ where: { id: ticket }, data: { volumeM3: 3 } });
-    await waitUntilBlockedOn(`SET "volumeM3"`);
+    const parentOutcome = startObserved(prisma.batchTicket.update({ where: { id: ticket }, data: { volumeM3: 3 } }));
+    await waitUntilBlockedOn(`SET "volumeM3"`, 8_000);
 
     releaseChild!();
     await childTx;
 
-    await assert.rejects(parentPromise, "3 is below the now-committed Trip.volumeDeliveredM3 of 6");
+    const outcome = await parentOutcome;
+    assert.equal(outcome.status, "rejected", "3 is below the now-committed Trip.volumeDeliveredM3 of 6");
 
     const finalTicket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticket }, select: { volumeM3: true } });
     assert.equal(finalTicket.volumeM3, 8, "the rejected parent write must never have applied");
@@ -1774,16 +1892,17 @@ test("DrumReturn/WasteIncidentMemo bound: a parent returnedVolumeM3 reduction ho
       await tx.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 3 } });
       signalParentLocked();
       await holdParent;
-    });
+    }, { timeout: 20_000 });
     await parentLocked;
 
-    const childPromise = prisma.wasteIncidentMemo.update({ where: { id: memo.id }, data: { wastedVolumeM3: 5 } });
-    await waitUntilBlockedOn(`SET "wastedVolumeM3"`);
+    const childOutcome = startObserved(prisma.wasteIncidentMemo.update({ where: { id: memo.id }, data: { wastedVolumeM3: 5 } }));
+    await waitUntilBlockedOn(`SET "wastedVolumeM3"`, 8_000);
 
     releaseParent!();
     await parentTx;
 
-    await assert.rejects(childPromise, "5 exceeds the now-committed returnedVolumeM3 of 3");
+    const outcome = await childOutcome;
+    assert.equal(outcome.status, "rejected", "5 exceeds the now-committed returnedVolumeM3 of 3");
 
     const finalReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { id: drumReturn.id }, select: { returnedVolumeM3: true } });
     assert.equal(finalReturn.returnedVolumeM3, 3);
@@ -1828,16 +1947,17 @@ test("DrumReturn/WasteIncidentMemo bound: a memo increase holding the parent loc
       await tx.wasteIncidentMemo.update({ where: { id: memo.id }, data: { wastedVolumeM3: 5 } });
       signalChildLocked();
       await holdChild;
-    });
+    }, { timeout: 20_000 });
     await childLocked;
 
-    const parentPromise = prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 3 } });
-    await waitUntilBlockedOn(`SET "returnedVolumeM3"`);
+    const parentOutcome = startObserved(prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 3 } }));
+    await waitUntilBlockedOn(`SET "returnedVolumeM3"`, 8_000);
 
     releaseChild!();
     await childTx;
 
-    await assert.rejects(parentPromise, "3 is below the now-committed WasteIncidentMemo.wastedVolumeM3 of 5");
+    const outcome = await parentOutcome;
+    assert.equal(outcome.status, "rejected", "3 is below the now-committed WasteIncidentMemo.wastedVolumeM3 of 5");
 
     const finalReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { id: drumReturn.id }, select: { returnedVolumeM3: true } });
     assert.equal(finalReturn.returnedVolumeM3, 6, "the rejected parent write must never have applied");
@@ -1959,6 +2079,162 @@ test("a concurrent Plant transfer also blocks and is correctly re-checked by rea
   }
 });
 
+// PL-R5-P2-06, fifth production-lifecycle review: the Plant-transfer
+// races above all transfer the TICKET's own plant. claimTripResources
+// separately locks the SELECTED truck's and pump's own plant too
+// (lockPlantSiteId at tripAssignment.ts:95/119) — this was implemented
+// but never actually proven with a two-connection test. Each test below
+// gives the truck/pump its own dedicated Plant (distinct from the
+// shared fixture plant every ticket lives on), so transferring THAT
+// specific plant can't be confused with the ticket's-own-plant races
+// already covered.
+
+test("a concurrent transfer of the SELECTED TRUCK's own Plant blocks startTripForTicket, and is correctly re-checked", async () => {
+  const truckPlant = await prisma.plant.create({ data: { siteId, name: "TEST-SUITE-PL-TRUCK-PLANT" } });
+  extraPlantIds.push(truckPlant.id);
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck = await makeTruck({ plantId: truckPlant.id });
+  const driver = await makeDriver();
+
+  let signalTransferLocked: () => void;
+  const transferLocked = new Promise<void>((resolve) => {
+    signalTransferLocked = resolve;
+  });
+  let releaseTransfer: () => void;
+  const holdTransfer = new Promise<void>((resolve) => {
+    releaseTransfer = resolve;
+  });
+
+  try {
+    const transferTx = prisma2.$transaction(async (tx) => {
+      await tx.plant.update({ where: { id: truckPlant.id }, data: { siteId: siteBId } });
+      signalTransferLocked();
+      await holdTransfer;
+    });
+    await transferLocked;
+
+    // claimTripResources locks the ticket's own plant (uncontested, a
+    // different row), validates the truck exists, then tries to lock
+    // the TRUCK's own plant — held by the transfer above.
+    const dispatchOutcome = startObserved(dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId }));
+    await waitUntilBlockedOn(`FROM "Plant"`, 8_000);
+
+    releaseTransfer!();
+    await transferTx;
+
+    const outcome = await dispatchOutcome;
+    assert.equal(outcome.status, "fulfilled", "startTripForTicket must return a typed result, not throw");
+    if (outcome.status === "fulfilled") {
+      assert.equal(outcome.value.status, "TRUCK_OUT_OF_SCOPE", "the truck's plant now belongs to a different site than the actor's own allowed scope");
+    }
+
+    const tripCount = await prisma.trip.count({ where: { batchTicketId: ticket } });
+    assert.equal(tripCount, 0, "a refused authorization check must never have dispatched a trip");
+  } finally {
+    releaseTransfer!();
+    await prisma.plant.update({ where: { id: truckPlant.id }, data: { siteId } });
+  }
+});
+
+test("a concurrent transfer of the SELECTED TRUCK's own Plant blocks reassignTrip, and is correctly re-checked", async () => {
+  const truckPlant = await prisma.plant.create({ data: { siteId, name: "TEST-SUITE-PL-TRUCK-PLANT-2" } });
+  extraPlantIds.push(truckPlant.id);
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const originalTruck = await makeTruck();
+  const driver1 = await makeDriver();
+  const driver2 = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: originalTruck, driverId: driver1, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+  const newTruck = await makeTruck({ plantId: truckPlant.id });
+
+  let signalTransferLocked: () => void;
+  const transferLocked = new Promise<void>((resolve) => {
+    signalTransferLocked = resolve;
+  });
+  let releaseTransfer: () => void;
+  const holdTransfer = new Promise<void>((resolve) => {
+    releaseTransfer = resolve;
+  });
+
+  try {
+    const transferTx = prisma2.$transaction(async (tx) => {
+      await tx.plant.update({ where: { id: truckPlant.id }, data: { siteId: siteBId } });
+      signalTransferLocked();
+      await holdTransfer;
+    });
+    await transferLocked;
+
+    const reassignOutcome = startObserved(
+      reassignTrip(dispatch.tripId, { truckId: newTruck, driverId: driver2, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() }),
+    );
+    await waitUntilBlockedOn(`FROM "Plant"`, 8_000);
+
+    releaseTransfer!();
+    await transferTx;
+
+    const outcome = await reassignOutcome;
+    assert.equal(outcome.status, "fulfilled");
+    if (outcome.status === "fulfilled") assert.equal(outcome.value.status, "TRUCK_OUT_OF_SCOPE");
+
+    const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+    assert.equal(trip.truckId, originalTruck, "a refused authorization check must never have reassigned the trip");
+  } finally {
+    releaseTransfer!();
+    await prisma.plant.update({ where: { id: truckPlant.id }, data: { siteId } });
+  }
+});
+
+test("a concurrent transfer of the SELECTED PUMP's own Plant blocks a pump-delivery dispatch, and is correctly re-checked", async () => {
+  const pumpPlant = await prisma.plant.create({ data: { siteId, name: "TEST-SUITE-PL-PUMP-PLANT" } });
+  extraPlantIds.push(pumpPlant.id);
+  const res = await makeReservation({ deliveryMethod: "PUMP" });
+  const ticket = await makeTicket(res);
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const pump = await makePump({ plantId: pumpPlant.id });
+  const operator = await makeCrew("OPERATOR");
+
+  let signalTransferLocked: () => void;
+  const transferLocked = new Promise<void>((resolve) => {
+    signalTransferLocked = resolve;
+  });
+  let releaseTransfer: () => void;
+  const holdTransfer = new Promise<void>((resolve) => {
+    releaseTransfer = resolve;
+  });
+
+  try {
+    const transferTx = prisma2.$transaction(async (tx) => {
+      await tx.plant.update({ where: { id: pumpPlant.id }, data: { siteId: siteBId } });
+      signalTransferLocked();
+      await holdTransfer;
+    });
+    await transferLocked;
+
+    const dispatchOutcome = startObserved(dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId, pumpId: pump, pumpOperatorId: operator }));
+    await waitUntilBlockedOn(`FROM "Plant"`, 8_000);
+
+    releaseTransfer!();
+    await transferTx;
+
+    const outcome = await dispatchOutcome;
+    assert.equal(outcome.status, "fulfilled");
+    if (outcome.status === "fulfilled") {
+      assert.equal(outcome.value.status, "PUMP_OUT_OF_SCOPE", "the pump's plant now belongs to a different site than the actor's own allowed scope");
+    }
+
+    const tripCount = await prisma.trip.count({ where: { batchTicketId: ticket } });
+    assert.equal(tripCount, 0, "a refused authorization check must never have dispatched a trip");
+  } finally {
+    releaseTransfer!();
+    await prisma.plant.update({ where: { id: pumpPlant.id }, data: { siteId } });
+  }
+});
+
 test("two concurrent reassignments contending for the same truck have exactly one winner, and the loser sees TRUCK_BUSY", async () => {
   const res = await makeReservation();
   const ticketA = await makeTicket(res);
@@ -2021,7 +2297,19 @@ test("two concurrent reassignments contending for the same driver have exactly o
   assert.equal(claimants.length, 1, "the shared driver must end up assigned to exactly one of the two trips");
 });
 
-test("two concurrent reassignments cross-claiming the same pump crew member (operator on one, assistant on the other) have exactly one winner", async () => {
+// PL-R5-P2-01, fifth production-lifecycle review: the previous version
+// of this test created its "shared crew member" with role OPERATOR, then
+// submitted that same id as the OTHER trip's pumpAssistantId.
+// claimTripResources intentionally requires operator.role === "OPERATOR"
+// AND assistant.role === "HELPER" — no roster member can ever satisfy
+// both, so that reassignment always failed on PUMP_ASSISTANT_INVALID
+// before it ever reached the busy check, proving nothing about
+// contention. Fixed as two separate, valid-role domain tests (same
+// column, contended) plus one direct-DB test below that bypasses
+// reassignTrip/claimTripResources entirely to prove the trigger's own
+// cross-column backstop independent of the domain's role validation.
+
+test("two concurrent reassignments contending for the same pump OPERATOR have exactly one winner", async () => {
   const res = await makeReservation({ deliveryMethod: "PUMP" });
   const ticketA = await makeTicket(res);
   const ticketB = await makeTicket(res);
@@ -2033,7 +2321,7 @@ test("two concurrent reassignments cross-claiming the same pump crew member (ope
   const pumpB = await makePump();
   const operatorA = await makeCrew("OPERATOR");
   const operatorB = await makeCrew("OPERATOR");
-  const sharedCrewMember = await makeCrew("OPERATOR");
+  const sharedOperator = await makeCrew("OPERATOR");
   const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, allowedSiteId: siteId, pumpId: pumpA, pumpOperatorId: operatorA });
   const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId, pumpId: pumpB, pumpOperatorId: operatorB });
   assert.equal(dispatchA.status, "OK");
@@ -2041,30 +2329,22 @@ test("two concurrent reassignments cross-claiming the same pump crew member (ope
   if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
   tripIds.push(dispatchA.tripId, dispatchB.tripId);
 
-  // Cross-column on purpose (PL-R4-P2-04's own wording): the shared crew
-  // member becomes trip A's OPERATOR and trip B's ASSISTANT — the
-  // collision trigger must catch this even though it's two different
-  // columns on two different trips, not the same column twice.
-  //
-  // Promise.allSettled, not Promise.all: unlike the truck/driver races
-  // above (whose only busy check is claimTripResources' own plain read,
-  // so Serializable write-skew detection turns the loser into a clean
-  // typed status), the crew collision backstop is the advisory-lock
-  // trigger itself (trip_check_pump_crew_collision, PL-R2-P2-05) — it
-  // BLOCKS the second UPDATE until the first commits, then re-checks and
-  // RAISES an exception, which surfaces as a rejected promise, not a
-  // typed CREW_BUSY result (same shape the existing READ-COMMITTED
-  // crew-collision test above already proves for a plain trip.create).
+  // Promise.allSettled: the backstop that actually decides the loser here
+  // is the advisory-lock trigger (trip_check_pump_crew_collision), which
+  // BLOCKS the second UPDATE until the first commits, then RAISES —
+  // surfacing as a rejected promise, not always a typed CREW_BUSY result.
   // claimTripResources' own plain-read busy check can still win the race
   // in either transaction's favor depending on timing, so the loser may
-  // legitimately come back as either shape.
+  // legitimately come back as either shape (same reasoning already
+  // established for the truck/driver races above, but the trigger raise
+  // is possible here in a way it never is for truck/driver).
   const [resultA, resultB] = await Promise.allSettled([
-    reassignTrip(dispatchA.tripId, { truckId: truckA, driverId: driverA, pumpId: pumpA, pumpOperatorId: sharedCrewMember, pumpAssistantId: null, allowedSiteId: siteId, ...actor() }),
-    reassignTrip(dispatchB.tripId, { truckId: truckB, driverId: driverB, pumpId: pumpB, pumpOperatorId: operatorB, pumpAssistantId: sharedCrewMember, allowedSiteId: siteId, ...actor() }),
+    reassignTrip(dispatchA.tripId, { truckId: truckA, driverId: driverA, pumpId: pumpA, pumpOperatorId: sharedOperator, pumpAssistantId: null, allowedSiteId: siteId, ...actor() }),
+    reassignTrip(dispatchB.tripId, { truckId: truckB, driverId: driverB, pumpId: pumpB, pumpOperatorId: sharedOperator, pumpAssistantId: null, allowedSiteId: siteId, ...actor() }),
   ]);
   const winners = [resultA, resultB].filter((r) => r.status === "fulfilled" && r.value.status === "OK");
   const losers = [resultA, resultB].filter((r) => !(r.status === "fulfilled" && r.value.status === "OK"));
-  assert.equal(winners.length, 1, "exactly one reassignment may claim the shared crew member");
+  assert.equal(winners.length, 1, "exactly one reassignment may claim the shared pump operator");
   assert.equal(losers.length, 1);
   const loser = losers[0];
   if (loser.status === "rejected") {
@@ -2077,6 +2357,82 @@ test("two concurrent reassignments cross-claiming the same pump crew member (ope
     prisma.trip.findUniqueOrThrow({ where: { id: dispatchA.tripId } }),
     prisma.trip.findUniqueOrThrow({ where: { id: dispatchB.tripId } }),
   ]);
-  const claimants = [tripA, tripB].filter((t) => t.pumpOperatorId === sharedCrewMember || t.pumpAssistantId === sharedCrewMember);
-  assert.equal(claimants.length, 1, "the shared crew member must end up assigned to exactly one of the two trips, in exactly one role");
+  const claimants = [tripA, tripB].filter((t) => t.pumpOperatorId === sharedOperator);
+  assert.equal(claimants.length, 1, "the shared operator must end up assigned to exactly one of the two trips");
+});
+
+test("two concurrent reassignments contending for the same pump HELPER (assistant) have exactly one winner", async () => {
+  const res = await makeReservation({ deliveryMethod: "PUMP" });
+  const ticketA = await makeTicket(res);
+  const ticketB = await makeTicket(res);
+  const truckA = await makeTruck();
+  const truckB = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const pumpA = await makePump();
+  const pumpB = await makePump();
+  const operatorA = await makeCrew("OPERATOR");
+  const operatorB = await makeCrew("OPERATOR");
+  const sharedHelper = await makeCrew("HELPER");
+  const dispatchA = await dispatchTrip(ticketA, { truckId: truckA, driverId: driverA, allowedSiteId: siteId, pumpId: pumpA, pumpOperatorId: operatorA });
+  const dispatchB = await dispatchTrip(ticketB, { truckId: truckB, driverId: driverB, allowedSiteId: siteId, pumpId: pumpB, pumpOperatorId: operatorB });
+  assert.equal(dispatchA.status, "OK");
+  assert.equal(dispatchB.status, "OK");
+  if (dispatchA.status !== "OK" || dispatchB.status !== "OK") return;
+  tripIds.push(dispatchA.tripId, dispatchB.tripId);
+
+  const [resultA, resultB] = await Promise.allSettled([
+    reassignTrip(dispatchA.tripId, { truckId: truckA, driverId: driverA, pumpId: pumpA, pumpOperatorId: operatorA, pumpAssistantId: sharedHelper, allowedSiteId: siteId, ...actor() }),
+    reassignTrip(dispatchB.tripId, { truckId: truckB, driverId: driverB, pumpId: pumpB, pumpOperatorId: operatorB, pumpAssistantId: sharedHelper, allowedSiteId: siteId, ...actor() }),
+  ]);
+  const winners = [resultA, resultB].filter((r) => r.status === "fulfilled" && r.value.status === "OK");
+  const losers = [resultA, resultB].filter((r) => !(r.status === "fulfilled" && r.value.status === "OK"));
+  assert.equal(winners.length, 1, "exactly one reassignment may claim the shared pump helper");
+  assert.equal(losers.length, 1);
+  const loser = losers[0];
+  if (loser.status === "rejected") {
+    assert.match(String(loser.reason), /already the operator or assistant/i);
+  } else {
+    assert.equal(loser.value.status, "CREW_BUSY");
+  }
+
+  const [tripA, tripB] = await Promise.all([
+    prisma.trip.findUniqueOrThrow({ where: { id: dispatchA.tripId } }),
+    prisma.trip.findUniqueOrThrow({ where: { id: dispatchB.tripId } }),
+  ]);
+  const claimants = [tripA, tripB].filter((t) => t.pumpAssistantId === sharedHelper);
+  assert.equal(claimants.length, 1, "the shared helper must end up assigned to exactly one of the two trips");
+});
+
+test("the pump-crew collision trigger catches a genuine cross-column collision (operator column vs. assistant column) at the database level, independent of domain role validation", async () => {
+  const res = await makeReservation({ deliveryMethod: "PUMP" });
+  const ticketA = await makeTicket(res);
+  const ticketB = await makeTicket(res);
+  const truckA = await makeTruck();
+  const truckB = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const pumpA = await makePump();
+  const pumpB = await makePump();
+  // A single crew member's role never matters to the trigger — it only
+  // ever compares raw ids in the pumpOperatorId/pumpAssistantId columns
+  // (PL-R5-P2-01) — so one role is enough to prove this independent of
+  // claimTripResources' own domain-level role check, which these two raw
+  // trip.create calls bypass entirely, the same way a direct maintenance
+  // write or a future domain bug could.
+  const sharedCrewMember = await makeCrew("OPERATOR");
+
+  const [resultA, resultB] = await Promise.allSettled([
+    prisma.trip.create({ data: { batchTicketId: ticketA, truckId: truckA, driverId: driverA, pumpId: pumpA, pumpOperatorId: sharedCrewMember, status: "LOADING", batchTime: new Date() } }),
+    prisma2.trip.create({ data: { batchTicketId: ticketB, truckId: truckB, driverId: driverB, pumpId: pumpB, pumpAssistantId: sharedCrewMember, status: "LOADING", batchTime: new Date() } }),
+  ]);
+
+  const fulfilled = [resultA, resultB].filter((r) => r.status === "fulfilled");
+  const rejected = [resultA, resultB].filter((r) => r.status === "rejected");
+  assert.equal(fulfilled.length, 1, "exactly one of the two concurrent trips may claim this crew member, even across different columns");
+  assert.equal(rejected.length, 1);
+  if (rejected[0].status === "rejected") assert.match(String(rejected[0].reason), /already the operator or assistant/i);
+  for (const r of fulfilled) {
+    if (r.status === "fulfilled") tripIds.push(r.value.id);
+  }
 });
