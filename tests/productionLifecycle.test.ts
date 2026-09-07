@@ -39,7 +39,7 @@ if (process.env.TEST_DATABASE_URL === process.env.DATABASE_URL) {
 }
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
 
-const { PrismaClient } = await import("@prisma/client");
+const { PrismaClient, Prisma } = await import("@prisma/client");
 const { startTripForTicket } = await import("../src/lib/tripDispatch");
 const { reassignTrip } = await import("../src/lib/tripAssignment");
 const {
@@ -525,10 +525,16 @@ test("dispatch refuses a pump delivery with no pump, an out-of-reach pump, and t
   const noPumpResult = await dispatchTrip(ticket1, { truckId: truck1, driverId: driver1, allowedSiteId: siteId });
   assert.equal(noPumpResult.status, "PUMP_REQUIRED");
 
+  // An operator is required before reach is even considered (PL-R2-P2-03
+  // validates operator presence first) — supplying one here is what lets
+  // this call actually reach the reach check it claims to test, rather
+  // than stopping earlier at PUMP_OPERATOR_REQUIRED (PL-R3-CI-01, third
+  // production-lifecycle review).
   const shortPump = await makePump({ reachM: 20 });
+  const shortReachOperator = await makeCrew("OPERATOR");
   const ticket2 = await makeTicket(res);
   const truck2 = await makeTruck();
-  const shortReachResult = await dispatchTrip(ticket2, { truckId: truck2, driverId: driver1, pumpId: shortPump, allowedSiteId: siteId });
+  const shortReachResult = await dispatchTrip(ticket2, { truckId: truck2, driverId: driver1, pumpId: shortPump, pumpOperatorId: shortReachOperator, allowedSiteId: siteId });
   assert.equal(shortReachResult.status, "PUMP_INSUFFICIENT_REACH");
 
   const goodPump = await makePump({ reachM: 50 });
@@ -687,6 +693,39 @@ test("closeTripFullForId refuses a crafted close straight from LOADING, and clos
   assert.equal(duplicateClose.status, "NOT_DISCHARGING");
 });
 
+test("two concurrent close attempts on the same trip (full-close vs. return-close) have exactly one winner, with no double audit", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+  await advanceToDischarging(dispatch.tripId);
+
+  const [fullResult, returnResult] = await Promise.all([
+    closeTripFullForId(dispatch.tripId, { allowedSiteId: siteId, ...actor() }),
+    closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 2, reasonCode: "OVER_ORDERED", fate: null }),
+  ]);
+  const statuses = [fullResult.status, returnResult.status].sort();
+  assert.deepEqual(statuses, ["NOT_DISCHARGING", "OK"], "exactly one close may win — the loser must see the trip already past DISCHARGING, never both succeed");
+
+  const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+  assert.equal(trip.status, "CLOSED");
+  // The winner's own side effects (a DrumReturn) exist only if
+  // return-close won — either outcome is a single, unambiguous result,
+  // never a mix of both closes' effects.
+  const drumReturnCount = await prisma.drumReturn.count({ where: { tripId: dispatch.tripId } });
+  assert.equal(drumReturnCount, returnResult.status === "OK" ? 1 : 0);
+  if (returnResult.status === "OK") {
+    const dr = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
+    drumReturnIds.push(dr.id);
+  }
+  const closeAuditCount = await prisma.auditEvent.count({ where: { recordId: dispatch.tripId, field: { in: ["status", "drumReturn"] } } });
+  assert.equal(closeAuditCount, 1, "exactly one close audit event, never two");
+});
+
 test("finalizing a reservation is deferred until every sibling ticket's trip has closed, and never overwrites an already-cancelled reservation", async () => {
   const res = await makeReservation();
   const ticketA = await makeTicket(res, { volumeM3: 8 });
@@ -800,9 +839,22 @@ test("advanceTripState re-checks site authorization against the POST-transfer Pl
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
 
-  let releaseTransferPause: () => void;
-  const transferPaused = new Promise<void>((resolve) => {
-    releaseTransferPause = resolve;
+  // Two separate latches, not one (PL-R3-CI-02, third production-
+  // lifecycle review): the old version started transferTx and
+  // advanceTripState back-to-back with nothing between them, so either
+  // side could reach the Plant row first — if advanceTripState won,
+  // waitUntilBlockedOn was polling for the WRONG statement (the
+  // transfer's own UPDATE would be the one blocked, not
+  // advanceTripState's SELECT ... FOR UPDATE) and just timed out. This
+  // is a test-coordination fix only; lockPlantSiteId itself was never in
+  // question.
+  let signalTransferLocked: () => void;
+  const transferLocked = new Promise<void>((resolve) => {
+    signalTransferLocked = resolve;
+  });
+  let releaseTransfer: () => void;
+  const holdTransfer = new Promise<void>((resolve) => {
+    releaseTransfer = resolve;
   });
 
   try {
@@ -814,17 +866,23 @@ test("advanceTripState re-checks site authorization against the POST-transfer Pl
     // genuinely waits on it, not just races it.
     const transferTx = prisma2.$transaction(async (tx) => {
       await tx.plant.update({ where: { id: plantId }, data: { siteId: siteBId } });
-      await transferPaused;
+      signalTransferLocked();
+      await holdTransfer;
     });
+
+    // Proves the UPDATE has actually completed and the transfer now
+    // owns the Plant row's lock, before advanceTripState ever starts —
+    // eliminating the race the old version had.
+    await transferLocked;
 
     // advanceTripState locks the Trip (uncontested) then tries to lock
     // the ticket's own Plant row (src/lib/siteScope.ts's
-    // lockPlantSiteId) — which the paused transfer above is already
-    // holding, so this genuinely blocks rather than racing on timing.
+    // lockPlantSiteId) — which the transfer above is already holding, so
+    // this genuinely blocks rather than racing on timing.
     const advancePromise = advanceTripState(dispatch.tripId, "LOADING", { allowedSiteId: siteId, ...actor() });
     await waitUntilBlockedOn(`FROM "Plant"`);
 
-    releaseTransferPause!();
+    releaseTransfer!();
     await transferTx;
 
     const result = await advancePromise;
@@ -837,8 +895,58 @@ test("advanceTripState re-checks site authorization against the POST-transfer Pl
     const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
     assert.equal(trip.status, "LOADING", "a refused authorization check must never have advanced the trip");
   } finally {
+    // Releasing again here is a safe no-op on the normal path (a
+    // Promise resolver ignores a second call) — it only matters if an
+    // assertion above threw before the normal release point was
+    // reached, which would otherwise leave transferTx's transaction
+    // paused forever and hang teardown.
+    releaseTransfer!();
     // Restore the shared fixture plant's site — every other test in
     // this file assumes plantId belongs to siteId.
+    await prisma.plant.update({ where: { id: plantId }, data: { siteId } });
+  }
+});
+
+test("a concurrent Plant transfer also blocks and is correctly re-checked by startTripForTicket, not only advanceTripState", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+
+  let signalTransferLocked: () => void;
+  const transferLocked = new Promise<void>((resolve) => {
+    signalTransferLocked = resolve;
+  });
+  let releaseTransfer: () => void;
+  const holdTransfer = new Promise<void>((resolve) => {
+    releaseTransfer = resolve;
+  });
+
+  try {
+    const transferTx = prisma2.$transaction(async (tx) => {
+      await tx.plant.update({ where: { id: plantId }, data: { siteId: siteBId } });
+      signalTransferLocked();
+      await holdTransfer;
+    });
+    await transferLocked;
+
+    // claimTripSlot (inside startTripForTicket) locks the Ticket's own
+    // Plant row via lockPlantSiteId, same as advanceTripState — this
+    // proves the dispatch path shares the same real backstop, not only
+    // the already-covered advance path.
+    const dispatchPromise = dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+    await waitUntilBlockedOn(`FROM "Plant"`);
+
+    releaseTransfer!();
+    await transferTx;
+
+    const result = await dispatchPromise;
+    assert.equal(result.status, "OUT_OF_SCOPE");
+
+    const tripCount = await prisma.trip.count({ where: { batchTicketId: ticket } });
+    assert.equal(tripCount, 0, "a refused dispatch must never have created a Trip");
+  } finally {
+    releaseTransfer!();
     await prisma.plant.update({ where: { id: plantId }, data: { siteId } });
   }
 });
@@ -1036,6 +1144,67 @@ test("concurrent approve-vs-deny on the same memo has exactly one winner", async
   ]);
   const statuses = [approveResult.status, denyResult.status].sort();
   assert.deepEqual(statuses, ["ALREADY_DECIDED", "OK"]);
+});
+
+// PL-R3-P2-03, third production-lifecycle review — decideWasteIncidentMemo
+// is transactionally shaped correctly, but that was never actually
+// proven with a real injected failure. A nonexistent actorId violates
+// AuditEvent.actorId's own FK the same way an earlier round's test
+// already proved for a different domain function — that failure lands
+// on the LAST write inside decideWasteIncidentMemo's transaction (the
+// audit insert), after the memo status, the Trip volume, and the
+// Reservation reconciliation have all already executed in that same
+// transaction — so this specifically proves the whole thing rolls back
+// together, not just that the audit write itself is guarded.
+test("decideWasteIncidentMemo rolls back the memo, Trip volume, and Reservation reconciliation together when the audit write fails", async () => {
+  const res = await makeReservation({ requestedVolumeM3: 8 });
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  await advanceToDischarging(dispatch.tripId);
+  const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 3, reasonCode: "QUALITY_REJECTED", fate: null });
+  assert.equal(close.status, "OK");
+  const memo = await prisma.wasteIncidentMemo.findFirstOrThrow({ where: { batchTicketId: ticket } });
+  wasteMemoIds.push(memo.id);
+  const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
+  drumReturnIds.push(drumReturn.id);
+
+  const beforeMemo = await prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id: memo.id } });
+  const beforeTrip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+  const beforeReservation = await prisma.reservation.findUniqueOrThrow({ where: { id: res } });
+  const auditCountBefore = await prisma.auditEvent.count({ where: { recordId: memo.id } });
+
+  await assert.rejects(() =>
+    decideWasteIncidentMemo(memo.id, "APPROVE", {
+      allowedSiteId: siteId,
+      actorId: "test-suite-pl-nonexistent-actor",
+      actorRole: "QUALITY_SUPERVISOR",
+      decisionNote: "TEST-SUITE-PL-forced-rollback",
+    }),
+  );
+
+  const [afterMemo, afterTrip, afterReservation, auditCountAfter] = await Promise.all([
+    prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id: memo.id } }),
+    prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } }),
+    prisma.reservation.findUniqueOrThrow({ where: { id: res } }),
+    prisma.auditEvent.count({ where: { recordId: memo.id } }),
+  ]);
+  assert.equal(afterMemo.status, beforeMemo.status, "memo status must roll back");
+  assert.equal(afterMemo.approvedById, beforeMemo.approvedById);
+  assert.equal(afterTrip.volumeDeliveredM3, beforeTrip.volumeDeliveredM3, "the Trip volume reduction must roll back with everything else");
+  assert.equal(afterReservation.status, beforeReservation.status, "reservation reconciliation must roll back too");
+  assert.equal(auditCountAfter, auditCountBefore, "no partial audit row may survive");
+
+  // The memo is still genuinely PENDING and can still be decided for
+  // real, once a real actor decides it — proves this wasn't left in some
+  // half-claimed state by the failed attempt.
+  const realDecision = await decideWasteIncidentMemo(memo.id, "APPROVE", { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", decisionNote: "TEST-SUITE-PL-real-decision-after-rollback" });
+  assert.equal(realDecision.status, "OK");
 });
 
 test("a multi-ticket reservation's totals and terminal status reconcile correctly after a quality approval on one of its tickets", async () => {
@@ -1248,7 +1417,39 @@ test("the database itself blocks updating or deleting an AuditEvent row outside 
   await assert.rejects(() => prisma.auditEvent.delete({ where: { id: audit.id } }), /immutable/i);
 });
 
-test("the database itself requires a return reason, bounds moisturePct, and bounds volumes across tables", async () => {
+// A structured matcher for a raw-query NOT NULL violation — PostgreSQL's
+// own stable SQLSTATE (23502) wrapped by Prisma as P2010 with the real
+// code inside meta.code, not a human-readable message string (PL-R3-CI-03,
+// third production-lifecycle review: the driver's actual wording doesn't
+// contain any of "null value"/"not-null"/"violates", so a text regex
+// rejected a genuinely correct rejection).
+function isNotNullViolation(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  return error.code === "P2010" && String((error.meta as { code?: unknown } | undefined)?.code) === "23502";
+}
+
+// Deliberately does NOT pattern-match the error's exact shape (class,
+// code, or message text) — a CHECK constraint and a trigger's own RAISE
+// EXCEPTION can surface through Prisma's normal (non-raw) query path in
+// more than one wrapped shape depending on Prisma/driver version, and
+// PL-R3-CI-03 already showed how fragile matching wrapped text is. Every
+// caller below pairs assert.rejects(fn) (any rejection at all — proof
+// the write never applied) with a follow-up read confirming the row's
+// actual value is unchanged, which is the real, version-independent
+// proof of the invariant.
+async function assertRejectedAndUnchanged<T>(fn: () => Promise<unknown>, readBack: () => Promise<T>): Promise<void> {
+  const before = await readBack();
+  await assert.rejects(fn);
+  const after = await readBack();
+  assert.deepEqual(after, before, "the rejected write must never have taken effect");
+}
+
+// Split into one assertion per invariant (PL-R3-P2-04) — the prior
+// combined test aborted at its first failing assertion (the NOT NULL
+// matcher bug above), which silently prevented every later bounds check
+// in the same test from ever running at all.
+
+test("the database itself requires a return reason (raw SQLSTATE 23502, not domain-layer text)", async () => {
   const res = await makeReservation();
   const ticket = await makeTicket(res, { volumeM3: 8 });
   const truck = await makeTruck();
@@ -1259,25 +1460,123 @@ test("the database itself requires a return reason, bounds moisturePct, and boun
   tripIds.push(dispatch.tripId);
   await advanceToDischarging(dispatch.tripId);
 
-  // PL-R2-P2-04 — a null reasonCode at the raw-SQL level, bypassing the
-  // domain layer's own mandatory check entirely.
   await assert.rejects(
     () => prisma.$executeRawUnsafe(`INSERT INTO "DrumReturn" (id, "tripId", "returnedVolumeM3", "minutesSinceBatch", disposition) VALUES ($1, $2, 1, 0, 'NO_CHARGE')`, `test-suite-pl-dr-${Date.now()}`, dispatch.tripId),
-    /null value|not-null|violates/i,
+    isNotNullViolation,
   );
+});
 
+test("the database itself bounds moisturePct to 0..100", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
   const component = await prisma.batchComponentActual.findFirstOrThrow({ where: { batchTicketId: ticket } });
-  await assert.rejects(() => prisma.batchComponentActual.update({ where: { id: component.id }, data: { moisturePct: 150 } }), /constraint|check/i);
-  await assert.rejects(() => prisma.batchComponentActual.update({ where: { id: component.id }, data: { moisturePct: -1 } }), /constraint|check/i);
+  const readMoisture = () => prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id }, select: { moisturePct: true } });
+  await assertRejectedAndUnchanged(() => prisma.batchComponentActual.update({ where: { id: component.id }, data: { moisturePct: 150 } }), readMoisture);
+  await assertRejectedAndUnchanged(() => prisma.batchComponentActual.update({ where: { id: component.id }, data: { moisturePct: -1 } }), readMoisture);
+});
 
-  // Cross-table bounds a plain CHECK constraint can't express on its own.
-  await assert.rejects(() => prisma.trip.update({ where: { id: dispatch.tripId }, data: { volumeDeliveredM3: 999 } }), /exceed/i);
+test("the database itself bounds Trip.volumeDeliveredM3 to its own ticket's volume", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
 
-  const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor(), returnedVolumeM3: 2, reasonCode: "OTHER", fate: null });
+  const readDelivered = () => prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId }, select: { volumeDeliveredM3: true } });
+  await assertRejectedAndUnchanged(() => prisma.trip.update({ where: { id: dispatch.tripId }, data: { volumeDeliveredM3: 999 } }), readDelivered);
+});
+
+test("the database itself bounds Trip.reclaimedVolumeM3 to its own ticket's volume", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  const readReclaimed = () => prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId }, select: { reclaimedVolumeM3: true } });
+  await assertRejectedAndUnchanged(() => prisma.trip.update({ where: { id: dispatch.tripId }, data: { reclaimedVolumeM3: 999 } }), readReclaimed);
+});
+
+test("the database itself bounds DrumReturn.returnedVolumeM3 to its trip ticket's volume, and WasteIncidentMemo.wastedVolumeM3 to its DrumReturn", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+  await advanceToDischarging(dispatch.tripId);
+
+  const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 2, reasonCode: "QUALITY_REJECTED", fate: null });
   assert.equal(close.status, "OK");
   const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
   drumReturnIds.push(drumReturn.id);
-  await assert.rejects(() => prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 999 } }), /exceed/i);
+  const memo = await prisma.wasteIncidentMemo.findFirstOrThrow({ where: { batchTicketId: ticket } });
+  wasteMemoIds.push(memo.id);
+
+  const readReturned = () => prisma.drumReturn.findUniqueOrThrow({ where: { id: drumReturn.id }, select: { returnedVolumeM3: true } });
+  const readWasted = () => prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id: memo.id }, select: { wastedVolumeM3: true } });
+  await assertRejectedAndUnchanged(() => prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 999 } }), readReturned);
+  await assertRejectedAndUnchanged(() => prisma.wasteIncidentMemo.update({ where: { id: memo.id }, data: { wastedVolumeM3: 999 } }), readWasted);
+});
+
+// PL-R3-P2-04 — the inverse direction: a PARENT quantity being lowered
+// below an already-existing dependent child must be rejected too, not
+// only an oversized child. No application code path ever updates
+// BatchTicket.volumeM3 or DrumReturn.returnedVolumeM3 after creation, so
+// this is a pure defensive database backstop, not a fix for a reachable
+// application bug — proven with direct SQL/Prisma writes only.
+
+test("the database itself refuses to lower a BatchTicket's volumeM3 below an existing dependent Trip/DrumReturn quantity", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+  await advanceToDischarging(dispatch.tripId);
+  const close = await closeTripFullForId(dispatch.tripId, { allowedSiteId: siteId, ...actor() });
+  assert.equal(close.status, "OK");
+
+  // Trip.volumeDeliveredM3 is now 8 — lowering the ticket's own volumeM3
+  // below that must be refused.
+  const readTicketVolume = () => prisma.batchTicket.findUniqueOrThrow({ where: { id: ticket }, select: { volumeM3: true } });
+  await assertRejectedAndUnchanged(() => prisma.batchTicket.update({ where: { id: ticket }, data: { volumeM3: 3 } }), readTicketVolume);
+  // Raising it, or leaving it unchanged, is never a problem.
+  await prisma.batchTicket.update({ where: { id: ticket }, data: { volumeM3: 8 } });
+});
+
+test("the database itself refuses to lower a DrumReturn's returnedVolumeM3 below an existing WasteIncidentMemo's wastedVolumeM3", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+  await advanceToDischarging(dispatch.tripId);
+  const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 3, reasonCode: "QUALITY_REJECTED", fate: null });
+  assert.equal(close.status, "OK");
+  const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
+  drumReturnIds.push(drumReturn.id);
+  const memo = await prisma.wasteIncidentMemo.findFirstOrThrow({ where: { batchTicketId: ticket } });
+  wasteMemoIds.push(memo.id);
+
+  // The memo's own wastedVolumeM3 is 3 — lowering the return below that
+  // must be refused.
+  const readReturnedVolume = () => prisma.drumReturn.findUniqueOrThrow({ where: { id: drumReturn.id }, select: { returnedVolumeM3: true } });
+  await assertRejectedAndUnchanged(() => prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 1 } }), readReturnedVolume);
+  await prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 3 } });
 });
 
 // ======================================================================
