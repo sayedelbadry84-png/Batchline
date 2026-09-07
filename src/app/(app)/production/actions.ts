@@ -8,8 +8,8 @@ import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@
 import { AGGREGATE_TYPES } from "@/lib/storageMatching";
 import { completeBatchTicket, reverseBatchTicket as reverseBatchTicketDomain, cancelBatchTicket as cancelBatchTicketDomain } from "@/lib/batchCompletion";
 import { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } from "@/lib/batchComponentEdits";
-import { startTripForTicket } from "@/lib/tripDispatch";
-import { reassignTrip } from "@/lib/tripAssignment";
+import { startTripForTicket, type StartTripResult } from "@/lib/tripDispatch";
+import { reassignTrip, type ReassignTripResult } from "@/lib/tripAssignment";
 import { releaseTicketForReservation } from "@/lib/reservationRelease";
 import { parseReturnTarget, releaseSuccessPath, releaseFailurePath, parseTripReturnTarget, tripReturnPath } from "@/lib/releaseRouting";
 import {
@@ -552,7 +552,20 @@ export async function rejectShortageOverrideRequest(_prevState: DecideShortageOv
   return { status: result.status };
 }
 
-export async function startTrip(formData: FormData) {
+// Both dispatch actions below used to silently return on every non-OK
+// outcome — a refused dispatch or reassignment looked identical to the
+// button simply not having been pressed (PL-R4-P2-02, fourth production-
+// lifecycle review, closing part of the same finding PL-R3-P2-01/
+// PL-R2-P2-01/PL-P2-01 already raised for the trip/quality pages). Both
+// now return their domain result's own typed status, useActionState-
+// shaped, same convention as trips/actions.ts. startTrip still redirects
+// on success — useActionState tolerates a redirect from inside the
+// action perfectly well, since redirect() throws and never reaches the
+// return statement below it.
+export type StartTripActionState = { status: StartTripResult["status"] } | { status: "MISSING_FIELDS" } | { status: "NOT_FOUND" } | null;
+export type UpdateTripAssignmentActionState = { status: ReassignTripResult["status"] } | { status: "MISSING_FIELDS" } | null;
+
+export async function startTrip(_prevState: StartTripActionState, formData: FormData): Promise<StartTripActionState> {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "startTrip");
 
@@ -565,7 +578,7 @@ export async function startTrip(formData: FormData) {
   // authenticated open redirect for any caller who submits something
   // other than the one value the field view's own form ever sends.
   const returnTarget = parseTripReturnTarget(formData.get("returnTarget"));
-  if (!batchTicketId || !truckId || !driverId) return;
+  if (!batchTicketId || !truckId || !driverId) return { status: "MISSING_FIELDS" };
 
   // Cheap pre-transaction read, purely to know whether this is a pump
   // delivery so the right form fields get parsed — the page only ever
@@ -579,7 +592,7 @@ export async function startTrip(formData: FormData) {
   // the one real domain command the Server Action and the integration
   // suite both call (PL-R2-P2-06).
   const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId }, select: { reservation: { select: { deliveryMethod: true } } } });
-  if (!ticket) return;
+  if (!ticket) return { status: "NOT_FOUND" };
 
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
   const pumpId = isPumpDelivery ? String(formData.get("pumpId") ?? "").trim() || null : null;
@@ -596,7 +609,7 @@ export async function startTrip(formData: FormData) {
     actorId: user!.id,
     actorRole: user!.role,
   });
-  if (result.status !== "OK") return;
+  if (result.status !== "OK") return result;
 
   // Real push notification (see src/lib/push.ts) the instant this driver
   // is actually dispatched — the whole point of the driver app knowing
@@ -651,14 +664,14 @@ export async function startTrip(formData: FormData) {
 // check below now runs fresh, inside the same row-locked transaction
 // that writes the reassignment, via claimTripResources (the same shared
 // validator startTrip itself uses).
-export async function updateTripAssignment(formData: FormData) {
+export async function updateTripAssignment(_prevState: UpdateTripAssignmentActionState, formData: FormData): Promise<UpdateTripAssignmentActionState> {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "updateTripAssignment");
 
   const tripId = String(formData.get("tripId") ?? "");
   const truckId = String(formData.get("truckId") ?? "");
   const driverId = String(formData.get("driverId") ?? "");
-  if (!tripId || !truckId || !driverId) return;
+  if (!tripId || !truckId || !driverId) return { status: "MISSING_FIELDS" };
 
   const pumpId = String(formData.get("pumpId") ?? "").trim() || null;
   const pumpOperatorId = String(formData.get("pumpOperatorId") ?? "").trim() || null;
@@ -674,12 +687,13 @@ export async function updateTripAssignment(formData: FormData) {
     actorId: user!.id,
     actorRole: user!.role,
   });
-  if (result.status !== "OK") return;
+  if (result.status !== "OK") return result;
 
   const trip = await prisma.trip.findUnique({ where: { id: tripId }, select: { batchTicketId: true } });
   revalidatePath(`/production/${trip?.batchTicketId}`);
   revalidatePath("/operator");
   revalidatePath("/trips");
+  return { status: "OK" };
 }
 
 // A component missed at release time (or a last-minute site addition —

@@ -8,18 +8,17 @@ import { getDictionary } from "@/lib/i18n";
 import {
   recordActuals,
   recordActualField,
-  startTrip,
-  updateTripAssignment,
   addTicketComponent,
   deleteTicketComponent,
 } from "../actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
-import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
 import { CompleteBatchForm } from "@/components/CompleteBatchForm";
 import { ReverseBatchForm } from "@/components/ReverseBatchForm";
 import { ShortageOverridePanel, type ShortageSnapshotEntry } from "@/components/ShortageOverridePanel";
 import { CancelBatchTicketForm } from "@/components/CancelBatchTicketForm";
+import { StartTripForm } from "@/components/StartTripForm";
+import { UpdateTripAssignmentForm } from "@/components/UpdateTripAssignmentForm";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -371,37 +370,39 @@ export default async function BatchTicketPage({
       )}
 
       {ticket.status === "COMPLETE" && !ticket.trip && (
-        <form action={startTrip} className={`${ui.card} flex flex-col gap-3`}>
-          <input type="hidden" name="batchTicketId" value={ticket.id} />
-          <h2 className="font-display text-lg font-semibold">{d.assignTitle}</h2>
-          <div className="grid grid-cols-2 gap-3">
-            <EquipmentAssignPicker
-              equipment={{ name: "truckId", label: d.truck, placeholder: d.selectTruck, required: true, className: ui.select, options: truckOptions }}
-              dependents={[{ key: "driverId", name: "driverId", label: d.driver, placeholder: d.selectDriver, required: true, className: ui.select, options: driverOptions }]}
-            />
-          </div>
-          {trucks.length === 0 && <p className="text-xs text-warn">{d.noTrucksAvailable}</p>}
-          {isPumpDelivery && (
-            <div className="border-t border-border pt-3">
-              <p className="mb-2 text-xs text-ink-muted">{d.pumpDeliveryNote}</p>
-              <div className="grid grid-cols-3 gap-3">
-                <EquipmentAssignPicker
-                  equipment={{ name: "pumpId", label: d.pump, placeholder: dict.field.selectPump, required: true, className: ui.select, options: pumpOptions }}
-                  dependents={[
-                    { key: "pumpOperatorId", name: "pumpOperatorId", label: d.pumpOperator, placeholder: d.selectPumpOperator, required: true, className: ui.select, options: operatorOptions },
-                    { key: "pumpAssistantId", name: "pumpAssistantId", label: d.pumpAssistant, placeholder: dict.field.none, className: ui.select, options: assistantOptions },
-                  ]}
-                />
-              </div>
-              {ticket.reservation.minPumpReachM != null && (
-                <p className="mt-1 text-xs text-ink-muted">{d.minPumpReachNote(ticket.reservation.minPumpReachM)}</p>
-              )}
-            </div>
-          )}
-          <button type="submit" className={`${ui.button} self-start`}>
-            {d.startTrip}
-          </button>
-        </form>
+        <StartTripForm
+          batchTicketId={ticket.id}
+          isPumpDelivery={isPumpDelivery}
+          minPumpReachM={ticket.reservation.minPumpReachM}
+          trucksAvailable={trucks.length > 0}
+          truckOptions={truckOptions}
+          driverOptions={driverOptions}
+          pumpOptions={pumpOptions}
+          operatorOptions={operatorOptions}
+          assistantOptions={assistantOptions}
+          messages={{
+            assignTitle: d.assignTitle,
+            truck: d.truck,
+            selectTruck: d.selectTruck,
+            driver: d.driver,
+            selectDriver: d.selectDriver,
+            noTrucksAvailable: d.noTrucksAvailable,
+            pumpDeliveryNote: d.pumpDeliveryNote,
+            pump: d.pump,
+            selectPump: dict.field.selectPump,
+            pumpOperator: d.pumpOperator,
+            selectPumpOperator: d.selectPumpOperator,
+            pumpAssistant: d.pumpAssistant,
+            none: dict.field.none,
+            minPumpReachNote: d.minPumpReachNote,
+            startTripButton: d.startTrip,
+            errors: d.dispatchErrors,
+          }}
+          cardClassName={`${ui.card} flex flex-col gap-3`}
+          titleClassName="font-display text-lg font-semibold"
+          selectClassName={ui.select}
+          buttonClassName={ui.button}
+        />
       )}
 
       {ticket.trip && !showEditTripForm && (
@@ -543,35 +544,42 @@ export default async function BatchTicketPage({
       )}
 
       {showEditTripForm && ticket.trip && (
-        <form action={updateTripAssignment} className={`${ui.card} flex flex-col gap-3`}>
-          <input type="hidden" name="tripId" value={ticket.trip.id} />
-          <h2 className="font-display text-lg font-semibold">{d.editAssignTitle}</h2>
-          <div className="grid grid-cols-2 gap-3">
-            <EquipmentAssignPicker
-              equipment={{ name: "truckId", label: d.truck, placeholder: d.selectTruck, required: true, className: ui.select, defaultValue: ticket.trip.truckId, options: truckOptions }}
-              dependents={[{ key: "driverId", name: "driverId", label: d.driver, placeholder: d.selectDriver, required: true, className: ui.select, defaultValue: ticket.trip.driverId, options: driverOptions }]}
-            />
-          </div>
-          {isPumpDelivery && (
-            <div className="border-t border-border pt-3">
-              <div className="grid grid-cols-3 gap-3">
-                <EquipmentAssignPicker
-                  equipment={{ name: "pumpId", label: d.pump, placeholder: dict.field.selectPump, required: true, className: ui.select, defaultValue: ticket.trip.pumpId ?? "", options: pumpOptions }}
-                  dependents={[
-                    { key: "pumpOperatorId", name: "pumpOperatorId", label: d.pumpOperator, placeholder: d.selectPumpOperator, required: true, className: ui.select, defaultValue: ticket.trip.pumpOperatorId ?? "", options: operatorOptions },
-                    { key: "pumpAssistantId", name: "pumpAssistantId", label: d.pumpAssistant, placeholder: dict.field.none, className: ui.select, defaultValue: ticket.trip.pumpAssistantId ?? "", options: assistantOptions },
-                  ]}
-                />
-              </div>
-            </div>
-          )}
-          <div className="flex gap-3">
-            <button type="submit" className={ui.button}>{dict.field.save}</button>
-            <Link href={`/production/${ticket.id}`} className="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt">
-              {dict.field.cancel}
-            </Link>
-          </div>
-        </form>
+        <UpdateTripAssignmentForm
+          tripId={ticket.trip.id}
+          cancelHref={`/production/${ticket.id}`}
+          isPumpDelivery={isPumpDelivery}
+          defaultTruckId={ticket.trip.truckId}
+          defaultDriverId={ticket.trip.driverId}
+          defaultPumpId={ticket.trip.pumpId ?? ""}
+          defaultPumpOperatorId={ticket.trip.pumpOperatorId ?? ""}
+          defaultPumpAssistantId={ticket.trip.pumpAssistantId ?? ""}
+          truckOptions={truckOptions}
+          driverOptions={driverOptions}
+          pumpOptions={pumpOptions}
+          operatorOptions={operatorOptions}
+          assistantOptions={assistantOptions}
+          messages={{
+            editAssignTitle: d.editAssignTitle,
+            truck: d.truck,
+            selectTruck: d.selectTruck,
+            driver: d.driver,
+            selectDriver: d.selectDriver,
+            pump: d.pump,
+            selectPump: dict.field.selectPump,
+            pumpOperator: d.pumpOperator,
+            selectPumpOperator: d.selectPumpOperator,
+            pumpAssistant: d.pumpAssistant,
+            none: dict.field.none,
+            save: dict.field.save,
+            cancel: dict.field.cancel,
+            errors: d.dispatchErrors,
+          }}
+          cardClassName={`${ui.card} flex flex-col gap-3`}
+          titleClassName="font-display text-lg font-semibold"
+          selectClassName={ui.select}
+          buttonClassName={ui.button}
+          cancelClassName="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt"
+        />
       )}
     </div>
   );

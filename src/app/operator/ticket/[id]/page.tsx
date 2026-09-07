@@ -3,12 +3,12 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { recordActuals, recordActualField, startTrip } from "@/app/(app)/production/actions";
+import { recordActuals, recordActualField } from "@/app/(app)/production/actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
-import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
 import { OfflineSyncBanner } from "@/components/OfflineSyncBanner";
 import { CompleteBatchForm } from "@/components/CompleteBatchForm";
+import { StartTripForm } from "@/components/StartTripForm";
 import { ShortageOverridePanel, type ShortageSnapshotEntry } from "@/components/ShortageOverridePanel";
 import { canPerformAction } from "@/lib/permissions";
 
@@ -271,34 +271,40 @@ export default async function OperatorTicketPage({
       )}
 
       {ticket.status === "COMPLETE" && !ticket.trip && (
-        <form action={startTrip} className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm">
-          <input type="hidden" name="batchTicketId" value={ticket.id} />
-          <input type="hidden" name="returnTarget" value="operator" />
-          <h2 className="font-display text-base font-semibold">{d.assignTitle}</h2>
-          <EquipmentAssignPicker
-            equipment={{ name: "truckId", label: d.truck, placeholder: d.selectTruck, required: true, className: mobileSelect, options: truckOptions }}
-            dependents={[{ key: "driverId", name: "driverId", label: d.driver, placeholder: d.selectDriver, required: true, className: mobileSelect, options: driverOptions }]}
-          />
-          {trucks.length === 0 && <p className="text-xs text-warn">{d.noTrucksAvailable}</p>}
-          {isPumpDelivery && (
-            <div className="flex flex-col gap-3 border-t border-border pt-3">
-              <p className="text-xs text-ink-muted">{d.pumpDeliveryNote}</p>
-              <EquipmentAssignPicker
-                equipment={{ name: "pumpId", label: d.pump, placeholder: dict.field.selectPump, required: true, className: mobileSelect, options: pumpOptions }}
-                dependents={[
-                  { key: "pumpOperatorId", name: "pumpOperatorId", label: d.pumpOperator, placeholder: d.selectPumpOperator, required: true, className: mobileSelect, options: operatorOptions },
-                  { key: "pumpAssistantId", name: "pumpAssistantId", label: d.pumpAssistant, placeholder: dict.field.none, className: mobileSelect, options: assistantOptions },
-                ]}
-              />
-              {ticket.reservation.minPumpReachM != null && (
-                <p className="text-xs text-ink-muted">{d.minPumpReachNote(ticket.reservation.minPumpReachM)}</p>
-              )}
-            </div>
-          )}
-          <button type="submit" className="rounded-md bg-accent py-2.5 text-sm font-medium text-white">
-            {d.startTrip}
-          </button>
-        </form>
+        <StartTripForm
+          batchTicketId={ticket.id}
+          returnTarget="operator"
+          isPumpDelivery={isPumpDelivery}
+          minPumpReachM={ticket.reservation.minPumpReachM}
+          trucksAvailable={trucks.length > 0}
+          truckOptions={truckOptions}
+          driverOptions={driverOptions}
+          pumpOptions={pumpOptions}
+          operatorOptions={operatorOptions}
+          assistantOptions={assistantOptions}
+          messages={{
+            assignTitle: d.assignTitle,
+            truck: d.truck,
+            selectTruck: d.selectTruck,
+            driver: d.driver,
+            selectDriver: d.selectDriver,
+            noTrucksAvailable: d.noTrucksAvailable,
+            pumpDeliveryNote: d.pumpDeliveryNote,
+            pump: d.pump,
+            selectPump: dict.field.selectPump,
+            pumpOperator: d.pumpOperator,
+            selectPumpOperator: d.selectPumpOperator,
+            pumpAssistant: d.pumpAssistant,
+            none: dict.field.none,
+            minPumpReachNote: d.minPumpReachNote,
+            startTripButton: d.startTrip,
+            errors: d.dispatchErrors,
+          }}
+          cardClassName="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm"
+          titleClassName="font-display text-base font-semibold"
+          selectClassName={mobileSelect}
+          buttonClassName="rounded-md bg-accent py-2.5 text-sm font-medium text-white"
+        />
       )}
 
       {ticket.trip && (
