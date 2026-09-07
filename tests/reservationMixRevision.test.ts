@@ -395,7 +395,7 @@ test("completion deducts the revised quantities, and reversal credits back exact
   assert.ok(Math.abs(cementAfterComplete - (cementBefore - expectedCementDeductionTons)) < 1e-6);
   assert.ok(Math.abs(waterAfterComplete - (waterBefore - expectedWaterDeductionTons)) < 1e-6);
 
-  const reversal = await reverseBatchTicket(ticket.id, { actorId: adminUserId, reason: "TEST-SUITE-RMR-REVERSAL" });
+  const reversal = await reverseBatchTicket(ticket.id, { actorId: adminUserId, actorRole: "ADMIN", reason: "TEST-SUITE-RMR-REVERSAL" });
   assert.equal(reversal.status, "SUCCESS");
 
   const cementAfterReversal = (await prisma.silo.findUniqueOrThrow({ where: { id: cementSiloId } })).currentLevelTons;

@@ -454,6 +454,37 @@ test("reassignTrip refuses an out-of-service truck, a busy driver, and a trip th
   assert.equal(notLoadingResult.status, "NOT_LOADING");
 });
 
+// PL-R6-P2-03, sixth production-lifecycle review: both ticket-detail
+// pages' driver picker used to list every driver regardless of status,
+// even though claimTripResources always rejects one that isn't ACTIVE —
+// the same picker/domain mismatch already fixed for cross-site trucks
+// and pumps. The picker-side fix (filtering the option list) isn't
+// reachable from this domain-only suite (see this file's own scope
+// note), so this proves the domain guard itself, both at dispatch and
+// at reassignment.
+test("startTripForTicket and reassignTrip both refuse an inactive driver", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck = await makeTruck();
+  const inactiveDriver = await makeDriver({ status: "INACTIVE" });
+
+  const dispatchResult = await dispatchTrip(ticket, { truckId: truck, driverId: inactiveDriver, allowedSiteId: siteId });
+  assert.equal(dispatchResult.status, "DRIVER_INACTIVE");
+  const tripCount = await prisma.trip.count({ where: { batchTicketId: ticket } });
+  assert.equal(tripCount, 0, "a refused dispatch must never have created a trip");
+
+  const activeDriver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: activeDriver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  const reassignResult = await reassignTrip(dispatch.tripId, { truckId: truck, driverId: inactiveDriver, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() });
+  assert.equal(reassignResult.status, "DRIVER_INACTIVE");
+  const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+  assert.equal(trip.driverId, activeDriver, "a refused reassignment must never have applied");
+});
+
 test("reassignTrip refuses a truck whose rated capacity is smaller than the ticket's own volume", async () => {
   const res = await makeReservation();
   const ticket = await makeTicket(res, { volumeM3: 10 });
@@ -629,7 +660,7 @@ test("cancelBatchTicket refuses a ticket that has already completed, and its pos
   const completion = await completeBatchTicket(ticket.id, { actorId: adminUserId });
   assert.equal(completion.status, "SUCCESS");
 
-  const cancelResult = await cancelBatchTicket(ticket.id, { actorId: adminUserId, reason: "TEST-SUITE-PL-late-cancel-attempt" });
+  const cancelResult = await cancelBatchTicket(ticket.id, { actorId: adminUserId, actorRole: "ADMIN", reason: "TEST-SUITE-PL-late-cancel-attempt" });
   assert.equal(cancelResult.status, "INVALID_STATE");
 
   const freshTicket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticket.id } });

@@ -1,5 +1,6 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
+import { writeAudit } from "@/lib/audit";
 
 // The claim-then-write core of recordActuals/recordActualField/
 // addTicketComponent/deleteTicketComponent (production/actions.ts),
@@ -8,14 +9,23 @@ import { prisma } from "@/lib/prisma";
 // paraphrase of it living only inside the test file — the same reasoning
 // that pulled completeBatchTicket/reverseBatchTicket out of their own
 // Server Actions in the first place. Each function takes no session/
-// formData, just the already-validated ticket/component ids and values;
-// the Server Action wrappers keep permission/scope checks, form parsing,
-// audit logging, and revalidation.
+// formData, just the already-validated ticket/component ids and values,
+// plus an explicit actor (never read from the session itself — see
+// writeAudit's own comment, PL-R6-P2-01, sixth production-lifecycle
+// review); the Server Action wrappers keep permission/scope checks, form
+// parsing, and revalidation. The audit event is now written INSIDE the
+// same claim transaction, not by the wrapper afterward — a failure on
+// that write rolls back the business mutation with it, and a caller can
+// never see a "failed" result for a write that actually already
+// committed.
 export type ComponentEditResult = { status: "OK" } | { status: "TERMINAL" };
+
+type Actor = { id: string | null; role: string };
 
 export async function claimAndRecordActuals(
   ticketId: string,
   writes: { id: string; actualMassKg: number; moisturePct: number | null }[],
+  actor: Actor,
 ): Promise<ComponentEditResult> {
   const claimed = await prisma.$transaction(async (tx) => {
     // Claiming the ticket row (flipping status to BATCHING) is what makes
@@ -30,6 +40,7 @@ export async function claimAndRecordActuals(
     for (const w of writes) {
       await tx.batchComponentActual.update({ where: { id: w.id }, data: { actualMassKg: w.actualMassKg, moisturePct: w.moisturePct } });
     }
+    await writeAudit(tx, actor, { module: "Production", recordId: ticketId, field: "actuals", reasonCode: "ACTUALS_RECORDED" });
     return true;
   });
   return claimed ? { status: "OK" } : { status: "TERMINAL" };
@@ -40,6 +51,7 @@ export async function claimAndRecordActualField(
   componentId: string,
   field: "actual" | "moisture",
   value: number,
+  actor: Actor,
 ): Promise<ComponentEditResult> {
   const claimed = await prisma.$transaction(async (tx) => {
     // Always sets "BATCHING" (not conditionally) — harmless when it's
@@ -53,12 +65,19 @@ export async function claimAndRecordActualField(
       where: { id: componentId },
       data: field === "actual" ? { actualMassKg: value } : { moisturePct: value },
     });
+    await writeAudit(tx, actor, {
+      module: "Production",
+      recordId: ticketId,
+      field: `component:${componentId}:${field}`,
+      afterValue: String(value),
+      reasonCode: "ACTUAL_FIELD_AUTOSAVED",
+    });
     return true;
   });
   return claimed ? { status: "OK" } : { status: "TERMINAL" };
 }
 
-export async function claimAndAddTicketComponent(ticketId: string, materialId: string, targetMassKg: number): Promise<ComponentEditResult> {
+export async function claimAndAddTicketComponent(ticketId: string, materialId: string, targetMassKg: number, actor: Actor): Promise<ComponentEditResult> {
   const claimed = await prisma.$transaction(async (tx) => {
     // A touch-only claim (no field here means anything on its own —
     // updatedAt is purely the lock) since add/delete-component has no
@@ -70,16 +89,24 @@ export async function claimAndAddTicketComponent(ticketId: string, materialId: s
       create: { batchTicketId: ticketId, materialId, targetMassKg },
       update: { targetMassKg },
     });
+    await writeAudit(tx, actor, {
+      module: "Production",
+      recordId: ticketId,
+      field: "component",
+      afterValue: `${materialId}: ${targetMassKg} kg`,
+      reasonCode: "TICKET_COMPONENT_ADDED",
+    });
     return true;
   });
   return claimed ? { status: "OK" } : { status: "TERMINAL" };
 }
 
-export async function claimAndDeleteTicketComponent(ticketId: string, componentId: string): Promise<ComponentEditResult> {
+export async function claimAndDeleteTicketComponent(ticketId: string, componentId: string, actor: Actor): Promise<ComponentEditResult> {
   const claimed = await prisma.$transaction(async (tx) => {
     const claim = await tx.batchTicket.updateMany({ where: { id: ticketId, status: { notIn: ["COMPLETE", "CANCELLED"] } }, data: { updatedAt: new Date() } });
     if (claim.count === 0) return false;
     await tx.batchComponentActual.delete({ where: { id: componentId } });
+    await writeAudit(tx, actor, { module: "Production", recordId: ticketId, field: "component", reasonCode: "TICKET_COMPONENT_REMOVED" });
     return true;
   });
   return claimed ? { status: "OK" } : { status: "TERMINAL" };

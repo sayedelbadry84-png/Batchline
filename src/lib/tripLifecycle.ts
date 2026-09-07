@@ -130,6 +130,19 @@ export async function closeTripFullForId(
     await tx.auditEvent.create({
       data: { actorId: opts.actorId, role: opts.actorRole, module: "Fleet", recordId: tripId, field: "status", afterValue: "CLOSED", reasonCode: "TRIP_CLOSED_FULL_LOAD" },
     });
+    // The driver's own confirmation event, in the SAME transaction as the
+    // close (PL-R6-P2-01, sixth production-lifecycle review) — used to be
+    // a second logAudit call written by the driver Server Action AFTER
+    // this transaction had already committed, so a failure on it left an
+    // already-closed trip with no confirmation record, and a caller could
+    // see a "failed" result for a close that had, in fact, already
+    // succeeded. Only written when a signature is actually present — the
+    // desktop/operator close path never sets deliverySignedBy.
+    if (opts.deliverySignedBy) {
+      await tx.auditEvent.create({
+        data: { actorId: opts.actorId, role: opts.actorRole, module: "Fleet", recordId: tripId, afterValue: opts.deliverySignedBy, reasonCode: "DELIVERY_CONFIRMED_FULL" },
+      });
+    }
 
     await reconcileReservationDeliveryState(tx, trip.batchTicket.reservationId);
     return { status: "OK" as const };
@@ -253,6 +266,13 @@ export async function closeTripWithReturnForId(
         reasonCode: disposition,
       },
     });
+    // Same in-transaction driver-confirmation event as closeTripFullForId
+    // above (PL-R6-P2-01) — was a second post-commit logAudit call.
+    if (opts.deliverySignedBy) {
+      await tx.auditEvent.create({
+        data: { actorId: opts.actorId, role: opts.actorRole, module: "Fleet", recordId: tripId, afterValue: opts.deliverySignedBy, reasonCode: "DELIVERY_CONFIRMED_WITH_RETURN" },
+      });
+    }
 
     await reconcileReservationDeliveryState(tx, trip.batchTicket.reservationId);
     return { status: "OK" as const };

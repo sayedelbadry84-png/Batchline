@@ -470,7 +470,7 @@ test("a genuinely tiny but real quantity still posts a movement and reverses cle
   assert.equal(movements.length, 1); // the old bug posted zero rows here
   assert.ok(Math.abs(movements[0].quantity - -0.0005) < 1e-6, `expected ~-0.0005, got ${movements[0].quantity}`); // exact equality isn't safe here — this is a real float round-trip, not a literal
 
-  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test reversal of a tiny quantity" });
+  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test reversal of a tiny quantity" });
   assert.equal(reversal.status, "SUCCESS");
   assert.equal(await siloLevel(siloId), 10); // restored exactly, nothing left unreconciled
 });
@@ -587,7 +587,7 @@ test("a reversal that would exceed capacity fails and reversedAt stays unset (P1
   // crediting the full 10t back on reversal would overflow it.
   await prisma.silo.update({ where: { id: siloId }, data: { currentLevelTons: 495 } });
 
-  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test capacity boundary" });
+  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test capacity boundary" });
   assert.equal(reversal.status, "CAPACITY_EXCEEDED");
 
   const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
@@ -986,7 +986,7 @@ test("cancelBatchTicket cancels a non-terminal ticket and expires any active ove
   assert.equal(request.status, "OK");
   if (request.status !== "OK") return;
 
-  const cancellation = await cancelBatchTicket(ticketId, { actorId: adminUserId, reason: "test cancellation" });
+  const cancellation = await cancelBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test cancellation" });
   assert.equal(cancellation.status, "SUCCESS");
 
   const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
@@ -1004,7 +1004,7 @@ test("cancelBatchTicket refuses an already-complete ticket (P2-01)", async () =>
   const completion = await completeBatchTicket(ticketId, {});
   assert.equal(completion.status, "SUCCESS");
 
-  const result = await cancelBatchTicket(ticketId, { actorId: adminUserId, reason: "should be refused" });
+  const result = await cancelBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "should be refused" });
   assert.equal(result.status, "INVALID_STATE");
 });
 
@@ -1072,7 +1072,7 @@ test("completion vs. recordActualField: exactly one of two valid outcomes, never
 
   const [completeResult, editResult] = await Promise.all([
     completeBatchTicket(ticketId, {}),
-    claimAndRecordActualField(ticketId, component.id, "actual", 2000), // 2kg — deliberately different from the 1kg target
+    claimAndRecordActualField(ticketId, component.id, "actual", 2000, { id: adminUserId, role: "ADMIN" }), // 2kg — deliberately different from the 1kg target
   ]);
 
   assert.equal(completeResult.status, "SUCCESS"); // completion always eventually succeeds — BATCHING never blocks its own claim
@@ -1100,7 +1100,7 @@ test("completion vs. recordActuals (bulk): exactly one of two valid outcomes", a
 
   const [completeResult, editResult] = await Promise.all([
     completeBatchTicket(ticketId, {}),
-    claimAndRecordActuals(ticketId, [{ id: component.id, actualMassKg: 3000, moisturePct: null }]),
+    claimAndRecordActuals(ticketId, [{ id: component.id, actualMassKg: 3000, moisturePct: null }], { id: adminUserId, role: "ADMIN" }),
   ]);
 
   assert.equal(completeResult.status, "SUCCESS");
@@ -1136,7 +1136,7 @@ test("completion vs. addTicketComponent: exactly one of two valid outcomes", asy
     // STORAGE_NOT_CONFIGURED (CR-02) rather than silently ignoring it.
     const [completeResult, editResult] = await Promise.all([
       completeBatchTicket(ticketId, {}),
-      claimAndAddTicketComponent(ticketId, secondMaterial.id, 500),
+      claimAndAddTicketComponent(ticketId, secondMaterial.id, 500, { id: adminUserId, role: "ADMIN" }),
     ]);
 
     if (editResult.status === "OK") {
@@ -1165,7 +1165,7 @@ test("completion vs. deleteTicketComponent: exactly one of two valid outcomes", 
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
   const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
 
-  const [completeResult, editResult] = await Promise.all([completeBatchTicket(ticketId, {}), claimAndDeleteTicketComponent(ticketId, component.id)]);
+  const [completeResult, editResult] = await Promise.all([completeBatchTicket(ticketId, {}), claimAndDeleteTicketComponent(ticketId, component.id, { id: adminUserId, role: "ADMIN" })]);
 
   if (editResult.status === "OK") {
     // The component was deleted before completion's claim — completion
@@ -1184,6 +1184,58 @@ test("completion vs. deleteTicketComponent: exactly one of two valid outcomes", 
   }
 });
 
+// ======================================================================
+// PL-R6-P2-01, sixth production-lifecycle review — the audit event for
+// each of these commands now writes inside the SAME transaction as the
+// business mutation (see batchComponentEdits.ts/batchCompletion.ts's own
+// comments on writeAudit). These tests prove that atomicity directly: a
+// nonexistent actor id violates AuditEvent.actorId's own FK the same way
+// an earlier round's tests already proved for other domain functions —
+// the failure lands on the LAST write in each transaction, so a rejected
+// call must roll back the business mutation right along with it, not
+// leave a component/ticket change on file with no audit trail behind it.
+// ======================================================================
+
+test("claimAndAddTicketComponent rolls back the component write together with a failed audit insert", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const componentCountBefore = await prisma.batchComponentActual.count({ where: { batchTicketId: ticketId } });
+  const auditCountBefore = await prisma.auditEvent.count({ where: { recordId: ticketId } });
+
+  await assert.rejects(() => claimAndAddTicketComponent(ticketId, materialId, 250, { id: "test-suite-bc-nonexistent-actor", role: "ADMIN" }));
+
+  const componentCountAfter = await prisma.batchComponentActual.count({ where: { batchTicketId: ticketId } });
+  const auditCountAfter = await prisma.auditEvent.count({ where: { recordId: ticketId } });
+  assert.equal(componentCountAfter, componentCountBefore, "the upserted component must never have applied");
+  assert.equal(auditCountAfter, auditCountBefore, "no partial audit row may survive");
+
+  // The ticket is still genuinely editable afterward — proves this wasn't
+  // left half-claimed by the failed attempt.
+  const retry = await claimAndAddTicketComponent(ticketId, materialId, 250, { id: adminUserId, role: "ADMIN" });
+  assert.equal(retry.status, "OK");
+});
+
+test("completeBatchTicket rolls back the ticket claim together with a failed audit insert", async () => {
+  // An inventoryTracked:false material (same fixture pattern as the
+  // reclaim tests above) means resolveTicketComponents posts NOTHING to
+  // the ledger — the only actorId-referencing write left inside this
+  // transaction is the new audit event itself, so this genuinely proves
+  // THAT write's own rollback, not just the ledger's own pre-existing FK
+  // guard tripping first.
+  const untrackedMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-BC-AUDIT-ROLLBACK", type: "WATER", inventoryTracked: false } });
+  const ticketId = await makeTicket([{ materialId: untrackedMaterial.id, targetMassKg: 1000 }]);
+
+  await assert.rejects(() => completeBatchTicket(ticketId, { actorId: "test-suite-bc-nonexistent-actor", actorRole: "ADMIN" }));
+
+  const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
+  assert.notEqual(ticket.status, "COMPLETE", "the ticket claim must have rolled back together with the failed audit insert");
+  const auditCount = await prisma.auditEvent.count({ where: { recordId: ticketId } });
+  assert.equal(auditCount, 0, "no partial audit row may survive");
+
+  // A real actor can still complete it for real afterward.
+  const retry = await completeBatchTicket(ticketId, {});
+  assert.equal(retry.status, "SUCCESS");
+});
+
 // ---- 7/8. Reversal restores exact quantities once; a second reversal --
 // ---- is a no-op --------------------------------------------------------
 
@@ -1195,7 +1247,7 @@ test("reversal restores the exact posted quantities once, and a second reversal 
   assert.equal(completion.status, "SUCCESS");
   assert.equal(await siloLevel(siloId), 34);
 
-  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test reversal" });
+  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test reversal" });
   assert.equal(reversal.status, "SUCCESS");
   assert.equal(await siloLevel(siloId), 40);
 
@@ -1206,7 +1258,7 @@ test("reversal restores the exact posted quantities once, and a second reversal 
   const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
   assert.equal(movements.length, 2); // completion + reversal
 
-  const secondReversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "second attempt" });
+  const secondReversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "second attempt" });
   assert.equal(secondReversal.status, "ALREADY_REVERSED");
   assert.equal(await siloLevel(siloId), 40);
 
@@ -1236,7 +1288,7 @@ test("reversing a COMPLETE ticket with no posted movements is refused, not silen
   });
   ticketIds.push(ticket.id);
 
-  const result = await reverseBatchTicket(ticket.id, { actorId: adminUserId, reason: "test pre-ledger reversal" });
+  const result = await reverseBatchTicket(ticket.id, { actorId: adminUserId, actorRole: "ADMIN", reason: "test pre-ledger reversal" });
   assert.equal(result.status, "NO_POSTED_MOVEMENTS");
 
   const fresh = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticket.id } });
@@ -1373,7 +1425,7 @@ test("a reversed ticket cannot be dispatched", async () => {
   await resetSilo(50);
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
   assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
-  assert.equal((await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test" })).status, "SUCCESS");
+  assert.equal((await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test" })).status, "SUCCESS");
 
   assert.equal(await tryDispatch(ticketId), "REJECTED");
   const tripCount = await prisma.trip.count({ where: { batchTicketId: ticketId } });
@@ -1386,7 +1438,7 @@ test("a dispatched ticket cannot be reversed", async () => {
   assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
   assert.equal(await tryDispatch(ticketId), "OK");
 
-  const result = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test" });
+  const result = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test" });
   assert.equal(result.status, "INVALID_STATE");
   const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
   assert.equal(ticket.reversedAt, null);
@@ -1398,7 +1450,7 @@ test("concurrent reversal and dispatch on the same ticket are mutually exclusive
   assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
 
   const [reversalResult, dispatchResult] = await Promise.all([
-    reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "race test" }),
+    reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "race test" }),
     tryDispatch(ticketId),
   ]);
 
@@ -1425,7 +1477,7 @@ test("reversal fails atomically when the storage can't hold the full credit back
   // to land at 504, which can't fit.
   await prisma.silo.update({ where: { id: siloId }, data: { currentLevelTons: 498 } });
 
-  const result = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "capacity test" });
+  const result = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "capacity test" });
   assert.equal(result.status, "CAPACITY_EXCEEDED");
 
   // Rolled back entirely — not clamped and stamped as if it succeeded.
@@ -1436,7 +1488,7 @@ test("reversal fails atomically when the storage can't hold the full credit back
   assert.equal(movements.length, 1); // only the original completion — no reversal row was left behind
 
   await prisma.silo.update({ where: { id: siloId }, data: { currentLevelTons: 14 } }); // restore for a clean re-check below
-  const cleanReversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "capacity test retry" });
+  const cleanReversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "capacity test retry" });
   assert.equal(cleanReversal.status, "SUCCESS");
   assert.equal(await siloLevel(siloId), 20);
 });

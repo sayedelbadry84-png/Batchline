@@ -152,11 +152,13 @@ export async function confirmDeliveryFull(formData: FormData) {
   // closed. Only a real OK writes that audit and leaves the confirmation
   // screen; anything else sends the driver back to the trip's own page,
   // where its actual (unclosed) state is what renders.
+  // The confirmation audit is now written inside closeTripFullForId's own
+  // transaction (PL-R6-P2-01, sixth production-lifecycle review) — no
+  // separate logAudit call needed here.
   if (result.status !== "OK") {
     revalidatePath(`/driver/trip/${tripId}`);
     redirect(`/driver/trip/${tripId}`);
   }
-  await logAudit({ module: "Fleet", recordId: tripId, afterValue: signedBy, reasonCode: "DELIVERY_CONFIRMED_FULL" });
 
   revalidatePath("/driver");
   redirect("/driver");
@@ -185,11 +187,12 @@ export async function confirmDeliveryWithReturn(formData: FormData) {
     deliverySignedBy: signedBy,
   });
   // Same false-success fix as confirmDeliveryFull above (PL-R2-P2-01).
+  // The confirmation audit is now written inside closeTripWithReturnForId's
+  // own transaction (PL-R6-P2-01) — no separate logAudit call needed here.
   if (result.status !== "OK") {
     revalidatePath(`/driver/trip/${tripId}`);
     redirect(`/driver/trip/${tripId}`);
   }
-  await logAudit({ module: "Fleet", recordId: tripId, afterValue: signedBy, reasonCode: "DELIVERY_CONFIRMED_WITH_RETURN" });
 
   revalidatePath("/driver");
   redirect("/driver");

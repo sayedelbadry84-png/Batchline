@@ -305,15 +305,10 @@ export async function recordActuals(formData: FormData) {
     writes.push({ id: c.id, actualMassKg: enteredMass, moisturePct });
   }
 
-  const result = await claimAndRecordActuals(batchTicketId, writes);
+  // Audit now written inside claimAndRecordActuals' own claim transaction
+  // (PL-R6-P2-01) — no separate logAudit call needed here any more.
+  const result = await claimAndRecordActuals(batchTicketId, writes, { id: user!.id, role: user!.role });
   if (result.status !== "OK") return;
-
-  await logAudit({
-    module: "Production",
-    recordId: batchTicketId,
-    field: "actuals",
-    reasonCode: "ACTUALS_RECORDED",
-  });
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);
@@ -324,7 +319,25 @@ export async function recordActuals(formData: FormData) {
 // be submitted, so a reading typed on the batching floor isn't lost to a
 // tab switch or an interrupted operator before that button gets pressed.
 // recordActuals (above) still exists for the explicit bulk save/status-flip.
-export async function recordActualField(formData: FormData) {
+// Every early return below used to be a bare `return;` — AutoSaveField
+// treated ANY resolved promise as success, so a rejected save (the
+// ticket went COMPLETE/CANCELLED under an autosave in flight, a stale
+// component id, an out-of-range value) showed a green checkmark for a
+// write that never happened (PL-R6-P2-02, sixth production-lifecycle
+// review). Worse, on reconnect the SAME silent-resolve shape made
+// flushQueue treat a rejected queued reading as flushed and permanently
+// drop it — real, silent measurement loss, not just a cosmetic status
+// bug. Every caller (AutoSaveField's own action prop, and the offline
+// replay handler in OfflineSyncBanner.tsx) now inspects this typed
+// result instead of assuming resolution means success.
+export type RecordActualFieldResult =
+  | { status: "OK" }
+  | { status: "MISSING_FIELDS" }
+  | { status: "INVALID_VALUE" }
+  | { status: "NOT_FOUND" }
+  | { status: "TERMINAL" };
+
+export async function recordActualField(formData: FormData): Promise<RecordActualFieldResult> {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "recordActualField");
 
@@ -332,19 +345,20 @@ export async function recordActualField(formData: FormData) {
   const componentId = String(formData.get("componentId") ?? "");
   const field = String(formData.get("field") ?? "");
   const rawValue = formData.get("value");
-  if (!batchTicketId || !componentId || rawValue === null || rawValue === "") return;
-  if (field !== "actual" && field !== "moisture") return;
+  if (!batchTicketId || !componentId || rawValue === null || rawValue === "") return { status: "MISSING_FIELDS" };
+  if (field !== "actual" && field !== "moisture") return { status: "MISSING_FIELDS" };
 
   const value = Number(rawValue);
-  if (!Number.isFinite(value) || value < 0) return;
-  if (field === "moisture" && value > MOISTURE_PCT_MAX) return;
+  if (!Number.isFinite(value) || value < 0) return { status: "INVALID_VALUE" };
+  if (field === "moisture" && value > MOISTURE_PCT_MAX) return { status: "INVALID_VALUE" };
 
   const component = await prisma.batchComponentActual.findUnique({
     where: { id: componentId },
     include: { batchTicket: true },
   });
-  if (!component || component.batchTicketId !== batchTicketId || component.batchTicket.status === "COMPLETE" || component.batchTicket.status === "CANCELLED") return;
-  if (!(await isPlantInScope(component.batchTicket.plantId, effectiveSiteId(user)))) return;
+  if (!component || component.batchTicketId !== batchTicketId) return { status: "NOT_FOUND" };
+  if (component.batchTicket.status === "COMPLETE" || component.batchTicket.status === "CANCELLED") return { status: "TERMINAL" };
+  if (!(await isPlantInScope(component.batchTicket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
 
   // Same claim-then-write shape as recordActuals above: the status flip
   // to BATCHING doubles as the atomic claim that closes the race against
@@ -354,19 +368,14 @@ export async function recordActualField(formData: FormData) {
   // Always setting "BATCHING" (not conditionally, like the old
   // status !== "BATCHING" check) is harmless when it's already BATCHING
   // — the WHERE clause is what does the real work.
-  const result = await claimAndRecordActualField(batchTicketId, componentId, field, value);
-  if (result.status !== "OK") return;
-
-  await logAudit({
-    module: "Production",
-    recordId: batchTicketId,
-    field: `component:${componentId}:${field}`,
-    afterValue: String(value),
-    reasonCode: "ACTUAL_FIELD_AUTOSAVED",
-  });
+  // Audit now written inside claimAndRecordActualField's own claim
+  // transaction (PL-R6-P2-01) — no separate logAudit call needed here.
+  const result = await claimAndRecordActualField(batchTicketId, componentId, field, value, { id: user!.id, role: user!.role });
+  if (result.status !== "OK") return { status: "TERMINAL" };
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);
+  return { status: "OK" };
 }
 
 // The typed result useActionState (see CompleteBatchForm.tsx) renders —
@@ -405,7 +414,11 @@ export async function completeBatch(_prevState: CompleteBatchActionState, formDa
   if (!ticket) return { status: "NOT_FOUND" };
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
 
-  const result = await completeBatchTicket(batchTicketId, { actorId: user!.id });
+  // actorRole now threaded through — completeBatchTicket writes its own
+  // audit event(s) inside the SAME transaction as the completion itself
+  // (PL-R6-P2-01, sixth production-lifecycle review), so this wrapper no
+  // longer writes a separate post-commit logAudit call.
+  const result = await completeBatchTicket(batchTicketId, { actorId: user!.id, actorRole: user!.role });
   if (result.status !== "SUCCESS") {
     if (result.status === "INSUFFICIENT_STOCK") return { status: "INSUFFICIENT_STOCK", detail: result.shortages.join("; ") };
     if (result.status === "STORAGE_NOT_CONFIGURED") return { status: "STORAGE_NOT_CONFIGURED", detail: result.material };
@@ -415,23 +428,6 @@ export async function completeBatch(_prevState: CompleteBatchActionState, formDa
   for (const r of result.requisitionCandidates) {
     const toKg = r.unit === "LITERS" ? (liters: number) => liters * (r.specificGravity ?? 1) : (tons: number) => tons * 1000;
     await maybeAutoRequisitionMaterial(r.materialId, r.siteId, r.newLevel, r.capacity, r.minThresholdPct, toKg);
-  }
-
-  await logAudit({
-    module: "Production",
-    recordId: batchTicketId,
-    field: "status",
-    afterValue: "COMPLETE",
-    reasonCode: result.consumedOverrideRequestId ? "BATCH_COMPLETE_WITH_SHORTAGE_OVERRIDE" : "BATCH_COMPLETE_INVENTORY_DEDUCTED",
-  });
-  if (result.consumedOverrideRequestId) {
-    await logAudit({
-      module: "Production",
-      recordId: batchTicketId,
-      field: "shortageOverrideRequestId",
-      afterValue: `${result.consumedOverrideRequestId} — ${result.shortages.join("; ")}`,
-      reasonCode: "BATCH_SHORTAGE_OVERRIDDEN",
-    });
   }
 
   revalidatePath(`/production/${batchTicketId}`);
@@ -723,16 +719,10 @@ export async function addTicketComponent(formData: FormData) {
   // completeBatchTicket's own claim (src/lib/batchCompletion.ts)
   // mutually exclusive: whichever transaction locks the row first is
   // what the other necessarily sees once it gets its turn.
-  const result = await claimAndAddTicketComponent(batchTicketId, materialId, targetMassKg);
+  // Audit now written inside claimAndAddTicketComponent's own claim
+  // transaction (PL-R6-P2-01) — no separate logAudit call needed here.
+  const result = await claimAndAddTicketComponent(batchTicketId, materialId, targetMassKg, { id: user!.id, role: user!.role });
   if (result.status !== "OK") return;
-
-  await logAudit({
-    module: "Production",
-    recordId: batchTicketId,
-    field: "component",
-    afterValue: `${materialId}: ${targetMassKg} kg`,
-    reasonCode: "TICKET_COMPONENT_ADDED",
-  });
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);
@@ -754,10 +744,10 @@ export async function deleteTicketComponent(formData: FormData) {
   if (!(await isPlantInScope(component.batchTicket.plantId, effectiveSiteId(user)))) return;
 
   // Same touch-claim as addTicketComponent above, same reason.
-  const result = await claimAndDeleteTicketComponent(batchTicketId, id);
+  // Audit now written inside claimAndDeleteTicketComponent's own claim
+  // transaction (PL-R6-P2-01) — no separate logAudit call needed here.
+  const result = await claimAndDeleteTicketComponent(batchTicketId, id, { id: user!.id, role: user!.role });
   if (result.status !== "OK") return;
-
-  await logAudit({ module: "Production", recordId: batchTicketId, field: "component", reasonCode: "TICKET_COMPONENT_REMOVED" });
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);
@@ -785,9 +775,10 @@ export async function cancelBatchTicket(_prevState: CancelBatchTicketActionState
   if (!ticket) return { status: "NOT_FOUND" };
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
 
-  const result = await cancelBatchTicketDomain(batchTicketId, { actorId: user!.id, reason });
+  // Audit now written inside cancelBatchTicketDomain's own transaction
+  // (PL-R6-P2-01) — no separate logAudit call needed here any more.
+  const result = await cancelBatchTicketDomain(batchTicketId, { actorId: user!.id, actorRole: user!.role, reason });
   if (result.status === "SUCCESS") {
-    await logAudit({ module: "Production", recordId: batchTicketId, field: "status", afterValue: "CANCELLED", reasonCode: "TICKET_CANCELLED" });
     revalidatePath(`/production/${batchTicketId}`);
     revalidatePath("/production");
     revalidatePath("/reservations");
@@ -823,15 +814,15 @@ export async function reverseBatchTicket(_prevState: ReverseBatchActionState, fo
   if (!ticket) return { status: "NOT_FOUND" };
   if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
 
-  const result = await reverseBatchTicketDomain(id, { actorId: user!.id, reason });
+  // Audit now written inside reverseBatchTicketDomain's own transaction
+  // (PL-R6-P2-01) — no separate logAudit call needed here any more.
+  const result = await reverseBatchTicketDomain(id, { actorId: user!.id, actorRole: user!.role, reason });
   if (result.status !== "SUCCESS") {
     if (result.status === "STORAGE_NOT_CONFIGURED") return { status: "STORAGE_NOT_CONFIGURED", detail: result.material };
     if (result.status === "CAPACITY_EXCEEDED") return { status: "CAPACITY_EXCEEDED", detail: result.storage };
     if (result.status === "NOT_FOUND") return { status: "NOT_FOUND" };
     return { status: result.status };
   }
-
-  await logAudit({ module: "Production", recordId: id, field: "reversedAt", afterValue: reason, reasonCode: "BATCH_TICKET_REVERSED" });
 
   revalidatePath("/production");
   revalidatePath(`/production/${id}`);

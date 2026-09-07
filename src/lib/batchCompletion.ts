@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { findMatchingSilo, findMatchingHopper, AGGREGATE_TYPES } from "@/lib/storageMatching";
 import { postSiloMovement, postHopperMovement, postChemicalTankMovement, DomainError, withRetry, EPSILON, type MovementResult } from "@/lib/inventoryLedger";
+import { writeAudit } from "@/lib/audit";
 
 type Tx = Prisma.TransactionClient;
 
@@ -174,7 +175,7 @@ type ShortageSnapshotEntry = { materialId: string; materialName: string; unit: "
  * ticket changes nothing (see the ledger's own idempotency claim) beyond
  * returning ALREADY_COMPLETED.
  */
-export async function completeBatchTicket(ticketId: string, opts: { actorId?: string | null }): Promise<CompleteBatchResult> {
+export async function completeBatchTicket(ticketId: string, opts: { actorId?: string | null; actorRole?: string }): Promise<CompleteBatchResult> {
   const exists = await prisma.batchTicket.findUnique({ where: { id: ticketId }, select: { id: true } });
   if (!exists) return { status: "INVALID_STATE" };
 
@@ -319,6 +320,33 @@ export async function completeBatchTicket(ticketId: string, opts: { actorId?: st
           }
         }
 
+        // Written in the SAME transaction as the completion itself
+        // (PL-R6-P2-01, sixth production-lifecycle review) — this used to
+        // be a separate logAudit call in the Server Action wrapper, AFTER
+        // this transaction had already committed. A failure on that
+        // separate write left a completed ticket with deducted inventory
+        // and no audit trail; conversely, the wrapper reporting a
+        // "failure" back to the UI for an audit-only problem, after the
+        // real business command had already succeeded, invited an unsafe
+        // retry. Now either both commit or neither does.
+        const actor = { id: opts.actorId ?? null, role: opts.actorRole ?? "SYSTEM" };
+        await writeAudit(tx, actor, {
+          module: "Production",
+          recordId: ticketId,
+          field: "status",
+          afterValue: "COMPLETE",
+          reasonCode: consumedOverrideRequestId ? "BATCH_COMPLETE_WITH_SHORTAGE_OVERRIDE" : "BATCH_COMPLETE_INVENTORY_DEDUCTED",
+        });
+        if (consumedOverrideRequestId) {
+          await writeAudit(tx, actor, {
+            module: "Production",
+            recordId: ticketId,
+            field: "shortageOverrideRequestId",
+            afterValue: `${consumedOverrideRequestId} — ${shortages.join("; ")}`,
+            reasonCode: "BATCH_SHORTAGE_OVERRIDDEN",
+          });
+        }
+
         return { status: "SUCCESS" as const, shortages, requisitionCandidates, consumedOverrideRequestId };
       }, TX_OPTIONS),
     );
@@ -362,7 +390,7 @@ export type ReverseBatchResult =
  * RECLAIM_CREDIT movements and its relationship to real physical material
  * already in motion; that needs its own, separate flow, not this one.
  */
-export async function reverseBatchTicket(ticketId: string, opts: { actorId: string; reason: string }): Promise<ReverseBatchResult> {
+export async function reverseBatchTicket(ticketId: string, opts: { actorId: string; actorRole: string; reason: string }): Promise<ReverseBatchResult> {
   const ticket = await prisma.batchTicket.findUnique({ where: { id: ticketId }, include: { trip: true } });
   if (!ticket) return { status: "NOT_FOUND" };
   if (ticket.status !== "COMPLETE" || ticket.trip) return { status: "INVALID_STATE" };
@@ -437,6 +465,16 @@ export async function reverseBatchTicket(ticketId: string, opts: { actorId: stri
             // credit that didn't fully land (CR-04).
           }
 
+          // Same in-transaction audit as completeBatchTicket above
+          // (PL-R6-P2-01) — was a separate post-commit logAudit call.
+          await writeAudit(tx, { id: opts.actorId, role: opts.actorRole }, {
+            module: "Production",
+            recordId: ticketId,
+            field: "reversedAt",
+            afterValue: opts.reason,
+            reasonCode: "BATCH_TICKET_REVERSED",
+          });
+
           return { status: "SUCCESS" as const };
         },
         { isolationLevel: "Serializable" },
@@ -468,7 +506,7 @@ export type CancelBatchTicketResult = { status: "SUCCESS" } | { status: "NOT_FOU
  * ticket has never deducted anything (only completeBatchTicket does, at
  * COMPLETE), so there's nothing to credit back.
  */
-export async function cancelBatchTicket(ticketId: string, opts: { actorId: string; reason: string }): Promise<CancelBatchTicketResult> {
+export async function cancelBatchTicket(ticketId: string, opts: { actorId: string; actorRole: string; reason: string }): Promise<CancelBatchTicketResult> {
   const ticket = await prisma.batchTicket.findUnique({ where: { id: ticketId }, include: { trip: true } });
   if (!ticket) return { status: "NOT_FOUND" };
   if (ticket.trip || ticket.status === "COMPLETE" || ticket.status === "CANCELLED") return { status: "INVALID_STATE" };
@@ -487,6 +525,16 @@ export async function cancelBatchTicket(ticketId: string, opts: { actorId: strin
       await tx.shortageOverrideRequest.updateMany({
         where: { batchTicketId: ticketId, status: { in: ["PENDING", "APPROVED"] } },
         data: { status: "EXPIRED" },
+      });
+
+      // Same in-transaction audit as completeBatchTicket/reverseBatchTicket
+      // above (PL-R6-P2-01) — was a separate post-commit logAudit call.
+      await writeAudit(tx, { id: opts.actorId, role: opts.actorRole }, {
+        module: "Production",
+        recordId: ticketId,
+        field: "status",
+        afterValue: "CANCELLED",
+        reasonCode: "TICKET_CANCELLED",
       });
 
       return { status: "SUCCESS" as const };
