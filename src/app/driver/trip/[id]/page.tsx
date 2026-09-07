@@ -4,8 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { DrumTimer } from "@/components/DrumTimer";
+import { DriverAdvanceTripForm } from "@/components/DriverAdvanceTripForm";
 import {
-  driverAdvanceTrip,
   uploadDeliveryPhoto,
   confirmDeliveryFull,
   confirmDeliveryWithReturn,
@@ -88,13 +88,12 @@ export default async function DriverTripPage({
       )}
 
       {["LOADING", "IN_TRANSIT", "ON_SITE"].includes(trip.status) && (
-        <form action={driverAdvanceTrip}>
-          <input type="hidden" name="tripId" value={trip.id} />
-          <input type="hidden" name="expectedStatus" value={trip.status} />
-          <button className="w-full rounded-md bg-accent px-4 py-3 text-base font-medium text-white">
-            {d.nextAction[trip.status as keyof typeof d.nextAction]}
-          </button>
-        </form>
+        <DriverAdvanceTripForm
+          tripId={trip.id}
+          expectedStatus={trip.status}
+          buttonClassName="w-full rounded-md bg-accent px-4 py-3 text-base font-medium text-white"
+          messages={{ buttonLabel: d.nextAction[trip.status as keyof typeof d.nextAction], errors: dict.modules.trips.errors }}
+        />
       )}
 
       {trip.status !== "CLOSED" && (

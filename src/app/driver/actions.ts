@@ -8,7 +8,7 @@ import { uploadFile, deleteFile } from "@/lib/blob";
 import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { advanceTrip as advanceTripBase } from "@/app/(app)/trips/actions";
+import { advanceTrip as advanceTripBase, type AdvanceTripActionState } from "@/app/(app)/trips/actions";
 import { closeTripFullForId, closeTripWithReturnForId } from "@/lib/tripLifecycle";
 
 // Every driver action is scoped to the logged-in session's own Employee
@@ -25,12 +25,20 @@ async function requireOwnTrip(tripId: string) {
   }
 }
 
-export async function driverAdvanceTrip(formData: FormData) {
+// Was void-returning, discarding advanceTripBase's own typed result
+// (PL-R5-P2-04, fifth production-lifecycle review) — a rejected advance
+// (STALE_STATE from a duplicate tap, NOT_FOUND, ...) reloaded the page
+// with no visible reason, same PL-R3-P2-01 gap the desktop Trip Board's
+// own AdvanceTripForm already closed. Same useActionState shape.
+export async function driverAdvanceTrip(_prevState: AdvanceTripActionState, formData: FormData): Promise<AdvanceTripActionState> {
   const tripId = String(formData.get("tripId") ?? "");
   await requireOwnTrip(tripId);
-  await advanceTripBase(null, formData);
-  revalidatePath(`/driver/trip/${tripId}`);
-  revalidatePath("/driver");
+  const result = await advanceTripBase(null, formData);
+  if (result?.status === "OK") {
+    revalidatePath(`/driver/trip/${tripId}`);
+    revalidatePath("/driver");
+  }
+  return result;
 }
 
 const DELAY_REASONS = new Set(["TRAFFIC", "BREAKDOWN", "WEATHER", "ACCIDENT", "OTHER"]);
