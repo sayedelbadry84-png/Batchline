@@ -3,7 +3,9 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { DrumTimer } from "@/components/DrumTimer";
-import { advanceTrip, closeTripFull, closeTripWithReturn } from "./actions";
+import { AdvanceTripForm } from "@/components/AdvanceTripForm";
+import { CloseTripFullForm } from "@/components/CloseTripFullForm";
+import { CloseTripWithReturnForm } from "@/components/CloseTripWithReturnForm";
 import { getActiveSiteId, tripPlantScopeWhere } from "@/lib/siteScope";
 
 const statusChip: Record<string, string> = {
@@ -114,47 +116,30 @@ export default async function TripsPage() {
                 </td>
                 <td className={ui.td}>
                   {t.status !== "DISCHARGING" ? (
-                    <form action={advanceTrip}>
-                      <input type="hidden" name="tripId" value={t.id} />
-                      <input type="hidden" name="expectedStatus" value={t.status} />
-                      <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">
-                        {t.status === "LOADING" ? m.depart : t.status === "IN_TRANSIT" ? m.arrived : m.startDischarge}
-                      </button>
-                    </form>
+                    <AdvanceTripForm
+                      tripId={t.id}
+                      expectedStatus={t.status}
+                      buttonClassName="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt"
+                      messages={{ buttonLabel: t.status === "LOADING" ? m.depart : t.status === "IN_TRANSIT" ? m.arrived : m.startDischarge, errors: m.errors }}
+                    />
                   ) : (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <form action={closeTripFull}>
-                        <input type="hidden" name="tripId" value={t.id} />
-                        <button className="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt">
-                          {m.fullLoadClose}
-                        </button>
-                      </form>
-                      <form action={closeTripWithReturn} className="flex items-center gap-1">
-                        <input type="hidden" name="tripId" value={t.id} />
-                        <input
-                          name="returnedVolumeM3"
-                          type="number"
-                          step="0.1"
-                          placeholder={m.returnPlaceholder}
-                          required
-                          className="w-24 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs"
-                        />
-                        <select name="reasonCode" defaultValue="" className="rounded-md border border-border bg-surface px-2 py-1 text-xs">
-                          <option value="">{m.returnReasonPlaceholder}</option>
-                          {Object.entries(dict.returnReasons).map(([k, label]) => (
-                            <option key={k} value={k}>{label}</option>
-                          ))}
-                        </select>
-                        <select name="fate" defaultValue="" className="rounded-md border border-border bg-surface px-2 py-1 text-xs">
-                          <option value="">{m.returnFatePlaceholder}</option>
-                          {Object.entries(dict.returnFates).map(([k, label]) => (
-                            <option key={k} value={k}>{label}</option>
-                          ))}
-                        </select>
-                        <button className="rounded-md bg-warn-soft px-3 py-1.5 text-xs font-medium text-warn hover:opacity-80">
-                          {m.logReturnClose}
-                        </button>
-                      </form>
+                    <div className="flex flex-wrap items-start gap-2">
+                      <CloseTripFullForm tripId={t.id} buttonClassName="rounded-md border border-border px-3 py-1.5 text-xs hover:bg-surface-alt" messages={{ buttonLabel: m.fullLoadClose, errors: m.errors }} />
+                      <CloseTripWithReturnForm
+                        tripId={t.id}
+                        returnReasons={dict.returnReasons}
+                        returnFates={dict.returnFates}
+                        className="flex items-center gap-1"
+                        inputClassName="w-24 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs"
+                        buttonClassName="rounded-md bg-warn-soft px-3 py-1.5 text-xs font-medium text-warn hover:opacity-80"
+                        messages={{
+                          returnPlaceholder: m.returnPlaceholder,
+                          returnReasonPlaceholder: m.returnReasonPlaceholder,
+                          returnFatePlaceholder: m.returnFatePlaceholder,
+                          buttonLabel: m.logReturnClose,
+                          errors: m.errors,
+                        }}
+                      />
                     </div>
                   )}
                 </td>

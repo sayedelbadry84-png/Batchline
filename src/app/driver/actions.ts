@@ -28,7 +28,7 @@ async function requireOwnTrip(tripId: string) {
 export async function driverAdvanceTrip(formData: FormData) {
   const tripId = String(formData.get("tripId") ?? "");
   await requireOwnTrip(tripId);
-  await advanceTripBase(formData);
+  await advanceTripBase(null, formData);
   revalidatePath(`/driver/trip/${tripId}`);
   revalidatePath("/driver");
 }

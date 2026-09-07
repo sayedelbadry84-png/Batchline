@@ -46,7 +46,7 @@ import {
   INCENTIVE_ROLE_KEYS,
   type IncentiveRoleKey,
 } from "@/lib/incentives";
-import { markDrumReturnFate } from "../trips/actions";
+import { MarkDrumReturnFateForm } from "@/components/MarkDrumReturnFateForm";
 import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { invoiceAmountDue } from "@/lib/billing";
@@ -2163,17 +2163,17 @@ export default async function ReportsPage({
             <h2 className="mb-1 font-display text-base font-semibold">{m.returnsReport.pendingTitle}</h2>
             <p className="mb-3 text-sm text-ink-muted">{m.returnsReport.pendingIntro}</p>
             {returnsData.pendingFate.map((r) => (
-              <form key={r.id} action={markDrumReturnFate} className="flex items-center gap-3 border-t border-border py-2 first:border-t-0 first:pt-0">
-                <input type="hidden" name="id" value={r.id} />
+              <div key={r.id} className="flex flex-wrap items-center gap-3 border-t border-border py-2 first:border-t-0 first:pt-0">
                 <span className="w-24 shrink-0 font-mono text-xs" dir="ltr">{r.trip.truck.code}</span>
                 <span className="flex-1 text-sm text-ink-muted">{r.trip.driver.name} · {r.returnedVolumeM3} m³</span>
-                <button name="fate" value="RECLAIMED" className="rounded-md border border-good bg-good-soft px-2 py-1 text-xs text-good hover:opacity-80">
-                  {dict.returnFates.RECLAIMED}
-                </button>
-                <button name="fate" value="DUMPED" className="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt">
-                  {dict.returnFates.DUMPED}
-                </button>
-              </form>
+                <MarkDrumReturnFateForm
+                  drumReturnId={r.id}
+                  className="flex flex-wrap items-center gap-2"
+                  reclaimedButtonClassName="rounded-md border border-good bg-good-soft px-2 py-1 text-xs text-good hover:opacity-80"
+                  dumpedButtonClassName="rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-alt"
+                  messages={{ reclaimedLabel: dict.returnFates.RECLAIMED, dumpedLabel: dict.returnFates.DUMPED, errors: dict.modules.trips.errors }}
+                />
+              </div>
             ))}
             {returnsData.pendingFate.length === 0 && <p className="text-sm text-ink-muted">{m.returnsReport.pendingEmpty}</p>}
           </div>

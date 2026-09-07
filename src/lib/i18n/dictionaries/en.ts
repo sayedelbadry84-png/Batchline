@@ -1465,6 +1465,20 @@ const en: typeof ar = {
       colClosed: { truck: "Truck", project: "Project", ticket: "Ticket #", reservation: "Reservation #", mix: "Mix", pourLocation: "Pour location", loadTime: "Load date/time", delivered: "Delivered", returnCol: "Return" },
       fullLoad: "full load",
       emptyClosed: "No closed trips yet.",
+      errors: {
+        NOT_FOUND: "This trip is no longer available, or you don't have access to it.",
+        STALE_STATE: "This trip's stage changed since the page loaded — refresh and try again.",
+        NO_NEXT_STATE: "This trip has no further stage to advance to.",
+        NOT_DISCHARGING: "This trip must be at the discharging stage before it can be closed.",
+        INVALID_VOLUME: "Enter a valid returned volume greater than zero.",
+        RETURN_EXCEEDS_TICKET_VOLUME: "The returned volume can't exceed the ticket's own volume.",
+        INVALID_REASON_CODE: "Choose a valid return reason.",
+        INVALID_FATE: "Choose a valid fate.",
+        NOT_ELIGIBLE: "A full-waste return has nothing left to mark a fate for.",
+        ALREADY_CONSUMED: "This return has already been reused in a later trip and can no longer change.",
+        ALREADY_SET: "This return's fate was already decided.",
+        MISSING_FIELDS: "Fill in every required field.",
+      },
     },
     quality: {
       tabs: { testing: "Testing", certificates: "Certificates", calibration: "Calibration", audits: "Internal Audits", documents: "Documents", training: "Training", materialTests: "Material Tests" },
@@ -1516,6 +1530,11 @@ const en: typeof ar = {
         backfillTitle: "Approved memos missing a written finding",
         backfillIntro: "Approved before writing a finding was required — fill in the actual finding for each to complete the record.",
         saveNote: "Save finding",
+        errors: {
+          NOT_FOUND: "This memo is no longer available, or you don't have access to it.",
+          ALREADY_DECIDED: "Someone else already decided this memo.",
+          MISSING_FIELDS: "Write the finding before approving or denying.",
+        },
       },
       capa: {
         title: "Corrective & Preventive Actions (CAPA)",

@@ -3,13 +3,12 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
+import { DecideWasteMemoForm } from "@/components/DecideWasteMemoForm";
 import {
   createTestBatch,
   addLabResult,
   createCertificate,
   updateCertificate,
-  approveWasteMemo,
-  denyWasteMemo,
   recordWasteMemoNote,
   saveCapaRecord,
   closeCapaRecord,
@@ -413,8 +412,7 @@ export default async function QualityPage({
         <p className="mb-3 text-sm text-ink-muted">{m.wasteMemos.intro}</p>
         <div className="flex flex-col gap-3">
           {pendingWasteMemos.map((memo) => (
-            <form key={memo.id} action={approveWasteMemo} className="flex flex-col gap-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
-              <input type="hidden" name="id" value={memo.id} />
+            <div key={memo.id} className="flex flex-col gap-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
                 <Link href={`/production/${memo.batchTicketId}`} className="font-mono text-xs font-medium text-accent-strong hover:underline" dir="ltr">
                   {memo.batchTicket.ticketNumber}
@@ -427,25 +425,15 @@ export default async function QualityPage({
                 <span>{dict.returnReasons[memo.reasonCode as keyof typeof dict.returnReasons] ?? memo.reasonCode}</span>
                 <span className="font-mono text-xs tabular text-ink-muted">{new Date(memo.createdAt).toLocaleDateString()}</span>
               </div>
-              <div className="flex items-end gap-2">
-                <div className="flex-1">
-                  <label className={ui.label}>{m.wasteMemos.noteLabel}</label>
-                  <textarea
-                    name="approvalNote"
-                    required
-                    rows={2}
-                    placeholder={m.wasteMemos.notePlaceholder}
-                    className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
-                  />
-                </div>
-                <button formAction={denyWasteMemo} className="rounded-md border border-critical bg-critical-soft px-3 py-1.5 text-xs font-medium text-critical hover:opacity-80">
-                  {m.wasteMemos.deny}
-                </button>
-                <button formAction={approveWasteMemo} className="rounded-md border border-good bg-good-soft px-3 py-1.5 text-xs font-medium text-good hover:opacity-80">
-                  {m.wasteMemos.approve}
-                </button>
-              </div>
-            </form>
+              <DecideWasteMemoForm
+                memoId={memo.id}
+                labelClassName={ui.label}
+                textareaClassName="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+                denyButtonClassName="rounded-md border border-critical bg-critical-soft px-3 py-1.5 text-xs font-medium text-critical hover:opacity-80"
+                approveButtonClassName="rounded-md border border-good bg-good-soft px-3 py-1.5 text-xs font-medium text-good hover:opacity-80"
+                messages={{ noteLabel: m.wasteMemos.noteLabel, notePlaceholder: m.wasteMemos.notePlaceholder, approveLabel: m.wasteMemos.approve, denyLabel: m.wasteMemos.deny, errors: m.wasteMemos.errors }}
+              />
+            </div>
           ))}
           {pendingWasteMemos.length === 0 && <p className="text-sm text-ink-muted">{m.wasteMemos.empty}</p>}
         </div>
