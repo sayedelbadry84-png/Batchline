@@ -704,6 +704,20 @@ test("two concurrent close attempts on the same trip (full-close vs. return-clos
   tripIds.push(dispatch.tripId);
   await advanceToDischarging(dispatch.tripId);
 
+  // PL-R4-P1-01, fourth production-lifecycle review: advanceToDischarging
+  // above already wrote three legitimate TRIP_ADVANCED audit rows (all
+  // field:"status", the same field a full-close's own audit row uses), so
+  // a bare count of field IN ("status","drumReturn") for this trip counts
+  // those three PLUS the one real close event — 4, not 1. A baseline
+  // taken right before the race, keyed to close-specific rows only
+  // (TRIP_CLOSED_FULL_LOAD's own reasonCode, or field:"drumReturn" for a
+  // return-close), isolates the delta the race actually produced.
+  const closeRelevantWhere = {
+    recordId: dispatch.tripId,
+    OR: [{ reasonCode: "TRIP_CLOSED_FULL_LOAD" }, { field: "drumReturn" }],
+  };
+  const auditsBefore = await prisma.auditEvent.count({ where: closeRelevantWhere });
+
   const [fullResult, returnResult] = await Promise.all([
     closeTripFullForId(dispatch.tripId, { allowedSiteId: siteId, ...actor() }),
     closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 2, reasonCode: "OVER_ORDERED", fate: null }),
@@ -722,8 +736,8 @@ test("two concurrent close attempts on the same trip (full-close vs. return-clos
     const dr = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
     drumReturnIds.push(dr.id);
   }
-  const closeAuditCount = await prisma.auditEvent.count({ where: { recordId: dispatch.tripId, field: { in: ["status", "drumReturn"] } } });
-  assert.equal(closeAuditCount, 1, "exactly one close audit event, never two");
+  const auditsAfter = await prisma.auditEvent.count({ where: closeRelevantWhere });
+  assert.equal(auditsAfter - auditsBefore, 1, "exactly one NEW close audit event, never two — the three prior advance events must not be counted");
 });
 
 test("finalizing a reservation is deferred until every sibling ticket's trip has closed, and never overwrites an already-cancelled reservation", async () => {
@@ -1150,12 +1164,23 @@ test("concurrent approve-vs-deny on the same memo has exactly one winner", async
 // is transactionally shaped correctly, but that was never actually
 // proven with a real injected failure. A nonexistent actorId violates
 // AuditEvent.actorId's own FK the same way an earlier round's test
-// already proved for a different domain function — that failure lands
-// on the LAST write inside decideWasteIncidentMemo's transaction (the
-// audit insert), after the memo status, the Trip volume, and the
-// Reservation reconciliation have all already executed in that same
-// transaction — so this specifically proves the whole thing rolls back
-// together, not just that the audit write itself is guarded.
+// already proved for a different domain function.
+//
+// PL-R4-P2-01, fourth production-lifecycle review, corrected this: the
+// audit insert is now the true LAST write (see tripLifecycle.ts's own
+// comment on the reorder), so the injected failure genuinely lands after
+// reconcileReservationDeliveryState has already run. But that alone
+// isn't enough — the fixture also has to put the Reservation somewhere
+// reconciliation actually MUTATES, or there is nothing to roll back and
+// the assertion passes trivially. A normal CONFIRMED reservation with a
+// PENDING memo was never touched by reconciliation either way. Instead,
+// this manufactures the one legacy-repairable state reconciliation
+// exists to fix (see reconcileReservationDeliveryState's own comment):
+// DELIVERED with closedAt still null, alongside a PENDING memo — a state
+// application code can no longer reach on its own (a pending memo always
+// blocks the natural DELIVERED transition), forced here directly the
+// same way an earlier round's reconciliation test already did to reach
+// this branch at all.
 test("decideWasteIncidentMemo rolls back the memo, Trip volume, and Reservation reconciliation together when the audit write fails", async () => {
   const res = await makeReservation({ requestedVolumeM3: 8 });
   const ticket = await makeTicket(res, { volumeM3: 8 });
@@ -1174,9 +1199,20 @@ test("decideWasteIncidentMemo rolls back the memo, Trip volume, and Reservation 
   const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
   drumReturnIds.push(drumReturn.id);
 
+  // Manufacture the legacy-repairable fixture: force DELIVERED with
+  // closedAt still null. Trip.volumeDeliveredM3 is currently the full 8
+  // (closeTripWithReturnForId never reduces it provisionally, PL-P1-06),
+  // so approving this 3 m³ memo will drop accepted volume to 5 — short of
+  // the reservation's own 8 m³ requested — which is exactly the shortfall
+  // reconcileReservationDeliveryState must react to by reopening to
+  // IN_PRODUCTION, a real, observable mutation of this row.
+  await prisma.reservation.update({ where: { id: res }, data: { status: "DELIVERED" } });
+
   const beforeMemo = await prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id: memo.id } });
   const beforeTrip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
   const beforeReservation = await prisma.reservation.findUniqueOrThrow({ where: { id: res } });
+  assert.equal(beforeReservation.status, "DELIVERED");
+  assert.equal(beforeReservation.closedAt, null);
   const auditCountBefore = await prisma.auditEvent.count({ where: { recordId: memo.id } });
 
   await assert.rejects(() =>
@@ -1197,14 +1233,24 @@ test("decideWasteIncidentMemo rolls back the memo, Trip volume, and Reservation 
   assert.equal(afterMemo.status, beforeMemo.status, "memo status must roll back");
   assert.equal(afterMemo.approvedById, beforeMemo.approvedById);
   assert.equal(afterTrip.volumeDeliveredM3, beforeTrip.volumeDeliveredM3, "the Trip volume reduction must roll back with everything else");
+  // The real proof this time (PL-R4-P2-01): reconciliation actually ran
+  // and actually flipped this row to IN_PRODUCTION inside the failed
+  // transaction — this asserts that mutation itself was undone, not just
+  // that a value which was never going to change stayed the same.
+  assert.equal(afterReservation.status, "DELIVERED", "the forced-legacy DELIVERED state must survive the rollback unchanged");
   assert.equal(afterReservation.status, beforeReservation.status, "reservation reconciliation must roll back too");
   assert.equal(auditCountAfter, auditCountBefore, "no partial audit row may survive");
 
   // The memo is still genuinely PENDING and can still be decided for
   // real, once a real actor decides it — proves this wasn't left in some
-  // half-claimed state by the failed attempt.
+  // half-claimed state by the failed attempt, and this time reconciliation
+  // really does reopen the reservation for the shortfall.
   const realDecision = await decideWasteIncidentMemo(memo.id, "APPROVE", { allowedSiteId: siteId, actorId: adminUserId, actorRole: "QUALITY_SUPERVISOR", decisionNote: "TEST-SUITE-PL-real-decision-after-rollback" });
   assert.equal(realDecision.status, "OK");
+  const finalReservation = await prisma.reservation.findUniqueOrThrow({ where: { id: res } });
+  assert.equal(finalReservation.status, "IN_PRODUCTION", "a genuinely short delivery must reopen the legacy-DELIVERED reservation");
+  const finalTrip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+  assert.equal(finalTrip.volumeDeliveredM3, 5);
 });
 
 test("a multi-ticket reservation's totals and terminal status reconcile correctly after a quality approval on one of its tickets", async () => {
@@ -1577,6 +1623,229 @@ test("the database itself refuses to lower a DrumReturn's returnedVolumeM3 below
   const readReturnedVolume = () => prisma.drumReturn.findUniqueOrThrow({ where: { id: drumReturn.id }, select: { returnedVolumeM3: true } });
   await assertRejectedAndUnchanged(() => prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 1 } }), readReturnedVolume);
   await prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 3 } });
+});
+
+// ======================================================================
+// PL-R4-P1-02, fourth production-lifecycle review — the sequential bound
+// tests above only prove each trigger correct in isolation; they say
+// nothing about two genuinely concurrent transactions racing the SAME
+// parent/child pair. The migration this round (harden_production_
+// lifecycle_round4) made every child-side trigger take a locking read
+// (SELECT ... FOR UPDATE) on its parent row before comparing, so the two
+// directions now serialize on that shared row instead of each reading a
+// pre-commit snapshot of the other. Four deterministic two-connection
+// tests below prove both lock orders, for both relationships, using the
+// same two-latch + waitUntilBlockedOn pattern as the Plant-transfer
+// tests above — never a fixed sleep.
+// ======================================================================
+
+test("BatchTicket/Trip bound: a parent volumeM3 reduction holding the lock first makes a concurrent Trip increase wait, then reject against the reduced parent", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  let signalParentLocked: () => void;
+  const parentLocked = new Promise<void>((resolve) => {
+    signalParentLocked = resolve;
+  });
+  let releaseParent: () => void;
+  const holdParent = new Promise<void>((resolve) => {
+    releaseParent = resolve;
+  });
+
+  try {
+    // No Trip has claimed any of it yet, so lowering to 3 passes
+    // batch_ticket_check_volume_lower_bound's own check (dependent max is
+    // still 0) — this transaction's own UPDATE holds BatchTicket's row
+    // lock until it commits.
+    const parentTx = prisma2.$transaction(async (tx) => {
+      await tx.batchTicket.update({ where: { id: ticket }, data: { volumeM3: 3 } });
+      signalParentLocked();
+      await holdParent;
+    });
+    await parentLocked;
+
+    // trip_check_volume_bounds now takes FOR UPDATE on the BatchTicket
+    // row before comparing — genuinely blocked behind the parent
+    // transaction above, not racing it.
+    const childPromise = prisma.trip.update({ where: { id: dispatch.tripId }, data: { volumeDeliveredM3: 5 } });
+    await waitUntilBlockedOn(`SET "volumeDeliveredM3"`);
+
+    releaseParent!();
+    await parentTx;
+
+    await assert.rejects(childPromise, "5 exceeds the now-committed volumeM3 of 3");
+
+    const finalTicket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticket }, select: { volumeM3: true } });
+    assert.equal(finalTicket.volumeM3, 3);
+    const finalTrip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId }, select: { volumeDeliveredM3: true } });
+    assert.equal(finalTrip.volumeDeliveredM3, null, "the rejected child write must never have applied");
+  } finally {
+    releaseParent!();
+    await prisma.batchTicket.update({ where: { id: ticket }, data: { volumeM3: 8 } });
+  }
+});
+
+test("BatchTicket/Trip bound: a Trip increase holding the parent lock first makes a concurrent volumeM3 reduction wait, then reject against the committed child", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  let signalChildLocked: () => void;
+  const childLocked = new Promise<void>((resolve) => {
+    signalChildLocked = resolve;
+  });
+  let releaseChild: () => void;
+  const holdChild = new Promise<void>((resolve) => {
+    releaseChild = resolve;
+  });
+
+  try {
+    // 6 <= 8, passes trip_check_volume_bounds — but that trigger's own
+    // locking read now holds the BatchTicket row's lock for the rest of
+    // this transaction, exactly like an explicit lock would.
+    const childTx = prisma2.$transaction(async (tx) => {
+      await tx.trip.update({ where: { id: dispatch.tripId }, data: { volumeDeliveredM3: 6 } });
+      signalChildLocked();
+      await holdChild;
+    });
+    await childLocked;
+
+    const parentPromise = prisma.batchTicket.update({ where: { id: ticket }, data: { volumeM3: 3 } });
+    await waitUntilBlockedOn(`SET "volumeM3"`);
+
+    releaseChild!();
+    await childTx;
+
+    await assert.rejects(parentPromise, "3 is below the now-committed Trip.volumeDeliveredM3 of 6");
+
+    const finalTicket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticket }, select: { volumeM3: true } });
+    assert.equal(finalTicket.volumeM3, 8, "the rejected parent write must never have applied");
+    const finalTrip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId }, select: { volumeDeliveredM3: true } });
+    assert.equal(finalTrip.volumeDeliveredM3, 6);
+  } finally {
+    releaseChild!();
+    await prisma.batchTicket.update({ where: { id: ticket }, data: { volumeM3: 8 } });
+  }
+});
+
+test("DrumReturn/WasteIncidentMemo bound: a parent returnedVolumeM3 reduction holding the lock first makes a concurrent memo increase wait, then reject against the reduced parent", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+  await advanceToDischarging(dispatch.tripId);
+  // OVER_ORDERED, not QUALITY_REJECTED — creates the DrumReturn without
+  // its own auto-created WasteIncidentMemo, so a memo can be inserted
+  // directly below with whatever wastedVolumeM3 this test needs.
+  const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 6, reasonCode: "OVER_ORDERED", fate: null });
+  assert.equal(close.status, "OK");
+  const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
+  drumReturnIds.push(drumReturn.id);
+  const memo = await prisma.wasteIncidentMemo.create({ data: { drumReturnId: drumReturn.id, batchTicketId: ticket, wastedVolumeM3: 2, reasonCode: "QUALITY_REJECTED" } });
+  wasteMemoIds.push(memo.id);
+
+  let signalParentLocked: () => void;
+  const parentLocked = new Promise<void>((resolve) => {
+    signalParentLocked = resolve;
+  });
+  let releaseParent: () => void;
+  const holdParent = new Promise<void>((resolve) => {
+    releaseParent = resolve;
+  });
+
+  try {
+    // 3 >= the memo's own 2, passes drum_return_check_volume_lower_bound.
+    const parentTx = prisma2.$transaction(async (tx) => {
+      await tx.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 3 } });
+      signalParentLocked();
+      await holdParent;
+    });
+    await parentLocked;
+
+    const childPromise = prisma.wasteIncidentMemo.update({ where: { id: memo.id }, data: { wastedVolumeM3: 5 } });
+    await waitUntilBlockedOn(`SET "wastedVolumeM3"`);
+
+    releaseParent!();
+    await parentTx;
+
+    await assert.rejects(childPromise, "5 exceeds the now-committed returnedVolumeM3 of 3");
+
+    const finalReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { id: drumReturn.id }, select: { returnedVolumeM3: true } });
+    assert.equal(finalReturn.returnedVolumeM3, 3);
+    const finalMemo = await prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id: memo.id }, select: { wastedVolumeM3: true } });
+    assert.equal(finalMemo.wastedVolumeM3, 2, "the rejected child write must never have applied");
+  } finally {
+    releaseParent!();
+  }
+});
+
+test("DrumReturn/WasteIncidentMemo bound: a memo increase holding the parent lock first makes a concurrent returnedVolumeM3 reduction wait, then reject against the committed child", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res, { volumeM3: 8 });
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+  await advanceToDischarging(dispatch.tripId);
+  const close = await closeTripWithReturnForId(dispatch.tripId, { allowedSiteId: siteId, ...actor("DRIVER"), returnedVolumeM3: 6, reasonCode: "OVER_ORDERED", fate: null });
+  assert.equal(close.status, "OK");
+  const drumReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { tripId: dispatch.tripId } });
+  drumReturnIds.push(drumReturn.id);
+  const memo = await prisma.wasteIncidentMemo.create({ data: { drumReturnId: drumReturn.id, batchTicketId: ticket, wastedVolumeM3: 2, reasonCode: "QUALITY_REJECTED" } });
+  wasteMemoIds.push(memo.id);
+
+  let signalChildLocked: () => void;
+  const childLocked = new Promise<void>((resolve) => {
+    signalChildLocked = resolve;
+  });
+  let releaseChild: () => void;
+  const holdChild = new Promise<void>((resolve) => {
+    releaseChild = resolve;
+  });
+
+  try {
+    // 5 <= the return's own 6, passes waste_memo_check_volume_bound — but
+    // its own locking read now holds the DrumReturn row's lock for the
+    // rest of this transaction.
+    const childTx = prisma2.$transaction(async (tx) => {
+      await tx.wasteIncidentMemo.update({ where: { id: memo.id }, data: { wastedVolumeM3: 5 } });
+      signalChildLocked();
+      await holdChild;
+    });
+    await childLocked;
+
+    const parentPromise = prisma.drumReturn.update({ where: { id: drumReturn.id }, data: { returnedVolumeM3: 3 } });
+    await waitUntilBlockedOn(`SET "returnedVolumeM3"`);
+
+    releaseChild!();
+    await childTx;
+
+    await assert.rejects(parentPromise, "3 is below the now-committed WasteIncidentMemo.wastedVolumeM3 of 5");
+
+    const finalReturn = await prisma.drumReturn.findUniqueOrThrow({ where: { id: drumReturn.id }, select: { returnedVolumeM3: true } });
+    assert.equal(finalReturn.returnedVolumeM3, 6, "the rejected parent write must never have applied");
+    const finalMemo = await prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id: memo.id }, select: { wastedVolumeM3: true } });
+    assert.equal(finalMemo.wastedVolumeM3, 5);
+  } finally {
+    releaseChild!();
+  }
 });
 
 // ======================================================================
