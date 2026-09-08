@@ -122,6 +122,18 @@ async function deleteMovements(where: NonNullable<Parameters<typeof prisma.inven
   await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_movement_immutability = 'on'`, prisma.inventoryMovement.deleteMany({ where })]);
 }
 
+// PL-R7-P1-01, seventh production-lifecycle review: this suite's own
+// after() hook deleted adminUserId directly, unlike productionLifecycle
+// .test.ts/reservationMixRevision.test.ts's own teardown — every one of
+// this round's new writeAudit calls left AuditEvent rows referencing
+// this fixture user, and Postgres's ON DELETE SET NULL action for the
+// optional actorId FK is itself an UPDATE, which the immutability
+// trigger correctly refuses ("insert a new event instead of using
+// UPDATE"). Same narrowly scoped bypass as the other two suites.
+async function deleteAuditEventsByActor(actorId: string) {
+  await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`, prisma.auditEvent.deleteMany({ where: { actorId } })]);
+}
+
 // P2025 ("record not found") is the one expected outcome here — some
 // tests already delete their own fixture (e.g. an extra Material) in
 // their own `finally` block, so by the time this runs it's legitimately
@@ -194,6 +206,7 @@ after(async () => {
   await cleanupDelete(() => prisma.customer.delete({ where: { id: customerId } }));
   await cleanupDelete(() => prisma.plant.delete({ where: { id: plantId } }));
   await cleanupDelete(() => prisma.site.delete({ where: { id: siteId } }));
+  await deleteAuditEventsByActor(adminUserId);
   await cleanupDelete(() => prisma.user.delete({ where: { id: adminUserId } }));
 
   // Proves the sweep above actually worked, not just that it ran without
@@ -206,8 +219,12 @@ after(async () => {
     prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
     prisma.plant.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
     prisma.batchTicket.count({ where: { ticketNumber: { startsWith: "TEST-SUITE-BC-" } } }),
+    // PL-R7-P1-01: proves deleteAuditEventsByActor above actually swept
+    // every audit row this suite's own writeAudit calls (Round 6) left
+    // behind, not just that the subsequent user delete didn't throw.
+    prisma.auditEvent.count({ where: { actorId: adminUserId } }),
   ]);
-  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket] = ${JSON.stringify(residue)}`);
+  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket, auditEvent] = ${JSON.stringify(residue)}`);
 
   await prisma.$disconnect();
 });

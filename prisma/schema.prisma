@@ -2809,7 +2809,14 @@ model DriverIncentivePolicy {
 model AuditEvent {
   id          String   @id @default(cuid())
   actorId     String?
-  actor       User?    @relation(fields: [actorId], references: [id])
+  // onDelete: Restrict, explicit (PL-R7-P1-01, seventh production-
+  // lifecycle review) — the default for an optional relation is SET
+  // NULL, which is itself an UPDATE the audit-immutability trigger
+  // correctly rejects. No application code hard-deletes a User (see
+  // User.status ACTIVE/DISABLED for the real deactivation path); this
+  // just makes an attempted hard delete of an audited user fail with a
+  // direct FK violation instead of a confusing trigger error.
+  actor       User?    @relation(fields: [actorId], references: [id], onDelete: Restrict)
   role        String
   module      String
   recordId    String

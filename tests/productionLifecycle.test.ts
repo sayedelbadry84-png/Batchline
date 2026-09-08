@@ -1522,6 +1522,36 @@ test("the database itself blocks updating or deleting an AuditEvent row outside 
   await assert.rejects(() => prisma.auditEvent.delete({ where: { id: audit.id } }), /immutable/i);
 });
 
+// PL-R7-P1-01, seventh production-lifecycle review: AuditEvent.actorId's
+// FK used to be ON DELETE SET NULL, which Postgres implements as an
+// UPDATE on the audited row — one the immutability trigger above
+// correctly refused, so a real hard delete of an audited user failed
+// with a confusing "AuditEvent rows are immutable" error rather than a
+// direct, correctly-worded FK violation. Migration
+// harden_production_lifecycle_round7 changed the FK to ON DELETE
+// RESTRICT instead; this proves it fails clean (a real FK violation,
+// not the trigger) and that the audit row itself survives untouched.
+test("the database refuses to hard-delete a User who still has an AuditEvent on file — a clean FK violation, not the immutability trigger", async () => {
+  const throwawayUser = await prisma.user.create({
+    data: { email: `test-suite-pl-throwaway-${Date.now()}@example.invalid`, name: "TEST-SUITE-PL-THROWAWAY", passwordHash: "not-a-real-hash", role: "ADMIN", status: "ACTIVE" },
+  });
+  const audit = await prisma.auditEvent.create({
+    data: { actorId: throwawayUser.id, role: "ADMIN", module: "Fleet", recordId: "test-suite-pl-fk-restrict-check", reasonCode: "TEST_FIXTURE" },
+  });
+
+  await assert.rejects(() => prisma.user.delete({ where: { id: throwawayUser.id } }), (e: unknown) => {
+    assert.ok(!/immutable/i.test(String(e)), "must fail as a real FK violation, not the audit-immutability trigger");
+    return true;
+  });
+  const stillThere = await prisma.auditEvent.findUnique({ where: { id: audit.id } });
+  assert.ok(stillThere, "the audit row itself must be completely untouched by the refused delete");
+
+  // Clean up through the same bypass real teardown uses — proves the
+  // ONLY sanctioned way to remove an audited user's history still works.
+  await deleteAuditEventsByActor(throwawayUser.id);
+  await prisma.user.delete({ where: { id: throwawayUser.id } });
+});
+
 // A structured matcher for a raw-query NOT NULL violation — PostgreSQL's
 // own stable SQLSTATE (23502) wrapped by Prisma as P2010 with the real
 // code inside meta.code, not a human-readable message string (PL-R3-CI-03,
