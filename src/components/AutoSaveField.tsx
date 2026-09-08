@@ -13,7 +13,9 @@ type Status = "idle" | "saving" | "saved" | "error" | "queued" | "rejected" | "s
 // counts as saved now; every other status renders a distinct visible
 // rejection and — critically — never updates lastSaved, so the field
 // still looks unsaved (correctly) rather than quietly "succeeding".
-type ActionResult = { status: string };
+// `version`, present on a real OK, is PL-R8-P1-03's own optimistic-
+// concurrency token — see currentVersion below.
+type ActionResult = { status: string; version?: number };
 
 // A plain uncontrolled input, still fully wired for any surrounding
 // <form>'s own submit (name + defaultValue), that also fires its own
@@ -38,6 +40,7 @@ export function AutoSaveField({
   offlineQueueKind,
   rejectedLabel,
   storageErrorLabel,
+  defaultVersion,
 }: {
   action: (formData: FormData) => Promise<ActionResult>;
   hiddenFields: Record<string, string>;
@@ -57,9 +60,20 @@ export function AutoSaveField({
   // server-side (rejected) or is inherently browser-local (storage).
   rejectedLabel?: string;
   storageErrorLabel?: string;
+  // PL-R8-P1-03, eighth production-lifecycle review: the row's own
+  // version at the moment this page rendered — sent as `expectedVersion`
+  // on every save. currentVersion (below) is what actually advances
+  // between saves within this mounted instance's own lifetime, but the
+  // server is always the real authority: a save whose expectedVersion no
+  // longer matches (another tab, another device, a queued offline
+  // replay that landed first) comes back STALE_READING and renders
+  // through the exact same "rejected" path as any other refusal, never
+  // silently applied over a value this instance never actually saw.
+  defaultVersion?: number;
 }) {
   const [status, setStatus] = useState<Status>("idle");
   const lastSaved = useRef(defaultValue != null ? String(defaultValue) : "");
+  const currentVersion = useRef(defaultVersion ?? 0);
   // PL-R7-P2-01, seventh production-lifecycle review: two overlapping
   // saves for the SAME field (a slow connection, two blurs close
   // together) used to each start their own independent Server Action
@@ -80,7 +94,7 @@ export function AutoSaveField({
   async function performSave(value: string) {
     inFlight.current = true;
     setStatus("saving");
-    const fields = { ...hiddenFields, [valueField]: value };
+    const fields = { ...hiddenFields, [valueField]: value, expectedVersion: String(currentVersion.current) };
     const fd = new FormData();
     for (const [k, v] of Object.entries(fields)) fd.set(k, v);
 
@@ -88,6 +102,7 @@ export function AutoSaveField({
       const result = await action(fd);
       if (result.status === "OK") {
         lastSaved.current = value;
+        if (typeof result.version === "number") currentVersion.current = result.version;
         setStatus("saved");
         setTimeout(() => setStatus((s) => (s === "saved" ? "idle" : s)), 1500);
       } else {
@@ -131,7 +146,7 @@ export function AutoSaveField({
     if (value === "" || value === lastSaved.current) return;
 
     if (offlineQueueKind && typeof navigator !== "undefined" && !navigator.onLine) {
-      const fields = { ...hiddenFields, [valueField]: value };
+      const fields = { ...hiddenFields, [valueField]: value, expectedVersion: String(currentVersion.current) };
       const enqueued = offlineQueue.enqueue(offlineQueueKind, fields);
       if (enqueued.status === "OK") {
         lastSaved.current = value;

@@ -1303,6 +1303,18 @@ model BatchComponentActual {
   // BEFORE batching (rather than crediting it back after, as today) is a
   // deeper sequencing fix left for a later phase.
   reclaimCreditMassKg Float       @default(0)
+  // Optimistic-concurrency token for actualMassKg/moisturePct specifically
+  // (PL-R8-P1-03, eighth production-lifecycle review) — recordActualField
+  // increments this on every accepted write and requires the caller's own
+  // expectedVersion to match first. A per-field React ref inside one
+  // mounted AutoSaveField instance only serializes requests THAT
+  // component ever issues; it says nothing about another browser tab, a
+  // second device, or a queued offline replay landing later. This column
+  // is the actual authority: whichever write reaches the database with a
+  // stale expectedVersion is rejected outright (STALE_READING), so an
+  // older reading can never silently overwrite a newer one no matter
+  // where the two requests originated.
+  version             Int         @default(0)
 
   @@unique([batchTicketId, materialId])
 }

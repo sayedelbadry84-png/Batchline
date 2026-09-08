@@ -46,25 +46,41 @@ export async function claimAndRecordActuals(
   return claimed ? { status: "OK" } : { status: "TERMINAL" };
 }
 
+export type RecordActualFieldClaimResult = { status: "OK"; version: number } | { status: "TERMINAL" } | { status: "STALE_READING" };
+
+// expectedVersion is the optimistic-concurrency token PL-R8-P1-03
+// (eighth production-lifecycle review) added specifically for this
+// function — AutoSaveField's own per-instance in-flight coalescing only
+// serializes requests ONE mounted component ever issues; it has no idea
+// about another browser tab, another device, or a queued offline replay
+// landing later. The database is the actual authority: `version` in the
+// WHERE clause means a write whose expectedVersion no longer matches the
+// row's real current version — because a NEWER write already landed,
+// from anywhere — is rejected outright as STALE_READING rather than
+// silently applied on top of a value the caller never actually saw.
 export async function claimAndRecordActualField(
   ticketId: string,
   componentId: string,
   field: "actual" | "moisture",
   value: number,
+  expectedVersion: number,
   actor: Actor,
-): Promise<ComponentEditResult> {
-  const claimed = await prisma.$transaction(async (tx) => {
+): Promise<RecordActualFieldClaimResult> {
+  return prisma.$transaction(async (tx) => {
     // Always sets "BATCHING" (not conditionally) — harmless when it's
     // already BATCHING, since the WHERE clause is what does the real work.
     const claim = await tx.batchTicket.updateMany({
       where: { id: ticketId, status: { notIn: ["COMPLETE", "CANCELLED"] } },
       data: { status: "BATCHING" },
     });
-    if (claim.count === 0) return false;
-    await tx.batchComponentActual.update({
-      where: { id: componentId },
-      data: field === "actual" ? { actualMassKg: value } : { moisturePct: value },
+    if (claim.count === 0) return { status: "TERMINAL" as const };
+
+    const updated = await tx.batchComponentActual.updateMany({
+      where: { id: componentId, version: expectedVersion },
+      data: field === "actual" ? { actualMassKg: value, version: { increment: 1 } } : { moisturePct: value, version: { increment: 1 } },
     });
+    if (updated.count === 0) return { status: "STALE_READING" as const };
+
     await writeAudit(tx, actor, {
       module: "Production",
       recordId: ticketId,
@@ -72,9 +88,8 @@ export async function claimAndRecordActualField(
       afterValue: String(value),
       reasonCode: "ACTUAL_FIELD_AUTOSAVED",
     });
-    return true;
+    return { status: "OK" as const, version: expectedVersion + 1 };
   });
-  return claimed ? { status: "OK" } : { status: "TERMINAL" };
 }
 
 export async function claimAndAddTicketComponent(ticketId: string, materialId: string, targetMassKg: number, actor: Actor): Promise<ComponentEditResult> {

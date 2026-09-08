@@ -144,12 +144,22 @@ const en: typeof ar = {
       INVALID_VALUE: "the value was out of range",
       NOT_FOUND: "the component no longer exists or is out of scope",
       TERMINAL: "the ticket was completed or cancelled before this could save",
+      // PL-R8-P1-03, eighth production-lifecycle review: a newer reading
+      // for this exact field was already saved (from any device/tab)
+      // before this queued one could replay.
+      STALE_READING: "a newer reading for this field was already saved elsewhere in the meantime",
     },
     offlineRejectedDismiss: "Dismiss",
     // PL-R7-P1-02, seventh production-lifecycle review: shown whenever
     // this device's own storage genuinely failed to persist a reading —
     // never claimed as "queued" or "saved" when this is the real state.
     offlineStorageError: "This device couldn't save one or more readings locally — write the value down and enter it again once storage is available.",
+    // PL-R8-P1-02, eighth production-lifecycle review: shown when this
+    // device's own locally-saved queue was unreadable and had to be
+    // reset — the unreadable copy is kept on file under a backup key,
+    // never deleted outright, but anything that was queued is no longer
+    // visible here and should be re-checked/re-entered if in doubt.
+    offlineCorruptionRecovered: "This device's saved offline queue was unreadable and had to be reset. Nothing was deleted — the old copy is kept on file — but re-check whether any readings need to be re-entered.",
   },
   driver: {
     brand: "Batchline Driver",

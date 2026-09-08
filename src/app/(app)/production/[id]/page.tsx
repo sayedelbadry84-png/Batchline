@@ -261,6 +261,7 @@ export default async function BatchTicketPage({
                       className="w-24 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs disabled:opacity-60"
                       rejectedLabel={d.autosaveRejected}
                       storageErrorLabel={d.autosaveStorageError}
+                      defaultVersion={c.version}
                     />
                   </td>
                   <td className={ui.td}>
@@ -276,6 +277,7 @@ export default async function BatchTicketPage({
                         className="w-20 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs disabled:opacity-60"
                         rejectedLabel={d.autosaveRejected}
                       storageErrorLabel={d.autosaveStorageError}
+                      defaultVersion={c.version}
                       />
                     ) : (
                       <span className="text-ink-faint">—</span>

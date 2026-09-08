@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { maybeAutoRequisitionMaterial } from "@/lib/materialRequisition";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
@@ -18,73 +19,10 @@ import {
   rejectShortageOverrideRequest as rejectShortageOverrideRequestDomain,
 } from "@/lib/shortageOverrideRequests";
 import { withSequentialNumber } from "@/lib/sequence";
-import { REQUISITION_APPROVAL_ROLES, SHORTAGE_OVERRIDE_DECISION_ROLES } from "@/lib/permissions";
+import { SHORTAGE_OVERRIDE_DECISION_ROLES } from "@/lib/permissions";
 import { notify, notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-
-// Raw-material counterpart to issueSparePartToOrder's shortfall handling —
-// called from completeBatch right after a silo/hopper/tank's level is
-// deducted; if what's left is at or below the store's own minThresholdPct,
-// opens a MaterialRequisition for enough to refill it (skipped if capacity
-// is unset/zero, since there's then no percentage to compare against, or
-// if one's already open for this material+site — a run of many low
-// batches must not flood Purchasing with duplicate requests for the same
-// shortage). toKg converts the store's own unit (tons for silo/hopper,
-// liters for a chemical tank) to the kg PurchaseOrderLine.orderedMassKg
-// expects.
-async function maybeAutoRequisitionMaterial(
-  materialId: string,
-  siteId: string,
-  currentLevel: number,
-  capacity: number,
-  minThresholdPct: number,
-  toKg: (units: number) => number,
-) {
-  if (capacity <= 0) return;
-  if ((currentLevel / capacity) * 100 > minThresholdPct) return;
-
-  const shortfall = capacity - currentLevel;
-  if (shortfall <= 0) return;
-
-  const existing = await prisma.materialRequisition.findFirst({
-    where: { materialId, siteId, status: { in: ["PENDING_APPROVAL", "APPROVED", "ORDERED"] } },
-  });
-  if (existing) return;
-
-  // The pre-check above is a plain read with no lock — a genuinely
-  // concurrent completion for the same material+site can still race past
-  // it and try to create a second open requisition. The partial unique
-  // index MaterialRequisition_open_per_material_site_key (migration
-  // harden_production_lifecycle_round7, PL-R7-P2-02) is the actual
-  // backstop: withSequentialNumber's own P2002 retry loop can't tell
-  // that constraint apart from its own requisitionNumber collisions, so
-  // it burns through its 5 attempts and gives up with this specific
-  // message — treated here as "an equivalent requisition already
-  // exists", not a real failure.
-  let requisition;
-  try {
-    requisition = await withSequentialNumber(
-      "MTR",
-      (yr) => prisma.materialRequisition.count({ where: { createdAt: yr } }),
-      (requisitionNumber) =>
-        prisma.materialRequisition.create({
-          data: { requisitionNumber, materialId, siteId, quantityNeededKg: toKg(shortfall) },
-          include: { material: true },
-        }),
-    );
-  } catch (e) {
-    if (e instanceof Error && e.message.startsWith("Could not allocate a unique MTR number")) return;
-    throw e;
-  }
-
-  await notifyRoles(REQUISITION_APPROVAL_ROLES, {
-    title: requisition.requisitionNumber,
-    body: `${requisition.material.name} — auto-requested, stock at or below threshold`,
-    link: "/warehouses?tab=rawMaterials&sub=silos",
-    module: "Warehouses",
-  });
-}
 
 // A single mixer truck load, never exceeded regardless of how much of the
 // reservation remains — the same ceiling the release form's own input
@@ -347,11 +285,19 @@ export async function recordActuals(formData: FormData) {
 // replay handler in OfflineSyncBanner.tsx) now inspects this typed
 // result instead of assuming resolution means success.
 export type RecordActualFieldResult =
-  | { status: "OK" }
+  | { status: "OK"; version: number }
   | { status: "MISSING_FIELDS" }
   | { status: "INVALID_VALUE" }
   | { status: "NOT_FOUND" }
-  | { status: "TERMINAL" };
+  | { status: "TERMINAL" }
+  // PL-R8-P1-03, eighth production-lifecycle review: a write whose
+  // expectedVersion no longer matches the component's real current
+  // version — someone/something else's newer write already landed,
+  // from any tab/device/offline replay. Rendered through the exact same
+  // "rejected" visual path as every other non-OK status (AutoSaveField
+  // never special-cased individual reasons) and the exact same REJECTED
+  // dead-letter path on offline replay — no new UI branch needed for it.
+  | { status: "STALE_READING" };
 
 export async function recordActualField(formData: FormData): Promise<RecordActualFieldResult> {
   const user = await getCurrentUser();
@@ -361,12 +307,15 @@ export async function recordActualField(formData: FormData): Promise<RecordActua
   const componentId = String(formData.get("componentId") ?? "");
   const field = String(formData.get("field") ?? "");
   const rawValue = formData.get("value");
-  if (!batchTicketId || !componentId || rawValue === null || rawValue === "") return { status: "MISSING_FIELDS" };
+  const rawVersion = formData.get("expectedVersion");
+  if (!batchTicketId || !componentId || rawValue === null || rawValue === "" || rawVersion === null) return { status: "MISSING_FIELDS" };
   if (field !== "actual" && field !== "moisture") return { status: "MISSING_FIELDS" };
 
   const value = Number(rawValue);
   if (!Number.isFinite(value) || value < 0) return { status: "INVALID_VALUE" };
   if (field === "moisture" && value > MOISTURE_PCT_MAX) return { status: "INVALID_VALUE" };
+  const expectedVersion = Number(rawVersion);
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 0) return { status: "INVALID_VALUE" };
 
   const component = await prisma.batchComponentActual.findUnique({
     where: { id: componentId },
@@ -386,12 +335,13 @@ export async function recordActualField(formData: FormData): Promise<RecordActua
   // — the WHERE clause is what does the real work.
   // Audit now written inside claimAndRecordActualField's own claim
   // transaction (PL-R6-P2-01) — no separate logAudit call needed here.
-  const result = await claimAndRecordActualField(batchTicketId, componentId, field, value, { id: user!.id, role: user!.role });
-  if (result.status !== "OK") return { status: "TERMINAL" };
+  const result = await claimAndRecordActualField(batchTicketId, componentId, field, value, expectedVersion, { id: user!.id, role: user!.role });
+  if (result.status === "TERMINAL") return { status: "TERMINAL" };
+  if (result.status === "STALE_READING") return { status: "STALE_READING" };
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);
-  return { status: "OK" };
+  return { status: "OK", version: result.version };
 }
 
 // The typed result useActionState (see CompleteBatchForm.tsx) renders —
