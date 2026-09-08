@@ -184,6 +184,12 @@ export default async function OperatorTicketPage({
                 <span className="font-mono text-xs text-ink-muted" dir="ltr">{c.targetMassKg.toFixed(1)} kg</span>
               </div>
               <div className="mt-2 flex items-center gap-2" dir="ltr">
+                {/* PL-R9-P1-03: field-specific version, not the old shared
+                    c.version — see schema.prisma's actualVersion/
+                    moistureVersion comment. The hidden input carries the
+                    same value for the bulk "Save readings" submit this
+                    component list is wrapped in. */}
+                <input type="hidden" name={`actualVersion_${c.id}`} value={c.actualVersion} />
                 <AutoSaveField
                   action={recordActualField}
                   offlineQueueKind="recordActualField"
@@ -197,24 +203,27 @@ export default async function OperatorTicketPage({
                   className="w-full rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
                   rejectedLabel={d.autosaveRejected}
                   storageErrorLabel={d.autosaveStorageError}
-                  defaultVersion={c.version}
+                  defaultVersion={c.actualVersion}
                 />
                 {AGGREGATE_TYPES.has(c.material.type) && (
-                  <AutoSaveField
-                    action={recordActualField}
-                    offlineQueueKind="recordActualField"
-                    hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
-                    valueField="value"
-                    name={`moisture_${c.id}`}
-                    step="0.1"
-                    placeholder={d.col.moisture}
-                    defaultValue={c.moisturePct ?? undefined}
-                    disabled={ticket.status === "COMPLETE"}
-                    className="w-24 shrink-0 rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
-                    rejectedLabel={d.autosaveRejected}
-                  storageErrorLabel={d.autosaveStorageError}
-                  defaultVersion={c.version}
-                  />
+                  <>
+                    <input type="hidden" name={`moistureVersion_${c.id}`} value={c.moistureVersion} />
+                    <AutoSaveField
+                      action={recordActualField}
+                      offlineQueueKind="recordActualField"
+                      hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
+                      valueField="value"
+                      name={`moisture_${c.id}`}
+                      step="0.1"
+                      placeholder={d.col.moisture}
+                      defaultValue={c.moisturePct ?? undefined}
+                      disabled={ticket.status === "COMPLETE"}
+                      className="w-24 shrink-0 rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
+                      rejectedLabel={d.autosaveRejected}
+                      storageErrorLabel={d.autosaveStorageError}
+                      defaultVersion={c.moistureVersion}
+                    />
+                  </>
                 )}
               </div>
               {deviationPct != null && (

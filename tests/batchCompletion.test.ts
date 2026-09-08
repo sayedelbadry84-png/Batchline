@@ -211,6 +211,16 @@ after(async () => {
   // fixture's id by hand across a dozen tests.
   const leftoverMaterialIds = (await prisma.material.findMany({ where: { name: { startsWith: "TEST-SUITE-BC-" } }, select: { id: true } })).map((m) => m.id);
   const leftoverSiloIds = (await prisma.silo.findMany({ where: { name: { startsWith: "TEST-SUITE-BC-" } }, select: { id: true } })).map((s) => s.id);
+  // PL-R9-P1-02, ninth production-lifecycle review: MaterialRequisition
+  // .materialId has no ON DELETE CASCADE — CI proved the concurrent-
+  // requisition test's own materialRequisitionIds tracking (pushed only
+  // after Promise.all resolved) was never a reliable substitute for a
+  // real, tracking-independent sweep. Deleting by materialId — the SAME
+  // generic, by-fixture-prefix predicate every other auxiliary row in
+  // this hook already uses — closes over every requisition any test in
+  // this file ever created for the shared materialId or an ad-hoc one,
+  // regardless of whether (or when) any test-local array was updated.
+  if (leftoverMaterialIds.length > 0) await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } }));
   if (leftoverMaterialIds.length > 0) await deleteMovements({ materialId: { in: leftoverMaterialIds } });
   if (leftoverSiloIds.length > 0) await deleteMovements({ storageId: { in: leftoverSiloIds } });
   if (leftoverMaterialIds.length > 0) await prisma.batchComponentActual.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } });
@@ -243,8 +253,14 @@ after(async () => {
     // including the SYSTEM/null-actor rows completeBatchTicket(id, {})
     // writes, not just adminUserId's own.
     prisma.auditEvent.count({ where: { OR: [{ actorId: adminUserId }, { recordId: { in: [reservationId, ...ticketIds, ...tripIds] } }] } }),
+    // PL-R9-P1-02: proves the materialId-keyed sweep above actually
+    // caught every requisition, not just that the subsequent material
+    // delete didn't throw — leftoverMaterialIds is the same snapshot the
+    // sweep itself used, still valid to query against even though those
+    // Material rows are already gone by this point.
+    prisma.materialRequisition.count({ where: { materialId: { in: leftoverMaterialIds } } }),
   ]);
-  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket, auditEvent] = ${JSON.stringify(residue)}`);
+  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket, auditEvent, materialRequisition] = ${JSON.stringify(residue)}`);
 
   await prisma.$disconnect();
 });
@@ -1114,7 +1130,7 @@ test("a COMPLETE ticket cannot be re-completed", async () => {
 test("an older delayed claimAndRecordActualField call cannot overwrite a newer one that already committed — real optimistic concurrency, not just request ordering", async () => {
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
   const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
-  assert.equal(component.version, 0, "a freshly created component starts at version 0");
+  assert.equal(component.actualVersion, 0, "a freshly created component starts at actualVersion 0");
 
   // Both "requests" read version 0 — exactly what two different browser
   // tabs (or an online save racing a queued offline replay) would each
@@ -1130,11 +1146,142 @@ test("an older delayed claimAndRecordActualField call cannot overwrite a newer o
 
   const finalComponent = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
   assert.equal(finalComponent.actualMassKg, 42, "the newer value must survive untouched — the older request must never have applied");
-  assert.equal(finalComponent.version, 1, "only the one accepted write may have advanced the version");
+  assert.equal(finalComponent.actualVersion, 1, "only the one accepted write may have advanced actualVersion");
 
   // A real caller who re-reads the current version can still save for real.
-  const retry = await claimAndRecordActualField(ticketId, component.id, "actual", 17, finalComponent.version, { id: adminUserId, role: "ADMIN" });
+  const retry = await claimAndRecordActualField(ticketId, component.id, "actual", 17, finalComponent.actualVersion, { id: adminUserId, role: "ADMIN" });
   assert.equal(retry.status, "OK");
+});
+
+// ---- PL-R9-P1-03, ninth production-lifecycle review: field-specific
+// ---- version columns replace the one shared BatchComponentActual.version
+// ---- round 8 introduced — a single shared token, checked/incremented by
+// ---- two independent AutoSaveField instances (one per field), made a
+// ---- perfectly ordinary sequential save of both fields on one page load
+// ---- falsely collide: saving actual bumped the shared version, so
+// ---- moisture's own still-0 ref then read back STALE_READING with no
+// ---- competing user or device anywhere. These tests prove the fix at the
+// ---- same domain-function layer the review itself inspected.
+
+test("saving actual then moisture from one rendered component — both succeed (no false sibling-field conflict)", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+  assert.equal(component.actualVersion, 0);
+  assert.equal(component.moistureVersion, 0);
+
+  // Both fields render from the SAME page load, both starting at version
+  // 0 — exactly the "operator fills in actual, then moisture" sequence
+  // PL-R9-P1-03 found falsely rejected under the old shared column.
+  const actualSave = await claimAndRecordActualField(ticketId, component.id, "actual", 42, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(actualSave.status, "OK", "actual save must succeed — nothing has touched this component yet");
+
+  const moistureSave = await claimAndRecordActualField(ticketId, component.id, "moisture", 3.5, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(moistureSave.status, "OK", "moisture save must still succeed against its own version 0 — the actual save above must never have touched it");
+
+  const final = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
+  assert.equal(final.actualMassKg, 42);
+  assert.equal(final.moisturePct, 3.5);
+  assert.equal(final.actualVersion, 1, "only the actual save may have advanced actualVersion");
+  assert.equal(final.moistureVersion, 1, "only the moisture save may have advanced moistureVersion");
+});
+
+test("saving moisture then actual from one rendered component — both succeed (order-independent)", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+
+  const moistureSave = await claimAndRecordActualField(ticketId, component.id, "moisture", 4.1, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(moistureSave.status, "OK");
+
+  const actualSave = await claimAndRecordActualField(ticketId, component.id, "actual", 55, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(actualSave.status, "OK", "actual save must still succeed against its own version 0 — the moisture save above must never have touched it");
+
+  const final = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
+  assert.equal(final.actualMassKg, 55);
+  assert.equal(final.moisturePct, 4.1);
+  assert.equal(final.actualVersion, 1);
+  assert.equal(final.moistureVersion, 1);
+});
+
+// This is also the offline-replay case (required test 5): OfflineSyncBanner's
+// recordActualField handler calls the exact same Server Action, which calls
+// this exact same domain function with the exact same per-field arguments —
+// there is no separate offline-only code path to diverge from what the two
+// tests above already prove for actual-then-moisture and moisture-then-actual
+// starting from one shared page load's versions.
+
+test("an old tab's single-field autosave cannot overwrite a newer bulk save on the same field — stale writer rejected", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+
+  // The bulk "Save readings" submit advances actualVersion (and
+  // moistureVersion, since it writes both fields) exactly like a real
+  // operator submitting the whole form.
+  const bulk = await claimAndRecordActuals(
+    ticketId,
+    [{ id: component.id, actualMassKg: 900, moisturePct: 2, expectedActualVersion: 0, expectedMoistureVersion: 0 }],
+    { id: adminUserId, role: "ADMIN" },
+  );
+  assert.equal(bulk.status, "OK");
+
+  // An old browser tab, still rendered from before the bulk save, now
+  // autosaves the actual field carrying its own stale belief (version 0).
+  const staleAutosave = await claimAndRecordActualField(ticketId, component.id, "actual", 111, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(staleAutosave.status, "STALE_READING", "the old tab's write must be refused, not silently applied over the newer bulk save");
+
+  const final = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
+  assert.equal(final.actualMassKg, 900, "the bulk save's value must survive untouched");
+});
+
+test("a bulk save versus a concurrent single-field autosave: exactly one deterministic winner, never a partial bulk write", async () => {
+  const ticketId = await makeTicket([
+    { materialId, targetMassKg: 1000 },
+    { materialId, targetMassKg: 2000 },
+  ]);
+  const components = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId }, orderBy: { targetMassKg: "asc" } });
+  const [componentA, componentB] = components;
+
+  // The concurrent autosave only ever touches componentA's actual field.
+  // The bulk save covers BOTH components in one transaction — if the race
+  // makes the bulk save's belief about componentA stale, componentB must
+  // never have been written either (no partial bulk write), even though
+  // nothing ever raced componentB directly.
+  const [autosaveResult, bulkResult] = await Promise.all([
+    claimAndRecordActualField(ticketId, componentA.id, "actual", 77, 0, { id: adminUserId, role: "ADMIN" }),
+    claimAndRecordActuals(
+      ticketId,
+      [
+        { id: componentA.id, actualMassKg: 500, moisturePct: null, expectedActualVersion: 0, expectedMoistureVersion: 0 },
+        { id: componentB.id, actualMassKg: 1900, moisturePct: null, expectedActualVersion: 0, expectedMoistureVersion: 0 },
+      ],
+      { id: adminUserId, role: "ADMIN" },
+    ),
+  ]);
+
+  assert.equal(autosaveResult.status, "OK", "the single-field autosave always succeeds against componentA's true version at the moment it commits");
+
+  const [finalA, finalB] = await Promise.all([
+    prisma.batchComponentActual.findUniqueOrThrow({ where: { id: componentA.id } }),
+    prisma.batchComponentActual.findUniqueOrThrow({ where: { id: componentB.id } }),
+  ]);
+
+  if (bulkResult.status === "OK") {
+    // The bulk save committed first — the autosave above then had to have
+    // read/won against actualVersion 1, which the OK assertion already
+    // covers implicitly since claimAndRecordActualField only accepts an
+    // exact match; both components show the bulk values, componentA's
+    // 500 immediately overwritten by the autosave's own 77.
+    assert.equal(finalA.actualMassKg, 77);
+    assert.equal(finalB.actualMassKg, 1900, "componentB must have the bulk value — the bulk write was never partial");
+  } else {
+    // The autosave committed first — the bulk save's belief about
+    // componentA (version 0) was stale by the time it ran, so the WHOLE
+    // bulk write must have rolled back, including componentB, which the
+    // race never touched directly.
+    assert.equal(bulkResult.status, "STALE_READING");
+    if (bulkResult.status === "STALE_READING") assert.deepEqual(bulkResult.staleIds, [componentA.id]);
+    assert.equal(finalA.actualMassKg, 77, "the autosave's own value must survive");
+    assert.equal(finalB.actualMassKg, null, "componentB must be untouched — a stale component must roll back the ENTIRE bulk write, not just its own row");
+  }
 });
 
 test("completion vs. recordActualField: exactly one of two valid outcomes, never a stale-ledger/saved-edit mix", async () => {
@@ -1144,7 +1291,7 @@ test("completion vs. recordActualField: exactly one of two valid outcomes, never
 
   const [completeResult, editResult] = await Promise.all([
     completeBatchTicket(ticketId, {}),
-    claimAndRecordActualField(ticketId, component.id, "actual", 2000, component.version, { id: adminUserId, role: "ADMIN" }), // 2kg — deliberately different from the 1kg target
+    claimAndRecordActualField(ticketId, component.id, "actual", 2000, component.actualVersion, { id: adminUserId, role: "ADMIN" }), // 2kg — deliberately different from the 1kg target
   ]);
 
   assert.equal(completeResult.status, "SUCCESS"); // completion always eventually succeeds — BATCHING never blocks its own claim
@@ -1172,7 +1319,11 @@ test("completion vs. recordActuals (bulk): exactly one of two valid outcomes", a
 
   const [completeResult, editResult] = await Promise.all([
     completeBatchTicket(ticketId, {}),
-    claimAndRecordActuals(ticketId, [{ id: component.id, actualMassKg: 3000, moisturePct: null }], { id: adminUserId, role: "ADMIN" }),
+    claimAndRecordActuals(
+      ticketId,
+      [{ id: component.id, actualMassKg: 3000, moisturePct: null, expectedActualVersion: component.actualVersion, expectedMoistureVersion: component.moistureVersion }],
+      { id: adminUserId, role: "ADMIN" },
+    ),
   ]);
 
   assert.equal(completeResult.status, "SUCCESS");
@@ -1320,25 +1471,52 @@ test("completeBatchTicket rolls back the ticket claim together with a failed aud
 // silently doing nothing.
 test("two concurrent shortfall requisition attempts for the same material+site leave exactly one open requisition, and both callers resolve to it", async () => {
   const toKg = (tons: number) => tons * 1000;
-  const [a, b] = await Promise.all([
+  // Promise.allSettled, not Promise.all (PL-R9-P1-02, ninth production-
+  // lifecycle review): even though the fixed P2002 classification means
+  // neither call SHOULD reject any more, tracking the winner in a
+  // finally block — not only after a bare Promise.all resolves — means
+  // this test's own cleanup never again depends on both calls having
+  // resolved cleanly. The generic by-fixture-material sweep in this
+  // file's own after() hook is the real, tracking-independent backstop;
+  // this is defense in depth on top of it.
+  const results = await Promise.allSettled([
     maybeAutoRequisitionMaterial(materialId, siteId, 2, 100, 50, toKg), // 2% on hand, well under the 50% threshold
     maybeAutoRequisitionMaterial(materialId, siteId, 2, 100, 50, toKg),
   ]);
+  try {
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value.status !== "BELOW_THRESHOLD" && r.value.status !== "NOT_TRACKED") {
+        materialRequisitionIds.push(r.value.requisitionId);
+      }
+    }
 
-  const statuses = [a.status, b.status].sort();
-  assert.deepEqual(statuses, ["ALREADY_OPEN", "CREATED"], "exactly one of the two concurrent attempts may create the requisition");
+    assert.ok(
+      results.every((r) => r.status === "fulfilled"),
+      `expected both calls to resolve, got: ${results.map((r) => (r.status === "rejected" ? String(r.reason) : r.status)).join(", ")}`,
+    );
+    const [a, b] = results.map((r) => (r.status === "fulfilled" ? r.value : null));
+    assert.ok(a && b);
 
-  const created = a.status === "CREATED" ? a : b.status === "CREATED" ? b : null;
-  const alreadyOpen = a.status === "ALREADY_OPEN" ? a : b.status === "ALREADY_OPEN" ? b : null;
-  assert.ok(created && alreadyOpen);
-  materialRequisitionIds.push(created.requisitionId);
-  assert.equal(alreadyOpen.requisitionId, created.requisitionId, "the losing call must resolve to the SAME row the winner created, not silently do nothing");
-  assert.equal(alreadyOpen.requisitionNumber, created.requisitionNumber);
+    const statuses = [a.status, b.status].sort();
+    assert.deepEqual(statuses, ["ALREADY_OPEN", "CREATED"], "exactly one of the two concurrent attempts may create the requisition");
 
-  const openCount = await prisma.materialRequisition.count({
-    where: { materialId, siteId, status: { in: ["PENDING_APPROVAL", "APPROVED", "ORDERED"] } },
-  });
-  assert.equal(openCount, 1, "exactly one open requisition must exist for this material+site — the partial unique index is the real backstop");
+    const created = a.status === "CREATED" ? a : b.status === "CREATED" ? b : null;
+    const alreadyOpen = a.status === "ALREADY_OPEN" ? a : b.status === "ALREADY_OPEN" ? b : null;
+    assert.ok(created && alreadyOpen);
+    assert.equal(alreadyOpen.requisitionId, created.requisitionId, "the losing call must resolve to the SAME row the winner created, not silently do nothing");
+    assert.equal(alreadyOpen.requisitionNumber, created.requisitionNumber);
+
+    const openCount = await prisma.materialRequisition.count({
+      where: { materialId, siteId, status: { in: ["PENDING_APPROVAL", "APPROVED", "ORDERED"] } },
+    });
+    assert.equal(openCount, 1, "exactly one open requisition must exist for this material+site — the partial unique index is the real backstop");
+  } finally {
+    // Belt-and-suspenders (this file's own after() hook sweeps by
+    // materialId regardless): remove it now too so a later test in this
+    // same run never sees a stray "already open" requisition for the
+    // shared materialId fixture.
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+  }
 });
 
 // ---- 7/8. Reversal restores exact quantities once; a second reversal --

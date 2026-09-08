@@ -250,6 +250,15 @@ export default async function BatchTicketPage({
                   </td>
                   <td className={`${ui.td} font-mono tabular`}>{c.targetMassKg.toFixed(1)}</td>
                   <td className={ui.td}>
+                    {/* PL-R9-P1-03: field-specific version, not the old
+                        shared c.version — see schema.prisma's
+                        actualVersion/moistureVersion comment for why one
+                        shared token made this and the moisture field
+                        below falsely collide on an ordinary sequential
+                        save. The hidden input carries the same value for
+                        the bulk "Save readings" submit just below, which
+                        now checks/increments the identical column. */}
+                    <input type="hidden" name={`actualVersion_${c.id}`} value={c.actualVersion} />
                     <AutoSaveField
                       action={recordActualField}
                       hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "actual" }}
@@ -261,24 +270,27 @@ export default async function BatchTicketPage({
                       className="w-24 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs disabled:opacity-60"
                       rejectedLabel={d.autosaveRejected}
                       storageErrorLabel={d.autosaveStorageError}
-                      defaultVersion={c.version}
+                      defaultVersion={c.actualVersion}
                     />
                   </td>
                   <td className={ui.td}>
                     {AGGREGATE_TYPES.has(c.material.type) ? (
-                      <AutoSaveField
-                        action={recordActualField}
-                        hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
-                        valueField="value"
-                        name={`moisture_${c.id}`}
-                        step="0.1"
-                        defaultValue={c.moisturePct ?? undefined}
-                        disabled={ticket.status === "COMPLETE"}
-                        className="w-20 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs disabled:opacity-60"
-                        rejectedLabel={d.autosaveRejected}
-                      storageErrorLabel={d.autosaveStorageError}
-                      defaultVersion={c.version}
-                      />
+                      <>
+                        <input type="hidden" name={`moistureVersion_${c.id}`} value={c.moistureVersion} />
+                        <AutoSaveField
+                          action={recordActualField}
+                          hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
+                          valueField="value"
+                          name={`moisture_${c.id}`}
+                          step="0.1"
+                          defaultValue={c.moisturePct ?? undefined}
+                          disabled={ticket.status === "COMPLETE"}
+                          className="w-20 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs disabled:opacity-60"
+                          rejectedLabel={d.autosaveRejected}
+                          storageErrorLabel={d.autosaveStorageError}
+                          defaultVersion={c.moistureVersion}
+                        />
+                      </>
                     ) : (
                       <span className="text-ink-faint">—</span>
                     )}

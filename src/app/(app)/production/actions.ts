@@ -226,7 +226,7 @@ export async function recordActuals(formData: FormData) {
   // ticket whose ledger was posted from whatever the components showed
   // at claim time — this closes that race the same way completion's own
   // claim already closes double-completion.
-  const writes: { id: string; actualMassKg: number; moisturePct: number | null }[] = [];
+  const writes: { id: string; actualMassKg: number; moisturePct: number | null; expectedActualVersion: number; expectedMoistureVersion: number }[] = [];
   for (const c of components) {
     const rawActual = formData.get(`actual_${c.id}`);
     const rawMoisture = formData.get(`moisture_${c.id}`);
@@ -256,13 +256,31 @@ export async function recordActuals(formData: FormData) {
     // into `currentLevelTons - massTons` in completeBatch and INCREASE the
     // silo/hopper reading instead of decreasing it.
     if (!Number.isFinite(enteredMass) || enteredMass < 0) continue;
-    writes.push({ id: c.id, actualMassKg: enteredMass, moisturePct });
+
+    // PL-R9-P1-03: the hidden per-component version inputs the page
+    // renders alongside each AutoSaveField (see production/[id]/page.tsx
+    // and operator/ticket/[id]/page.tsx) — this bulk submit is the only
+    // writer that previously bypassed the version protocol entirely.
+    // Missing/malformed defaults to the component's own already-loaded
+    // c.actualVersion/c.moistureVersion rather than 0, so a real bulk
+    // submit can never be misread as "expects version 0" against a
+    // component that has moved on.
+    const rawActualVersion = formData.get(`actualVersion_${c.id}`);
+    const rawMoistureVersion = formData.get(`moistureVersion_${c.id}`);
+    const expectedActualVersion = Number.isInteger(Number(rawActualVersion)) && rawActualVersion !== null ? Number(rawActualVersion) : c.actualVersion;
+    const expectedMoistureVersion = Number.isInteger(Number(rawMoistureVersion)) && rawMoistureVersion !== null ? Number(rawMoistureVersion) : c.moistureVersion;
+
+    writes.push({ id: c.id, actualMassKg: enteredMass, moisturePct, expectedActualVersion, expectedMoistureVersion });
   }
 
   // Audit now written inside claimAndRecordActuals' own claim transaction
-  // (PL-R6-P2-01) — no separate logAudit call needed here any more.
+  // (PL-R6-P2-01) — no separate logAudit call needed here any more. A
+  // STALE_READING result means the whole bulk write was rolled back
+  // (PL-R9-P1-03) — still revalidate so the page re-renders with the
+  // authoritative current versions instead of leaving the form holding
+  // the same stale ones that would just fail again on retry.
   const result = await claimAndRecordActuals(batchTicketId, writes, { id: user!.id, role: user!.role });
-  if (result.status !== "OK") return;
+  if (result.status === "TERMINAL") return;
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);
