@@ -1,7 +1,6 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
-import { writeAudit } from "@/lib/audit";
 import { getCurrentUser } from "@/lib/session";
 import { effectiveSiteId } from "@/lib/siteScope";
 import { uploadFile, deleteFile } from "@/lib/blob";
@@ -9,7 +8,7 @@ import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { advanceTrip as advanceTripBase, type AdvanceTripActionState } from "@/app/(app)/trips/actions";
-import { closeTripFullForId, closeTripWithReturnForId } from "@/lib/tripLifecycle";
+import { closeTripFullForId, closeTripWithReturnForId, reportTripDelayForId, attachDeliveryPhotoForId, DELAY_REASONS } from "@/lib/tripLifecycle";
 
 // Every driver action is scoped to the logged-in session's own Employee
 // record — a driver can only touch their own trips, not one assigned to
@@ -44,11 +43,15 @@ export async function driverAdvanceTrip(_prevState: AdvanceTripActionState, form
   return result;
 }
 
-const DELAY_REASONS = new Set(["TRAFFIC", "BREAKDOWN", "WEATHER", "ACCIDENT", "OTHER"]);
-
 // Real push (see src/lib/push.ts, via notify()) to dispatch the instant a
 // driver reports a delay — the whole point being that the office finds
 // out before the customer has to call and ask where their delivery is.
+//
+// PL-R8-P1-04, eighth production-lifecycle review: requireOwnTrip below
+// is now only a cheap pre-check (avoids the domain call entirely for an
+// obviously-wrong request) — the AUTHORITATIVE ownership check happens
+// inside reportTripDelayForId's own Trip-row lock, closing the
+// reassignment race a plain pre-transaction read couldn't.
 export async function reportTripDelay(formData: FormData) {
   const tripId = String(formData.get("tripId") ?? "");
   const reason = String(formData.get("reason") ?? "");
@@ -56,26 +59,12 @@ export async function reportTripDelay(formData: FormData) {
   if (!tripId || !DELAY_REASONS.has(reason)) return;
   const user = await requireOwnTrip(tripId);
 
-  const trip = await prisma.trip.findUnique({
-    where: { id: tripId },
-    select: { batchTicket: { select: { ticketNumber: true, reservation: { select: { reservationNumber: true, project: { select: { name: true } } } } } } },
-  });
-  if (!trip) return;
-
-  // The report and its audit event commit together (PL-R7-P2-02, seventh
-  // production-lifecycle review) — was two separate statements against
-  // the plain singleton, so a failure on the audit write left a real
-  // delay report on file with no audit trail behind it. notifyRoles below
-  // stays post-commit — genuinely external delivery, same disclosed
-  // scope as startTrip's own notifications.
-  await prisma.$transaction(async (tx) => {
-    await tx.tripDelayReport.create({ data: { tripId, reason, note } });
-    await writeAudit(tx, { id: user.id, role: user.role }, { module: "Fleet", recordId: tripId, afterValue: reason, reasonCode: "TRIP_DELAY_REPORTED" });
-  });
+  const result = await reportTripDelayForId(tripId, { requireOwnDriverEmployeeId: user.employeeId!, reason, note, actorId: user.id, actorRole: user.role });
+  if (result.status !== "OK") return;
 
   await notifyRoles(["PLANT_OPERATOR", "ADMIN"], {
-    title: trip.batchTicket.reservation.reservationNumber,
-    body: `${trip.batchTicket.ticketNumber} — ${trip.batchTicket.reservation.project.name}: ${reason}${note ? ` — ${note}` : ""}`,
+    title: result.reservationNumber,
+    body: `${result.ticketNumber} — ${result.projectName}: ${reason}${note ? ` — ${note}` : ""}`,
     link: "/trips",
     module: "Fleet",
   });
@@ -107,6 +96,17 @@ async function detectPhotoExtension(file: File): Promise<string | null> {
   return null;
 }
 
+// PL-R8-P1-04, eighth production-lifecycle review: requireOwnTrip below
+// is a cheap pre-check only, same reasoning as reportTripDelay above.
+// attachDeliveryPhotoForId re-verifies ownership under the Trip lock AND
+// reads deliveryPhotoUrl only after acquiring it — the old version read
+// it before the transaction, so two near-simultaneous uploads could both
+// read the SAME original url and each try to delete it, potentially
+// orphaning whichever new blob didn't end up referenced. Reading it
+// fresh, locked, means the losing transaction (whichever commits second)
+// correctly sees the WINNER's new url as "old" and deletes that
+// intermediate blob instead — only the truly final url is ever left
+// referenced or missing its own cleanup.
 export async function uploadDeliveryPhoto(formData: FormData) {
   const tripId = String(formData.get("tripId") ?? "");
   const file = formData.get("photo");
@@ -115,27 +115,27 @@ export async function uploadDeliveryPhoto(formData: FormData) {
   const ext = await detectPhotoExtension(file);
   if (!ext) return;
   const user = await requireOwnTrip(tripId);
-  const trip = await prisma.trip.findUnique({ where: { id: tripId }, select: { deliveryPhotoUrl: true } });
 
   // Blob storage isn't part of the Postgres transaction below — it can't
   // be, uploadFile is an external network call, not a DB write — so it
   // still has to happen first, before the URL it returns can be stored.
-  // What CAN be (and now is) atomic is the trip's own URL update and its
-  // audit event (PL-R7-P2-02, seventh production-lifecycle review): was
-  // two separate statements against the plain singleton.
   const url = await uploadFile(`delivery-photos/${tripId}.${ext}`, file);
 
-  await prisma.$transaction(async (tx) => {
-    await tx.trip.update({ where: { id: tripId }, data: { deliveryPhotoUrl: url } });
-    await writeAudit(tx, { id: user.id, role: user.role }, { module: "Fleet", recordId: tripId, reasonCode: "DELIVERY_PHOTO_CAPTURED" });
-  });
+  const result = await attachDeliveryPhotoForId(tripId, { requireOwnDriverEmployeeId: user.employeeId!, url, actorId: user.id, actorRole: user.role });
+  if (result.status !== "OK") {
+    // The trip was reassigned (or otherwise no longer this driver's) in
+    // the gap between the pre-check and this lock — compensate for the
+    // upload that already happened rather than leaving an orphaned blob
+    // nothing ever references.
+    await deleteFile(url);
+    return;
+  }
 
-  // A re-take replaces the row's own URL above — clean up the old blob
-  // after the DB change has genuinely committed, so a driver retrying
-  // the photo doesn't leave orphaned files behind in storage, and a
-  // failed DB update never deletes a blob the (unchanged) row still
-  // points to.
-  if (trip?.deliveryPhotoUrl) await deleteFile(trip.deliveryPhotoUrl);
+  // A re-take replaces the row's own URL above — clean up whichever URL
+  // attachDeliveryPhotoForId's own locked read actually found as "old"
+  // (see that function's own comment for why this must be read under
+  // the lock, not before the transaction).
+  if (result.oldUrl) await deleteFile(result.oldUrl);
 
   revalidatePath(`/driver/trip/${tripId}`);
 }

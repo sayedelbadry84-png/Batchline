@@ -24,6 +24,7 @@ const NEXT_STATUS: Record<string, string> = {
 // was ever built to recognize.
 export const RETURN_REASON_CODES = new Set(["CUSTOMER_CANCELLED", "SITE_NOT_READY", "OVER_ORDERED", "ACCESS_BLOCKED", "QUALITY_REJECTED", "TRAFFIC_DELAY", "OTHER"]);
 export const RETURN_FATES = new Set(["DUMPED", "RECLAIMED"]);
+export const DELAY_REASONS = new Set(["TRAFFIC", "BREAKDOWN", "WEATHER", "ACCIDENT", "OTHER"]);
 
 type OwnershipOpts = { allowedSiteId: string | null; requireOwnDriverEmployeeId?: string | null };
 
@@ -395,5 +396,85 @@ export async function setDrumReturnFateForId(
     await tx.auditEvent.create({ data: { actorId: opts.actorId, role: opts.actorRole, module: "Fleet", recordId: drumReturnId, field: "fate", afterValue: fate, reasonCode: "DRUM_RETURN_FATE_SET" } });
 
     return { status: "OK" as const };
+  });
+}
+
+// PL-R8-P1-04, eighth production-lifecycle review: driver/actions.ts's
+// own requireOwnTrip checked trip.driverId with a plain, unlocked read
+// BEFORE either of these two actions opened their own (Round-7) audit-
+// atomic transaction — a dispatch reassignment landing in that exact gap
+// let the FORMER driver still attach a delay report or replace the
+// delivery photo on a trip no longer theirs. Both commands below lock
+// the Trip row first and re-verify ownership against that fresh,
+// locked read — the SAME pattern closeTripFullForId/
+// closeTripWithReturnForId already used for their own
+// requireOwnDriverEmployeeId check, which this round's review confirmed
+// was already correct.
+
+export type ReportTripDelayResult =
+  | { status: "OK"; reservationNumber: string; ticketNumber: string; projectName: string }
+  | { status: "NOT_FOUND" }
+  | { status: "INVALID_REASON" };
+
+export async function reportTripDelayForId(
+  tripId: string,
+  opts: { requireOwnDriverEmployeeId: string; reason: string; note: string | null; actorId: string; actorRole: string },
+): Promise<ReportTripDelayResult> {
+  if (!DELAY_REASONS.has(opts.reason)) return { status: "INVALID_REASON" };
+
+  return prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Trip" WHERE "id" = ${tripId} FOR UPDATE`;
+    if (locked.length === 0) return { status: "NOT_FOUND" as const };
+
+    const trip = await tx.trip.findUniqueOrThrow({
+      where: { id: tripId },
+      include: { batchTicket: { select: { ticketNumber: true, reservation: { select: { reservationNumber: true, project: { select: { name: true } } } } } } },
+    });
+    // Fresh, locked read — not the Server Action's own pre-transaction
+    // check — so a reassignment that lands in the gap before this lock
+    // is acquired is exactly what this re-check catches.
+    if (trip.driverId !== opts.requireOwnDriverEmployeeId) return { status: "NOT_FOUND" as const };
+
+    await tx.tripDelayReport.create({ data: { tripId, reason: opts.reason, note: opts.note } });
+    await tx.auditEvent.create({
+      data: { actorId: opts.actorId, role: opts.actorRole, module: "Fleet", recordId: tripId, afterValue: opts.reason, reasonCode: "TRIP_DELAY_REPORTED" },
+    });
+
+    return {
+      status: "OK" as const,
+      reservationNumber: trip.batchTicket.reservation.reservationNumber,
+      ticketNumber: trip.batchTicket.ticketNumber,
+      projectName: trip.batchTicket.reservation.project.name,
+    };
+  });
+}
+
+export type AttachDeliveryPhotoResult = { status: "OK"; oldUrl: string | null } | { status: "NOT_FOUND" };
+
+// The blob itself is uploaded by the caller BEFORE this runs — external
+// object storage isn't part of the Postgres transaction below and can't
+// be — so this only ever receives the already-uploaded url to attach.
+// Reading deliveryPhotoUrl AFTER acquiring the Trip lock (not before,
+// and not from a separate pre-transaction read) is what makes a genuine
+// two-upload race safe: whichever transaction's lock wins reads the
+// OTHER's already-committed new URL as "old" once it's this one's turn,
+// so the caller always deletes the exact intermediate blob it should,
+// and only the truly final URL is ever left referenced.
+export async function attachDeliveryPhotoForId(
+  tripId: string,
+  opts: { requireOwnDriverEmployeeId: string; url: string; actorId: string; actorRole: string },
+): Promise<AttachDeliveryPhotoResult> {
+  return prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Trip" WHERE "id" = ${tripId} FOR UPDATE`;
+    if (locked.length === 0) return { status: "NOT_FOUND" as const };
+
+    const trip = await tx.trip.findUniqueOrThrow({ where: { id: tripId }, select: { driverId: true, deliveryPhotoUrl: true } });
+    if (trip.driverId !== opts.requireOwnDriverEmployeeId) return { status: "NOT_FOUND" as const };
+
+    const oldUrl = trip.deliveryPhotoUrl;
+    await tx.trip.update({ where: { id: tripId }, data: { deliveryPhotoUrl: opts.url } });
+    await tx.auditEvent.create({ data: { actorId: opts.actorId, role: opts.actorRole, module: "Fleet", recordId: tripId, reasonCode: "DELIVERY_PHOTO_CAPTURED" } });
+
+    return { status: "OK" as const, oldUrl };
   });
 }
