@@ -55,6 +55,41 @@ function getDefaultStorage(): StorageAdapter | null {
   }
 }
 
+// PL-R9-P2-01, ninth production-lifecycle review: enqueue/dismissRejected
+// (and flushQueue's own per-item write) are each a plain getItem→modify→
+// setItem sequence with no cross-tab coordination — two browser tabs can
+// each read the same starting state, append/modify their own change in
+// memory, and whichever setItem runs last silently erases the other
+// tab's change. Server-side versioning (PL-R9-P1-03) cannot help here:
+// the losing tab's reading never reaches the server at all, so there is
+// nothing for the server to reject. A named Web Lock serializes every
+// mutation across every tab/frame on this origin — the browser itself
+// queues a second `request` call for the same name until the first
+// resolves, even across separate tabs, which a JS-level mutex confined
+// to one tab's own heap cannot do.
+export type LockAdapter = { withLock<T>(fn: () => Promise<T>): Promise<T> };
+
+// The safe fallback the review explicitly calls for: on a browser (or
+// test runner) without the Web Locks API, mutations simply run
+// unserialized, exactly as they always have — no worse than before this
+// fix, and Web Locks is already supported by every browser this app
+// otherwise targets (evergreen Chrome/Edge/Firefox/Safari).
+function getDefaultLock(): LockAdapter | null {
+  if (typeof navigator === "undefined" || !("locks" in navigator) || !navigator.locks) return null;
+  const locks = navigator.locks;
+  return {
+    withLock<T>(fn: () => Promise<T>): Promise<T> {
+      // lib.dom.d.ts's LockGrantedCallback<T> types the callback as
+      // returning T directly, not Promise<T> — losing the real Web Locks
+      // spec behavior (the lock isn't released, and request()'s own
+      // promise doesn't settle, until a callback-returned promise
+      // itself settles). The cast reflects that real runtime contract,
+      // not a type-system bypass of it.
+      return locks.request("bl-offline-queue", () => fn()) as unknown as Promise<T>;
+    },
+  };
+}
+
 const STORAGE_KEY = "bl_offline_queue_v1";
 
 type OfflineStateV1 = { version: 1; pending: QueuedAction[]; rejected: RejectedAction[] };
@@ -63,8 +98,15 @@ function emptyState(): OfflineStateV1 {
   return { version: 1, pending: [], rejected: [] };
 }
 
+// PL-R9-P2-01, ninth production-lifecycle review: `typeof [] === "object"`
+// and `Object.values([...])` both happily accept an array, so a stored
+// `fields` that was somehow an array of strings (a hand-edited payload, a
+// future bug elsewhere) passed this check and was trusted as a
+// Record<string, string> — every consumer that does `fields.field` or
+// `fields.value` would then silently read `undefined` instead of being
+// caught here as corrupt.
 function isStringRecord(v: unknown): v is Record<string, string> {
-  return typeof v === "object" && v !== null && Object.values(v as Record<string, unknown>).every((x) => typeof x === "string");
+  return typeof v === "object" && v !== null && !Array.isArray(v) && Object.values(v as Record<string, unknown>).every((x) => typeof x === "string");
 }
 
 // PL-R8-P1-02, eighth production-lifecycle review: the old check only
@@ -194,7 +236,14 @@ export type EnqueueResult = { status: "OK"; item: QueuedAction } | { status: "ST
 // actually uses, but tests construct their own instance over a fake
 // StorageAdapter (including one that always throws) to exercise failure
 // paths deterministically, with no browser/jsdom involved.
-export function createOfflineQueue(storage: StorageAdapter | null) {
+export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAdapter | null = getDefaultLock()) {
+  // Every mutating read-modify-write below runs through this — a no-op
+  // pass-through when no lock is available (see getDefaultLock's own
+  // comment for why that's still safe, just unserialized).
+  function withLock<T>(fn: () => Promise<T> | T): Promise<T> {
+    return lock ? lock.withLock(async () => fn()) : Promise.resolve(fn());
+  }
+
   // Shared by every mutation below (enqueue/dismissRejected/flushQueue):
   // reads current state, transparently recovering from CORRUPT (backup-
   // then-replace) but NEVER manufacturing a writable empty state out of
@@ -221,18 +270,22 @@ export function createOfflineQueue(storage: StorageAdapter | null) {
     return read.status === "STORAGE_UNAVAILABLE" ? { items: [], readStatus: "STORAGE_UNAVAILABLE" } : { items: read.state.rejected, readStatus: read.status };
   }
 
-  function enqueue(kind: string, fields: Record<string, string>): EnqueueResult {
-    const read = readForMutation();
-    if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
-    const item: QueuedAction = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind, fields, createdAt: Date.now() };
-    const result = persistState(storage!, { version: 1, pending: [...read.state.pending, item], rejected: read.state.rejected });
-    return result.status === "OK" ? { status: "OK", item } : { status: "STORAGE_UNAVAILABLE" };
+  function enqueue(kind: string, fields: Record<string, string>): Promise<EnqueueResult> {
+    return withLock(() => {
+      const read = readForMutation();
+      if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
+      const item: QueuedAction = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind, fields, createdAt: Date.now() };
+      const result = persistState(storage!, { version: 1, pending: [...read.state.pending, item], rejected: read.state.rejected });
+      return result.status === "OK" ? { status: "OK", item } : { status: "STORAGE_UNAVAILABLE" };
+    });
   }
 
-  function dismissRejected(id: string): PersistResult {
-    const read = readForMutation();
-    if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
-    return persistState(storage!, { version: 1, pending: read.state.pending, rejected: read.state.rejected.filter((item) => item.id !== id) });
+  function dismissRejected(id: string): Promise<PersistResult> {
+    return withLock(() => {
+      const read = readForMutation();
+      if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
+      return persistState(storage!, { version: 1, pending: read.state.pending, rejected: read.state.rejected.filter((item) => item.id !== id) });
+    });
   }
 
   // Replays every queued item whose kind has a matching handler.
@@ -260,38 +313,52 @@ export function createOfflineQueue(storage: StorageAdapter | null) {
       }
       if (outcome.status === "RETRYABLE") continue; // leave it queued, exactly as-is, for the next flush.
 
-      // Re-read the FRESHEST state right before this one item's write,
-      // not the snapshot flushQueue started with — two concurrent
-      // flushQueue calls (e.g. two open tabs on the same ticket) can
-      // otherwise each work from a stale snapshot and clobber each
-      // other's already-persisted removals.
-      const fresh = readForMutation();
-      if (fresh.status === "STORAGE_UNAVAILABLE") {
-        readStatus = "STORAGE_UNAVAILABLE";
-        continue; // Can't safely read-modify-write right now — leave this item queued for the next flush.
-      }
-      if (fresh.status === "RECOVERED_FROM_CORRUPT") readStatus = "RECOVERED_FROM_CORRUPT";
-      if (!fresh.state.pending.some((i) => i.id === item.id)) {
-        // Already gone — a concurrent flushQueue call already resolved
-        // this exact item between our handler call and this write.
-        // Re-applying REJECTED here would append a duplicate rejected
-        // entry for the same reading; simply not touching it is correct
-        // either way.
-        continue;
-      }
-      const nextPending = fresh.state.pending.filter((i) => i.id !== item.id);
-      const nextRejected =
-        outcome.status === "REJECTED" ? [...fresh.state.rejected, { ...item, reason: outcome.reason, rejectedAt: Date.now() }] : fresh.state.rejected;
-      const result = persistState(storage!, { version: 1, pending: nextPending, rejected: nextRejected });
-      if (result.status === "OK") {
+      // The read-modify-write below runs under the SAME named lock
+      // enqueue/dismissRejected use (PL-R9-P2-01) — without it, this
+      // re-read-then-persist step is exactly the same unserialized
+      // getItem→setItem race as a plain enqueue, just with flushQueue as
+      // the writer instead. The handler call above stays OUTSIDE the
+      // lock deliberately: it can be a slow network round-trip, and
+      // holding a cross-tab lock across that would block every other
+      // tab's own enqueue/dismiss/flush for as long as this one request
+      // takes.
+      const writeOutcome = await withLock(() => {
+        // Re-read the FRESHEST state right before this one item's write,
+        // not the snapshot flushQueue started with — two concurrent
+        // flushQueue calls (e.g. two open tabs on the same ticket) can
+        // otherwise each work from a stale snapshot and clobber each
+        // other's already-persisted removals.
+        const fresh = readForMutation();
+        if (fresh.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" as const };
+        if (!fresh.state.pending.some((i) => i.id === item.id)) {
+          // Already gone — a concurrent flushQueue call already resolved
+          // this exact item between our handler call and this write.
+          // Re-applying REJECTED here would append a duplicate rejected
+          // entry for the same reading; simply not touching it is
+          // correct either way.
+          return { status: "ALREADY_RESOLVED" as const };
+        }
+        const nextPending = fresh.state.pending.filter((i) => i.id !== item.id);
+        const nextRejected =
+          outcome.status === "REJECTED" ? [...fresh.state.rejected, { ...item, reason: outcome.reason, rejectedAt: Date.now() }] : fresh.state.rejected;
+        const persisted = persistState(storage!, { version: 1, pending: nextPending, rejected: nextRejected });
+        return persisted.status === "OK"
+          ? { status: "OK" as const, readStatus: fresh.status === "RECOVERED_FROM_CORRUPT" ? ("RECOVERED_FROM_CORRUPT" as const) : undefined }
+          : { status: "STORAGE_UNAVAILABLE" as const };
+      });
+
+      if (writeOutcome.status === "OK") {
+        if (writeOutcome.readStatus === "RECOVERED_FROM_CORRUPT") readStatus = "RECOVERED_FROM_CORRUPT";
         if (outcome.status === "APPLIED") flushed++;
-      } else {
-        // The write failed — the item is untouched in storage (still
-        // pending), so nothing was lost; replaying either outcome again
-        // next flush is safe (APPLIED is idempotent, REJECTED is
-        // re-derived fresh).
+      } else if (writeOutcome.status === "STORAGE_UNAVAILABLE") {
+        // The write failed (or couldn't safely read first) — the item is
+        // untouched in storage (still pending), so nothing was lost;
+        // replaying either outcome again next flush is safe (APPLIED is
+        // idempotent, REJECTED is re-derived fresh).
         readStatus = "STORAGE_UNAVAILABLE";
       }
+      // ALREADY_RESOLVED: nothing to update — a concurrent flush already
+      // persisted this item's outcome.
     }
 
     const final = readForMutation();

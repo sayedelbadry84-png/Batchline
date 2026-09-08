@@ -98,12 +98,12 @@ export function OfflineSyncBanner({
     };
   }, [trySync]);
 
-  function handleDismiss(id: string) {
+  async function handleDismiss(id: string) {
     // PL-R7-P1-02: only reflect the dismissal in the UI once persistence
     // of that removal actually succeeded — re-reading peekRejected()
     // (rather than filtering local state directly) means a failed
     // persist leaves the item showing exactly as it did before.
-    const result = offlineQueue.dismissRejected(id);
+    const result = await offlineQueue.dismissRejected(id);
     if (result.status !== "OK") setReadStatus("STORAGE_UNAVAILABLE");
     setRejected(offlineQueue.peekRejected().items);
   }

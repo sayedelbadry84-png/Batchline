@@ -114,7 +114,7 @@ export function AutoSaveField({
       }
     } catch {
       if (offlineQueueKind) {
-        const enqueued = offlineQueue.enqueue(offlineQueueKind, fields);
+        const enqueued = await offlineQueue.enqueue(offlineQueueKind, fields);
         if (enqueued.status === "OK") {
           lastSaved.current = value;
           setStatus("queued");
@@ -141,13 +141,13 @@ export function AutoSaveField({
     }
   }
 
-  function handleBlur(e: React.FocusEvent<HTMLInputElement>) {
+  async function handleBlur(e: React.FocusEvent<HTMLInputElement>) {
     const value = e.target.value;
     if (value === "" || value === lastSaved.current) return;
 
     if (offlineQueueKind && typeof navigator !== "undefined" && !navigator.onLine) {
       const fields = { ...hiddenFields, [valueField]: value, expectedVersion: String(currentVersion.current) };
-      const enqueued = offlineQueue.enqueue(offlineQueueKind, fields);
+      const enqueued = await offlineQueue.enqueue(offlineQueueKind, fields);
       if (enqueued.status === "OK") {
         lastSaved.current = value;
         setStatus("queued");

@@ -14,7 +14,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createOfflineQueue, type StorageAdapter, type ReplayOutcome } from "../src/lib/offlineQueue";
+import { createOfflineQueue, type StorageAdapter, type ReplayOutcome, type LockAdapter } from "../src/lib/offlineQueue";
 
 // A real in-memory Map-backed adapter — genuinely persists across calls
 // within one test, exactly like localStorage would, just without a
@@ -50,10 +50,37 @@ function throwingStorage(opts: { onSetItem?: boolean; onGetItem?: boolean } = { 
   };
 }
 
+// PL-R9-P2-01, ninth production-lifecycle review: models the ONE
+// guarantee the real Web Locks API gives two separate browser tabs on
+// the same origin — a named lock's holder count never exceeds one, and a
+// second requester genuinely waits for the first to release, however
+// long that takes. A plain promise chain reproduces exactly that FIFO
+// mutual-exclusion contract for two `createOfflineQueue` instances that
+// share one lock instance, standing in for "two tabs coordinating
+// through the same origin's Web Locks manager" — the real cross-process
+// interleaving Web Locks prevents in a browser is not reproducible with
+// full fidelity inside one single-threaded Node process, but the
+// serialization CONTRACT createOfflineQueue relies on is exactly this,
+// and is what these tests hold to a real, enforced invariant below (see
+// "a shared lock enforces true mutual exclusion...").
+function sharedLock(): LockAdapter {
+  let tail: Promise<unknown> = Promise.resolve();
+  return {
+    withLock<T>(fn: () => Promise<T>): Promise<T> {
+      const run = tail.then(() => fn());
+      tail = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    },
+  };
+}
+
 test("enqueue then a matching APPLIED handler removes the item from pending and never adds it to rejected", async () => {
   const storage = memoryStorage();
   const queue = createOfflineQueue(storage);
-  const enqueued = queue.enqueue("recordActualField", { value: "12.5" });
+  const enqueued = await queue.enqueue("recordActualField", { value: "12.5" });
   assert.equal(enqueued.status, "OK");
 
   const result = await queue.flushQueue({ recordActualField: async () => ({ status: "APPLIED" }) });
@@ -67,7 +94,7 @@ test("enqueue then a matching APPLIED handler removes the item from pending and 
 test("a RETRYABLE outcome leaves the item queued, completely unchanged", async () => {
   const storage = memoryStorage();
   const queue = createOfflineQueue(storage);
-  const enqueued = queue.enqueue("recordActualField", { value: "3" });
+  const enqueued = await queue.enqueue("recordActualField", { value: "3" });
   assert.equal(enqueued.status, "OK");
   const before = queue.peekQueue().items;
 
@@ -80,7 +107,7 @@ test("a RETRYABLE outcome leaves the item queued, completely unchanged", async (
 test("a handler that throws leaves the item queued, completely unchanged — the still-offline/transport-error path", async () => {
   const storage = memoryStorage();
   const queue = createOfflineQueue(storage);
-  queue.enqueue("recordActualField", { value: "7" });
+  await queue.enqueue("recordActualField", { value: "7" });
   const before = queue.peekQueue().items;
 
   const result = await queue.flushQueue({
@@ -96,7 +123,7 @@ test("a handler that throws leaves the item queued, completely unchanged — the
 test("a REJECTED outcome moves the item to the rejected list exactly once, with no window where it exists in neither", async () => {
   const storage = memoryStorage();
   const queue = createOfflineQueue(storage);
-  const enqueued = queue.enqueue("recordActualField", { field: "actual", value: "999" });
+  const enqueued = await queue.enqueue("recordActualField", { field: "actual", value: "999" });
   assert.equal(enqueued.status, "OK");
 
   const result = await queue.flushQueue({ recordActualField: async () => ({ status: "REJECTED", reason: "TERMINAL" }) });
@@ -111,11 +138,11 @@ test("a REJECTED outcome moves the item to the rejected list exactly once, with 
   assert.deepEqual(queue.peekQueue().items, []);
 });
 
-test("enqueue never claims success when the underlying storage write actually fails", () => {
+test("enqueue never claims success when the underlying storage write actually fails", async () => {
   const storage = throwingStorage({ onSetItem: true });
   const queue = createOfflineQueue(storage);
 
-  const result = queue.enqueue("recordActualField", { value: "42" });
+  const result = await queue.enqueue("recordActualField", { value: "42" });
   assert.equal(result.status, "STORAGE_UNAVAILABLE");
   // Nothing durable exists anywhere for this reading — peekQueue reads
   // through the same (failing) adapter and correctly sees nothing.
@@ -140,8 +167,8 @@ test("a corrupt stored payload is backed up under a separate key, not silently d
 test("two concurrent flush attempts against the same storage produce no duplicate rejected item and no lost pending item", async () => {
   const storage = memoryStorage();
   const queue = createOfflineQueue(storage);
-  queue.enqueue("a", { value: "1" });
-  queue.enqueue("b", { value: "2" });
+  await queue.enqueue("a", { value: "1" });
+  await queue.enqueue("b", { value: "2" });
 
   // Deliberately interleaved: both handlers yield to the event loop
   // before resolving, so both flushQueue calls are genuinely in flight
@@ -167,7 +194,7 @@ test("two concurrent flush attempts against the same storage produce no duplicat
   assert.equal(rejected[0].kind, "b");
 });
 
-test("dismissing a rejected item only removes it from the visible list once persistence actually succeeds", () => {
+test("dismissing a rejected item only removes it from the visible list once persistence actually succeeds", async () => {
   const storage = memoryStorage();
   const queue = createOfflineQueue(storage);
   storage.setItem("bl_offline_queue_v1", JSON.stringify({ version: 1, pending: [], rejected: [{ id: "r1", kind: "recordActualField", fields: { value: "5" }, createdAt: 1, reason: "TERMINAL", rejectedAt: 2 }] }));
@@ -178,10 +205,10 @@ test("dismissing a rejected item only removes it from the visible list once pers
   // prove the CONTRACT directly: a dismiss that can't persist reports
   // STORAGE_UNAVAILABLE, which is exactly what OfflineSyncBanner checks
   // before dropping the item from its own displayed state.
-  const failedDismiss = failing.dismissRejected("r1");
+  const failedDismiss = await failing.dismissRejected("r1");
   assert.equal(failedDismiss.status, "STORAGE_UNAVAILABLE");
 
-  const okDismiss = queue.dismissRejected("r1");
+  const okDismiss = await queue.dismissRejected("r1");
   assert.equal(okDismiss.status, "OK");
   assert.deepEqual(queue.peekRejected().items, []);
 });
@@ -194,14 +221,14 @@ test("dismissing a rejected item only removes it from the visible list once pers
 // one call couldn't see it. This proves the fix: a getItem failure must
 // report STORAGE_UNAVAILABLE and refuse to write at all, never fabricate
 // a writable empty snapshot.
-test("a getItem failure never becomes a writable empty snapshot that could overwrite real existing data", () => {
+test("a getItem failure never becomes a writable empty snapshot that could overwrite real existing data", async () => {
   // Seed real data through a working adapter first, then swap to one
   // whose reads fail but whose writes would otherwise still succeed —
   // proving the failure is specifically about not trusting a failed
   // READ, not about setItem also being broken.
   const storage = memoryStorage();
   const seedQueue = createOfflineQueue(storage);
-  seedQueue.enqueue("recordActualField", { value: "1" });
+  await seedQueue.enqueue("recordActualField", { value: "1" });
   const seededRaw = storage.store.get("bl_offline_queue_v1");
   assert.ok(seededRaw);
 
@@ -217,7 +244,7 @@ test("a getItem failure never becomes a writable empty snapshot that could overw
   assert.equal(peeked.readStatus, "STORAGE_UNAVAILABLE");
   assert.deepEqual(peeked.items, []);
 
-  const enqueueResult = queue.enqueue("recordActualField", { value: "2" });
+  const enqueueResult = await queue.enqueue("recordActualField", { value: "2" });
   assert.equal(enqueueResult.status, "STORAGE_UNAVAILABLE", "must refuse to write when the prior read couldn't be trusted");
 
   // The ORIGINAL seeded data must still be sitting there completely
@@ -272,4 +299,112 @@ test("a parseable but malformed queue item (missing required fields) is treated 
   const peeked = queue.peekQueue();
   assert.equal(peeked.readStatus, "RECOVERED_FROM_CORRUPT", "a malformed item must be treated as a corrupt payload, not silently trusted");
   assert.deepEqual(peeked.items, []);
+});
+
+test("`fields` stored as an array is rejected as corrupt, never trusted as a Record<string, string>", () => {
+  const storage = memoryStorage();
+  // typeof [] === "object" and Object.values([...]) both accept an array
+  // — the exact gap PL-R9-P2-01 closed in isStringRecord.
+  storage.setItem("bl_offline_queue_v1", JSON.stringify({ version: 1, pending: [{ id: "p1", kind: "recordActualField", fields: ["not", "a", "record"], createdAt: 1 }], rejected: [] }));
+  const queue = createOfflineQueue(storage);
+
+  const peeked = queue.peekQueue();
+  assert.equal(peeked.readStatus, "RECOVERED_FROM_CORRUPT", "an array-shaped fields must be treated as corrupt, not silently accepted");
+  assert.deepEqual(peeked.items, []);
+});
+
+// ---- PL-R9-P2-01: two-instance tests modeling real cross-tab access to
+// ---- the SAME origin storage, coordinated through one shared lock — see
+// ---- sharedLock's own comment above for exactly what this can and
+// ---- cannot prove in a single-threaded test process.
+
+test("a shared lock enforces true mutual exclusion between two withLock callers, even when one has a real async gap", async () => {
+  const lock = sharedLock();
+  let running = false;
+  let overlapDetected = false;
+  const order: string[] = [];
+
+  async function criticalSection(name: string, delayMs: number) {
+    return lock.withLock(async () => {
+      if (running) overlapDetected = true;
+      running = true;
+      order.push(`${name}:enter`);
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+      order.push(`${name}:exit`);
+      running = false;
+    });
+  }
+
+  // "tab1" is slow (simulates real latency inside its own critical
+  // section); "tab2" is fired essentially immediately after — if the
+  // lock didn't serialize them, tab2 could enter while tab1 is still
+  // mid-flight (running === true), exactly the interleaving that
+  // silently loses one tab's write in production.
+  await Promise.all([criticalSection("tab1", 20), criticalSection("tab2", 0)]);
+
+  assert.equal(overlapDetected, false, "no two critical sections may ever run concurrently under the same lock");
+  assert.deepEqual(order, ["tab1:enter", "tab1:exit", "tab2:enter", "tab2:exit"], "tab2 must wait for tab1 to fully exit before entering");
+});
+
+test("two-instance enqueue/enqueue over the same storage and a shared lock never loses either reading", async () => {
+  const storage = memoryStorage();
+  const lock = sharedLock();
+  const tab1 = createOfflineQueue(storage, lock);
+  const tab2 = createOfflineQueue(storage, lock);
+
+  const [r1, r2] = await Promise.all([tab1.enqueue("recordActualField", { field: "actual", value: "10" }), tab2.enqueue("recordActualField", { field: "moisture", value: "3" })]);
+  assert.equal(r1.status, "OK");
+  assert.equal(r2.status, "OK");
+
+  const items = tab1.peekQueue().items;
+  assert.equal(items.length, 2, "both tabs' readings must survive — neither enqueue may silently overwrite the other's read-modify-write");
+  assert.deepEqual(
+    items.map((i) => i.fields.field).sort(),
+    ["actual", "moisture"],
+  );
+});
+
+test("two-instance enqueue vs. dismiss over the same storage and a shared lock: both changes survive together", async () => {
+  const storage = memoryStorage();
+  storage.setItem("bl_offline_queue_v1", JSON.stringify({ version: 1, pending: [], rejected: [{ id: "r1", kind: "recordActualField", fields: { value: "5" }, createdAt: 1, reason: "TERMINAL", rejectedAt: 2 }] }));
+  const lock = sharedLock();
+  const tab1 = createOfflineQueue(storage, lock);
+  const tab2 = createOfflineQueue(storage, lock);
+
+  const [dismissResult, enqueueResult] = await Promise.all([tab1.dismissRejected("r1"), tab2.enqueue("recordActualField", { field: "actual", value: "88" })]);
+  assert.equal(dismissResult.status, "OK");
+  assert.equal(enqueueResult.status, "OK");
+
+  assert.deepEqual(tab1.peekRejected().items, [], "tab1's dismiss must have taken effect");
+  assert.equal(tab1.peekQueue().items.length, 1, "tab2's enqueue must have taken effect too — neither read-modify-write may clobber the other's already-persisted change");
+});
+
+test("two-instance enqueue during a slow concurrent flush: the new reading is never lost, the flushed one is still resolved correctly", async () => {
+  const storage = memoryStorage();
+  const lock = sharedLock();
+  const flushingTab = createOfflineQueue(storage, lock);
+  const otherTab = createOfflineQueue(storage, lock);
+
+  await flushingTab.enqueue("slow-kind", { value: "1" });
+
+  const slowHandler = {
+    "slow-kind": async (): Promise<ReplayOutcome> => {
+      // The handler call itself is deliberately OUTSIDE the lock (see
+      // offlineQueue.ts's own comment on why) — this delay is exactly
+      // the window where another tab's enqueue must still be able to
+      // proceed immediately rather than blocking on a slow network call
+      // it has nothing to do with.
+      await new Promise((r) => setTimeout(r, 15));
+      return { status: "APPLIED" };
+    },
+  };
+
+  const [flushResult, enqueueResult] = await Promise.all([flushingTab.flushQueue(slowHandler), otherTab.enqueue("recordActualField", { field: "actual", value: "99" })]);
+
+  assert.equal(flushResult.flushed, 1);
+  assert.equal(enqueueResult.status, "OK", "the concurrent enqueue must not be blocked or lost while the unrelated flush handler is still in flight");
+
+  const remaining = flushingTab.peekQueue().items;
+  assert.equal(remaining.length, 1, "the newly enqueued item must survive flushQueue's own re-read-freshest-state write, not be silently dropped by it");
+  assert.equal(remaining[0].fields.field, "actual");
 });
