@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { maybeAutoRequisitionMaterial, queuePendingAutoRequisition } from "@/lib/materialRequisition";
+import { processPendingAutoRequisition } from "@/lib/materialRequisition";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
@@ -427,28 +427,30 @@ export async function completeBatch(_prevState: CompleteBatchActionState, formDa
   // The ticket, its inventory ledger, and its own audit event have
   // ALREADY committed successfully by this point — auto-requisition is a
   // best-effort follow-up, not part of what "the batch completed" means.
-  // A failure here used to propagate as an uncaught exception, making
-  // this whole Server Action look like it failed to the caller even
-  // though the actual completion already succeeded — a retry would then
-  // see ALREADY_COMPLETED and never get a second chance to open the
-  // requisition (PL-R7-P2-02, seventh production-lifecycle review). The
-  // new partial-unique DB index on MaterialRequisition (migration
-  // harden_production_lifecycle_round7) makes a genuine concurrent
-  // duplicate a caught, safe no-op here instead of a silent race.
-  for (const r of result.requisitionCandidates) {
+  // A failure here must never propagate as an uncaught exception, which
+  // would make this whole Server Action look like it failed even though
+  // the actual completion already succeeded (PL-R7-P2-02, seventh
+  // production-lifecycle review).
+  //
+  // PL-R10-P2-01, tenth production-lifecycle review: each id here is
+  // already a DURABLE PendingAutoRequisition row, staged inside
+  // completeBatchTicket's own transaction (batchCompletion.ts) — not
+  // created only if THIS attempt happens to fail. processPendingAutoRequisition
+  // is the exact same function the daily cron sweep uses to drain any
+  // row still on file, so this "fast path" attempt and that "retry path"
+  // can never quietly drift apart: a fast-path failure here just leaves
+  // the row for tomorrow's sweep, already backed off/recorded by
+  // processPendingAutoRequisition itself — no separate queue-on-failure
+  // step is needed any more.
+  for (const intentId of result.stagedAutoRequisitionIds) {
     try {
-      const toKg = r.unit === "LITERS" ? (liters: number) => liters * (r.specificGravity ?? 1) : (tons: number) => tons * 1000;
-      await maybeAutoRequisitionMaterial(r.materialId, r.siteId, r.newLevel, r.capacity, r.minThresholdPct, toKg);
+      await processPendingAutoRequisition(intentId);
     } catch (e) {
-      console.error(`[completeBatch] auto-requisition follow-up failed for material ${r.materialId} (ticket ${batchTicketId}) — the batch itself is still COMPLETE:`, e);
-      // PL-R9-P2-03, ninth production-lifecycle review: this used to be
-      // just the log line above — a genuine failure here (a transient DB
-      // error, or one inside maybeAutoRequisitionMaterial's own
-      // notifyRoles call after the requisition row itself already
-      // committed) left no durable trace that this shortage never
-      // actually got followed up. Queued for the same daily cron sweep
-      // (api/cron/cleanup) that already drains PendingBlobDeletion.
-      await queuePendingAutoRequisition(batchTicketId, r, e);
+      // processPendingAutoRequisition is designed to never throw (every
+      // failure path already records backoff on the row) — this is a
+      // last-resort net for a truly unexpected error, so it still can
+      // never fail the request the batch itself already committed under.
+      console.error(`[completeBatch] unexpected error processing auto-requisition intent ${intentId} (ticket ${batchTicketId}) — the batch itself is still COMPLETE:`, e);
     }
   }
 

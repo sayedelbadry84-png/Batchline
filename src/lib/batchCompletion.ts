@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { findMatchingSilo, findMatchingHopper, AGGREGATE_TYPES } from "@/lib/storageMatching";
 import { postSiloMovement, postHopperMovement, postChemicalTankMovement, DomainError, withRetry, EPSILON, type MovementResult } from "@/lib/inventoryLedger";
 import { writeAudit } from "@/lib/audit";
+import { stageAutoRequisitionIntent } from "@/lib/materialRequisition";
 
 type Tx = Prisma.TransactionClient;
 
@@ -25,7 +26,7 @@ export type RequisitionCandidate = {
 };
 
 export type CompleteBatchResult =
-  | { status: "SUCCESS"; shortages: string[]; requisitionCandidates: RequisitionCandidate[]; consumedOverrideRequestId: string | null }
+  | { status: "SUCCESS"; shortages: string[]; stagedAutoRequisitionIds: string[]; consumedOverrideRequestId: string | null }
   | { status: "ALREADY_COMPLETED" }
   | { status: "INVALID_STATE" }
   | { status: "INSUFFICIENT_STOCK"; shortages: string[] }
@@ -252,7 +253,7 @@ export async function completeBatchTicket(ticketId: string, opts: { actorId?: st
         if (resolution.status === "STORAGE_NOT_CONFIGURED") throw new DomainError("STORAGE_NOT_CONFIGURED", resolution.material);
 
         const shortages: string[] = [];
-        const requisitionCandidates: RequisitionCandidate[] = [];
+        const stagedAutoRequisitionIds: string[] = [];
         for (const r of resolution.resolved) {
           const post = r.storageType === "SILO" ? postSiloMovement : r.storageType === "HOPPER" ? postHopperMovement : postChemicalTankMovement;
           const movement: MovementResult = await post(tx, {
@@ -285,7 +286,17 @@ export async function completeBatchTicket(ticketId: string, opts: { actorId?: st
           if (movement.shortfallAllowed > EPSILON) {
             shortages.push(`${r.materialName}: requested ${Math.abs(r.quantity).toFixed(2)}, applied ${Math.abs(movement.appliedQuantity).toFixed(2)}`);
           }
-          requisitionCandidates.push({
+          // PL-R10-P2-01, tenth production-lifecycle review: staged INSIDE
+          // this same completion transaction, not created only after a
+          // caught failure in the wrapper's own best-effort follow-up
+          // (the Round 9 gap) — the intent is durable from the instant the
+          // shortage that created it is, so a process crash between this
+          // commit and the follow-up (or a failure of the row insert
+          // itself) can no longer lose it. Staged unconditionally for
+          // every candidate; createRequisitionIfNeeded's own
+          // NOT_TRACKED/BELOW_THRESHOLD checks at processing time resolve
+          // (and delete) a row that never actually needed a requisition.
+          const intent = await stageAutoRequisitionIntent(tx, ticketId, {
             materialId: r.materialId,
             siteId: ticket.plant.siteId,
             newLevel: movement.newLevel,
@@ -294,6 +305,7 @@ export async function completeBatchTicket(ticketId: string, opts: { actorId?: st
             unit: r.storageType === "CHEMICAL_TANK" ? "LITERS" : "TONS",
             specificGravity: r.specificGravity,
           });
+          stagedAutoRequisitionIds.push(intent.id);
         }
 
         // Resolve whatever active request is on file, now that the
@@ -347,7 +359,7 @@ export async function completeBatchTicket(ticketId: string, opts: { actorId?: st
           });
         }
 
-        return { status: "SUCCESS" as const, shortages, requisitionCandidates, consumedOverrideRequestId };
+        return { status: "SUCCESS" as const, shortages, stagedAutoRequisitionIds, consumedOverrideRequestId };
       }, TX_OPTIONS),
     );
   } catch (e) {

@@ -4,6 +4,10 @@ import { prisma } from "@/lib/prisma";
 import { withSequentialNumber } from "@/lib/sequence";
 import { notifyRoles } from "@/lib/notify";
 import { REQUISITION_APPROVAL_ROLES } from "@/lib/permissions";
+import { computeNextAttempt, MAX_ATTEMPTS_BEFORE_DEAD_LETTER } from "@/lib/retryBackoff";
+import type { RequisitionCandidate } from "@/lib/batchCompletion";
+
+type Tx = Prisma.TransactionClient;
 
 // Extracted out of production/actions.ts (PL-R8-P2-02, eighth production-
 // lifecycle review) so the concurrency behavior below is directly
@@ -48,28 +52,35 @@ async function findOpenRequisition(materialId: string, siteId: string) {
   });
 }
 
-export type AutoRequisitionResult =
-  | { status: "CREATED"; requisitionId: string; requisitionNumber: string }
-  | { status: "ALREADY_OPEN"; requisitionId: string; requisitionNumber: string }
+export type CreateRequisitionResult =
+  | { status: "CREATED"; requisitionId: string; requisitionNumber: string; materialName: string }
+  | { status: "ALREADY_OPEN"; requisitionId: string; requisitionNumber: string; materialName: string }
   | { status: "BELOW_THRESHOLD" }
   | { status: "NOT_TRACKED" };
 
-// Raw-material counterpart to issueSparePartToOrder's shortfall handling —
-// called from completeBatch right after a silo/hopper/tank's level is
-// deducted; if what's left is at or below the store's own minThresholdPct,
-// opens a MaterialRequisition for enough to refill it (skipped if capacity
-// is unset/zero, since there's then no percentage to compare against, or
-// if one's already open for this material+site). toKg converts the
-// store's own unit (tons for silo/hopper, liters for a chemical tank) to
-// the kg PurchaseOrderLine.orderedMassKg expects.
-export async function maybeAutoRequisitionMaterial(
+// The creation half ONLY — no notification. Split out in PL-R10-P2-01
+// (tenth production-lifecycle review) so requisition creation and
+// approval-notification delivery can be tracked and retried as separate
+// progress on one PendingAutoRequisition intent row (see
+// processPendingAutoRequisition below) — a notifyRoles failure after the
+// requisition itself already committed must retry ONLY the notification,
+// never risk a duplicate create.
+//
+// Raw-material counterpart to issueSparePartToOrder's shortfall handling;
+// if what's left is at or below the store's own minThresholdPct, opens a
+// MaterialRequisition for enough to refill it (skipped if capacity is
+// unset/zero, since there's then no percentage to compare against, or if
+// one's already open for this material+site). toKg converts the store's
+// own unit (tons for silo/hopper, liters for a chemical tank) to the kg
+// PurchaseOrderLine.orderedMassKg expects.
+export async function createRequisitionIfNeeded(
   materialId: string,
   siteId: string,
   currentLevel: number,
   capacity: number,
   minThresholdPct: number,
   toKg: (units: number) => number,
-): Promise<AutoRequisitionResult> {
+): Promise<CreateRequisitionResult> {
   if (capacity <= 0) return { status: "NOT_TRACKED" };
   if ((currentLevel / capacity) * 100 > minThresholdPct) return { status: "BELOW_THRESHOLD" };
 
@@ -77,7 +88,10 @@ export async function maybeAutoRequisitionMaterial(
   if (shortfall <= 0) return { status: "BELOW_THRESHOLD" };
 
   const existing = await findOpenRequisition(materialId, siteId);
-  if (existing) return { status: "ALREADY_OPEN", requisitionId: existing.id, requisitionNumber: existing.requisitionNumber };
+  if (existing) {
+    const material = await prisma.material.findUniqueOrThrow({ where: { id: materialId } });
+    return { status: "ALREADY_OPEN", requisitionId: existing.id, requisitionNumber: existing.requisitionNumber, materialName: material.name };
+  }
 
   // The pre-check above is a plain read with no lock — a genuinely
   // concurrent completion for the same material+site can still race past
@@ -118,7 +132,8 @@ export async function maybeAutoRequisitionMaterial(
       // own "return the existing open requisition" ask — so both
       // concurrent callers resolve to the SAME row instead of one of
       // them silently doing nothing with no visible result at all.
-      return { status: "ALREADY_OPEN", requisitionId: e.winner.id, requisitionNumber: e.winner.requisitionNumber };
+      const material = await prisma.material.findUniqueOrThrow({ where: { id: materialId } });
+      return { status: "ALREADY_OPEN", requisitionId: e.winner.id, requisitionNumber: e.winner.requisitionNumber, materialName: material.name };
     }
     // Anything else — including 5 real requisitionNumber collisions —
     // is a genuine allocation failure, not a benign duplicate. It
@@ -127,72 +142,179 @@ export async function maybeAutoRequisitionMaterial(
     throw e;
   }
 
+  return { status: "CREATED", requisitionId: requisition.id, requisitionNumber: requisition.requisitionNumber, materialName: requisition.material.name };
+}
+
+export async function notifyRequisitionCreated(requisitionNumber: string, materialName: string): Promise<void> {
   await notifyRoles(REQUISITION_APPROVAL_ROLES, {
-    title: requisition.requisitionNumber,
-    body: `${requisition.material.name} — auto-requested, stock at or below threshold`,
+    title: requisitionNumber,
+    body: `${materialName} — auto-requested, stock at or below threshold`,
     link: "/warehouses?tab=rawMaterials&sub=silos",
     module: "Warehouses",
   });
-  return { status: "CREATED", requisitionId: requisition.id, requisitionNumber: requisition.requisitionNumber };
 }
 
-// PL-R9-P2-03, ninth production-lifecycle review: completeBatch's own
-// call into maybeAutoRequisitionMaterial above is deliberately best-
-// effort (the batch itself must stay COMPLETE regardless of a
-// purchasing-side failure) — but the old catch block there just logged
-// and moved on, leaving no durable trace that a shortage never actually
-// got a requisition opened for it. This is the paired "queue it for
-// retry" half — see retryPendingAutoRequisitions below for the drain
-// side, and PendingAutoRequisition's own comment in schema.prisma for
-// why this is a narrow, reused-infrastructure fix rather than a full
-// transactional outbox. Never throws: this itself runs from inside a
-// catch block that must not fail the request it's already recovering
-// from.
-export async function queuePendingAutoRequisition(batchTicketId: string, candidate: { materialId: string; siteId: string; newLevel: number; capacity: number; minThresholdPct: number; unit: "TONS" | "LITERS"; specificGravity?: number }, error: unknown): Promise<void> {
+function toKgConverter(unit: string, specificGravity: number | null): (units: number) => number {
+  return unit === "LITERS" ? (liters: number) => liters * (specificGravity ?? 1) : (tons: number) => tons * 1000;
+}
+
+// PL-R10-P2-01, tenth production-lifecycle review: called INSIDE
+// completeBatchTicket's own completion transaction (batchCompletion.ts),
+// not after a caught failure — the intent is durable from the moment the
+// shortage that created it is, so a process crash between commit and the
+// best-effort follow-up (or a failure of the row insert itself, the
+// Round 9 gap) can no longer lose it. One row per (batchTicketId,
+// materialId, siteId) — completeBatchTicket's own claim already makes a
+// second call for the SAME ticket unreachable, so a genuine duplicate
+// here would only ever be a real bug, not a race to defend against.
+export async function stageAutoRequisitionIntent(tx: Tx, batchTicketId: string, candidate: RequisitionCandidate): Promise<{ id: string }> {
+  return tx.pendingAutoRequisition.create({
+    data: {
+      batchTicketId,
+      materialId: candidate.materialId,
+      siteId: candidate.siteId,
+      newLevel: candidate.newLevel,
+      capacity: candidate.capacity,
+      minThresholdPct: candidate.minThresholdPct,
+      unit: candidate.unit,
+      specificGravity: candidate.specificGravity ?? null,
+    },
+    select: { id: true },
+  });
+}
+
+export type ProcessIntentResult = { status: "RESOLVED" } | { status: "RETRY" };
+
+// The one place that actually drains a staged intent — called both by
+// completeBatch's own right-after-commit best-effort attempt (actions.ts)
+// and by the daily cron sweep (retryPendingAutoRequisitions below), so
+// both paths get identical, idempotent behavior instead of a "fast path"
+// and a "retry path" that could quietly drift apart. Progress is tracked
+// in two independent steps: requisitionId (creation) and, once that's
+// set, the notification — so a notifyRoles failure after the requisition
+// already committed retries ONLY the notification on the next pass,
+// never a duplicate create (see PL-R10-P2-01's own "record separate
+// progress" requirement). Never throws — every failure path is caught
+// and turned into a RETRY result with backoff recorded on the row.
+//
+// `notify` is injectable (defaulting to the real notifyRequisitionCreated
+// above), the same DI pattern already used for StorageAdapter
+// (offlineQueue.ts) and BlobDeleter (blob.ts) — this is what makes
+// "requisition created, notification fails, retry sends notification
+// exactly once, never a duplicate create" provable in a real integration
+// test without needing to force a genuine notifyRoles failure.
+export async function processPendingAutoRequisition(intentId: string, notify: (requisitionNumber: string, materialName: string) => Promise<void> = notifyRequisitionCreated): Promise<ProcessIntentResult> {
+  const intent = await prisma.pendingAutoRequisition.findUnique({ where: { id: intentId } });
+  if (!intent) return { status: "RESOLVED" }; // already resolved (and deleted) by a concurrent attempt
+
   try {
-    await prisma.pendingAutoRequisition.create({
-      data: {
-        batchTicketId,
-        materialId: candidate.materialId,
-        siteId: candidate.siteId,
-        newLevel: candidate.newLevel,
-        capacity: candidate.capacity,
-        minThresholdPct: candidate.minThresholdPct,
-        unit: candidate.unit,
-        specificGravity: candidate.specificGravity ?? null,
-        lastError: String(error),
-      },
-    });
-  } catch (persistError) {
-    console.error(`[materialRequisition] auto-requisition follow-up failed AND failed to record for retry: material ${candidate.materialId}, ticket ${batchTicketId}`, error, persistError);
+    let requisitionNumber = intent.requisitionNumber;
+    let materialName = intent.materialName;
+
+    if (!intent.requisitionId) {
+      const toKg = toKgConverter(intent.unit, intent.specificGravity);
+      const created = await createRequisitionIfNeeded(intent.materialId, intent.siteId, intent.newLevel, intent.capacity, intent.minThresholdPct, toKg);
+
+      if (created.status === "BELOW_THRESHOLD" || created.status === "NOT_TRACKED") {
+        // The snapshot that triggered this intent no longer calls for a
+        // requisition — re-read fresh from the current MaterialRequisition
+        // table (via findOpenRequisition inside createRequisitionIfNeeded)
+        // and the storage row's OWN current level (currentLevel/capacity
+        // are read fresh from the row's own arguments here — this retry
+        // deliberately re-evaluates against the ORIGINAL captured
+        // newLevel/capacity/minThresholdPct snapshot, not a fresh storage
+        // read: honoring the snapshot that actually triggered the
+        // shortage is the documented choice (PL-R10-P2-01) — a retry
+        // days later re-reading current storage could either mask a
+        // shortage that has since gotten WORSE (silently under-ordering)
+        // or skip one that has genuinely resolved (over-ordering); the
+        // snapshot is the one thing this intent can prove actually
+        // happened at completion time.
+        await prisma.pendingAutoRequisition.delete({ where: { id: intentId } }).catch(() => {});
+        return { status: "RESOLVED" };
+      }
+      if (created.status === "ALREADY_OPEN") {
+        // Someone else's completion already created (and already
+        // notified for) this exact material+site — nothing left for
+        // THIS intent to do.
+        await prisma.pendingAutoRequisition.delete({ where: { id: intentId } }).catch(() => {});
+        return { status: "RESOLVED" };
+      }
+
+      // CREATED — record the requisition progress durably BEFORE
+      // attempting notification, so a notifyRoles failure next can never
+      // cause a retry to re-attempt creation.
+      requisitionNumber = created.requisitionNumber;
+      materialName = created.materialName;
+      await prisma.pendingAutoRequisition.update({
+        where: { id: intentId },
+        data: { requisitionId: created.requisitionId, requisitionNumber, materialName },
+      });
+    }
+
+    // requisitionId is now set either way — only the notification is
+    // still owed (an ALREADY_OPEN intent above already returned; only a
+    // genuine CREATED reaches here).
+    await notify(requisitionNumber!, materialName!);
+    await prisma.pendingAutoRequisition.delete({ where: { id: intentId } }).catch(() => {});
+    return { status: "RESOLVED" };
+  } catch (error) {
+    const attempts = intent.attempts + 1;
+    await prisma.pendingAutoRequisition
+      .update({
+        where: { id: intentId },
+        data: {
+          attempts,
+          lastError: String(error),
+          lastTriedAt: new Date(),
+          nextAttemptAt: computeNextAttempt(attempts),
+          deadLetteredAt: attempts >= MAX_ATTEMPTS_BEFORE_DEAD_LETTER ? new Date() : undefined,
+        },
+      })
+      .catch(() => {});
+    return { status: "RETRY" };
   }
 }
 
-// The api/cron/cleanup sweep's own half — retries every row still on
-// file by calling the exact same maybeAutoRequisitionMaterial callers
-// use directly, so a retry gets the exact same idempotent behavior a
-// fresh call would (findOpenRequisition's own pre-check means a
-// requisition that DID get created before the original failure — e.g. a
-// failure inside notifyRoles, after the create had already committed —
-// is correctly seen as ALREADY_OPEN on retry rather than duplicated). A
-// row is removed once it resolves to ANY terminal outcome (CREATED,
-// ALREADY_OPEN, BELOW_THRESHOLD, NOT_TRACKED are all "nothing left to
-// retry"); a row that fails again just records the new error for
-// tomorrow's run — retried indefinitely, same reasoning as
-// retryPendingBlobDeletions (blob.ts): the cost of leaving a row queued
-// is a delayed requisition, never incorrect data.
-export async function retryPendingAutoRequisitions(): Promise<{ attempted: number; resolved: number }> {
-  const rows = await prisma.pendingAutoRequisition.findMany({ orderBy: { createdAt: "asc" }, take: 200 });
+// PL-R10-P2-03, tenth production-lifecycle review: a single atomic
+// UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) — the
+// standard Postgres work-queue claim pattern. Provisionally bumps each
+// claimed row's own nextAttemptAt forward by one backoff step BEFORE any
+// real work happens, so if this process crashes mid-batch, the row isn't
+// immediately re-claimed by a concurrent sweep; processPendingAutoRequisition
+// then either deletes the row (resolved) or recomputes the real backoff
+// on failure. SKIP LOCKED is what makes two overlapping cron invocations
+// safe: each one only ever claims rows the other isn't already holding.
+async function claimEligiblePendingAutoRequisitions(limit: number): Promise<{ id: string }[]> {
+  const provisionalLease = computeNextAttempt(0);
+  return prisma.$queryRaw<{ id: string }[]>`
+    UPDATE "PendingAutoRequisition"
+    SET "nextAttemptAt" = ${provisionalLease}
+    WHERE id IN (
+      SELECT id FROM "PendingAutoRequisition"
+      WHERE "nextAttemptAt" <= now() AND "deadLetteredAt" IS NULL
+      ORDER BY "nextAttemptAt" ASC
+      LIMIT ${limit}
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id
+  `;
+}
+
+// The api/cron/cleanup sweep's own half — claims a fair batch of
+// eligible rows (never the same permanently-failing ones forever, see
+// claimEligiblePendingAutoRequisitions) and drains each through the
+// exact same processPendingAutoRequisition completeBatch's own best-
+// effort attempt uses.
+export async function retryPendingAutoRequisitions(
+  limit = 200,
+  notify: (requisitionNumber: string, materialName: string) => Promise<void> = notifyRequisitionCreated,
+): Promise<{ attempted: number; resolved: number }> {
+  const claimed = await claimEligiblePendingAutoRequisitions(limit);
   let resolved = 0;
-  for (const row of rows) {
-    const toKg = row.unit === "LITERS" ? (liters: number) => liters * (row.specificGravity ?? 1) : (tons: number) => tons * 1000;
-    try {
-      await maybeAutoRequisitionMaterial(row.materialId, row.siteId, row.newLevel, row.capacity, row.minThresholdPct, toKg);
-      await prisma.pendingAutoRequisition.delete({ where: { id: row.id } }).catch(() => {});
-      resolved++;
-    } catch (error) {
-      await prisma.pendingAutoRequisition.update({ where: { id: row.id }, data: { attempts: { increment: 1 }, lastError: String(error), lastTriedAt: new Date() } }).catch(() => {});
-    }
+  for (const row of claimed) {
+    const outcome = await processPendingAutoRequisition(row.id, notify);
+    if (outcome.status === "RESOLVED") resolved++;
   }
-  return { attempted: rows.length, resolved };
+  return { attempted: claimed.length, resolved };
 }

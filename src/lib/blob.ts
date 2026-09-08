@@ -1,5 +1,6 @@
 import { put, del, get } from "@vercel/blob";
 import { prisma } from "@/lib/prisma";
+import { computeNextAttempt, MAX_ATTEMPTS_BEFORE_DEAD_LETTER } from "@/lib/retryBackoff";
 
 // The one place in the app that talks to object storage — Vercel Blob,
 // since the app is already deployed on Vercel and this needs no separate
@@ -65,29 +66,70 @@ export async function deleteFileDurable(appUrl: string, reason: string, deleteFn
   }
 }
 
+// PL-R10-P2-03, tenth production-lifecycle review: a blind
+// `orderBy: createdAt, take: 200` let the oldest 200 permanently-failing
+// rows starve every genuinely resolvable newer row forever — every daily
+// sweep re-selected the exact same rows. This claims a FAIR batch via the
+// standard Postgres work-queue pattern: one atomic UPDATE ... WHERE id IN
+// (SELECT ... FOR UPDATE SKIP LOCKED), ordered by nextAttemptAt (which
+// capped-exponential backoff below pushes later on each repeat failure,
+// so a chronically failing row naturally falls behind newer ones) and
+// excluding deadLetteredAt rows. SKIP LOCKED is what makes two
+// overlapping cron invocations safe — see retryBackoff.ts's own comment
+// for the exact policy this shares with materialRequisition.ts's
+// identical claim pattern for PendingAutoRequisition.
+async function claimEligiblePendingBlobDeletions(limit: number): Promise<{ id: string; url: string; attempts: number }[]> {
+  const provisionalLease = computeNextAttempt(0);
+  return prisma.$queryRaw<{ id: string; url: string; attempts: number }[]>`
+    UPDATE "PendingBlobDeletion"
+    SET "nextAttemptAt" = ${provisionalLease}
+    WHERE id IN (
+      SELECT id FROM "PendingBlobDeletion"
+      WHERE "nextAttemptAt" <= now() AND "deadLetteredAt" IS NULL
+      ORDER BY "nextAttemptAt" ASC
+      LIMIT ${limit}
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, url, attempts
+  `;
+}
+
 // The api/cron/cleanup sweep's own half of PendingBlobDeletion — kept
 // here rather than importing @vercel/blob's del() directly into the
 // route, matching this file's own role as the one place that talks to
-// object storage. Each row is retried once per sweep; a delete that
-// succeeds removes the row, one that fails again just records the new
-// error and is picked up by tomorrow's run — retried indefinitely rather
-// than capped, since an orphaned blob costs storage, not correctness,
-// and there is no safe point at which "give up forever" is the right
-// call for it.
-export async function retryPendingBlobDeletions(deleteFn: BlobDeleter = defaultDeleter): Promise<{ attempted: number; succeeded: number }> {
-  const rows = await prisma.pendingBlobDeletion.findMany({ orderBy: { createdAt: "asc" }, take: 200 });
+// object storage. A delete that succeeds removes the row outright; one
+// that fails again records the new error, bumps attempts, and computes
+// the next real backoff — moved to a dead-lettered state (excluded from
+// future claims, not deleted — a human can still find and clear it) past
+// MAX_ATTEMPTS_BEFORE_DEAD_LETTER, since an orphaned blob costs storage,
+// not correctness, and retrying forever with nobody ever noticing serves
+// no one either.
+export async function retryPendingBlobDeletions(deleteFn: BlobDeleter = defaultDeleter, limit = 200): Promise<{ attempted: number; succeeded: number }> {
+  const claimed = await claimEligiblePendingBlobDeletions(limit);
   let succeeded = 0;
-  for (const row of rows) {
+  for (const row of claimed) {
     const pathname = row.url.replace(/^\/api\/files\//, "");
     try {
       await deleteFn(pathname);
       await prisma.pendingBlobDeletion.delete({ where: { id: row.id } }).catch(() => {});
       succeeded++;
     } catch (error) {
-      await prisma.pendingBlobDeletion.update({ where: { id: row.id }, data: { attempts: { increment: 1 }, lastError: String(error), lastTriedAt: new Date() } }).catch(() => {});
+      const attempts = row.attempts + 1;
+      await prisma.pendingBlobDeletion
+        .update({
+          where: { id: row.id },
+          data: {
+            attempts,
+            lastError: String(error),
+            lastTriedAt: new Date(),
+            nextAttemptAt: computeNextAttempt(attempts),
+            deadLetteredAt: attempts >= MAX_ATTEMPTS_BEFORE_DEAD_LETTER ? new Date() : undefined,
+          },
+        })
+        .catch(() => {});
     }
   }
-  return { attempted: rows.length, succeeded };
+  return { attempted: claimed.length, succeeded };
 }
 
 // Used only by the /api/files route — reads the same private blob back so

@@ -44,7 +44,7 @@ const { postSiloMovement } = await import("../src/lib/inventoryLedger");
 const { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } = await import("../src/lib/batchComponentEdits");
 const { claimTripSlot, applyReclaimCredit } = await import("../src/lib/tripDispatch");
 const { requestShortageOverride, approveShortageOverrideRequest, rejectShortageOverrideRequest } = await import("../src/lib/shortageOverrideRequests");
-const { maybeAutoRequisitionMaterial, queuePendingAutoRequisition, retryPendingAutoRequisitions } = await import("../src/lib/materialRequisition");
+const { createRequisitionIfNeeded, stageAutoRequisitionIntent, processPendingAutoRequisition, retryPendingAutoRequisitions } = await import("../src/lib/materialRequisition");
 
 const prisma = new PrismaClient();
 
@@ -1239,19 +1239,34 @@ test("an old tab's single-field autosave cannot overwrite a newer bulk save on t
   assert.equal(final.actualMassKg, 900, "the bulk save's value must survive untouched");
 });
 
-test("a bulk save versus a concurrent single-field autosave: exactly one deterministic winner, never a partial bulk write", async () => {
+test("a bulk save versus a concurrent single-field autosave: exactly one winner, never a partial bulk write", async () => {
+  // PL-R10-P1-02, tenth production-lifecycle review: BatchComponentActual
+  // has @@unique([batchTicketId, materialId]) — two components on ONE
+  // ticket can never share a materialId. The original fixture here
+  // created both with the same `materialId`, so Postgres rejected the
+  // insert before the race below ever ran. A genuine second component
+  // needs a genuinely second material.
+  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-BC-BULK-VS-AUTOSAVE-B", type: "CEMENT" } });
   const ticketId = await makeTicket([
     { materialId, targetMassKg: 1000 },
-    { materialId, targetMassKg: 2000 },
+    { materialId: secondMaterial.id, targetMassKg: 2000 },
   ]);
-  const components = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId }, orderBy: { targetMassKg: "asc" } });
-  const [componentA, componentB] = components;
+  const componentA = await prisma.batchComponentActual.findFirstOrThrow({ where: { batchTicketId: ticketId, materialId } });
+  const componentB = await prisma.batchComponentActual.findFirstOrThrow({ where: { batchTicketId: ticketId, materialId: secondMaterial.id } });
 
   // The concurrent autosave only ever touches componentA's actual field.
   // The bulk save covers BOTH components in one transaction — if the race
   // makes the bulk save's belief about componentA stale, componentB must
   // never have been written either (no partial bulk write), even though
   // nothing ever raced componentB directly.
+  //
+  // PL-R10-P1-02: Promise.all gives NO ordering guarantee between these
+  // two — either one can reach its own transaction's commit first. The
+  // only real invariant is that EXACTLY ONE of them may end up "OK"
+  // against actualVersion 0; the other must see STALE_READING and (for
+  // the bulk side) roll back in full. Asserting a predetermined winner
+  // was the actual bug this round's review found — both legal outcomes
+  // are validated symmetrically below instead.
   const [autosaveResult, bulkResult] = await Promise.all([
     claimAndRecordActualField(ticketId, componentA.id, "actual", 77, 0, { id: adminUserId, role: "ADMIN" }),
     claimAndRecordActuals(
@@ -1264,22 +1279,18 @@ test("a bulk save versus a concurrent single-field autosave: exactly one determi
     ),
   ]);
 
-  assert.equal(autosaveResult.status, "OK", "the single-field autosave always succeeds against componentA's true version at the moment it commits");
+  assert.equal(
+    [autosaveResult.status, bulkResult.status].filter((s) => s === "OK").length,
+    1,
+    `exactly one of the two concurrent writers may win against actualVersion 0, got: autosave=${autosaveResult.status}, bulk=${bulkResult.status}`,
+  );
 
   const [finalA, finalB] = await Promise.all([
     prisma.batchComponentActual.findUniqueOrThrow({ where: { id: componentA.id } }),
     prisma.batchComponentActual.findUniqueOrThrow({ where: { id: componentB.id } }),
   ]);
 
-  if (bulkResult.status === "OK") {
-    // The bulk save committed first — the autosave above then had to have
-    // read/won against actualVersion 1, which the OK assertion already
-    // covers implicitly since claimAndRecordActualField only accepts an
-    // exact match; both components show the bulk values, componentA's
-    // 500 immediately overwritten by the autosave's own 77.
-    assert.equal(finalA.actualMassKg, 77);
-    assert.equal(finalB.actualMassKg, 1900, "componentB must have the bulk value — the bulk write was never partial");
-  } else {
+  if (autosaveResult.status === "OK") {
     // The autosave committed first — the bulk save's belief about
     // componentA (version 0) was stale by the time it ran, so the WHOLE
     // bulk write must have rolled back, including componentB, which the
@@ -1288,6 +1299,14 @@ test("a bulk save versus a concurrent single-field autosave: exactly one determi
     if (bulkResult.status === "STALE_READING") assert.deepEqual(bulkResult.staleIds, [componentA.id]);
     assert.equal(finalA.actualMassKg, 77, "the autosave's own value must survive");
     assert.equal(finalB.actualMassKg, null, "componentB must be untouched — a stale component must roll back the ENTIRE bulk write, not just its own row");
+  } else {
+    // The bulk save committed first — the autosave's own belief about
+    // componentA (also version 0) was then stale, so it must have been
+    // refused rather than silently overwriting the bulk save's value.
+    assert.equal(autosaveResult.status, "STALE_READING", "the losing autosave must be refused, not silently applied over the bulk save's own value");
+    assert.equal(bulkResult.status, "OK");
+    assert.equal(finalA.actualMassKg, 500, "the bulk save's value for componentA must survive untouched");
+    assert.equal(finalB.actualMassKg, 1900, "componentB must have the bulk value");
   }
 });
 
@@ -1466,7 +1485,7 @@ test("completeBatchTicket rolls back the ticket claim together with a failed aud
   assert.equal(retry.status, "SUCCESS");
 });
 
-// PL-R8-P2-02, eighth production-lifecycle review: maybeAutoRequisitionMaterial's
+// PL-R8-P2-02, eighth production-lifecycle review: createRequisitionIfNeeded's
 // own pre-check (a plain SELECT) has a race window a genuinely concurrent
 // call can win — the partial unique index MaterialRequisition_open_per_
 // material_site_key is the real backstop, and the P2002 it raises must be
@@ -1475,7 +1494,11 @@ test("completeBatchTicket rolls back the ticket claim together with a failed aud
 // both calls racing against the SAME real PostgreSQL database proves both
 // the index and the classification together: exactly one row is created,
 // and the LOSING call resolves to that exact same row rather than
-// silently doing nothing.
+// silently doing nothing. PL-R10-P2-01, tenth production-lifecycle
+// review: this now calls createRequisitionIfNeeded directly (the
+// creation-only half) rather than the old combined create+notify
+// maybeAutoRequisitionMaterial — notification delivery is a separate
+// concern, tested on its own below.
 test("two concurrent shortfall requisition attempts for the same material+site leave exactly one open requisition, and both callers resolve to it", async () => {
   const toKg = (tons: number) => tons * 1000;
   // Promise.allSettled, not Promise.all (PL-R9-P1-02, ninth production-
@@ -1487,8 +1510,8 @@ test("two concurrent shortfall requisition attempts for the same material+site l
   // file's own after() hook is the real, tracking-independent backstop;
   // this is defense in depth on top of it.
   const results = await Promise.allSettled([
-    maybeAutoRequisitionMaterial(materialId, siteId, 2, 100, 50, toKg), // 2% on hand, well under the 50% threshold
-    maybeAutoRequisitionMaterial(materialId, siteId, 2, 100, 50, toKg),
+    createRequisitionIfNeeded(materialId, siteId, 2, 100, 50, toKg), // 2% on hand, well under the 50% threshold
+    createRequisitionIfNeeded(materialId, siteId, 2, 100, 50, toKg),
   ]);
   try {
     for (const r of results) {
@@ -1526,35 +1549,30 @@ test("two concurrent shortfall requisition attempts for the same material+site l
   }
 });
 
-// PL-R9-P2-03, ninth production-lifecycle review: completeBatch's own
-// auto-requisition follow-up is best-effort and used to leave nothing
-// durable behind on failure — queuePendingAutoRequisition/
-// retryPendingAutoRequisitions (materialRequisition.ts) are the queue-
-// then-drain pair the daily cron sweep uses. This proves the drain side
-// against the real database: a row seeded exactly as the completeBatch
-// catch block would create one is picked up, resolved for real (a real
-// MaterialRequisition gets created), and removed — nothing left to retry
-// tomorrow.
-test("retryPendingAutoRequisitions resolves a queued follow-up for real and removes the row", async () => {
-  await queuePendingAutoRequisition(
-    "test-suite-bc-fake-ticket-id",
-    { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" },
-    new Error("simulated transient failure — the original follow-up attempt never even ran"),
-  );
-  const queued = await prisma.pendingAutoRequisition.findFirst({ where: { materialId, siteId } });
-  assert.ok(queued, "queuePendingAutoRequisition must have persisted a retryable row");
+// PL-R10-P2-01, tenth production-lifecycle review: PendingAutoRequisition
+// is now a real staged intent — stageAutoRequisitionIntent is what
+// completeBatchTicket itself calls, INSIDE its own completion
+// transaction, for every shortage candidate (batchCompletion.ts). This
+// proves the drain side against the real database: a row staged exactly
+// the way that transaction stages one is picked up by the cron sweep,
+// resolved for real (a real MaterialRequisition gets created), and
+// removed — nothing left to retry tomorrow.
+test("retryPendingAutoRequisitions resolves a staged intent for real and removes the row", async () => {
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+  const queued = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
   assert.equal(queued.attempts, 0);
+  assert.equal(queued.requisitionId, null, "a freshly staged intent has no requisition yet");
 
   try {
     const result = await retryPendingAutoRequisitions();
     assert.ok(result.attempted >= 1);
     assert.ok(result.resolved >= 1);
 
-    const stillQueued = await prisma.pendingAutoRequisition.findUnique({ where: { id: queued.id } });
-    assert.equal(stillQueued, null, "a resolved row must be removed, not left for another retry");
+    const stillQueued = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
+    assert.equal(stillQueued, null, "a fully resolved row (requisition created AND notified) must be removed, not left for another retry");
 
     const created = await prisma.materialRequisition.findFirst({ where: { materialId, siteId, status: { in: ["PENDING_APPROVAL", "APPROVED", "ORDERED"] } } });
-    assert.ok(created, "the retry must have actually opened a real requisition, not just deleted the queue row");
+    assert.ok(created, "the retry must have actually opened a real requisition, not just deleted the intent row");
     materialRequisitionIds.push(created.id);
   } finally {
     await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
@@ -1562,27 +1580,78 @@ test("retryPendingAutoRequisitions resolves a queued follow-up for real and remo
   }
 });
 
-test("retryPendingAutoRequisitions leaves a row queued and records the new error when the retry itself still fails", async () => {
+test("retryPendingAutoRequisitions leaves an intent queued, backed off, and records the new error when the retry itself still fails", async () => {
   // A materialId with no matching Material row drives a genuine thrown
   // failure, not a clean terminal status: the requisition create's own
   // required FK on materialId throws a real P2003, which
   // withSequentialNumber's own P2002-only catch does not intercept —
   // exactly the "the retry itself still fails" case this test wants.
   const bogusMaterialId = "test-suite-bc-nonexistent-material-id";
-  await queuePendingAutoRequisition("test-suite-bc-fake-ticket-id", { materialId: bogusMaterialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" }, new Error("simulated"));
-  const queued = await prisma.pendingAutoRequisition.findFirstOrThrow({ where: { materialId: bogusMaterialId } });
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId: bogusMaterialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+  const before = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
 
   try {
     const result = await retryPendingAutoRequisitions();
     assert.ok(result.attempted >= 1);
 
-    const stillQueued = await prisma.pendingAutoRequisition.findUnique({ where: { id: queued.id } });
+    const stillQueued = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
     assert.ok(stillQueued, "a retry that fails again must leave the row queued for the next sweep, not silently drop it");
     assert.equal(stillQueued!.attempts, 1);
-    assert.ok(stillQueued!.lastError && stillQueued!.lastError !== "simulated", "the new failure's own error must be recorded, not the original queuing reason");
+    assert.ok(stillQueued!.lastError, "the new failure's own error must be recorded");
     assert.ok(stillQueued!.lastTriedAt);
+    // PL-R10-P2-03: a real backoff, not "retry again in the very next
+    // sweep no matter what" — and nowhere near the dead-letter threshold
+    // after just one failure.
+    assert.ok(stillQueued!.nextAttemptAt.getTime() > before.nextAttemptAt.getTime(), "a failed attempt must push nextAttemptAt further into the future, not leave it eligible again immediately");
+    assert.equal(stillQueued!.deadLetteredAt, null);
   } finally {
     await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: bogusMaterialId } }));
+  }
+});
+
+// PL-R10-P2-01's own explicit required proof: "requisition created,
+// notification fails, retry sends notification exactly once" — a
+// notifyRoles failure after the requisition itself already committed
+// must retry ONLY the notification on the next pass, never risk a
+// duplicate create. Uses processPendingAutoRequisition's injectable
+// `notify` parameter (the same DI pattern as StorageAdapter/BlobDeleter)
+// to force a real, deterministic notification failure without needing
+// to break notifyRoles itself.
+test("a notification failure after requisition creation is retried independently — notified exactly once, never a duplicate create", async () => {
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+
+  const notifyCalls: string[] = [];
+  const failingNotify = async (requisitionNumber: string) => {
+    notifyCalls.push(requisitionNumber);
+    throw new Error("simulated notifyRoles failure");
+  };
+
+  try {
+    const first = await processPendingAutoRequisition(intent.id, failingNotify);
+    assert.equal(first.status, "RETRY", "a notification failure must leave the intent for another attempt, not silently resolve it");
+
+    const afterFirst = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+    assert.ok(afterFirst.requisitionId, "the requisition itself must have been created and its progress recorded BEFORE the notification was even attempted");
+    const requisitionCountAfterFirst = await prisma.materialRequisition.count({ where: { id: afterFirst.requisitionId! } });
+    assert.equal(requisitionCountAfterFirst, 1);
+
+    const succeedingNotify = async (requisitionNumber: string) => {
+      notifyCalls.push(requisitionNumber);
+    };
+    const second = await processPendingAutoRequisition(intent.id, succeedingNotify);
+    assert.equal(second.status, "RESOLVED");
+
+    const afterSecond = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
+    assert.equal(afterSecond, null, "fully resolved (requisition created AND notified) — the intent row must be gone");
+
+    const requisitionCountAfterSecond = await prisma.materialRequisition.count({ where: { materialId, siteId } });
+    assert.equal(requisitionCountAfterSecond, 1, "the retry must never have created a SECOND requisition — only the notification was retried");
+    assert.equal(notifyCalls.length, 2, "notify must have been attempted twice (once failing, once succeeding) — never skipped, never duplicated beyond that");
+
+    materialRequisitionIds.push(afterFirst.requisitionId!);
+  } finally {
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId, siteId } }));
   }
 });
 

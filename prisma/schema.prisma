@@ -1520,34 +1520,73 @@ model Trip {
 // see retryPendingAutoRequisitions (materialRequisition.ts) and the
 // daily cron sweep (api/cron/cleanup) that drains it, the same reused-
 // infrastructure shape PendingBlobDeletion above already established.
+// PL-R10-P2-01, tenth production-lifecycle review: this table is now a
+// real staged intent, not a row created only after a caught failure —
+// completeBatchTicket (batchCompletion.ts) inserts one row per shortage
+// candidate INSIDE its own completion transaction, before the batch even
+// commits, so a process crash between commit and the best-effort
+// follow-up (or a failure of the row insert itself, the Round 9 gap)
+// no longer loses the intent entirely: it was already durable before the
+// transaction that made it necessary ever returned. requisitionId/
+// requisitionNumber/materialName are filled in once creation succeeds —
+// a row that persists with those set still needs only its NOTIFICATION
+// retried (see processPendingAutoRequisition, materialRequisition.ts),
+// never a duplicate create; that's what keeps requisition creation and
+// approval-notification delivery as separately tracked progress within
+// one row, per PL-R10-P2-01's own "record separate progress" requirement.
 model PendingAutoRequisition {
-  id              String    @id @default(cuid())
-  batchTicketId   String
-  materialId      String
-  siteId          String
-  newLevel        Float
-  capacity        Float
-  minThresholdPct Float
-  unit            String // TONS, LITERS — mirrors RequisitionCandidate.unit
-  specificGravity Float?
-  attempts        Int       @default(0)
-  lastError       String?
-  createdAt       DateTime  @default(now())
-  lastTriedAt     DateTime?
+  id                String    @id @default(cuid())
+  batchTicketId     String
+  materialId        String
+  siteId            String
+  newLevel          Float
+  capacity          Float
+  minThresholdPct   Float
+  unit              String // TONS, LITERS — mirrors RequisitionCandidate.unit
+  specificGravity   Float?
+  requisitionId     String?
+  requisitionNumber String?
+  materialName      String?
+  attempts          Int       @default(0)
+  lastError         String?
+  createdAt         DateTime  @default(now())
+  lastTriedAt       DateTime?
+  // PL-R10-P2-03, tenth production-lifecycle review: both retry tables
+  // used a blind `orderBy: createdAt, take: 200` — once the OLDEST 200
+  // rows are permanent failures, every sweep re-selects the same 200
+  // forever and a genuinely resolvable newer row can never be attempted.
+  // nextAttemptAt implements real (capped exponential) backoff — a
+  // repeatedly failing row's own next-eligible time keeps moving later,
+  // naturally falling behind newer rows in `WHERE nextAttemptAt <= now()
+  // ORDER BY nextAttemptAt ASC` — and doubles as the claim lease a
+  // concurrent sweep bumps forward before doing any real work, so two
+  // overlapping cron invocations can never process the same row (see the
+  // FOR UPDATE SKIP LOCKED claim query in materialRequisition.ts).
+  // deadLetteredAt stops automatic retries past a defined attempt
+  // threshold while leaving the row on file (excluded from claims, not
+  // deleted) for a human to inspect or manually clear.
+  nextAttemptAt     DateTime  @default(now())
+  deadLetteredAt    DateTime?
 
-  @@index([createdAt])
+  @@unique([batchTicketId, materialId, siteId])
+  @@index([nextAttemptAt])
 }
 
 model PendingBlobDeletion {
-  id          String    @id @default(cuid())
-  url         String // the app-relative /api/files/... url deleteFile expects
-  reason      String // DELIVERY_PHOTO_COMPENSATION, DELIVERY_PHOTO_REPLACED — why this delete was ever attempted
-  attempts    Int       @default(0)
-  lastError   String?
-  createdAt   DateTime  @default(now())
-  lastTriedAt DateTime?
+  id             String    @id @default(cuid())
+  url            String // the app-relative /api/files/... url deleteFile expects
+  reason         String // DELIVERY_PHOTO_COMPENSATION, DELIVERY_PHOTO_REPLACED — why this delete was ever attempted
+  attempts       Int       @default(0)
+  lastError      String?
+  createdAt      DateTime  @default(now())
+  lastTriedAt    DateTime?
+  // Same fair-scheduling/claim-safety/dead-letter mechanism as
+  // PendingAutoRequisition's own nextAttemptAt/deadLetteredAt above —
+  // see that model's comment (PL-R10-P2-03).
+  nextAttemptAt  DateTime  @default(now())
+  deadLetteredAt DateTime?
 
-  @@index([createdAt])
+  @@index([nextAttemptAt])
 }
 
 model TripDelayReport {

@@ -50,10 +50,11 @@ export async function RawMaterialsSilosTab({
     prisma.material.findMany({ where: { type: "ADMIXTURE" }, orderBy: { name: "asc" } }),
     prisma.material.findMany({ where: { type: { in: ["CEMENT", "FLY_ASH", "SLAG", "SILICA_FUME"] } }, orderBy: { name: "asc" } }),
     prisma.material.findMany({ where: { type: { in: ["SAND", "COARSE_AGGREGATE", "WATER"] } }, orderBy: { name: "asc" } }),
-    // Auto-opened by completeBatch (production/actions.ts) when a silo/
-    // hopper/tank crosses its own low-stock threshold — see
-    // maybeAutoRequisitionMaterial there and MaterialRequisition's model
-    // comment.
+    // Auto-opened when a silo/hopper/tank crosses its own low-stock
+    // threshold — staged as a PendingAutoRequisition intent inside
+    // completeBatchTicket's own transaction (batchCompletion.ts) and
+    // drained by processPendingAutoRequisition (materialRequisition.ts);
+    // see MaterialRequisition's own model comment.
     prisma.materialRequisition.findMany({
       where: { ...reservationSiteScopeWhere(siteId) },
       include: { material: true, site: true, requestedBy: true },
