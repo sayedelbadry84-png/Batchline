@@ -52,15 +52,31 @@ async function maybeAutoRequisitionMaterial(
   });
   if (existing) return;
 
-  const requisition = await withSequentialNumber(
-    "MTR",
-    (yr) => prisma.materialRequisition.count({ where: { createdAt: yr } }),
-    (requisitionNumber) =>
-      prisma.materialRequisition.create({
-        data: { requisitionNumber, materialId, siteId, quantityNeededKg: toKg(shortfall) },
-        include: { material: true },
-      }),
-  );
+  // The pre-check above is a plain read with no lock — a genuinely
+  // concurrent completion for the same material+site can still race past
+  // it and try to create a second open requisition. The partial unique
+  // index MaterialRequisition_open_per_material_site_key (migration
+  // harden_production_lifecycle_round7, PL-R7-P2-02) is the actual
+  // backstop: withSequentialNumber's own P2002 retry loop can't tell
+  // that constraint apart from its own requisitionNumber collisions, so
+  // it burns through its 5 attempts and gives up with this specific
+  // message — treated here as "an equivalent requisition already
+  // exists", not a real failure.
+  let requisition;
+  try {
+    requisition = await withSequentialNumber(
+      "MTR",
+      (yr) => prisma.materialRequisition.count({ where: { createdAt: yr } }),
+      (requisitionNumber) =>
+        prisma.materialRequisition.create({
+          data: { requisitionNumber, materialId, siteId, quantityNeededKg: toKg(shortfall) },
+          include: { material: true },
+        }),
+    );
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith("Could not allocate a unique MTR number")) return;
+    throw e;
+  }
 
   await notifyRoles(REQUISITION_APPROVAL_ROLES, {
     title: requisition.requisitionNumber,
@@ -425,9 +441,24 @@ export async function completeBatch(_prevState: CompleteBatchActionState, formDa
     return { status: result.status };
   }
 
+  // The ticket, its inventory ledger, and its own audit event have
+  // ALREADY committed successfully by this point — auto-requisition is a
+  // best-effort follow-up, not part of what "the batch completed" means.
+  // A failure here used to propagate as an uncaught exception, making
+  // this whole Server Action look like it failed to the caller even
+  // though the actual completion already succeeded — a retry would then
+  // see ALREADY_COMPLETED and never get a second chance to open the
+  // requisition (PL-R7-P2-02, seventh production-lifecycle review). The
+  // new partial-unique DB index on MaterialRequisition (migration
+  // harden_production_lifecycle_round7) makes a genuine concurrent
+  // duplicate a caught, safe no-op here instead of a silent race.
   for (const r of result.requisitionCandidates) {
-    const toKg = r.unit === "LITERS" ? (liters: number) => liters * (r.specificGravity ?? 1) : (tons: number) => tons * 1000;
-    await maybeAutoRequisitionMaterial(r.materialId, r.siteId, r.newLevel, r.capacity, r.minThresholdPct, toKg);
+    try {
+      const toKg = r.unit === "LITERS" ? (liters: number) => liters * (r.specificGravity ?? 1) : (tons: number) => tons * 1000;
+      await maybeAutoRequisitionMaterial(r.materialId, r.siteId, r.newLevel, r.capacity, r.minThresholdPct, toKg);
+    } catch (e) {
+      console.error(`[completeBatch] auto-requisition follow-up failed for material ${r.materialId} (ticket ${batchTicketId}) — the batch itself is still COMPLETE:`, e);
+    }
   }
 
   revalidatePath(`/production/${batchTicketId}`);

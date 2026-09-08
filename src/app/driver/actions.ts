@@ -1,7 +1,7 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { writeAudit } from "@/lib/audit";
 import { getCurrentUser } from "@/lib/session";
 import { effectiveSiteId } from "@/lib/siteScope";
 import { uploadFile, deleteFile } from "@/lib/blob";
@@ -13,7 +13,9 @@ import { closeTripFullForId, closeTripWithReturnForId } from "@/lib/tripLifecycl
 
 // Every driver action is scoped to the logged-in session's own Employee
 // record — a driver can only touch their own trips, not one assigned to
-// someone else, even if they guess another trip's id.
+// someone else, even if they guess another trip's id. Returns the
+// checked user so callers needing an actor for writeAudit (PL-R7-P2-02,
+// seventh production-lifecycle review) don't need a second session read.
 async function requireOwnTrip(tripId: string) {
   const user = await getCurrentUser();
   if (!user || user.role !== "DRIVER" || !user.employeeId) {
@@ -23,6 +25,7 @@ async function requireOwnTrip(tripId: string) {
   if (!trip || trip.driverId !== user.employeeId) {
     throw new Error("This trip isn't assigned to you.");
   }
+  return user;
 }
 
 // Was void-returning, discarding advanceTripBase's own typed result
@@ -51,7 +54,7 @@ export async function reportTripDelay(formData: FormData) {
   const reason = String(formData.get("reason") ?? "");
   const note = String(formData.get("note") ?? "").trim() || null;
   if (!tripId || !DELAY_REASONS.has(reason)) return;
-  await requireOwnTrip(tripId);
+  const user = await requireOwnTrip(tripId);
 
   const trip = await prisma.trip.findUnique({
     where: { id: tripId },
@@ -59,9 +62,17 @@ export async function reportTripDelay(formData: FormData) {
   });
   if (!trip) return;
 
-  await prisma.tripDelayReport.create({ data: { tripId, reason, note } });
+  // The report and its audit event commit together (PL-R7-P2-02, seventh
+  // production-lifecycle review) — was two separate statements against
+  // the plain singleton, so a failure on the audit write left a real
+  // delay report on file with no audit trail behind it. notifyRoles below
+  // stays post-commit — genuinely external delivery, same disclosed
+  // scope as startTrip's own notifications.
+  await prisma.$transaction(async (tx) => {
+    await tx.tripDelayReport.create({ data: { tripId, reason, note } });
+    await writeAudit(tx, { id: user.id, role: user.role }, { module: "Fleet", recordId: tripId, afterValue: reason, reasonCode: "TRIP_DELAY_REPORTED" });
+  });
 
-  await logAudit({ module: "Fleet", recordId: tripId, afterValue: reason, reasonCode: "TRIP_DELAY_REPORTED" });
   await notifyRoles(["PLANT_OPERATOR", "ADMIN"], {
     title: trip.batchTicket.reservation.reservationNumber,
     body: `${trip.batchTicket.ticketNumber} — ${trip.batchTicket.reservation.project.name}: ${reason}${note ? ` — ${note}` : ""}`,
@@ -103,18 +114,28 @@ export async function uploadDeliveryPhoto(formData: FormData) {
   if (file.size > MAX_PHOTO_BYTES) return;
   const ext = await detectPhotoExtension(file);
   if (!ext) return;
-  await requireOwnTrip(tripId);
+  const user = await requireOwnTrip(tripId);
   const trip = await prisma.trip.findUnique({ where: { id: tripId }, select: { deliveryPhotoUrl: true } });
 
+  // Blob storage isn't part of the Postgres transaction below — it can't
+  // be, uploadFile is an external network call, not a DB write — so it
+  // still has to happen first, before the URL it returns can be stored.
+  // What CAN be (and now is) atomic is the trip's own URL update and its
+  // audit event (PL-R7-P2-02, seventh production-lifecycle review): was
+  // two separate statements against the plain singleton.
   const url = await uploadFile(`delivery-photos/${tripId}.${ext}`, file);
 
-  await prisma.trip.update({ where: { id: tripId }, data: { deliveryPhotoUrl: url } });
-  // A re-take replaces the row's own URL immediately above — clean up the
-  // old blob after so a driver retrying the photo doesn't leave orphaned
-  // files behind in storage.
-  if (trip?.deliveryPhotoUrl) await deleteFile(trip.deliveryPhotoUrl);
+  await prisma.$transaction(async (tx) => {
+    await tx.trip.update({ where: { id: tripId }, data: { deliveryPhotoUrl: url } });
+    await writeAudit(tx, { id: user.id, role: user.role }, { module: "Fleet", recordId: tripId, reasonCode: "DELIVERY_PHOTO_CAPTURED" });
+  });
 
-  await logAudit({ module: "Fleet", recordId: tripId, reasonCode: "DELIVERY_PHOTO_CAPTURED" });
+  // A re-take replaces the row's own URL above — clean up the old blob
+  // after the DB change has genuinely committed, so a driver retrying
+  // the photo doesn't leave orphaned files behind in storage, and a
+  // failed DB update never deletes a blob the (unchanged) row still
+  // points to.
+  if (trip?.deliveryPhotoUrl) await deleteFile(trip.deliveryPhotoUrl);
 
   revalidatePath(`/driver/trip/${tripId}`);
 }
