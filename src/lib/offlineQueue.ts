@@ -69,11 +69,16 @@ function getDefaultStorage(): StorageAdapter | null {
 // to one tab's own heap cannot do.
 export type LockAdapter = { withLock<T>(fn: () => Promise<T>): Promise<T> };
 
-// The safe fallback the review explicitly calls for: on a browser (or
-// test runner) without the Web Locks API, mutations simply run
-// unserialized, exactly as they always have — no worse than before this
-// fix, and Web Locks is already supported by every browser this app
-// otherwise targets (evergreen Chrome/Edge/Firefox/Safari).
+// Returns null on a browser (or test runner) without the Web Locks API.
+// PL-R9-P2-01's original fallback here ran mutations unserialized in
+// that case, reasoning "no worse than before this fix" — Round 10 named
+// that a real, still-lossy fallback (a client that can't serialize
+// simply reintroduces the exact cross-tab race this whole mechanism
+// exists to close). createOfflineQueue's own mutating operations now
+// fail CLOSED instead whenever this returns null — see that factory's
+// own comment. Web Locks is already supported by every browser this app
+// otherwise targets (evergreen Chrome/Edge/Firefox/Safari); a null here
+// in production is the genuinely exceptional case, not the common one.
 function getDefaultLock(): LockAdapter | null {
   if (typeof navigator === "undefined" || !("locks" in navigator) || !navigator.locks) return null;
   const locks = navigator.locks;
@@ -231,17 +236,95 @@ export type ReadStatus = "OK" | "STORAGE_UNAVAILABLE" | "RECOVERED_FROM_CORRUPT"
 
 export type EnqueueResult = { status: "OK"; item: QueuedAction } | { status: "STORAGE_UNAVAILABLE" };
 
+// PL-R10-P1-03, tenth production-lifecycle review: a real deterministic
+// failure sequence found in the offline queue — two offline edits to the
+// SAME field (kind + identity fields identical, only the value differs)
+// used to enqueue as two SEPARATE items, both carrying the version the
+// field had when it first went offline. Replay applied the OLDER value
+// first (advancing the server's version), then rejected the genuinely
+// LATEST value as STALE_READING — the operator's real final reading was
+// silently discarded while a stale one won.
+//
+// This identifies "the same logical field" generically, without
+// offlineQueue.ts hardcoding any domain-specific field names: `value`
+// (the one field a caller's own mutable reading lives under — see
+// mutableField below) and `expectedVersion` (the optimistic-concurrency
+// token, itself derived from a read, not part of the field's own
+// identity) are excluded; every remaining field (kind plus whatever
+// identifies WHICH row/field this is — ticket/component/field today) is
+// sorted for a stable key. Two enqueue calls that produce the same key
+// are, by construction, two beliefs about the exact same protected
+// value.
+const MUTABLE_FIELD_NAMES = new Set(["expectedVersion"]);
+
+export function logicalKey(kind: string, fields: Record<string, string>, mutableField = "value"): string {
+  const identity = Object.entries(fields)
+    .filter(([k]) => k !== mutableField && !MUTABLE_FIELD_NAMES.has(k))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${v}`)
+    .join("&");
+  return `${kind}|${identity}`;
+}
+
+// PL-R10-P1-03: the other half of the fix — once a queued item's replay
+// actually reaches the server and returns a fresh version, the still-
+// mounted AutoSaveField instance that originally enqueued it must learn
+// that version before its NEXT save (online or offline), or that next
+// save will carry the same stale pre-offline version and be refused for
+// no real reason. OfflineSyncBanner (a sibling component with no direct
+// reference to any specific AutoSaveField instance) and AutoSaveField
+// itself have no shared parent state to thread this through — this is a
+// minimal, module-scoped pub/sub keyed by the exact same logicalKey both
+// sides can independently compute from data they already have (their own
+// hiddenFields/kind on one side, the queued item's own kind/fields on the
+// other), not a general event bus.
+type ReplaySuccessListener = (version: number) => void;
+const replaySuccessListeners = new Map<string, Set<ReplaySuccessListener>>();
+
+export function onReplaySuccess(key: string, listener: ReplaySuccessListener): () => void {
+  let set = replaySuccessListeners.get(key);
+  if (!set) {
+    set = new Set();
+    replaySuccessListeners.set(key, set);
+  }
+  set.add(listener);
+  return () => {
+    set!.delete(listener);
+    if (set!.size === 0) replaySuccessListeners.delete(key);
+  };
+}
+
+export function emitReplaySuccess(key: string, version: number): void {
+  replaySuccessListeners.get(key)?.forEach((listener) => listener(version));
+}
+
 // A factory, not a module-level singleton bound to `window.localStorage`
 // directly (PL-R7-P1-02) — the default export below is what the app
 // actually uses, but tests construct their own instance over a fake
 // StorageAdapter (including one that always throws) to exercise failure
 // paths deterministically, with no browser/jsdom involved.
 export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAdapter | null = getDefaultLock()) {
-  // Every mutating read-modify-write below runs through this — a no-op
-  // pass-through when no lock is available (see getDefaultLock's own
-  // comment for why that's still safe, just unserialized).
+  // PL-R10-P2-02, tenth production-lifecycle review: the old fallback
+  // here ran every mutation unserialized when no lock was available,
+  // reasoning that this was "no worse than before" Web Locks existed —
+  // but "still loses an item on an unsupported/disabled client" is not a
+  // safe fallback, it's just the same known-lossy cross-tab race Round 9
+  // set out to close, silently reintroduced for exactly the clients that
+  // can't defend against it. Every mutating operation below now checks
+  // `lock` itself (via requireLock, right below) and fails CLOSED with no
+  // lock — a mutation reports STORAGE_UNAVAILABLE rather than proceeding
+  // unserialized, surfacing through the SAME storage-error UI a
+  // genuinely broken localStorage already does, so the operator is told
+  // to write the reading down rather than shown a false "queued" status
+  // masking a real cross-tab loss risk. Reads (peekQueue/peekRejected)
+  // are unaffected — they don't mutate state, so they carry no such risk
+  // and stay available either way. Only ever called once a caller has
+  // already checked `lock !== null` itself — kept as its own small
+  // helper purely so the mutating call sites below all share the
+  // identical `lock.withLock(async () => fn())` wrapping rather than
+  // repeating it.
   function withLock<T>(fn: () => Promise<T> | T): Promise<T> {
-    return lock ? lock.withLock(async () => fn()) : Promise.resolve(fn());
+    return lock!.withLock(async () => fn());
   }
 
   // Shared by every mutation below (enqueue/dismissRejected/flushQueue):
@@ -270,10 +353,33 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
     return read.status === "STORAGE_UNAVAILABLE" ? { items: [], readStatus: "STORAGE_UNAVAILABLE" } : { items: read.state.rejected, readStatus: read.status };
   }
 
-  function enqueue(kind: string, fields: Record<string, string>): Promise<EnqueueResult> {
+  function enqueue(kind: string, fields: Record<string, string>, mutableField = "value"): Promise<EnqueueResult> {
+    // PL-R10-P2-02: fail closed, never proceed unserialized — see this
+    // factory's own top comment.
+    if (!lock) return Promise.resolve({ status: "STORAGE_UNAVAILABLE" });
     return withLock(() => {
       const read = readForMutation();
       if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
+
+      // PL-R10-P1-03: a second offline edit to the SAME field coalesces
+      // onto the item already queued for it, rather than enqueuing a
+      // second, independent stale-version write — see logicalKey's own
+      // comment for the full failure sequence this closes. Only the
+      // mutable value itself is replaced; `expectedVersion` (and every
+      // other field) is deliberately kept from the EARLIER item — it is
+      // still the correct base to replay against, since nothing else can
+      // have touched the server for this field while genuinely offline.
+      const key = logicalKey(kind, fields, mutableField);
+      const existingIndex = read.state.pending.findIndex((i) => logicalKey(i.kind, i.fields, mutableField) === key);
+      if (existingIndex !== -1) {
+        const existing = read.state.pending[existingIndex];
+        const merged: QueuedAction = { ...existing, fields: { ...existing.fields, [mutableField]: fields[mutableField] } };
+        const nextPending = [...read.state.pending];
+        nextPending[existingIndex] = merged;
+        const result = persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
+        return result.status === "OK" ? { status: "OK", item: merged } : { status: "STORAGE_UNAVAILABLE" };
+      }
+
       const item: QueuedAction = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind, fields, createdAt: Date.now() };
       const result = persistState(storage!, { version: 1, pending: [...read.state.pending, item], rejected: read.state.rejected });
       return result.status === "OK" ? { status: "OK", item } : { status: "STORAGE_UNAVAILABLE" };
@@ -281,6 +387,8 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
   }
 
   function dismissRejected(id: string): Promise<PersistResult> {
+    // PL-R10-P2-02: fail closed, never proceed unserialized.
+    if (!lock) return Promise.resolve({ status: "STORAGE_UNAVAILABLE" });
     return withLock(() => {
       const read = readForMutation();
       if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
@@ -322,6 +430,16 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
       // holding a cross-tab lock across that would block every other
       // tab's own enqueue/dismiss/flush for as long as this one request
       // takes.
+      //
+      // PL-R10-P2-02: fails closed with no lock, same as enqueue/
+      // dismissRejected — a handler that already succeeded server-side
+      // stays queued rather than risk an unserialized write here; it
+      // will simply be re-applied (idempotently) on the next flush once
+      // a lock is available again.
+      if (!lock) {
+        readStatus = "STORAGE_UNAVAILABLE";
+        continue;
+      }
       const writeOutcome = await withLock(() => {
         // Re-read the FRESHEST state right before this one item's write,
         // not the snapshot flushQueue started with — two concurrent

@@ -6,15 +6,15 @@
 // recovery, concurrent flushes, gated dismissal — testable in plain
 // node:test, with no browser harness this repo doesn't otherwise have.
 //
-// Out of scope here: AutoSaveField's own per-field save-coalescing
-// (PL-R7-P2-01) is React component behavior with no DOM to render it
-// against in this suite — see that file's own comment for the ordering
-// guarantee itself; a rendered-component/browser test for it remains a
-// disclosed gap, same as the rest of this app's UI layer.
+// AutoSaveField's own per-field save-coalescing (PL-R7-P2-01, online) and
+// offline same-field enqueue coalescing (PL-R10-P1-03) are both React
+// component / real-DOM behavior — see tests/AutoSaveField.test.tsx for the
+// rendered coverage of both. This file stays scoped to offlineQueue.ts's
+// own pure logic.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createOfflineQueue, type StorageAdapter, type ReplayOutcome, type LockAdapter } from "../src/lib/offlineQueue";
+import { createOfflineQueue, logicalKey, onReplaySuccess, emitReplaySuccess, type StorageAdapter, type ReplayOutcome, type LockAdapter } from "../src/lib/offlineQueue";
 
 // A real in-memory Map-backed adapter — genuinely persists across calls
 // within one test, exactly like localStorage would, just without a
@@ -79,7 +79,7 @@ function sharedLock(): LockAdapter {
 
 test("enqueue then a matching APPLIED handler removes the item from pending and never adds it to rejected", async () => {
   const storage = memoryStorage();
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
   const enqueued = await queue.enqueue("recordActualField", { value: "12.5" });
   assert.equal(enqueued.status, "OK");
 
@@ -93,7 +93,7 @@ test("enqueue then a matching APPLIED handler removes the item from pending and 
 
 test("a RETRYABLE outcome leaves the item queued, completely unchanged", async () => {
   const storage = memoryStorage();
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
   const enqueued = await queue.enqueue("recordActualField", { value: "3" });
   assert.equal(enqueued.status, "OK");
   const before = queue.peekQueue().items;
@@ -104,9 +104,64 @@ test("a RETRYABLE outcome leaves the item queued, completely unchanged", async (
   assert.deepEqual(queue.peekQueue().items, before);
 });
 
+// ---- PL-R10-P1-03, tenth production-lifecycle review: a real
+// ---- deterministic failure the round found — two offline edits to the
+// ---- SAME field enqueued as two SEPARATE items, both carrying the
+// ---- version the field had when it first went offline. Replay applied
+// ---- the OLDER value first (advancing the server version), then
+// ---- rejected the genuinely latest value as STALE_READING. These prove
+// ---- the fix at the offlineQueue.ts layer directly.
+
+test("a second offline enqueue for the same logical field coalesces onto the first item, keeping the earliest expectedVersion but the latest value", async () => {
+  const storage = memoryStorage();
+  const queue = createOfflineQueue(storage, sharedLock());
+
+  const first = await queue.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "10", expectedVersion: "0" });
+  assert.equal(first.status, "OK");
+  const second = await queue.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "20", expectedVersion: "0" });
+  assert.equal(second.status, "OK");
+
+  const items = queue.peekQueue().items;
+  assert.equal(items.length, 1, "the second enqueue must coalesce onto the first item, not create a second, independently-replayable one");
+  assert.equal(items[0].fields.value, "20", "the LATEST value must be what's actually queued for replay");
+  assert.equal(items[0].fields.expectedVersion, "0", "expectedVersion must stay the original base — still correct, since nothing else could have touched the server while genuinely offline");
+  assert.equal(items[0].id, first.status === "OK" ? first.item.id : "", "the coalesced item must keep the FIRST item's own identity, not become a new queue entry");
+});
+
+test("offline edits to two DIFFERENT fields on the same component enqueue as two separate items, never coalesced together", async () => {
+  const storage = memoryStorage();
+  const queue = createOfflineQueue(storage, sharedLock());
+  await queue.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "10", expectedVersion: "0" });
+  await queue.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "moisture", value: "3", expectedVersion: "0" });
+  const items = queue.peekQueue().items;
+  assert.equal(items.length, 2, "different fields must never coalesce into one — they carry independent server versions (actualVersion/moistureVersion)");
+});
+
+test("logicalKey ignores the mutable value and expectedVersion fields, but is sensitive to every identity field", () => {
+  const base = logicalKey("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "10", expectedVersion: "0" });
+  const sameIdentityDifferentValue = logicalKey("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "999", expectedVersion: "5" });
+  assert.equal(base, sameIdentityDifferentValue, "differing only in value/expectedVersion must produce the SAME key");
+
+  assert.notEqual(base, logicalKey("recordActualField", { batchTicketId: "t1", componentId: "c2", field: "actual", value: "10", expectedVersion: "0" }), "a different componentId must change the key");
+  assert.notEqual(base, logicalKey("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "moisture", value: "10", expectedVersion: "0" }), "a different field must change the key");
+  assert.notEqual(base, logicalKey("otherKind", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "10", expectedVersion: "0" }), "a different kind must change the key");
+});
+
+test("emitReplaySuccess calls only listeners subscribed to the matching key, carrying the emitted version, and never fires again after unsubscribe", () => {
+  const received: number[] = [];
+  const unsubscribe = onReplaySuccess("kind|a=1", (version) => received.push(version));
+  emitReplaySuccess("kind|a=1", 3);
+  emitReplaySuccess("kind|a=2", 99); // a different key — must not fire this listener
+  assert.deepEqual(received, [3]);
+
+  unsubscribe();
+  emitReplaySuccess("kind|a=1", 4);
+  assert.deepEqual(received, [3], "a listener must never fire again after unsubscribing");
+});
+
 test("a handler that throws leaves the item queued, completely unchanged — the still-offline/transport-error path", async () => {
   const storage = memoryStorage();
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
   await queue.enqueue("recordActualField", { value: "7" });
   const before = queue.peekQueue().items;
 
@@ -122,7 +177,7 @@ test("a handler that throws leaves the item queued, completely unchanged — the
 
 test("a REJECTED outcome moves the item to the rejected list exactly once, with no window where it exists in neither", async () => {
   const storage = memoryStorage();
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
   const enqueued = await queue.enqueue("recordActualField", { field: "actual", value: "999" });
   assert.equal(enqueued.status, "OK");
 
@@ -140,7 +195,7 @@ test("a REJECTED outcome moves the item to the rejected list exactly once, with 
 
 test("enqueue never claims success when the underlying storage write actually fails", async () => {
   const storage = throwingStorage({ onSetItem: true });
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
 
   const result = await queue.enqueue("recordActualField", { value: "42" });
   assert.equal(result.status, "STORAGE_UNAVAILABLE");
@@ -153,7 +208,7 @@ test("a corrupt stored payload is backed up under a separate key, not silently d
   const storage = memoryStorage();
   storage.setItem("bl_offline_queue_v1", "{not valid json this is a corrupt payload}");
 
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
   assert.deepEqual(queue.peekQueue().items, []);
   assert.deepEqual(queue.peekRejected().items, []);
 
@@ -166,7 +221,7 @@ test("a corrupt stored payload is backed up under a separate key, not silently d
 
 test("two concurrent flush attempts against the same storage produce no duplicate rejected item and no lost pending item", async () => {
   const storage = memoryStorage();
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
   await queue.enqueue("a", { value: "1" });
   await queue.enqueue("b", { value: "2" });
 
@@ -196,10 +251,10 @@ test("two concurrent flush attempts against the same storage produce no duplicat
 
 test("dismissing a rejected item only removes it from the visible list once persistence actually succeeds", async () => {
   const storage = memoryStorage();
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
   storage.setItem("bl_offline_queue_v1", JSON.stringify({ version: 1, pending: [], rejected: [{ id: "r1", kind: "recordActualField", fields: { value: "5" }, createdAt: 1, reason: "TERMINAL", rejectedAt: 2 }] }));
 
-  const failing = createOfflineQueue(throwingStorage({ onSetItem: true }));
+  const failing = createOfflineQueue(throwingStorage({ onSetItem: true }), sharedLock());
   // Seed the failing adapter's own backing store with the same rejected
   // item indirectly is awkward since it always throws on write — instead
   // prove the CONTRACT directly: a dismiss that can't persist reports
@@ -227,7 +282,7 @@ test("a getItem failure never becomes a writable empty snapshot that could overw
   // proving the failure is specifically about not trusting a failed
   // READ, not about setItem also being broken.
   const storage = memoryStorage();
-  const seedQueue = createOfflineQueue(storage);
+  const seedQueue = createOfflineQueue(storage, sharedLock());
   await seedQueue.enqueue("recordActualField", { value: "1" });
   const seededRaw = storage.store.get("bl_offline_queue_v1");
   assert.ok(seededRaw);
@@ -238,7 +293,7 @@ test("a getItem failure never becomes a writable empty snapshot that could overw
     },
     setItem: storage.setItem,
   };
-  const queue = createOfflineQueue(readFailing);
+  const queue = createOfflineQueue(readFailing, sharedLock());
 
   const peeked = queue.peekQueue();
   assert.equal(peeked.readStatus, "STORAGE_UNAVAILABLE");
@@ -266,7 +321,7 @@ test("a corrupt payload whose backup write also fails leaves the primary value c
       throw new Error("simulated setItem failure (backup included)");
     },
   };
-  const queue = createOfflineQueue(backupFailing);
+  const queue = createOfflineQueue(backupFailing, sharedLock());
 
   const peeked = queue.peekQueue();
   assert.equal(peeked.readStatus, "STORAGE_UNAVAILABLE", "an unrecoverable corrupt payload must not silently present as an empty, writable queue");
@@ -281,7 +336,7 @@ test("a corrupt payload whose backup write also fails leaves the primary value c
 test("a corrupt payload whose backup write succeeds recovers to empty and reports RECOVERED_FROM_CORRUPT", () => {
   const storage = memoryStorage();
   storage.setItem("bl_offline_queue_v1", "{ this parses to nothing usable ");
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
 
   const peeked = queue.peekQueue();
   assert.equal(peeked.readStatus, "RECOVERED_FROM_CORRUPT");
@@ -294,7 +349,7 @@ test("a parseable but malformed queue item (missing required fields) is treated 
   // and `fields` — exactly the "parseable but malformed" gap PL-R8-P1-02
   // named: the old array-only check would have accepted this.
   storage.setItem("bl_offline_queue_v1", JSON.stringify({ version: 1, pending: [{ kind: "recordActualField", createdAt: 1 }], rejected: [] }));
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
 
   const peeked = queue.peekQueue();
   assert.equal(peeked.readStatus, "RECOVERED_FROM_CORRUPT", "a malformed item must be treated as a corrupt payload, not silently trusted");
@@ -306,11 +361,67 @@ test("`fields` stored as an array is rejected as corrupt, never trusted as a Rec
   // typeof [] === "object" and Object.values([...]) both accept an array
   // — the exact gap PL-R9-P2-01 closed in isStringRecord.
   storage.setItem("bl_offline_queue_v1", JSON.stringify({ version: 1, pending: [{ id: "p1", kind: "recordActualField", fields: ["not", "a", "record"], createdAt: 1 }], rejected: [] }));
-  const queue = createOfflineQueue(storage);
+  const queue = createOfflineQueue(storage, sharedLock());
 
   const peeked = queue.peekQueue();
   assert.equal(peeked.readStatus, "RECOVERED_FROM_CORRUPT", "an array-shaped fields must be treated as corrupt, not silently accepted");
   assert.deepEqual(peeked.items, []);
+});
+
+// ---- PL-R10-P2-02, tenth production-lifecycle review: the old no-lock
+// ---- fallback ran every mutation unserialized, reasoning "no worse than
+// ---- before Web Locks existed" — Round 10 named that a real, still-
+// ---- lossy fallback, since it silently reintroduces the exact cross-tab
+// ---- race Round 9 set out to close for exactly the clients that can't
+// ---- defend against it. Every mutating operation now fails CLOSED with
+// ---- no lock instead. `lock: null` here stands in for whatever
+// ---- getDefaultLock() itself returns on a real browser/runtime without
+// ---- the Web Locks API (this Node test runner's own build happens to
+// ---- ship a native navigator.locks, so getDefaultLock() would NOT
+// ---- return null here — the explicit null is what actually exercises
+// ---- the fallback path deterministically, in this environment and any
+// ---- other).
+
+test("with no lock available, enqueue/dismissRejected/flushQueue all fail closed — never proceed unserialized", async () => {
+  const storage = memoryStorage();
+  const queue = createOfflineQueue(storage, null); // the real no-Web-Locks fallback
+
+  const enqueued = await queue.enqueue("recordActualField", { value: "10" });
+  assert.equal(enqueued.status, "STORAGE_UNAVAILABLE", "enqueue must refuse, not silently perform the known-lossy unserialized mutation");
+  assert.deepEqual(queue.peekQueue().items, [], "nothing may have been written");
+
+  // Seed a rejected item directly through storage (bypassing the queue's
+  // own gate) so dismissRejected has something to refuse to touch.
+  storage.setItem("bl_offline_queue_v1", JSON.stringify({ version: 1, pending: [], rejected: [{ id: "r1", kind: "recordActualField", fields: { value: "5" }, createdAt: 1, reason: "TERMINAL", rejectedAt: 2 }] }));
+  const dismissed = await queue.dismissRejected("r1");
+  assert.equal(dismissed.status, "STORAGE_UNAVAILABLE");
+  assert.equal(queue.peekRejected().items.length, 1, "a refused dismiss must leave the rejected item exactly as it was");
+
+  // Seed a pending item directly the same way, so flushQueue has
+  // something it could otherwise have (unsafely) applied.
+  storage.setItem("bl_offline_queue_v1", JSON.stringify({ version: 1, pending: [{ id: "p1", kind: "recordActualField", fields: { value: "10" }, createdAt: 1 }], rejected: [] }));
+  const flushResult = await queue.flushQueue({ recordActualField: async () => ({ status: "APPLIED" }) });
+  assert.equal(flushResult.readStatus, "STORAGE_UNAVAILABLE", "flushQueue must report the same fail-closed status, not silently apply the handler's own successful outcome");
+  assert.equal(flushResult.flushed, 0);
+  assert.equal(queue.peekQueue().items.length, 1, "the item must remain queued, untouched, for a later flush once a lock is available");
+});
+
+// The review's own explicit ask: a two-instance test for the ACTUAL
+// fallback path, not only an injected ideal lock. Two tabs, neither with
+// Web Locks available (both instances built with no lock, exactly like
+// getDefaultLock() would return for both in a real unsupported browser),
+// racing an enqueue for the SAME origin storage: the old fallback would
+// have let this race silently lose one reading. Now both instances
+// simply refuse — a real (if inconvenient) safety, never a silent loss.
+test("two-instance fallback with no lock on either side: both refuse rather than silently racing", async () => {
+  const storage = memoryStorage();
+  const tab1 = createOfflineQueue(storage, null);
+  const tab2 = createOfflineQueue(storage, null);
+
+  const [r1, r2] = await Promise.all([tab1.enqueue("recordActualField", { field: "actual", value: "10" }), tab2.enqueue("recordActualField", { field: "moisture", value: "3" })]);
+  assert.equal(r1.status, "STORAGE_UNAVAILABLE");
+  assert.equal(r2.status, "STORAGE_UNAVAILABLE");
+  assert.deepEqual(tab1.peekQueue().items, [], "neither tab's reading may have been silently written without a way to serialize the two");
 });
 
 // ---- PL-R9-P2-01: two-instance tests modeling real cross-tab access to

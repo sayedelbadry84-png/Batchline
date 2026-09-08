@@ -33,6 +33,29 @@ setGlobal("HTMLElement", dom.window.HTMLElement);
 setGlobal("HTMLInputElement", dom.window.HTMLInputElement);
 setGlobal("Event", dom.window.Event);
 setGlobal("FocusEvent", dom.window.FocusEvent);
+// jsdom's own navigator doesn't implement the Web Locks API at all —
+// offlineQueue.ts's getDefaultLock() would see that exactly as it would
+// a real unsupported browser and return null, which (PL-R10-P2-02) now
+// makes every offline mutation fail closed. A minimal, real FIFO-mutex
+// polyfill (same guarantee sharedLock() in offlineQueue.test.ts models)
+// is what actually lets this file's offline test exercise genuine
+// enqueue/coalesce/replay behavior end to end against the real
+// offlineQueue singleton below, rather than only proving the fail-closed
+// path an already-covered offlineQueue.test.ts test proves on its own.
+let lockTail: Promise<unknown> = Promise.resolve();
+Object.defineProperty(dom.window.navigator, "locks", {
+  configurable: true,
+  value: {
+    request(_name: string, callback: () => unknown) {
+      const run = lockTail.then(() => callback());
+      lockTail = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    },
+  },
+});
 // Tells React this is a real test environment so React.act() actually
 // batches/flushes updates instead of just warning that it can't tell.
 setGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -40,6 +63,7 @@ setGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 const React = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { AutoSaveField } = await import("../src/components/AutoSaveField");
+const { offlineQueue, logicalKey, emitReplaySuccess } = await import("../src/lib/offlineQueue");
 
 function mountInput(props: Parameters<typeof AutoSaveField>[0]) {
   const container = dom.window.document.createElement("div");
@@ -164,5 +188,97 @@ test("AutoSaveField: a rejected (non-OK) save never updates lastSaved, so the sa
     await new Promise((r) => setTimeout(r, 0));
   });
   assert.deepEqual(calls, ["9", "9"], "a rejected save's value must still look unsaved, so an identical retry blur sends it again rather than being treated as a no-op");
+  await unmount();
+});
+
+// PL-R10-P1-03, tenth production-lifecycle review: the deterministic
+// failure sequence the round found — two offline edits to the same field
+// used to enqueue as two SEPARATE items, both carrying the pre-offline
+// version. Replay applied the OLDER value first (advancing the server's
+// version), then rejected the genuinely latest value as STALE_READING.
+// This exercises the real component + the real offlineQueue singleton
+// (over jsdom's own localStorage) end to end, not a paraphrase of either.
+test("AutoSaveField: two offline edits to the same field coalesce — exactly one server write with the latest value, no rejected latest, and the field learns the returned version", async () => {
+  dom.window.localStorage.clear();
+  const setOnLine = (value: boolean) => Object.defineProperty(dom.window.navigator, "onLine", { value, configurable: true });
+  setOnLine(false);
+
+  const calls: string[] = [];
+  const sentVersions: string[] = [];
+  const action = async (fd: FormData) => {
+    calls.push(String(fd.get("value")));
+    sentVersions.push(String(fd.get("expectedVersion")));
+    return { status: "OK", version: 42 };
+  };
+
+  const hiddenFields = { batchTicketId: "test-offline-ticket", componentId: "test-offline-component", field: "actual" };
+  const { input, unmount } = mountInput({
+    action,
+    hiddenFields,
+    valueField: "value",
+    name: "offline-field",
+    defaultValue: "1",
+    defaultVersion: 0,
+    offlineQueueKind: "recordActualField",
+  });
+
+  // Two offline blurs to the SAME field — neither may reach `action` at
+  // all (offline), and the second must coalesce onto the first in the
+  // queue rather than enqueue a second, independently-stale-able item.
+  await React.act(async () => {
+    setValueAndBlur(input, "10");
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  await React.act(async () => {
+    setValueAndBlur(input, "20");
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.deepEqual(calls, [], "neither offline blur may call the server action directly");
+
+  const pending = offlineQueue.peekQueue().items;
+  assert.equal(pending.length, 1, "two offline edits to the same field must coalesce into ONE queued item");
+  assert.equal(pending[0].fields.value, "20");
+  assert.equal(pending[0].fields.expectedVersion, "0");
+
+  // "Reconnect": flush, simulating exactly what OfflineSyncBanner's own
+  // real handler does — call the action and, on success, emit the
+  // replay-success event this instance is subscribed to.
+  setOnLine(true);
+  let flushResult!: Awaited<ReturnType<typeof offlineQueue.flushQueue>>;
+  await React.act(async () => {
+    flushResult = await offlineQueue.flushQueue({
+      recordActualField: async (fields) => {
+        const fd = new FormData();
+        for (const [k, v] of Object.entries(fields)) fd.set(k, v);
+        const result = await action(fd);
+        // Synchronously triggers AutoSaveField's own onReplaySuccess
+        // listener (a setStatus/ref update) — must run inside act() the
+        // same as any other React-state-touching interaction in this file.
+        emitReplaySuccess(logicalKey("recordActualField", fields), result.version);
+        return { status: "APPLIED" };
+      },
+    });
+  });
+
+  assert.equal(flushResult.flushed, 1);
+  assert.deepEqual(calls, ["20"], "exactly one server write may happen, containing the LATEST value — 10 must never reach the server on its own");
+  assert.equal(offlineQueue.peekRejected().items.length, 0, "the latest value must never be rejected merely because an older queued sibling replayed first");
+
+  // Give the emitted replay-success event's React state update a tick to
+  // land before the next interaction.
+  await React.act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
+
+  // The NEXT edit — now online — must carry the version the replay
+  // actually RETURNED (42), not the stale pre-offline version (0),
+  // proving this specific mounted instance learned it.
+  await React.act(async () => {
+    setValueAndBlur(input, "30");
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.deepEqual(calls, ["20", "30"]);
+  assert.equal(sentVersions[1], "42", "the next save must use the version the offline replay returned, not the stale version this field started offline with");
+
   await unmount();
 });

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { offlineQueue, type RejectedAction, type ReplayOutcome, type ReadStatus } from "@/lib/offlineQueue";
+import { offlineQueue, logicalKey, emitReplaySuccess, type RejectedAction, type ReplayOutcome, type ReadStatus } from "@/lib/offlineQueue";
 import { recordActualField } from "@/app/(app)/production/actions";
 
 // Registry of queueable action kinds this banner knows how to replay —
@@ -19,7 +19,19 @@ const HANDLERS: Record<string, (fields: Record<string, string>) => Promise<Repla
     const fd = new FormData();
     for (const [k, v] of Object.entries(fields)) fd.set(k, v);
     const result = await recordActualField(fd);
-    return result.status === "OK" ? { status: "APPLIED" } : { status: "REJECTED", reason: result.status };
+    if (result.status === "OK") {
+      // PL-R10-P1-03, tenth production-lifecycle review: the mounted
+      // AutoSaveField that originally queued this item has no way to
+      // learn the server's fresh version on its own — emitted here,
+      // keyed exactly the same way that instance itself computes the key
+      // (see logicalKey's own comment), so its currentVersion ref is
+      // corrected before its next save, online or offline, instead of
+      // that next save carrying the stale pre-offline version and being
+      // refused as STALE_READING for no real reason.
+      emitReplaySuccess(logicalKey("recordActualField", fields), result.version);
+      return { status: "APPLIED" };
+    }
+    return { status: "REJECTED", reason: result.status };
   },
 };
 

@@ -1,7 +1,7 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { offlineQueue } from "@/lib/offlineQueue";
+import { useEffect, useRef, useState } from "react";
+import { offlineQueue, logicalKey, onReplaySuccess } from "@/lib/offlineQueue";
 
 type Status = "idle" | "saving" | "saved" | "error" | "queued" | "rejected" | "storageError";
 
@@ -91,6 +91,32 @@ export function AutoSaveField({
   const inFlight = useRef(false);
   const pendingValue = useRef<string | null>(null);
 
+  // PL-R10-P1-03, tenth production-lifecycle review: an offline replay
+  // that lands successfully (OfflineSyncBanner, a sibling component with
+  // no direct reference to this instance) advances the row's version on
+  // the SERVER, but this instance's own currentVersion ref has no way to
+  // learn that on its own — the next save (online or a further offline
+  // edit) would otherwise still carry the stale pre-offline version and
+  // be refused as STALE_READING for no real reason. Subscribed only when
+  // this field actually queues offline; the emitted key must match
+  // exactly what OfflineSyncBanner's own handler computes from the same
+  // queued item's kind/fields (see logicalKey's own comment).
+  useEffect(() => {
+    if (!offlineQueueKind) return;
+    const key = logicalKey(offlineQueueKind, hiddenFields, valueField);
+    return onReplaySuccess(key, (version) => {
+      currentVersion.current = version;
+      setStatus("saved");
+      setTimeout(() => setStatus((s) => (s === "saved" ? "idle" : s)), 1500);
+    });
+    // hiddenFields is a plain object literal recreated every render at
+    // every call site — keying off offlineQueueKind/valueField alone
+    // (both stable strings for a given field) avoids re-subscribing on
+    // every render while still resubscribing if the field this instance
+    // represents genuinely changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offlineQueueKind, valueField]);
+
   async function performSave(value: string) {
     inFlight.current = true;
     setStatus("saving");
@@ -114,7 +140,7 @@ export function AutoSaveField({
       }
     } catch {
       if (offlineQueueKind) {
-        const enqueued = await offlineQueue.enqueue(offlineQueueKind, fields);
+        const enqueued = await offlineQueue.enqueue(offlineQueueKind, fields, valueField);
         if (enqueued.status === "OK") {
           lastSaved.current = value;
           setStatus("queued");
@@ -147,7 +173,7 @@ export function AutoSaveField({
 
     if (offlineQueueKind && typeof navigator !== "undefined" && !navigator.onLine) {
       const fields = { ...hiddenFields, [valueField]: value, expectedVersion: String(currentVersion.current) };
-      const enqueued = await offlineQueue.enqueue(offlineQueueKind, fields);
+      const enqueued = await offlineQueue.enqueue(offlineQueueKind, fields, valueField);
       if (enqueued.status === "OK") {
         lastSaved.current = value;
         setStatus("queued");
