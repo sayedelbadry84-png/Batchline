@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { offlineQueue, type RejectedAction, type ReplayOutcome } from "@/lib/offlineQueue";
+import { offlineQueue, type RejectedAction, type ReplayOutcome, type ReadStatus } from "@/lib/offlineQueue";
 import { recordActualField } from "@/app/(app)/production/actions";
 
 // Registry of queueable action kinds this banner knows how to replay —
@@ -43,21 +43,32 @@ export function OfflineSyncBanner({
     reasonLabels: Record<string, string>;
     dismiss: string;
     storageError: string;
+    corruptionRecovered: string;
   };
 }) {
   // Lazy initializers (not a synchronous setState in the effect body) —
   // guarded for SSR, where navigator/localStorage don't exist.
-  const [pendingCount, setPendingCount] = useState(() => (typeof window === "undefined" ? 0 : offlineQueue.peekQueue().length));
-  const [rejected, setRejected] = useState<RejectedAction[]>(() => (typeof window === "undefined" ? [] : offlineQueue.peekRejected()));
+  const [pendingCount, setPendingCount] = useState(() => (typeof window === "undefined" ? 0 : offlineQueue.peekQueue().items.length));
+  const [rejected, setRejected] = useState<RejectedAction[]>(() => (typeof window === "undefined" ? [] : offlineQueue.peekRejected().items));
   const [isOnline, setIsOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
   const [justSynced, setJustSynced] = useState(false);
-  const [storageError, setStorageError] = useState(false);
+  // PL-R8-P1-02, eighth production-lifecycle review: readStatus (not a
+  // plain boolean) — "storage genuinely unreadable/unwritable right now"
+  // and "a corrupt payload was just recovered from" are different
+  // situations an operator needs different words for, and this banner
+  // must never silently render "nothing pending" for either one (the
+  // reviewed finding: a peekQueue()/peekRejected() that returns an empty
+  // array on a READ failure looks identical to a genuinely empty queue).
+  const [readStatus, setReadStatus] = useState<ReadStatus>("OK");
 
   const trySync = useCallback(async () => {
-    const { flushed, remaining, storageError: hadStorageError } = await offlineQueue.flushQueue(HANDLERS);
+    const { flushed, remaining, readStatus: flushReadStatus } = await offlineQueue.flushQueue(HANDLERS);
+    const rejectedRead = offlineQueue.peekRejected();
     setPendingCount(remaining);
-    setRejected(offlineQueue.peekRejected());
-    setStorageError(hadStorageError);
+    setRejected(rejectedRead.items);
+    // Worst-of the two reads this tick performed — STORAGE_UNAVAILABLE
+    // outranks RECOVERED_FROM_CORRUPT, which outranks OK.
+    setReadStatus(flushReadStatus === "STORAGE_UNAVAILABLE" || rejectedRead.readStatus === "STORAGE_UNAVAILABLE" ? "STORAGE_UNAVAILABLE" : flushReadStatus === "RECOVERED_FROM_CORRUPT" || rejectedRead.readStatus === "RECOVERED_FROM_CORRUPT" ? "RECOVERED_FROM_CORRUPT" : "OK");
     if (flushed > 0) {
       setJustSynced(true);
       setTimeout(() => setJustSynced(false), 2500);
@@ -74,7 +85,11 @@ export function OfflineSyncBanner({
     // A blur→save can queue an item without the browser ever firing
     // "offline" (e.g. a request that just times out) — a light poll
     // catches that case too, without needing a broadcast channel.
-    const poll = window.setInterval(() => setPendingCount(offlineQueue.peekQueue().length), 5000);
+    const poll = window.setInterval(() => {
+      const read = offlineQueue.peekQueue();
+      setPendingCount(read.items.length);
+      if (read.readStatus !== "OK") setReadStatus(read.readStatus);
+    }, 5000);
     return () => {
       window.clearTimeout(initialSync);
       window.removeEventListener("online", onOnline);
@@ -89,12 +104,12 @@ export function OfflineSyncBanner({
     // (rather than filtering local state directly) means a failed
     // persist leaves the item showing exactly as it did before.
     const result = offlineQueue.dismissRejected(id);
-    setStorageError(result.status !== "OK");
-    setRejected(offlineQueue.peekRejected());
+    if (result.status !== "OK") setReadStatus("STORAGE_UNAVAILABLE");
+    setRejected(offlineQueue.peekRejected().items);
   }
 
   const showStatusLine = isOnline === false || pendingCount > 0 || justSynced;
-  if (!showStatusLine && rejected.length === 0 && !storageError) return null;
+  if (!showStatusLine && rejected.length === 0 && readStatus === "OK") return null;
 
   return (
     <div className="flex flex-col gap-2">
@@ -111,9 +126,14 @@ export function OfflineSyncBanner({
               : labels.synced}
         </div>
       )}
-      {storageError && (
+      {readStatus === "STORAGE_UNAVAILABLE" && (
         <div role="alert" className="rounded-lg border border-critical/30 bg-critical-soft px-3 py-2 text-xs text-critical">
           {labels.storageError}
+        </div>
+      )}
+      {readStatus === "RECOVERED_FROM_CORRUPT" && (
+        <div role="alert" className="rounded-lg border border-warn/30 bg-warn-soft px-3 py-2 text-xs text-warn">
+          {labels.corruptionRecovered}
         </div>
       )}
       {rejected.length > 0 && (

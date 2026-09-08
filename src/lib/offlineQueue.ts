@@ -63,60 +63,64 @@ function emptyState(): OfflineStateV1 {
   return { version: 1, pending: [], rejected: [] };
 }
 
-function isOfflineStateV1(value: unknown): value is OfflineStateV1 {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as { version?: unknown }).version === 1 &&
-    Array.isArray((value as { pending?: unknown }).pending) &&
-    Array.isArray((value as { rejected?: unknown }).rejected)
-  );
+function isStringRecord(v: unknown): v is Record<string, string> {
+  return typeof v === "object" && v !== null && Object.values(v as Record<string, unknown>).every((x) => typeof x === "string");
 }
 
-// Reads the ENTIRE queue as one object — pending and rejected are two
-// fields of the SAME persisted value, not two separate storage keys, so
-// a pending→rejected transition (or any other) is always a single
-// setItem call, never two writes with a loss window between them
-// (PL-R7-P1-02).
-function readState(storage: StorageAdapter): OfflineStateV1 {
+// PL-R8-P1-02, eighth production-lifecycle review: the old check only
+// confirmed `pending`/`rejected` were arrays — a parseable but malformed
+// item (a missing `id`, a `fields` that isn't a plain string map) could
+// still get through, then break rendering or sit forever unreplayable
+// (flushQueue has no handler-kind match, forever RETRYABLE-shaped).
+// Every item is now validated field-by-field, not just array-shaped.
+function isQueuedAction(v: unknown): v is QueuedAction {
+  if (typeof v !== "object" || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.id === "string" && typeof o.kind === "string" && typeof o.createdAt === "number" && isStringRecord(o.fields);
+}
+
+function isRejectedAction(v: unknown): v is RejectedAction {
+  if (!isQueuedAction(v)) return false;
+  const o = v as unknown as Record<string, unknown>;
+  return typeof o.reason === "string" && typeof o.rejectedAt === "number";
+}
+
+function isOfflineStateV1(value: unknown): value is OfflineStateV1 {
+  if (typeof value !== "object" || value === null) return false;
+  const o = value as Record<string, unknown>;
+  return o.version === 1 && Array.isArray(o.pending) && o.pending.every(isQueuedAction) && Array.isArray(o.rejected) && o.rejected.every(isRejectedAction);
+}
+
+// A typed read outcome, not "corrupt/failure both collapse to an empty
+// state" (PL-R8-P1-02) — a storage READ failing (a `getItem` throw) is a
+// completely different situation from the stored value being corrupt
+// JSON: the former means the EXISTING data might still be there and
+// perfectly fine, just unreadable THIS instant (a transient adapter
+// fault), so treating it as "empty" and letting a subsequent write
+// proceed would silently overwrite and destroy real pending/rejected
+// readings that were never actually lost. Every caller below must
+// branch on this instead of collapsing it.
+type ReadStateResult =
+  | { status: "OK"; state: OfflineStateV1 }
+  | { status: "STORAGE_UNAVAILABLE"; error?: unknown }
+  | { status: "CORRUPT"; raw: string };
+
+function readState(storage: StorageAdapter): ReadStateResult {
   let raw: string | null;
   try {
     raw = storage.getItem(STORAGE_KEY);
-  } catch {
-    return emptyState();
+  } catch (error) {
+    return { status: "STORAGE_UNAVAILABLE", error };
   }
-  if (!raw) return emptyState();
+  if (!raw) return { status: "OK", state: emptyState() };
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (isOfflineStateV1(parsed)) return parsed;
+    if (isOfflineStateV1(parsed)) return { status: "OK", state: parsed };
   } catch {
-    // fall through to the corrupt-payload handling below
+    // fall through — CORRUPT below covers both a JSON parse failure and
+    // a validly-parsed value that isn't a real OfflineStateV1 shape.
   }
-  // Corrupt or unrecognized shape — never silently discard it. Back it
-  // up under a distinct key (best-effort; a failure here just means the
-  // backup itself couldn't be written) and warn loudly, then replace
-  // STORAGE_KEY itself with a fresh empty state — not merely returning
-  // one in memory — so a later read of the same still-corrupt payload
-  // doesn't back it up again under yet another key on every single call.
-  const backupKey = `${STORAGE_KEY}_corrupt_backup_${Date.now()}`;
-  try {
-    storage.setItem(backupKey, raw);
-  } catch {
-    // best-effort only
-  }
-  if (typeof console !== "undefined") {
-    console.warn("[offlineQueue] stored state was corrupt or an unrecognized shape; backed up under a separate key and starting fresh.", raw);
-  }
-  const fresh = emptyState();
-  try {
-    storage.setItem(STORAGE_KEY, JSON.stringify(fresh));
-  } catch {
-    // If even this fails, the original corrupt raw string is still
-    // sitting under STORAGE_KEY untouched — nothing is lost, this read
-    // just returns an in-memory empty state for THIS call only, and the
-    // next read will go through this same recovery path again.
-  }
-  return fresh;
+  return { status: "CORRUPT", raw };
 }
 
 function persistState(storage: StorageAdapter, next: OfflineStateV1): PersistResult {
@@ -126,12 +130,62 @@ function persistState(storage: StorageAdapter, next: OfflineStateV1): PersistRes
   } catch (error) {
     // Quota exceeded, storage disabled/blocked, or any other reason
     // setItem can throw — the caller must treat this as "not saved",
-    // never as success (PL-R7-P1-02: this used to be swallowed here
-    // with nothing returned, so enqueue/dequeue/dismiss all looked like
-    // they had worked even when nothing was actually persisted).
+    // never as success.
     return { status: "STORAGE_UNAVAILABLE", error };
   }
 }
+
+// Recovery for a CORRUPT read: back the raw payload up under a distinct
+// key FIRST, and only if that backup genuinely persists does this
+// replace STORAGE_KEY with a fresh empty state — never the other way
+// around (PL-R8-P1-02's own "corrupt-backup failure must not still
+// destroy the primary" finding). If the backup itself can't be written
+// (the same failing storage that made the payload unreadable in the
+// first place, most likely), the original raw string is left completely
+// untouched under STORAGE_KEY and this reports BACKUP_FAILED — callers
+// must treat that exactly like STORAGE_UNAVAILABLE: no further write.
+function recoverFromCorrupt(storage: StorageAdapter, raw: string): { status: "RECOVERED"; state: OfflineStateV1 } | { status: "BACKUP_FAILED" } {
+  const backupKey = `${STORAGE_KEY}_corrupt_backup_${Date.now()}`;
+  try {
+    storage.setItem(backupKey, raw);
+  } catch {
+    return { status: "BACKUP_FAILED" };
+  }
+  const fresh = emptyState();
+  const replaced = persistState(storage, fresh);
+  warnCorrupt(raw, replaced.status === "OK");
+  // Even if replacing the primary key failed, the backup is safely on
+  // file and the ORIGINAL raw string is still sitting under STORAGE_KEY
+  // untouched (this function never got far enough to fail a write to
+  // it before the backup succeeded) — either way it's safe to hand the
+  // caller a fresh in-memory state to build this one write on, since
+  // the next read will simply go through this same recovery path again.
+  return { status: "RECOVERED", state: fresh };
+}
+
+let lastCorruptWarning: { raw: string; at: number } | null = null;
+
+// PL-R8-P1-02: "explicit warning/backup policy, not only console.warn" —
+// this still logs (useful in real browser devtools), but the actual
+// operator-visible signal is OfflineSyncBanner's own corruption banner,
+// driven by the readStatus every read-through-recovery caller below
+// returns alongside its data.
+function warnCorrupt(raw: string, primaryReplaced: boolean) {
+  lastCorruptWarning = { raw, at: Date.now() };
+  if (typeof console !== "undefined") {
+    console.warn(
+      `[offlineQueue] stored state was corrupt or an unrecognized shape; backed up under a separate key${primaryReplaced ? " and replaced with a fresh empty state" : " (could not replace the primary key, will recover again next read)"}.`,
+      raw,
+    );
+  }
+}
+
+// A read-through-recovery status every peek/mutation below surfaces
+// alongside its actual data, so a caller (OfflineSyncBanner, most
+// notably) can never render "nothing pending" when reading storage
+// genuinely failed, and can show a real recovery warning rather than
+// only a devtools console line (PL-R8-P1-02).
+export type ReadStatus = "OK" | "STORAGE_UNAVAILABLE" | "RECOVERED_FROM_CORRUPT";
 
 export type EnqueueResult = { status: "OK"; item: QueuedAction } | { status: "STORAGE_UNAVAILABLE" };
 
@@ -141,44 +195,61 @@ export type EnqueueResult = { status: "OK"; item: QueuedAction } | { status: "ST
 // StorageAdapter (including one that always throws) to exercise failure
 // paths deterministically, with no browser/jsdom involved.
 export function createOfflineQueue(storage: StorageAdapter | null) {
-  function peekQueue(): QueuedAction[] {
-    return storage ? readState(storage).pending : [];
+  // Shared by every mutation below (enqueue/dismissRejected/flushQueue):
+  // reads current state, transparently recovering from CORRUPT (backup-
+  // then-replace) but NEVER manufacturing a writable empty state out of
+  // a genuine STORAGE_UNAVAILABLE read — that's the exact bug PL-R8-P1-02
+  // found (a transient getItem failure silently becoming "empty," so the
+  // next successful setItem overwrote and destroyed real data).
+  function readForMutation(): { status: "OK" | "RECOVERED_FROM_CORRUPT"; state: OfflineStateV1 } | { status: "STORAGE_UNAVAILABLE"; error?: unknown } {
+    if (!storage) return { status: "STORAGE_UNAVAILABLE" };
+    const read = readState(storage);
+    if (read.status === "OK") return { status: "OK", state: read.state };
+    if (read.status === "STORAGE_UNAVAILABLE") return read;
+    const recovered = recoverFromCorrupt(storage, read.raw);
+    if (recovered.status === "BACKUP_FAILED") return { status: "STORAGE_UNAVAILABLE" };
+    return { status: "RECOVERED_FROM_CORRUPT", state: recovered.state };
   }
 
-  function peekRejected(): RejectedAction[] {
-    return storage ? readState(storage).rejected : [];
+  function peekQueue(): { items: QueuedAction[]; readStatus: ReadStatus } {
+    const read = readForMutation();
+    return read.status === "STORAGE_UNAVAILABLE" ? { items: [], readStatus: "STORAGE_UNAVAILABLE" } : { items: read.state.pending, readStatus: read.status };
+  }
+
+  function peekRejected(): { items: RejectedAction[]; readStatus: ReadStatus } {
+    const read = readForMutation();
+    return read.status === "STORAGE_UNAVAILABLE" ? { items: [], readStatus: "STORAGE_UNAVAILABLE" } : { items: read.state.rejected, readStatus: read.status };
   }
 
   function enqueue(kind: string, fields: Record<string, string>): EnqueueResult {
-    if (!storage) return { status: "STORAGE_UNAVAILABLE" };
-    const state = readState(storage);
+    const read = readForMutation();
+    if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
     const item: QueuedAction = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind, fields, createdAt: Date.now() };
-    const result = persistState(storage, { version: 1, pending: [...state.pending, item], rejected: state.rejected });
+    const result = persistState(storage!, { version: 1, pending: [...read.state.pending, item], rejected: read.state.rejected });
     return result.status === "OK" ? { status: "OK", item } : { status: "STORAGE_UNAVAILABLE" };
   }
 
   function dismissRejected(id: string): PersistResult {
-    if (!storage) return { status: "STORAGE_UNAVAILABLE" };
-    const state = readState(storage);
-    return persistState(storage, { version: 1, pending: state.pending, rejected: state.rejected.filter((item) => item.id !== id) });
+    const read = readForMutation();
+    if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
+    return persistState(storage!, { version: 1, pending: read.state.pending, rejected: read.state.rejected.filter((item) => item.id !== id) });
   }
 
   // Replays every queued item whose kind has a matching handler.
   // APPLIED and REJECTED each commit their pending→(gone|rejected)
   // transition as ONE persistState call carrying the full next state —
-  // never a dequeue followed by a separate rejected-list write
-  // (PL-R7-P1-02's own "two non-atomic writes" finding). If that single
-  // write fails, the item is left exactly as it was in storage (still
-  // pending), never partially transitioned.
+  // never a dequeue followed by a separate rejected-list write. If that
+  // single write fails, the item is left exactly as it was in storage
+  // (still pending), never partially transitioned.
   async function flushQueue(
     handlers: Record<string, (fields: Record<string, string>) => Promise<ReplayOutcome>>,
-  ): Promise<{ flushed: number; remaining: number; rejected: number; storageError: boolean }> {
-    if (!storage) return { flushed: 0, remaining: 0, rejected: 0, storageError: true };
-    const state = readState(storage);
+  ): Promise<{ flushed: number; remaining: number; rejected: number; readStatus: ReadStatus }> {
+    const initial = readForMutation();
+    if (initial.status === "STORAGE_UNAVAILABLE") return { flushed: 0, remaining: 0, rejected: 0, readStatus: "STORAGE_UNAVAILABLE" };
+    let readStatus: ReadStatus = initial.status;
     let flushed = 0;
-    let storageError = false;
 
-    for (const item of state.pending) {
+    for (const item of initial.state.pending) {
       const handler = handlers[item.kind];
       if (!handler) continue;
       let outcome: ReplayOutcome;
@@ -194,19 +265,24 @@ export function createOfflineQueue(storage: StorageAdapter | null) {
       // flushQueue calls (e.g. two open tabs on the same ticket) can
       // otherwise each work from a stale snapshot and clobber each
       // other's already-persisted removals.
-      const fresh = readState(storage);
-      if (!fresh.pending.some((i) => i.id === item.id)) {
+      const fresh = readForMutation();
+      if (fresh.status === "STORAGE_UNAVAILABLE") {
+        readStatus = "STORAGE_UNAVAILABLE";
+        continue; // Can't safely read-modify-write right now — leave this item queued for the next flush.
+      }
+      if (fresh.status === "RECOVERED_FROM_CORRUPT") readStatus = "RECOVERED_FROM_CORRUPT";
+      if (!fresh.state.pending.some((i) => i.id === item.id)) {
         // Already gone — a concurrent flushQueue call already resolved
-        // this exact item (APPLIED or REJECTED) between our handler call
-        // and this write. Re-applying REJECTED here would append a
-        // second, duplicate rejected entry for the same reading; simply
-        // not touching it is correct either way.
+        // this exact item between our handler call and this write.
+        // Re-applying REJECTED here would append a duplicate rejected
+        // entry for the same reading; simply not touching it is correct
+        // either way.
         continue;
       }
-      const nextPending = fresh.pending.filter((i) => i.id !== item.id);
+      const nextPending = fresh.state.pending.filter((i) => i.id !== item.id);
       const nextRejected =
-        outcome.status === "REJECTED" ? [...fresh.rejected, { ...item, reason: outcome.reason, rejectedAt: Date.now() }] : fresh.rejected;
-      const result = persistState(storage, { version: 1, pending: nextPending, rejected: nextRejected });
+        outcome.status === "REJECTED" ? [...fresh.state.rejected, { ...item, reason: outcome.reason, rejectedAt: Date.now() }] : fresh.state.rejected;
+      const result = persistState(storage!, { version: 1, pending: nextPending, rejected: nextRejected });
       if (result.status === "OK") {
         if (outcome.status === "APPLIED") flushed++;
       } else {
@@ -214,18 +290,26 @@ export function createOfflineQueue(storage: StorageAdapter | null) {
         // pending), so nothing was lost; replaying either outcome again
         // next flush is safe (APPLIED is idempotent, REJECTED is
         // re-derived fresh).
-        storageError = true;
+        readStatus = "STORAGE_UNAVAILABLE";
       }
     }
 
-    const final = readState(storage);
-    return { flushed, remaining: final.pending.length, rejected: final.rejected.length, storageError };
+    const final = readForMutation();
+    if (final.status === "STORAGE_UNAVAILABLE") return { flushed, remaining: initial.state.pending.length, rejected: initial.state.rejected.length, readStatus: "STORAGE_UNAVAILABLE" };
+    return { flushed, remaining: final.state.pending.length, rejected: final.state.rejected.length, readStatus };
   }
 
   return { peekQueue, peekRejected, enqueue, dismissRejected, flushQueue };
 }
 
 export type OfflineQueue = ReturnType<typeof createOfflineQueue>;
+
+// Test-only introspection — the most recent corrupt payload this
+// process observed, if any (used by tests to confirm a recovery warning
+// actually fired without depending on console output).
+export function __lastCorruptWarningForTesting() {
+  return lastCorruptWarning;
+}
 
 // The instance every Client Component actually uses.
 export const offlineQueue = createOfflineQueue(getDefaultStorage());
