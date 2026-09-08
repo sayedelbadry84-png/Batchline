@@ -1,0 +1,168 @@
+// Rendered-component test for src/components/AutoSaveField.tsx — the one
+// disclosed gap every prior round's test suite named but never closed:
+// "AutoSaveField's own per-field save-coalescing is React component
+// behavior with no DOM to render it against" (see offlineQueue.test.ts's
+// own top comment). PL-R9-P2-04, ninth production-lifecycle review, asks
+// for exactly this.
+//
+// jsdom globals MUST be assigned before AutoSaveField (or its own
+// offlineQueue import) is ever loaded — offlineQueue.ts's default export
+// is a module-level singleton whose storage adapter is decided once, at
+// import time, by `typeof window === "undefined"`. A static top-level
+// import here would already have pulled that module in before this
+// file's own top-level code ran; the dynamic imports below (after the
+// jsdom globals are assigned) are what makes the ordering actually work,
+// the same technique batchCompletion.test.ts already uses to redirect
+// DATABASE_URL before its own domain imports load.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { JSDOM } from "jsdom";
+
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/" });
+// Object.defineProperty, not a plain assignment — Node 21+ ships its own
+// read-only `navigator` global getter, which a plain `global.navigator =`
+// throws against ("Cannot set property navigator... which has only a
+// getter"). `configurable: true` lets this override it cleanly.
+function setGlobal(name: string, value: unknown) {
+  Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+}
+setGlobal("window", dom.window);
+setGlobal("document", dom.window.document);
+setGlobal("navigator", dom.window.navigator);
+setGlobal("HTMLElement", dom.window.HTMLElement);
+setGlobal("HTMLInputElement", dom.window.HTMLInputElement);
+setGlobal("Event", dom.window.Event);
+setGlobal("FocusEvent", dom.window.FocusEvent);
+// Tells React this is a real test environment so React.act() actually
+// batches/flushes updates instead of just warning that it can't tell.
+setGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
+const React = await import("react");
+const { createRoot } = await import("react-dom/client");
+const { AutoSaveField } = await import("../src/components/AutoSaveField");
+
+function mountInput(props: Parameters<typeof AutoSaveField>[0]) {
+  const container = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(container);
+  const root = createRoot(container);
+  React.act(() => {
+    root.render(React.createElement(AutoSaveField, props));
+  });
+  const input = container.querySelector("input") as HTMLInputElement;
+  const unmount = async () => {
+    await React.act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  };
+  return { container, root, input, unmount };
+}
+
+function setValueAndBlur(input: HTMLInputElement, value: string) {
+  input.value = value;
+  // React's onBlur is implemented over the native, bubbling "focusout"
+  // event (not the non-bubbling "blur"), same as every browser's own
+  // event delegation React relies on outside jsdom too.
+  input.dispatchEvent(new dom.window.FocusEvent("focusout", { bubbles: true }));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+// PL-R7-P2-01, seventh production-lifecycle review: two overlapping saves
+// for the SAME field used to each start their own independent request
+// with no ordering guarantee. inFlight/pendingValue serialize them — a
+// blur that arrives while a save is already in flight must never start a
+// second concurrent request; it must instead be picked up by the
+// in-flight save's own completion handler, and only the truly LATEST
+// value must ever be the last one actually sent.
+test("AutoSaveField: a blur that arrives while a save is in flight is coalesced, not sent as a second concurrent request", async () => {
+  const calls: string[] = [];
+  const firstCallGate = deferred<void>();
+  let resolveFirstSave!: (v: { status: string }) => void;
+
+  const action = async (fd: FormData) => {
+    const value = String(fd.get("value"));
+    calls.push(value);
+    if (calls.length === 1) {
+      firstCallGate.resolve();
+      return new Promise<{ status: string }>((resolve) => {
+        resolveFirstSave = resolve;
+      });
+    }
+    return { status: "OK" };
+  };
+
+  const { input, unmount } = mountInput({
+    action,
+    hiddenFields: {},
+    valueField: "value",
+    name: "test-field",
+    defaultValue: "10",
+    defaultVersion: 0,
+  });
+
+  // First blur starts the (still-pending) first save.
+  await React.act(async () => {
+    setValueAndBlur(input, "20");
+    await firstCallGate.promise;
+  });
+  assert.deepEqual(calls, ["20"], "the first blur must start exactly one save");
+
+  // A second, then a third, value arrive while that first save is still
+  // in flight — handleBlur must queue only the LATEST one (pendingValue
+  // overwritten, not appended), never start a concurrent second request.
+  await React.act(async () => {
+    setValueAndBlur(input, "21");
+    setValueAndBlur(input, "22");
+  });
+  assert.deepEqual(calls, ["20"], "no second request may be sent while the first is still in flight, no matter how many blurs arrive");
+
+  // The first save now resolves — its own completion handler must fire
+  // the queued follow-up for the LATEST value only.
+  await React.act(async () => {
+    resolveFirstSave({ status: "OK" });
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.deepEqual(calls, ["20", "22"], "the follow-up save must carry only the truly latest value — 21 must never have been sent on its own");
+  await unmount();
+});
+
+test("AutoSaveField: a rejected (non-OK) save never updates lastSaved, so the same value is retried on the next blur", async () => {
+  const calls: string[] = [];
+  const action = async (fd: FormData) => {
+    const value = String(fd.get("value"));
+    calls.push(value);
+    return { status: "STALE_READING" };
+  };
+
+  const { input, unmount } = mountInput({
+    action,
+    hiddenFields: {},
+    valueField: "value",
+    name: "test-field-2",
+    defaultValue: "5",
+    defaultVersion: 0,
+  });
+
+  await React.act(async () => {
+    setValueAndBlur(input, "9");
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.deepEqual(calls, ["9"]);
+
+  // Blurring the SAME value again must re-send it — a rejected save must
+  // never have been treated as "already saved" (lastSaved must still be
+  // the original, un-applied value, not the rejected "9").
+  await React.act(async () => {
+    setValueAndBlur(input, "9");
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  assert.deepEqual(calls, ["9", "9"], "a rejected save's value must still look unsaved, so an identical retry blur sends it again rather than being treated as a no-op");
+  await unmount();
+});
