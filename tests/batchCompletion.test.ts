@@ -44,6 +44,7 @@ const { postSiloMovement } = await import("../src/lib/inventoryLedger");
 const { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } = await import("../src/lib/batchComponentEdits");
 const { claimTripSlot, applyReclaimCredit } = await import("../src/lib/tripDispatch");
 const { requestShortageOverride, approveShortageOverrideRequest, rejectShortageOverrideRequest } = await import("../src/lib/shortageOverrideRequests");
+const { maybeAutoRequisitionMaterial } = await import("../src/lib/materialRequisition");
 
 const prisma = new PrismaClient();
 
@@ -66,6 +67,7 @@ let driverId: string;
 
 const ticketIds: string[] = [];
 const tripIds: string[] = [];
+const materialRequisitionIds: string[] = [];
 
 before(async () => {
   const site = await prisma.site.create({ data: { code: `TEST-SUITE-BC-${Date.now()}`, name: "TEST-SUITE-BC-SITE", city: "Test", country: "Test" } });
@@ -130,8 +132,24 @@ async function deleteMovements(where: NonNullable<Parameters<typeof prisma.inven
 // optional actorId FK is itself an UPDATE, which the immutability
 // trigger correctly refuses ("insert a new event instead of using
 // UPDATE"). Same narrowly scoped bypass as the other two suites.
-async function deleteAuditEventsByActor(actorId: string) {
-  await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`, prisma.auditEvent.deleteMany({ where: { actorId } })]);
+//
+// PL-R8-P1-01, eighth production-lifecycle review: actorId alone isn't
+// enough in THIS file specifically — completeBatchTicket(ticketId, {})
+// (no actorId) is how the great majority of this suite's own tests call
+// it, which writes its audit event with actorId: null, role: "SYSTEM".
+// Filtering by actorId alone left every one of those rows (well over
+// forty across this file) as untracked, un-swept residue that the old
+// "zero residue" assertion never actually looked at. recordId, not
+// actorId, is what every one of this file's own domain calls
+// (completeBatchTicket/cancelBatchTicket/reverseBatchTicket) actually
+// keys their audit event to — always one of this suite's own fixture
+// ticket ids — so sweeping by recordId is the one predicate that closes
+// over the SYSTEM-actor rows too, not just adminUserId's own.
+async function deleteSuiteAuditEvents() {
+  await prisma.$transaction([
+    prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`,
+    prisma.auditEvent.deleteMany({ where: { OR: [{ actorId: adminUserId }, { recordId: { in: [reservationId, ...ticketIds, ...tripIds] } }] } }),
+  ]);
 }
 
 // P2025 ("record not found") is the one expected outcome here — some
@@ -157,6 +175,7 @@ async function cleanupDelete(fn: () => Promise<unknown>): Promise<void> {
 }
 
 after(async () => {
+  for (const id of materialRequisitionIds) await cleanupDelete(() => prisma.materialRequisition.delete({ where: { id } }));
   for (const id of tripIds) {
     await prisma.drumReturn.deleteMany({ where: { tripId: id } });
     // RECLAIM_CREDIT movements are sourced by the TRIP's own id, not the
@@ -206,7 +225,7 @@ after(async () => {
   await cleanupDelete(() => prisma.customer.delete({ where: { id: customerId } }));
   await cleanupDelete(() => prisma.plant.delete({ where: { id: plantId } }));
   await cleanupDelete(() => prisma.site.delete({ where: { id: siteId } }));
-  await deleteAuditEventsByActor(adminUserId);
+  await deleteSuiteAuditEvents();
   await cleanupDelete(() => prisma.user.delete({ where: { id: adminUserId } }));
 
   // Proves the sweep above actually worked, not just that it ran without
@@ -219,10 +238,11 @@ after(async () => {
     prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
     prisma.plant.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
     prisma.batchTicket.count({ where: { ticketNumber: { startsWith: "TEST-SUITE-BC-" } } }),
-    // PL-R7-P1-01: proves deleteAuditEventsByActor above actually swept
-    // every audit row this suite's own writeAudit calls (Round 6) left
-    // behind, not just that the subsequent user delete didn't throw.
-    prisma.auditEvent.count({ where: { actorId: adminUserId } }),
+    // PL-R8-P1-01: matches deleteSuiteAuditEvents' own predicate exactly
+    // — actorId OR recordId — so this genuinely proves zero residue
+    // including the SYSTEM/null-actor rows completeBatchTicket(id, {})
+    // writes, not just adminUserId's own.
+    prisma.auditEvent.count({ where: { OR: [{ actorId: adminUserId }, { recordId: { in: [reservationId, ...ticketIds, ...tripIds] } }] } }),
   ]);
   assert.deepEqual(residue, [0, 0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket, auditEvent] = ${JSON.stringify(residue)}`);
 
@@ -1082,6 +1102,41 @@ test("a COMPLETE ticket cannot be re-completed", async () => {
   assert.equal(second.status, "ALREADY_COMPLETED");
 });
 
+// PL-R8-P1-03, eighth production-lifecycle review: AutoSaveField's own
+// in-flight coalescing only serializes requests ONE mounted component
+// instance issues — it has no idea about another tab, another device, or
+// a delayed request that happens to resolve out of order. This proves
+// the actual authority is the database, not the client: a "delayed"
+// older request (one that read version 0 same as the newer one, but
+// reaches the server SECOND) must be refused as STALE_READING rather
+// than silently overwriting the value a genuinely newer request already
+// committed — real optimistic concurrency, not a timing assumption.
+test("an older delayed claimAndRecordActualField call cannot overwrite a newer one that already committed — real optimistic concurrency, not just request ordering", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+  assert.equal(component.version, 0, "a freshly created component starts at version 0");
+
+  // Both "requests" read version 0 — exactly what two different browser
+  // tabs (or an online save racing a queued offline replay) would each
+  // believe independently, with neither aware of the other.
+  const newer = await claimAndRecordActualField(ticketId, component.id, "actual", 42, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(newer.status, "OK");
+  if (newer.status === "OK") assert.equal(newer.version, 1);
+
+  // The "delayed" older request now arrives, still carrying its own
+  // stale belief that the version is 0.
+  const older = await claimAndRecordActualField(ticketId, component.id, "actual", 17, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(older.status, "STALE_READING", "a write against a version that's no longer current must be refused, not silently applied");
+
+  const finalComponent = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
+  assert.equal(finalComponent.actualMassKg, 42, "the newer value must survive untouched — the older request must never have applied");
+  assert.equal(finalComponent.version, 1, "only the one accepted write may have advanced the version");
+
+  // A real caller who re-reads the current version can still save for real.
+  const retry = await claimAndRecordActualField(ticketId, component.id, "actual", 17, finalComponent.version, { id: adminUserId, role: "ADMIN" });
+  assert.equal(retry.status, "OK");
+});
+
 test("completion vs. recordActualField: exactly one of two valid outcomes, never a stale-ledger/saved-edit mix", async () => {
   await resetSilo(50);
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]); // 1kg -> 0.001t, small on purpose
@@ -1089,7 +1144,7 @@ test("completion vs. recordActualField: exactly one of two valid outcomes, never
 
   const [completeResult, editResult] = await Promise.all([
     completeBatchTicket(ticketId, {}),
-    claimAndRecordActualField(ticketId, component.id, "actual", 2000, { id: adminUserId, role: "ADMIN" }), // 2kg — deliberately different from the 1kg target
+    claimAndRecordActualField(ticketId, component.id, "actual", 2000, component.version, { id: adminUserId, role: "ADMIN" }), // 2kg — deliberately different from the 1kg target
   ]);
 
   assert.equal(completeResult.status, "SUCCESS"); // completion always eventually succeeds — BATCHING never blocks its own claim
@@ -1251,6 +1306,39 @@ test("completeBatchTicket rolls back the ticket claim together with a failed aud
   // A real actor can still complete it for real afterward.
   const retry = await completeBatchTicket(ticketId, {});
   assert.equal(retry.status, "SUCCESS");
+});
+
+// PL-R8-P2-02, eighth production-lifecycle review: maybeAutoRequisitionMaterial's
+// own pre-check (a plain SELECT) has a race window a genuinely concurrent
+// call can win — the partial unique index MaterialRequisition_open_per_
+// material_site_key is the real backstop, and the P2002 it raises must be
+// classified precisely (not confused with an unrelated requisitionNumber
+// collision). Calling the real function directly (not a paraphrase) with
+// both calls racing against the SAME real PostgreSQL database proves both
+// the index and the classification together: exactly one row is created,
+// and the LOSING call resolves to that exact same row rather than
+// silently doing nothing.
+test("two concurrent shortfall requisition attempts for the same material+site leave exactly one open requisition, and both callers resolve to it", async () => {
+  const toKg = (tons: number) => tons * 1000;
+  const [a, b] = await Promise.all([
+    maybeAutoRequisitionMaterial(materialId, siteId, 2, 100, 50, toKg), // 2% on hand, well under the 50% threshold
+    maybeAutoRequisitionMaterial(materialId, siteId, 2, 100, 50, toKg),
+  ]);
+
+  const statuses = [a.status, b.status].sort();
+  assert.deepEqual(statuses, ["ALREADY_OPEN", "CREATED"], "exactly one of the two concurrent attempts may create the requisition");
+
+  const created = a.status === "CREATED" ? a : b.status === "CREATED" ? b : null;
+  const alreadyOpen = a.status === "ALREADY_OPEN" ? a : b.status === "ALREADY_OPEN" ? b : null;
+  assert.ok(created && alreadyOpen);
+  materialRequisitionIds.push(created.requisitionId);
+  assert.equal(alreadyOpen.requisitionId, created.requisitionId, "the losing call must resolve to the SAME row the winner created, not silently do nothing");
+  assert.equal(alreadyOpen.requisitionNumber, created.requisitionNumber);
+
+  const openCount = await prisma.materialRequisition.count({
+    where: { materialId, siteId, status: { in: ["PENDING_APPROVAL", "APPROVED", "ORDERED"] } },
+  });
+  assert.equal(openCount, 1, "exactly one open requisition must exist for this material+site — the partial unique index is the real backstop");
 });
 
 // ---- 7/8. Reversal restores exact quantities once; a second reversal --

@@ -48,6 +48,8 @@ const {
   closeTripWithReturnForId,
   decideWasteIncidentMemo,
   setDrumReturnFateForId,
+  reportTripDelayForId,
+  attachDeliveryPhotoForId,
 } = await import("../src/lib/tripLifecycle");
 const { completeBatchTicket, cancelBatchTicket } = await import("../src/lib/batchCompletion");
 const { closeReservationForId, getRemainingVolumeM3 } = await import("../src/lib/reservations");
@@ -418,6 +420,167 @@ test("reassignTrip succeeds for an in-scope operator and writes one atomic audit
   assert.equal(trip.driverId, driver2);
   const audit = await prisma.auditEvent.findFirst({ where: { recordId: dispatch.tripId, reasonCode: "TRIP_ASSIGNMENT_UPDATED" } });
   assert.ok(audit);
+});
+
+// ======================================================================
+// PL-R8-P1-04, eighth production-lifecycle review — driver/actions.ts's
+// requireOwnTrip used to be the ONLY ownership check for reportTripDelay/
+// uploadDeliveryPhoto, run as a plain pre-transaction read. A dispatch
+// reassignment landing in the gap between that check and the (Round-7)
+// audit-atomic transaction let the FORMER driver still act on a trip no
+// longer theirs. reportTripDelayForId/attachDeliveryPhotoForId
+// (tripLifecycle.ts) now re-verify ownership under the SAME Trip-row
+// lock their own write uses. Proven two ways below: a fully
+// deterministic "already reassigned" case (no latch needed — the
+// re-check is unconditional), and a genuine concurrent race against a
+// real reassignTrip call using the same two-latch pattern as the
+// existing Plant-transfer tests.
+// ======================================================================
+
+test("reportTripDelayForId and attachDeliveryPhotoForId both refuse a driver no longer assigned to the trip", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck1 = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const truck2 = await makeTruck();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck1, driverId: driverA, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  const reassign = await reassignTrip(dispatch.tripId, { truckId: truck2, driverId: driverB, pumpId: null, pumpOperatorId: null, pumpAssistantId: null, allowedSiteId: siteId, ...actor() });
+  assert.equal(reassign.status, "OK");
+
+  const delayResult = await reportTripDelayForId(dispatch.tripId, { requireOwnDriverEmployeeId: driverA, reason: "TRAFFIC", note: null, ...actor() });
+  assert.equal(delayResult.status, "NOT_FOUND", "the former driver must be refused once the trip has been reassigned");
+  const delayCount = await prisma.tripDelayReport.count({ where: { tripId: dispatch.tripId } });
+  assert.equal(delayCount, 0);
+
+  const photoResult = await attachDeliveryPhotoForId(dispatch.tripId, { requireOwnDriverEmployeeId: driverA, url: "https://example.invalid/test-suite-pl-photo.jpg", ...actor() });
+  assert.equal(photoResult.status, "NOT_FOUND", "the former driver must be refused once the trip has been reassigned");
+  const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+  assert.equal(trip.deliveryPhotoUrl, null, "a refused attach must never have written a URL");
+
+  // The NEW driver can legitimately act on it.
+  const realDelay = await reportTripDelayForId(dispatch.tripId, { requireOwnDriverEmployeeId: driverB, reason: "TRAFFIC", note: null, ...actor() });
+  assert.equal(realDelay.status, "OK");
+});
+
+test("attachDeliveryPhotoForId returns the freshest old URL, so a genuine race between two uploads never orphans the wrong blob", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  const first = await attachDeliveryPhotoForId(dispatch.tripId, { requireOwnDriverEmployeeId: driver, url: "https://example.invalid/photo-1.jpg", ...actor() });
+  assert.equal(first.status, "OK");
+  if (first.status === "OK") assert.equal(first.oldUrl, null, "no photo existed yet");
+
+  const second = await attachDeliveryPhotoForId(dispatch.tripId, { requireOwnDriverEmployeeId: driver, url: "https://example.invalid/photo-2.jpg", ...actor() });
+  assert.equal(second.status, "OK");
+  if (second.status === "OK") assert.equal(second.oldUrl, "https://example.invalid/photo-1.jpg", "must return exactly the URL this write is replacing, read fresh under the lock");
+
+  const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+  assert.equal(trip.deliveryPhotoUrl, "https://example.invalid/photo-2.jpg");
+});
+
+test("a concurrent reassignment blocks reportTripDelayForId, and is correctly re-checked afterward", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck1 = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const truck2 = await makeTruck();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck1, driverId: driverA, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  let signalReassignLocked: () => void;
+  const reassignLocked = new Promise<void>((resolve) => {
+    signalReassignLocked = resolve;
+  });
+  let releaseReassign: () => void;
+  const holdReassign = new Promise<void>((resolve) => {
+    releaseReassign = resolve;
+  });
+
+  try {
+    const reassignTx = prisma2.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Trip" WHERE "id" = ${dispatch.tripId} FOR UPDATE`;
+      await tx.trip.update({ where: { id: dispatch.tripId }, data: { truckId: truck2, driverId: driverB } });
+      signalReassignLocked();
+      await holdReassign;
+    });
+    await reassignLocked;
+
+    const delayOutcome = startObserved(reportTripDelayForId(dispatch.tripId, { requireOwnDriverEmployeeId: driverA, reason: "TRAFFIC", note: null, ...actor() }));
+    await waitUntilBlockedOn(`FROM "Trip"`, 8_000);
+
+    releaseReassign!();
+    await reassignTx;
+
+    const outcome = await delayOutcome;
+    assert.equal(outcome.status, "fulfilled");
+    if (outcome.status === "fulfilled") assert.equal(outcome.value.status, "NOT_FOUND", "must see the committed reassignment, not the pre-race driver");
+    const delayCount = await prisma.tripDelayReport.count({ where: { tripId: dispatch.tripId } });
+    assert.equal(delayCount, 0, "a refused report must never have been created");
+  } finally {
+    releaseReassign!();
+  }
+});
+
+test("a concurrent reassignment blocks attachDeliveryPhotoForId, and is correctly re-checked afterward", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck1 = await makeTruck();
+  const driverA = await makeDriver();
+  const driverB = await makeDriver();
+  const truck2 = await makeTruck();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck1, driverId: driverA, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  let signalReassignLocked: () => void;
+  const reassignLocked = new Promise<void>((resolve) => {
+    signalReassignLocked = resolve;
+  });
+  let releaseReassign: () => void;
+  const holdReassign = new Promise<void>((resolve) => {
+    releaseReassign = resolve;
+  });
+
+  try {
+    const reassignTx = prisma2.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Trip" WHERE "id" = ${dispatch.tripId} FOR UPDATE`;
+      await tx.trip.update({ where: { id: dispatch.tripId }, data: { truckId: truck2, driverId: driverB } });
+      signalReassignLocked();
+      await holdReassign;
+    });
+    await reassignLocked;
+
+    const photoOutcome = startObserved(
+      attachDeliveryPhotoForId(dispatch.tripId, { requireOwnDriverEmployeeId: driverA, url: "https://example.invalid/race-photo.jpg", ...actor() }),
+    );
+    await waitUntilBlockedOn(`FROM "Trip"`, 8_000);
+
+    releaseReassign!();
+    await reassignTx;
+
+    const outcome = await photoOutcome;
+    assert.equal(outcome.status, "fulfilled");
+    if (outcome.status === "fulfilled") assert.equal(outcome.value.status, "NOT_FOUND", "must see the committed reassignment, not the pre-race driver");
+    const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+    assert.equal(trip.deliveryPhotoUrl, null, "a refused attach must never have written a URL");
+  } finally {
+    releaseReassign!();
+  }
 });
 
 test("reassignTrip refuses an out-of-service truck, a busy driver, and a trip that already left LOADING", async () => {
@@ -1539,10 +1702,17 @@ test("the database refuses to hard-delete a User who still has an AuditEvent on 
     data: { actorId: throwawayUser.id, role: "ADMIN", module: "Fleet", recordId: "test-suite-pl-fk-restrict-check", reasonCode: "TEST_FIXTURE" },
   });
 
-  await assert.rejects(() => prisma.user.delete({ where: { id: throwawayUser.id } }), (e: unknown) => {
-    assert.ok(!/immutable/i.test(String(e)), "must fail as a real FK violation, not the audit-immutability trigger");
-    return true;
-  });
+  // PL-R8-P2-01, eighth production-lifecycle review: "any rejection whose
+  // text doesn't say immutable" is too weak — it would also pass for an
+  // unrelated connection error or a completely different bug. Assert the
+  // actual Prisma error class AND the real Postgres FK-violation SQLSTATE
+  // (23503, wrapped as P2003) specifically, the same structured-matcher
+  // discipline PL-R3-CI-03 already established for a different domain
+  // function's own FK check.
+  await assert.rejects(
+    () => prisma.user.delete({ where: { id: throwawayUser.id } }),
+    (e: unknown) => e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2003",
+  );
   const stillThere = await prisma.auditEvent.findUnique({ where: { id: audit.id } });
   assert.ok(stillThere, "the audit row itself must be completely untouched by the refused delete");
 
