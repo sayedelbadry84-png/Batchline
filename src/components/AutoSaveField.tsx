@@ -1,9 +1,9 @@
 "use client";
 
-import { useRef, useState, useTransition } from "react";
-import { enqueue } from "@/lib/offlineQueue";
+import { useRef, useState } from "react";
+import { offlineQueue } from "@/lib/offlineQueue";
 
-type Status = "idle" | "saving" | "saved" | "error" | "queued" | "rejected";
+type Status = "idle" | "saving" | "saved" | "error" | "queued" | "rejected" | "storageError";
 
 // A typed { status } result, not Promise<void> (PL-R6-P2-02, sixth
 // production-lifecycle review) — treating ANY resolved promise as
@@ -37,6 +37,7 @@ export function AutoSaveField({
   className,
   offlineQueueKind,
   rejectedLabel,
+  storageErrorLabel,
 }: {
   action: (formData: FormData) => Promise<ActionResult>;
   hiddenFields: Record<string, string>;
@@ -49,58 +50,103 @@ export function AutoSaveField({
   disabled?: boolean;
   className?: string;
   offlineQueueKind?: string;
-  // A plain string, not a per-status function — the same Server→Client
+  // Plain strings, not per-status functions — the same Server→Client
   // serialization rule PL-R5-P1-02 already fixed elsewhere applies here
-  // too. Shown as a title/tooltip on the rejection mark; a generic
+  // too. Shown as a title/tooltip on the respective mark; a generic
   // message is enough since the specific reason is already logged
-  // server-side and the value visibly never turned into a checkmark.
+  // server-side (rejected) or is inherently browser-local (storage).
   rejectedLabel?: string;
+  storageErrorLabel?: string;
 }) {
   const [status, setStatus] = useState<Status>("idle");
-  const [, startTransition] = useTransition();
   const lastSaved = useRef(defaultValue != null ? String(defaultValue) : "");
+  // PL-R7-P2-01, seventh production-lifecycle review: two overlapping
+  // saves for the SAME field (a slow connection, two blurs close
+  // together) used to each start their own independent Server Action
+  // call with no ordering guarantee — if the first blur's save happened
+  // to resolve AFTER the second's, its stale value could land in the
+  // database last, and its stale response could regress the displayed
+  // state back over a newer one already shown. inFlight + pendingValue
+  // serialize saves for this one field: a blur that arrives while a save
+  // is already in flight never starts a second concurrent request — it
+  // just records the newest value, which the in-flight save's own
+  // completion handler picks up and sends next. Requests for this field
+  // are therefore always issued (and so always land) in the same order
+  // the operator actually typed them, and only the truly latest value is
+  // ever the last one sent.
+  const inFlight = useRef(false);
+  const pendingValue = useRef<string | null>(null);
+
+  async function performSave(value: string) {
+    inFlight.current = true;
+    setStatus("saving");
+    const fields = { ...hiddenFields, [valueField]: value };
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(fields)) fd.set(k, v);
+
+    try {
+      const result = await action(fd);
+      if (result.status === "OK") {
+        lastSaved.current = value;
+        setStatus("saved");
+        setTimeout(() => setStatus((s) => (s === "saved" ? "idle" : s)), 1500);
+      } else {
+        // A genuine business rejection, not a network failure — never
+        // queued (queuing would just retry the same rejection forever
+        // once back online) and lastSaved stays exactly what it was, so
+        // this field keeps looking unsaved.
+        setStatus("rejected");
+      }
+    } catch {
+      if (offlineQueueKind) {
+        const enqueued = offlineQueue.enqueue(offlineQueueKind, fields);
+        if (enqueued.status === "OK") {
+          lastSaved.current = value;
+          setStatus("queued");
+        } else {
+          // PL-R7-P1-02: persistence genuinely failed (quota exceeded,
+          // storage blocked) — must never claim "queued" for a value
+          // that has no durable copy anywhere. lastSaved stays
+          // unchanged so the field keeps looking unsaved.
+          setStatus("storageError");
+        }
+      } else {
+        setStatus("error");
+      }
+    } finally {
+      inFlight.current = false;
+      const next = pendingValue.current;
+      pendingValue.current = null;
+      if (next !== null && next !== lastSaved.current) {
+        // Fire-and-forget on purpose — this is the SAME coalescing chain
+        // handleBlur itself starts, just continuing it for the value
+        // that arrived while this save was still in flight.
+        void performSave(next);
+      }
+    }
+  }
 
   function handleBlur(e: React.FocusEvent<HTMLInputElement>) {
     const value = e.target.value;
     if (value === "" || value === lastSaved.current) return;
 
-    const fields = { ...hiddenFields, [valueField]: value };
-
     if (offlineQueueKind && typeof navigator !== "undefined" && !navigator.onLine) {
-      enqueue(offlineQueueKind, fields);
-      lastSaved.current = value;
-      setStatus("queued");
+      const fields = { ...hiddenFields, [valueField]: value };
+      const enqueued = offlineQueue.enqueue(offlineQueueKind, fields);
+      if (enqueued.status === "OK") {
+        lastSaved.current = value;
+        setStatus("queued");
+      } else {
+        setStatus("storageError");
+      }
       return;
     }
 
-    setStatus("saving");
-    const fd = new FormData();
-    for (const [k, v] of Object.entries(fields)) fd.set(k, v);
-
-    startTransition(async () => {
-      try {
-        const result = await action(fd);
-        if (result.status === "OK") {
-          lastSaved.current = value;
-          setStatus("saved");
-          setTimeout(() => setStatus((s) => (s === "saved" ? "idle" : s)), 1500);
-        } else {
-          // A genuine business rejection, not a network failure — never
-          // queued (queuing would just retry the same rejection forever
-          // once back online) and lastSaved stays exactly what it was,
-          // so this field keeps looking unsaved.
-          setStatus("rejected");
-        }
-      } catch {
-        if (offlineQueueKind) {
-          enqueue(offlineQueueKind, fields);
-          lastSaved.current = value;
-          setStatus("queued");
-        } else {
-          setStatus("error");
-        }
-      }
-    });
+    if (inFlight.current) {
+      pendingValue.current = value;
+      return;
+    }
+    void performSave(value);
   }
 
   return (
@@ -123,6 +169,11 @@ export function AutoSaveField({
         {status === "rejected" && (
           <span role="alert" className="text-critical" title={rejectedLabel}>
             ✕
+          </span>
+        )}
+        {status === "storageError" && (
+          <span role="alert" className="text-critical" title={storageErrorLabel}>
+            ⚠
           </span>
         )}
       </span>

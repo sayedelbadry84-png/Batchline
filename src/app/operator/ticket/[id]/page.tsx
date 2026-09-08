@@ -164,6 +164,7 @@ export default async function OperatorTicketPage({
           fieldLabels: o.offlineRejectedField,
           reasonLabels: o.offlineRejectedReasons,
           dismiss: o.offlineRejectedDismiss,
+          storageError: o.offlineStorageError,
         }}
       />
 
@@ -194,6 +195,7 @@ export default async function OperatorTicketPage({
                   disabled={ticket.status === "COMPLETE"}
                   className="w-full rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
                   rejectedLabel={d.autosaveRejected}
+                  storageErrorLabel={d.autosaveStorageError}
                 />
                 {AGGREGATE_TYPES.has(c.material.type) && (
                   <AutoSaveField
@@ -208,6 +210,7 @@ export default async function OperatorTicketPage({
                     disabled={ticket.status === "COMPLETE"}
                     className="w-24 shrink-0 rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
                     rejectedLabel={d.autosaveRejected}
+                  storageErrorLabel={d.autosaveStorageError}
                   />
                 )}
               </div>

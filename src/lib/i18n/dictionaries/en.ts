@@ -146,6 +146,10 @@ const en: typeof ar = {
       TERMINAL: "the ticket was completed or cancelled before this could save",
     },
     offlineRejectedDismiss: "Dismiss",
+    // PL-R7-P1-02, seventh production-lifecycle review: shown whenever
+    // this device's own storage genuinely failed to persist a reading —
+    // never claimed as "queued" or "saved" when this is the real state.
+    offlineStorageError: "This device couldn't save one or more readings locally — write the value down and enter it again once storage is available.",
   },
   driver: {
     brand: "Batchline Driver",
@@ -568,6 +572,7 @@ const en: typeof ar = {
         // (ticket went terminal, stale component, out-of-range value),
         // never shown for a network failure, which queues/retries instead.
         autosaveRejected: "Not saved — this reading was rejected. Re-check the value or the ticket's status.",
+        autosaveStorageError: "Not saved anywhere — this device's storage failed. Write the value down and re-enter it once storage is available.",
         completeTitle: "Complete batch",
         completeIntro: "Deducts actual (or target, if unweighed) mass from the plant's silo and hopper levels — the same numbers the Silos screen shows.",
         completeButton: "Complete & deduct inventory",
