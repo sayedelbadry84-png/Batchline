@@ -414,7 +414,8 @@ export async function setDrumReturnFateForId(
 export type ReportTripDelayResult =
   | { status: "OK"; reservationNumber: string; ticketNumber: string; projectName: string }
   | { status: "NOT_FOUND" }
-  | { status: "INVALID_REASON" };
+  | { status: "INVALID_REASON" }
+  | { status: "TRIP_CLOSED" };
 
 export async function reportTripDelayForId(
   tripId: string,
@@ -434,6 +435,14 @@ export async function reportTripDelayForId(
     // check — so a reassignment that lands in the gap before this lock
     // is acquired is exactly what this re-check catches.
     if (trip.driverId !== opts.requireOwnDriverEmployeeId) return { status: "NOT_FOUND" as const };
+    // PL-R9-P2-02, ninth production-lifecycle review: a delay report is
+    // meaningful for a trip still in progress — nothing checked trip
+    // status at all before this, so a delay could be logged against a
+    // trip that had already closed (possibly hours/days earlier), with
+    // no operational meaning and no way to distinguish it from a real,
+    // timely report in any list of "current" delays. The review's own
+    // recommended default: allowed at any point before CLOSED.
+    if (trip.status === "CLOSED") return { status: "TRIP_CLOSED" as const };
 
     await tx.tripDelayReport.create({ data: { tripId, reason: opts.reason, note: opts.note } });
     await tx.auditEvent.create({
@@ -449,7 +458,7 @@ export async function reportTripDelayForId(
   });
 }
 
-export type AttachDeliveryPhotoResult = { status: "OK"; oldUrl: string | null } | { status: "NOT_FOUND" };
+export type AttachDeliveryPhotoResult = { status: "OK"; oldUrl: string | null } | { status: "NOT_FOUND" } | { status: "NOT_DISCHARGING" };
 
 // The blob itself is uploaded by the caller BEFORE this runs — external
 // object storage isn't part of the Postgres transaction below and can't
@@ -468,8 +477,18 @@ export async function attachDeliveryPhotoForId(
     const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "Trip" WHERE "id" = ${tripId} FOR UPDATE`;
     if (locked.length === 0) return { status: "NOT_FOUND" as const };
 
-    const trip = await tx.trip.findUniqueOrThrow({ where: { id: tripId }, select: { driverId: true, deliveryPhotoUrl: true } });
+    const trip = await tx.trip.findUniqueOrThrow({ where: { id: tripId }, select: { driverId: true, deliveryPhotoUrl: true, status: true } });
     if (trip.driverId !== opts.requireOwnDriverEmployeeId) return { status: "NOT_FOUND" as const };
+    // PL-R9-P2-02, ninth production-lifecycle review: nothing checked
+    // trip status before this — a photo could be attached to a trip that
+    // hadn't even started discharging yet, or long after it closed, with
+    // no record of which delivery it was actually meant to document. The
+    // review's own recommended default, matching closeTripFullForId's
+    // own DISCHARGING boundary: a driver may only capture the delivery
+    // photo while actually discharging. A later correction by a
+    // supervisor/admin role is a real, disclosed gap — no such call site
+    // exists yet, so no bypass is implemented for one that isn't there.
+    if (trip.status !== "DISCHARGING") return { status: "NOT_DISCHARGING" as const };
 
     const oldUrl = trip.deliveryPhotoUrl;
     await tx.trip.update({ where: { id: tripId }, data: { deliveryPhotoUrl: opts.url } });

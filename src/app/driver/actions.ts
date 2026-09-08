@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
 import { effectiveSiteId } from "@/lib/siteScope";
-import { uploadFile, deleteFile } from "@/lib/blob";
+import { uploadFile, deleteFileDurable } from "@/lib/blob";
 import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -121,13 +121,28 @@ export async function uploadDeliveryPhoto(formData: FormData) {
   // still has to happen first, before the URL it returns can be stored.
   const url = await uploadFile(`delivery-photos/${tripId}.${ext}`, file);
 
-  const result = await attachDeliveryPhotoForId(tripId, { requireOwnDriverEmployeeId: user.employeeId!, url, actorId: user.id, actorRole: user.role });
+  // PL-R9-P2-02, ninth production-lifecycle review: attachDeliveryPhotoForId
+  // can THROW (a genuine DB error, not just a refused typed result) —
+  // the old code had no try/catch here at all, so a thrown failure
+  // skipped the compensating delete entirely and left the just-uploaded
+  // blob permanently orphaned, referenced by nothing. Both paths now
+  // compensate the same way, through the durable-retry delete (see
+  // blob.ts) rather than the old fire-and-forget one, so a failed
+  // compensating delete itself isn't silently lost either.
+  let result;
+  try {
+    result = await attachDeliveryPhotoForId(tripId, { requireOwnDriverEmployeeId: user.employeeId!, url, actorId: user.id, actorRole: user.role });
+  } catch (error) {
+    await deleteFileDurable(url, "DELIVERY_PHOTO_COMPENSATION");
+    throw error;
+  }
   if (result.status !== "OK") {
     // The trip was reassigned (or otherwise no longer this driver's) in
-    // the gap between the pre-check and this lock — compensate for the
+    // the gap between the pre-check and this lock, or is no longer in a
+    // state that accepts a photo (PL-R9-P2-02) — compensate for the
     // upload that already happened rather than leaving an orphaned blob
     // nothing ever references.
-    await deleteFile(url);
+    await deleteFileDurable(url, "DELIVERY_PHOTO_COMPENSATION");
     return;
   }
 
@@ -135,7 +150,7 @@ export async function uploadDeliveryPhoto(formData: FormData) {
   // attachDeliveryPhotoForId's own locked read actually found as "old"
   // (see that function's own comment for why this must be read under
   // the lock, not before the transaction).
-  if (result.oldUrl) await deleteFile(result.oldUrl);
+  if (result.oldUrl) await deleteFileDurable(result.oldUrl, "DELIVERY_PHOTO_REPLACED");
 
   revalidatePath(`/driver/trip/${tripId}`);
 }

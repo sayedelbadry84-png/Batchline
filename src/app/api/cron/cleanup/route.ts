@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { retryPendingBlobDeletions } from "@/lib/blob";
 
 // Daily housekeeping (see vercel.json) — the "background job" half of what
 // this app was missing at scale: instead of a paid queue/Redis (not
@@ -64,11 +65,20 @@ export async function GET(request: NextRequest) {
     await logAudit({ module: "Sales", recordId: q.id, afterValue: "EXPIRED", reasonCode: "QUOTE_AUTO_EXPIRED" });
   }
 
+  // PL-R9-P2-02, ninth production-lifecycle review: durable retry for a
+  // delivery-photo blob whose compensating delete itself failed — see
+  // PendingBlobDeletion's own comment in schema.prisma. Runs after the
+  // DB-only sweeps above so a slow/failing blob-storage retry never
+  // delays session/login-attempt/quote housekeeping ahead of it.
+  const blobDeletions = await retryPendingBlobDeletions();
+
   return NextResponse.json({
     ranAt: now.toISOString(),
     expiredSessionsDeleted: expiredSessions.count,
     staleLoginAttemptsDeleted: staleLoginAttempts.count,
     abandonedTotpSetupsCleared: abandonedTotpSetups.count,
     quotesExpired: staleQuotes.length,
+    pendingBlobDeletionsAttempted: blobDeletions.attempted,
+    pendingBlobDeletionsSucceeded: blobDeletions.succeeded,
   });
 }

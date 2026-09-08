@@ -1491,6 +1491,30 @@ model Trip {
 // so this exists to give dispatch/customer service a real, timestamped
 // reason for why a load is running long instead of them finding out only
 // once it's already a problem.
+// PL-R9-P2-02, ninth production-lifecycle review: uploadDeliveryPhoto
+// (driver/actions.ts) has to compensate for a blob it already uploaded
+// whenever the DB half of the attach is refused or throws — but the
+// compensating deleteFile call is itself a network request to object
+// storage that can fail too. The old code just swallowed that failure
+// (blob.ts's own deleteFile catches and discards), leaving an orphaned
+// blob with no record anywhere that cleanup is still owed. A row here is
+// written whenever that compensating delete itself fails; the existing
+// daily cron sweep (api/cron/cleanup) retries every row still on file
+// and removes it once the delete actually succeeds — reusing the one
+// scheduled-job mechanism this app already has rather than standing up
+// new job infrastructure for one narrow cleanup case.
+model PendingBlobDeletion {
+  id          String    @id @default(cuid())
+  url         String // the app-relative /api/files/... url deleteFile expects
+  reason      String // DELIVERY_PHOTO_COMPENSATION, DELIVERY_PHOTO_REPLACED — why this delete was ever attempted
+  attempts    Int       @default(0)
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  lastTriedAt DateTime?
+
+  @@index([createdAt])
+}
+
 model TripDelayReport {
   id         String   @id @default(cuid())
   tripId     String

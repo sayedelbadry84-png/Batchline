@@ -160,6 +160,11 @@ after(async () => {
   await deleteAuditEventsByActor(adminUserId);
   for (const id of wasteMemoIds) await cleanupDelete(() => prisma.wasteIncidentMemo.delete({ where: { id } }));
   for (const id of drumReturnIds) await cleanupDelete(() => prisma.drumReturn.delete({ where: { id } }));
+  // PL-R9-P1-02, ninth production-lifecycle review: TripDelayReport.tripId
+  // has no ON DELETE CASCADE — the new driver-ownership-race tests
+  // (PL-R8-P1-04) create real TripDelayReport rows, and CI proved the
+  // trip delete below failed a real FK violation without this first.
+  if (tripIds.length > 0) await cleanupDelete(() => prisma.tripDelayReport.deleteMany({ where: { tripId: { in: tripIds } } }));
   for (const id of tripIds) await cleanupDelete(() => prisma.trip.delete({ where: { id } }));
   for (const id of ticketIds) {
     await deleteMovements(id);
@@ -188,6 +193,13 @@ after(async () => {
   // suites) — only counts rows under THIS file's own unique prefix.
   const leftoverSites = await prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-PL-" } } });
   assert.equal(leftoverSites, 0, "productionLifecycle.test.ts left residue behind");
+
+  // PL-R9-P1-02: explicit count, not just reliance on the trip delete
+  // loop above throwing on an FK violation — the review's own acceptance
+  // criterion #3 calls out delay reports by name as a zero-residue check
+  // this suite must prove, not merely fail loudly if violated.
+  const leftoverDelayReports = await prisma.tripDelayReport.count({ where: { tripId: { in: tripIds } } });
+  assert.equal(leftoverDelayReports, 0, "productionLifecycle.test.ts left TripDelayReport residue behind");
 
   await prisma.$disconnect();
   await prisma2.$disconnect();
@@ -476,6 +488,9 @@ test("attachDeliveryPhotoForId returns the freshest old URL, so a genuine race b
   assert.equal(dispatch.status, "OK");
   if (dispatch.status !== "OK") return;
   tripIds.push(dispatch.tripId);
+  // PL-R9-P2-02: attachDeliveryPhotoForId now only accepts a photo while
+  // actually DISCHARGING — a freshly dispatched trip starts at LOADING.
+  await advanceToDischarging(dispatch.tripId);
 
   const first = await attachDeliveryPhotoForId(dispatch.tripId, { requireOwnDriverEmployeeId: driver, url: "https://example.invalid/photo-1.jpg", ...actor() });
   assert.equal(first.status, "OK");
@@ -487,6 +502,71 @@ test("attachDeliveryPhotoForId returns the freshest old URL, so a genuine race b
 
   const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
   assert.equal(trip.deliveryPhotoUrl, "https://example.invalid/photo-2.jpg");
+});
+
+// PL-R9-P2-02, ninth production-lifecycle review: neither function
+// checked trip lifecycle status at all before this — a delay could be
+// logged against a trip that closed days ago, and a photo could be
+// attached before discharge even started or long after close, with no
+// way to tell a meaningful report from a stray one. These prove the
+// review's own recommended defaults: delays refused only once CLOSED;
+// photo attach allowed only while DISCHARGING.
+
+test("reportTripDelayForId is refused once the trip is CLOSED, and accepted at every state before that", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  // LOADING — allowed.
+  const whileLoading = await reportTripDelayForId(dispatch.tripId, { requireOwnDriverEmployeeId: driver, reason: "TRAFFIC", note: null, ...actor() });
+  assert.equal(whileLoading.status, "OK");
+
+  await advanceToDischarging(dispatch.tripId);
+  // DISCHARGING — still allowed.
+  const whileDischarging = await reportTripDelayForId(dispatch.tripId, { requireOwnDriverEmployeeId: driver, reason: "WEATHER", note: null, ...actor() });
+  assert.equal(whileDischarging.status, "OK");
+
+  const close = await closeTripFullForId(dispatch.tripId, { allowedSiteId: siteId, requireOwnDriverEmployeeId: driver, ...actor() });
+  assert.equal(close.status, "OK");
+
+  const afterClose = await reportTripDelayForId(dispatch.tripId, { requireOwnDriverEmployeeId: driver, reason: "BREAKDOWN", note: null, ...actor() });
+  assert.equal(afterClose.status, "TRIP_CLOSED", "a delay report against an already-closed trip must be refused, not silently recorded");
+
+  const delayCount = await prisma.tripDelayReport.count({ where: { tripId: dispatch.tripId } });
+  assert.equal(delayCount, 2, "only the two reports before close may have been written");
+});
+
+test("attachDeliveryPhotoForId is refused before DISCHARGING and after CLOSED, accepted only while actually discharging", async () => {
+  const res = await makeReservation();
+  const ticket = await makeTicket(res);
+  const truck = await makeTruck();
+  const driver = await makeDriver();
+  const dispatch = await dispatchTrip(ticket, { truckId: truck, driverId: driver, allowedSiteId: siteId });
+  assert.equal(dispatch.status, "OK");
+  if (dispatch.status !== "OK") return;
+  tripIds.push(dispatch.tripId);
+
+  // LOADING — refused, nothing written.
+  const whileLoading = await attachDeliveryPhotoForId(dispatch.tripId, { requireOwnDriverEmployeeId: driver, url: "https://example.invalid/too-early.jpg", ...actor() });
+  assert.equal(whileLoading.status, "NOT_DISCHARGING");
+
+  await advanceToDischarging(dispatch.tripId);
+  const whileDischarging = await attachDeliveryPhotoForId(dispatch.tripId, { requireOwnDriverEmployeeId: driver, url: "https://example.invalid/on-time.jpg", ...actor() });
+  assert.equal(whileDischarging.status, "OK");
+
+  const close = await closeTripFullForId(dispatch.tripId, { allowedSiteId: siteId, requireOwnDriverEmployeeId: driver, ...actor() });
+  assert.equal(close.status, "OK");
+
+  const afterClose = await attachDeliveryPhotoForId(dispatch.tripId, { requireOwnDriverEmployeeId: driver, url: "https://example.invalid/too-late.jpg", ...actor() });
+  assert.equal(afterClose.status, "NOT_DISCHARGING", "a photo attach after close must be refused, not silently overwrite the delivery record");
+
+  const trip = await prisma.trip.findUniqueOrThrow({ where: { id: dispatch.tripId } });
+  assert.equal(trip.deliveryPhotoUrl, "https://example.invalid/on-time.jpg", "only the DISCHARGING-time attach may have taken effect");
 });
 
 test("a concurrent reassignment blocks reportTripDelayForId, and is correctly re-checked afterward", async () => {
