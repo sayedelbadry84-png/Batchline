@@ -28,6 +28,18 @@ export async function deleteFile(appUrl: string): Promise<void> {
   await del(pathname).catch(() => {});
 }
 
+// Injectable, same reasoning as offlineQueue.ts's own StorageAdapter —
+// the real @vercel/blob del() needs live storage credentials this
+// project's tests have no access to outside CI, so deleteFileDurable/
+// retryPendingBlobDeletions below take the deleting function as a
+// parameter (defaulting to the real one) purely so their own retry-queue
+// bookkeeping — create on failure, remove on a resolved retry, keep
+// queued with a recorded error on a repeat failure — is provable in
+// plain node:test against a real Postgres database, without needing a
+// real blob store at all.
+export type BlobDeleter = (pathname: string) => Promise<void>;
+const defaultDeleter: BlobDeleter = (pathname) => del(pathname);
+
 // PL-R9-P2-02, ninth production-lifecycle review: deleteFile above
 // silently discards a failed delete — fine for the many callers that
 // have no real recovery option anyway, but wrong for a COMPENSATING
@@ -40,10 +52,10 @@ export async function deleteFile(appUrl: string): Promise<void> {
 // succeeds. Even the persistence write can fail (a genuine DB outage at
 // exactly the wrong moment) — there is no further fallback for that at
 // this layer, so it's logged for a real operator to notice.
-export async function deleteFileDurable(appUrl: string, reason: string): Promise<void> {
+export async function deleteFileDurable(appUrl: string, reason: string, deleteFn: BlobDeleter = defaultDeleter): Promise<void> {
   const pathname = appUrl.replace(/^\/api\/files\//, "");
   try {
-    await del(pathname);
+    await deleteFn(pathname);
   } catch (error) {
     try {
       await prisma.pendingBlobDeletion.create({ data: { url: appUrl, reason, lastError: String(error) } });
@@ -62,13 +74,13 @@ export async function deleteFileDurable(appUrl: string, reason: string): Promise
 // than capped, since an orphaned blob costs storage, not correctness,
 // and there is no safe point at which "give up forever" is the right
 // call for it.
-export async function retryPendingBlobDeletions(): Promise<{ attempted: number; succeeded: number }> {
+export async function retryPendingBlobDeletions(deleteFn: BlobDeleter = defaultDeleter): Promise<{ attempted: number; succeeded: number }> {
   const rows = await prisma.pendingBlobDeletion.findMany({ orderBy: { createdAt: "asc" }, take: 200 });
   let succeeded = 0;
   for (const row of rows) {
     const pathname = row.url.replace(/^\/api\/files\//, "");
     try {
-      await del(pathname);
+      await deleteFn(pathname);
       await prisma.pendingBlobDeletion.delete({ where: { id: row.id } }).catch(() => {});
       succeeded++;
     } catch (error) {

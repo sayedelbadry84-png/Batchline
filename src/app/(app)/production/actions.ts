@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { maybeAutoRequisitionMaterial } from "@/lib/materialRequisition";
+import { maybeAutoRequisitionMaterial, queuePendingAutoRequisition } from "@/lib/materialRequisition";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
@@ -426,6 +426,14 @@ export async function completeBatch(_prevState: CompleteBatchActionState, formDa
       await maybeAutoRequisitionMaterial(r.materialId, r.siteId, r.newLevel, r.capacity, r.minThresholdPct, toKg);
     } catch (e) {
       console.error(`[completeBatch] auto-requisition follow-up failed for material ${r.materialId} (ticket ${batchTicketId}) — the batch itself is still COMPLETE:`, e);
+      // PL-R9-P2-03, ninth production-lifecycle review: this used to be
+      // just the log line above — a genuine failure here (a transient DB
+      // error, or one inside maybeAutoRequisitionMaterial's own
+      // notifyRoles call after the requisition row itself already
+      // committed) left no durable trace that this shortage never
+      // actually got followed up. Queued for the same daily cron sweep
+      // (api/cron/cleanup) that already drains PendingBlobDeletion.
+      await queuePendingAutoRequisition(batchTicketId, r, e);
     }
   }
 

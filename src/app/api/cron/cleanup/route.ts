@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { retryPendingBlobDeletions } from "@/lib/blob";
+import { retryPendingAutoRequisitions } from "@/lib/materialRequisition";
 
 // Daily housekeeping (see vercel.json) — the "background job" half of what
 // this app was missing at scale: instead of a paid queue/Redis (not
@@ -72,6 +73,11 @@ export async function GET(request: NextRequest) {
   // delays session/login-attempt/quote housekeeping ahead of it.
   const blobDeletions = await retryPendingBlobDeletions();
 
+  // PL-R9-P2-03, ninth production-lifecycle review: durable retry for
+  // completeBatch's own best-effort auto-requisition follow-up — see
+  // PendingAutoRequisition's own comment in schema.prisma.
+  const autoRequisitions = await retryPendingAutoRequisitions();
+
   return NextResponse.json({
     ranAt: now.toISOString(),
     expiredSessionsDeleted: expiredSessions.count,
@@ -80,5 +86,7 @@ export async function GET(request: NextRequest) {
     quotesExpired: staleQuotes.length,
     pendingBlobDeletionsAttempted: blobDeletions.attempted,
     pendingBlobDeletionsSucceeded: blobDeletions.succeeded,
+    pendingAutoRequisitionsAttempted: autoRequisitions.attempted,
+    pendingAutoRequisitionsResolved: autoRequisitions.resolved,
   });
 }

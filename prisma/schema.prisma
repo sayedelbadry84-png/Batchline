@@ -1503,6 +1503,41 @@ model Trip {
 // and removes it once the delete actually succeeds — reusing the one
 // scheduled-job mechanism this app already has rather than standing up
 // new job infrastructure for one narrow cleanup case.
+// PL-R9-P2-03, ninth production-lifecycle review: completeBatch's own
+// auto-requisition follow-up (maybeAutoRequisitionMaterial, called once
+// per shortage candidate after the batch itself has already committed)
+// is deliberately best-effort — the batch's own completion must never
+// be undone by a purchasing-side failure. The old version's failure
+// handling stopped at `console.error`: a genuine failure (a transient DB
+// error mid-create, or inside its own notifyRoles call after the
+// requisition row itself already committed) left nothing on file that
+// any human or process would ever see again — the shortage that
+// triggered it just silently never got a requisition opened, with no
+// record it was ever supposed to. A full transactional outbox (every
+// side effect of every domain command staged and drained generically)
+// is a genuinely larger architectural decision this fix does not make on
+// its own; this is the narrow, concrete gap the review actually named —
+// see retryPendingAutoRequisitions (materialRequisition.ts) and the
+// daily cron sweep (api/cron/cleanup) that drains it, the same reused-
+// infrastructure shape PendingBlobDeletion above already established.
+model PendingAutoRequisition {
+  id              String    @id @default(cuid())
+  batchTicketId   String
+  materialId      String
+  siteId          String
+  newLevel        Float
+  capacity        Float
+  minThresholdPct Float
+  unit            String // TONS, LITERS — mirrors RequisitionCandidate.unit
+  specificGravity Float?
+  attempts        Int       @default(0)
+  lastError       String?
+  createdAt       DateTime  @default(now())
+  lastTriedAt     DateTime?
+
+  @@index([createdAt])
+}
+
 model PendingBlobDeletion {
   id          String    @id @default(cuid())
   url         String // the app-relative /api/files/... url deleteFile expects

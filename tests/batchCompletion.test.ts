@@ -44,7 +44,7 @@ const { postSiloMovement } = await import("../src/lib/inventoryLedger");
 const { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } = await import("../src/lib/batchComponentEdits");
 const { claimTripSlot, applyReclaimCredit } = await import("../src/lib/tripDispatch");
 const { requestShortageOverride, approveShortageOverrideRequest, rejectShortageOverrideRequest } = await import("../src/lib/shortageOverrideRequests");
-const { maybeAutoRequisitionMaterial } = await import("../src/lib/materialRequisition");
+const { maybeAutoRequisitionMaterial, queuePendingAutoRequisition, retryPendingAutoRequisitions } = await import("../src/lib/materialRequisition");
 
 const prisma = new PrismaClient();
 
@@ -221,6 +221,11 @@ after(async () => {
   // this file ever created for the shared materialId or an ad-hoc one,
   // regardless of whether (or when) any test-local array was updated.
   if (leftoverMaterialIds.length > 0) await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } }));
+  // PL-R9-P2-03, ninth production-lifecycle review: same by-materialId
+  // sweep, extended to the new retry queue — a test exercising the
+  // queue-on-failure path (or a row a retry never resolved) must not
+  // leak past this file's own teardown either.
+  if (leftoverMaterialIds.length > 0) await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } }));
   if (leftoverMaterialIds.length > 0) await deleteMovements({ materialId: { in: leftoverMaterialIds } });
   if (leftoverSiloIds.length > 0) await deleteMovements({ storageId: { in: leftoverSiloIds } });
   if (leftoverMaterialIds.length > 0) await prisma.batchComponentActual.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } });
@@ -259,8 +264,10 @@ after(async () => {
     // sweep itself used, still valid to query against even though those
     // Material rows are already gone by this point.
     prisma.materialRequisition.count({ where: { materialId: { in: leftoverMaterialIds } } }),
+    // PL-R9-P2-03: same reasoning as the materialRequisition count above.
+    prisma.pendingAutoRequisition.count({ where: { materialId: { in: leftoverMaterialIds } } }),
   ]);
-  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket, auditEvent, materialRequisition] = ${JSON.stringify(residue)}`);
+  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket, auditEvent, materialRequisition, pendingAutoRequisition] = ${JSON.stringify(residue)}`);
 
   await prisma.$disconnect();
 });
@@ -1516,6 +1523,66 @@ test("two concurrent shortfall requisition attempts for the same material+site l
     // same run never sees a stray "already open" requisition for the
     // shared materialId fixture.
     await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+  }
+});
+
+// PL-R9-P2-03, ninth production-lifecycle review: completeBatch's own
+// auto-requisition follow-up is best-effort and used to leave nothing
+// durable behind on failure — queuePendingAutoRequisition/
+// retryPendingAutoRequisitions (materialRequisition.ts) are the queue-
+// then-drain pair the daily cron sweep uses. This proves the drain side
+// against the real database: a row seeded exactly as the completeBatch
+// catch block would create one is picked up, resolved for real (a real
+// MaterialRequisition gets created), and removed — nothing left to retry
+// tomorrow.
+test("retryPendingAutoRequisitions resolves a queued follow-up for real and removes the row", async () => {
+  await queuePendingAutoRequisition(
+    "test-suite-bc-fake-ticket-id",
+    { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" },
+    new Error("simulated transient failure — the original follow-up attempt never even ran"),
+  );
+  const queued = await prisma.pendingAutoRequisition.findFirst({ where: { materialId, siteId } });
+  assert.ok(queued, "queuePendingAutoRequisition must have persisted a retryable row");
+  assert.equal(queued.attempts, 0);
+
+  try {
+    const result = await retryPendingAutoRequisitions();
+    assert.ok(result.attempted >= 1);
+    assert.ok(result.resolved >= 1);
+
+    const stillQueued = await prisma.pendingAutoRequisition.findUnique({ where: { id: queued.id } });
+    assert.equal(stillQueued, null, "a resolved row must be removed, not left for another retry");
+
+    const created = await prisma.materialRequisition.findFirst({ where: { materialId, siteId, status: { in: ["PENDING_APPROVAL", "APPROVED", "ORDERED"] } } });
+    assert.ok(created, "the retry must have actually opened a real requisition, not just deleted the queue row");
+    materialRequisitionIds.push(created.id);
+  } finally {
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId, siteId } }));
+  }
+});
+
+test("retryPendingAutoRequisitions leaves a row queued and records the new error when the retry itself still fails", async () => {
+  // A materialId with no matching Material row drives a genuine thrown
+  // failure, not a clean terminal status: the requisition create's own
+  // required FK on materialId throws a real P2003, which
+  // withSequentialNumber's own P2002-only catch does not intercept —
+  // exactly the "the retry itself still fails" case this test wants.
+  const bogusMaterialId = "test-suite-bc-nonexistent-material-id";
+  await queuePendingAutoRequisition("test-suite-bc-fake-ticket-id", { materialId: bogusMaterialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" }, new Error("simulated"));
+  const queued = await prisma.pendingAutoRequisition.findFirstOrThrow({ where: { materialId: bogusMaterialId } });
+
+  try {
+    const result = await retryPendingAutoRequisitions();
+    assert.ok(result.attempted >= 1);
+
+    const stillQueued = await prisma.pendingAutoRequisition.findUnique({ where: { id: queued.id } });
+    assert.ok(stillQueued, "a retry that fails again must leave the row queued for the next sweep, not silently drop it");
+    assert.equal(stillQueued!.attempts, 1);
+    assert.ok(stillQueued!.lastError && stillQueued!.lastError !== "simulated", "the new failure's own error must be recorded, not the original queuing reason");
+    assert.ok(stillQueued!.lastTriedAt);
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: bogusMaterialId } }));
   }
 });
 

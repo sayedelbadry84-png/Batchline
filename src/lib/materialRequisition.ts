@@ -135,3 +135,64 @@ export async function maybeAutoRequisitionMaterial(
   });
   return { status: "CREATED", requisitionId: requisition.id, requisitionNumber: requisition.requisitionNumber };
 }
+
+// PL-R9-P2-03, ninth production-lifecycle review: completeBatch's own
+// call into maybeAutoRequisitionMaterial above is deliberately best-
+// effort (the batch itself must stay COMPLETE regardless of a
+// purchasing-side failure) — but the old catch block there just logged
+// and moved on, leaving no durable trace that a shortage never actually
+// got a requisition opened for it. This is the paired "queue it for
+// retry" half — see retryPendingAutoRequisitions below for the drain
+// side, and PendingAutoRequisition's own comment in schema.prisma for
+// why this is a narrow, reused-infrastructure fix rather than a full
+// transactional outbox. Never throws: this itself runs from inside a
+// catch block that must not fail the request it's already recovering
+// from.
+export async function queuePendingAutoRequisition(batchTicketId: string, candidate: { materialId: string; siteId: string; newLevel: number; capacity: number; minThresholdPct: number; unit: "TONS" | "LITERS"; specificGravity?: number }, error: unknown): Promise<void> {
+  try {
+    await prisma.pendingAutoRequisition.create({
+      data: {
+        batchTicketId,
+        materialId: candidate.materialId,
+        siteId: candidate.siteId,
+        newLevel: candidate.newLevel,
+        capacity: candidate.capacity,
+        minThresholdPct: candidate.minThresholdPct,
+        unit: candidate.unit,
+        specificGravity: candidate.specificGravity ?? null,
+        lastError: String(error),
+      },
+    });
+  } catch (persistError) {
+    console.error(`[materialRequisition] auto-requisition follow-up failed AND failed to record for retry: material ${candidate.materialId}, ticket ${batchTicketId}`, error, persistError);
+  }
+}
+
+// The api/cron/cleanup sweep's own half — retries every row still on
+// file by calling the exact same maybeAutoRequisitionMaterial callers
+// use directly, so a retry gets the exact same idempotent behavior a
+// fresh call would (findOpenRequisition's own pre-check means a
+// requisition that DID get created before the original failure — e.g. a
+// failure inside notifyRoles, after the create had already committed —
+// is correctly seen as ALREADY_OPEN on retry rather than duplicated). A
+// row is removed once it resolves to ANY terminal outcome (CREATED,
+// ALREADY_OPEN, BELOW_THRESHOLD, NOT_TRACKED are all "nothing left to
+// retry"); a row that fails again just records the new error for
+// tomorrow's run — retried indefinitely, same reasoning as
+// retryPendingBlobDeletions (blob.ts): the cost of leaving a row queued
+// is a delayed requisition, never incorrect data.
+export async function retryPendingAutoRequisitions(): Promise<{ attempted: number; resolved: number }> {
+  const rows = await prisma.pendingAutoRequisition.findMany({ orderBy: { createdAt: "asc" }, take: 200 });
+  let resolved = 0;
+  for (const row of rows) {
+    const toKg = row.unit === "LITERS" ? (liters: number) => liters * (row.specificGravity ?? 1) : (tons: number) => tons * 1000;
+    try {
+      await maybeAutoRequisitionMaterial(row.materialId, row.siteId, row.newLevel, row.capacity, row.minThresholdPct, toKg);
+      await prisma.pendingAutoRequisition.delete({ where: { id: row.id } }).catch(() => {});
+      resolved++;
+    } catch (error) {
+      await prisma.pendingAutoRequisition.update({ where: { id: row.id }, data: { attempts: { increment: 1 }, lastError: String(error), lastTriedAt: new Date() } }).catch(() => {});
+    }
+  }
+  return { attempted: rows.length, resolved };
+}
