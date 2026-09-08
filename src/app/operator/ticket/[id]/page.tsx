@@ -3,9 +3,10 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { recordActuals, recordActualField } from "@/app/(app)/production/actions";
+import { recordActualField } from "@/app/(app)/production/actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
+import { RecordActualsForm } from "@/components/RecordActualsForm";
 import { OfflineSyncBanner } from "@/components/OfflineSyncBanner";
 import { CompleteBatchForm } from "@/components/CompleteBatchForm";
 import { StartTripForm } from "@/components/StartTripForm";
@@ -169,8 +170,11 @@ export default async function OperatorTicketPage({
         }}
       />
 
-      <form action={recordActuals} className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm">
-        <input type="hidden" name="batchTicketId" value={ticket.id} />
+      <RecordActualsForm
+        ticketId={ticket.id}
+        messages={{ staleConflict: d.recordActualsStaleConflict }}
+        className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm"
+      >
         <h2 className="font-display text-base font-semibold">{d.targetVsActual}</h2>
         {ticket.components.map((c) => {
           const tolerance = toleranceByMaterial.get(c.materialId) ?? 2;
@@ -240,7 +244,7 @@ export default async function OperatorTicketPage({
             {d.saveReadings}
           </button>
         )}
-      </form>
+      </RecordActualsForm>
 
       {!isTerminal && (
         <CompleteBatchForm

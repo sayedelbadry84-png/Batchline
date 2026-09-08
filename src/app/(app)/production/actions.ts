@@ -195,12 +195,24 @@ export async function createManualRelease(formData: FormData) {
   redirect(`/production/${result.ticket.id}`);
 }
 
-export async function recordActuals(formData: FormData) {
+// PL-R10-P1-04, tenth production-lifecycle review: was a bare void-
+// returning action bound straight to a plain <form action={recordActuals}>
+// — a STALE_READING result (the whole bulk write correctly rolled back by
+// claimAndRecordActuals, PL-R9-P1-03) had no way to reach the page at all.
+// The operator saw the form simply reload with no indication anything had
+// gone wrong, recreating exactly the false-success appearance the version
+// work was meant to eliminate. Now a typed useActionState action —
+// RecordActualsForm.tsx is the Client Component wrapper that actually
+// renders NOT_FOUND/TERMINAL/STALE_READING as a visible, localized banner
+// on both production and operator ticket pages.
+export type RecordActualsActionState = { status: "OK" | "NOT_FOUND" | "TERMINAL" | "STALE_READING" } | null;
+
+export async function recordActuals(_prevState: RecordActualsActionState, formData: FormData): Promise<RecordActualsActionState> {
   const user = await getCurrentUser();
   await requireActionPermission(user, "production", "recordActuals");
 
   const batchTicketId = String(formData.get("batchTicketId") ?? "");
-  if (!batchTicketId) return;
+  if (!batchTicketId) return { status: "NOT_FOUND" };
 
   // Same COMPLETE boundary recordActualField already enforces (line ~337
   // below) — this bulk sibling was missing it entirely. Without this guard,
@@ -209,8 +221,9 @@ export async function recordActuals(formData: FormData) {
   // guard and lets a resubmit deduct the same materials from inventory a
   // second time.
   const ticket = await prisma.batchTicket.findUnique({ where: { id: batchTicketId } });
-  if (!ticket || ticket.status === "COMPLETE" || ticket.status === "CANCELLED") return;
-  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return;
+  if (!ticket) return { status: "NOT_FOUND" };
+  if (ticket.status === "COMPLETE" || ticket.status === "CANCELLED") return { status: "TERMINAL" };
+  if (!(await isPlantInScope(ticket.plantId, effectiveSiteId(user)))) return { status: "NOT_FOUND" };
 
   const components = await prisma.batchComponentActual.findMany({
     where: { batchTicketId },
@@ -280,10 +293,12 @@ export async function recordActuals(formData: FormData) {
   // authoritative current versions instead of leaving the form holding
   // the same stale ones that would just fail again on retry.
   const result = await claimAndRecordActuals(batchTicketId, writes, { id: user!.id, role: user!.role });
-  if (result.status === "TERMINAL") return;
+  if (result.status === "TERMINAL") return { status: "TERMINAL" };
+  if (result.status === "STALE_READING") return { status: "STALE_READING" };
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);
+  return { status: "OK" };
 }
 
 // One field, saved the instant it's entered — called from AutoSaveField's

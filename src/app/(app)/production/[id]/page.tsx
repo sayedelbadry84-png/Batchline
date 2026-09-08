@@ -7,13 +7,13 @@ import { canPerformAction } from "@/lib/permissions";
 import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
 import {
-  recordActuals,
   recordActualField,
   addTicketComponent,
   deleteTicketComponent,
 } from "../actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
+import { RecordActualsForm } from "@/components/RecordActualsForm";
 import { CompleteBatchForm } from "@/components/CompleteBatchForm";
 import { ReverseBatchForm } from "@/components/ReverseBatchForm";
 import { ShortageOverridePanel, type ShortageSnapshotEntry } from "@/components/ShortageOverridePanel";
@@ -222,8 +222,7 @@ export default async function BatchTicketPage({
           </form>
         ))}
 
-      <form action={recordActuals} className={ui.card}>
-        <input type="hidden" name="batchTicketId" value={ticket.id} />
+      <RecordActualsForm ticketId={ticket.id} messages={{ staleConflict: d.recordActualsStaleConflict }} className={ui.card}>
         <h2 className="mb-3 font-display text-lg font-semibold">{d.targetVsActual}</h2>
         <table className={ui.table}>
           <thead>
@@ -325,7 +324,7 @@ export default async function BatchTicketPage({
           </div>
         )}
         <p className="mt-3 text-xs text-ink-muted">{d.moistureHint}</p>
-      </form>
+      </RecordActualsForm>
 
       {canEditComponents && addableMaterials.length > 0 && (
         <form action={addTicketComponent} className={`${ui.card} flex flex-wrap items-end gap-3`}>

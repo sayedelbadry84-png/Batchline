@@ -583,6 +583,11 @@ const en: typeof ar = {
         // never shown for a network failure, which queues/retries instead.
         autosaveRejected: "Not saved — this reading was rejected. Re-check the value or the ticket's status.",
         autosaveStorageError: "Not saved anywhere — this device's storage failed. Write the value down and re-enter it once storage is available.",
+        // PL-R10-P1-04, tenth production-lifecycle review: the bulk "Save
+        // readings" submit used to roll its ENTIRE write back on a stale
+        // component with no visible signal at all — the operator saw the
+        // page simply reload with no explanation. This is that signal.
+        recordActualsStaleConflict: "Not saved — one or more readings were changed elsewhere since this page loaded. Refresh and re-enter your readings.",
         completeTitle: "Complete batch",
         completeIntro: "Deducts actual (or target, if unweighed) mass from the plant's silo and hopper levels — the same numbers the Silos screen shows.",
         completeButton: "Complete & deduct inventory",
