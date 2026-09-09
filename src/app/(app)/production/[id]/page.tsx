@@ -222,7 +222,7 @@ export default async function BatchTicketPage({
           </form>
         ))}
 
-      <RecordActualsForm ticketId={ticket.id} messages={{ staleConflict: d.recordActualsStaleConflict }} className={ui.card}>
+      <RecordActualsForm ticketId={ticket.id} messages={{ staleConflict: d.recordActualsStaleConflict, terminal: d.recordActualsTerminal, notFound: d.recordActualsNotFound, genericFailure: d.recordActualsGenericFailure }} className={ui.card}>
         <h2 className="mb-3 font-display text-lg font-semibold">{d.targetVsActual}</h2>
         <table className={ui.table}>
           <thead>

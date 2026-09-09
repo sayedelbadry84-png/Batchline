@@ -588,6 +588,13 @@ const en: typeof ar = {
         // component with no visible signal at all — the operator saw the
         // page simply reload with no explanation. This is that signal.
         recordActualsStaleConflict: "Not saved — one or more readings were changed elsewhere since this page loaded. Refresh and re-enter your readings.",
+        // PL-R12-P2-01, twelfth production-lifecycle review: a ticket
+        // going COMPLETE/CANCELLED mid-entry refuses the whole bulk
+        // submit — an ordinary production race that used to leave the
+        // operator with no explanation at all.
+        recordActualsTerminal: "Not saved — this ticket has been completed or cancelled, so readings can no longer be changed.",
+        recordActualsNotFound: "Not saved — this ticket is no longer available to you. Reload the page.",
+        recordActualsGenericFailure: "Not saved — the readings were refused. Reload the page and try again.",
         completeTitle: "Complete batch",
         completeIntro: "Deducts actual (or target, if unweighed) mass from the plant's silo and hopper levels — the same numbers the Silos screen shows.",
         completeButton: "Complete & deduct inventory",

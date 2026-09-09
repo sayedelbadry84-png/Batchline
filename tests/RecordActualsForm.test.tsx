@@ -50,13 +50,20 @@ const React = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { RecordActualsForm } = await import("../src/components/RecordActualsForm");
 
+const MESSAGES = {
+  staleConflict: "Not saved — readings changed elsewhere.",
+  terminal: "Not saved — this ticket has been completed or cancelled.",
+  notFound: "Not saved — this ticket is no longer available to you.",
+  genericFailure: "Not saved — the readings were refused.",
+};
+
 function mount(action: (prevState: RecordActualsActionState, formData: FormData) => Promise<RecordActualsActionState>) {
   const container = dom.window.document.createElement("div");
   dom.window.document.body.appendChild(container);
   const root = createRoot(container);
   React.act(() => {
     root.render(
-      <RecordActualsForm ticketId="test-ticket" messages={{ staleConflict: "Not saved — readings changed elsewhere." }} action={action}>
+      <RecordActualsForm ticketId="test-ticket" messages={MESSAGES} action={action}>
         <button type="submit">Save readings</button>
       </RecordActualsForm>,
     );
@@ -103,20 +110,34 @@ test("RecordActualsForm: an OK result renders no conflict banner", async () => {
   await unmount();
 });
 
-test("RecordActualsForm: a TERMINAL result renders no STALE_READING-specific banner (a different, already-established rejection path)", async () => {
-  const action = async (): Promise<RecordActualsActionState> => ({ status: "TERMINAL" });
-  const { container, button, unmount } = mount(action);
+// PL-R12-P2-01, twelfth production-lifecycle review: this test used to
+// PIN THE SILENCE — it asserted no alert for TERMINAL. A ticket going
+// COMPLETE/CANCELLED while readings are being entered is an ordinary
+// production race that refuses the entire bulk submit, so the operator
+// saw a page reload and nothing else. Every non-OK status must now say
+// something, including a status this component has never heard of.
+for (const [status, expected] of [
+  ["TERMINAL", MESSAGES.terminal],
+  ["NOT_FOUND", MESSAGES.notFound],
+  ["STALE_READING", MESSAGES.staleConflict],
+  // Not a member of RecordActualsActionState today — stands in for a
+  // status added later. It must fall through to the generic message
+  // rather than render nothing, since rendering nothing is exactly the
+  // false-success behaviour this component exists to prevent.
+  ["SOME_FUTURE_FAILURE", MESSAGES.genericFailure],
+] as const) {
+  test(`RecordActualsForm: a ${status} result renders its own visible, localized message`, async () => {
+    const action = async (): Promise<RecordActualsActionState> => ({ status } as unknown as RecordActualsActionState);
+    const { container, button, unmount } = mount(action);
 
-  await React.act(async () => {
-    button.click();
-    await new Promise((r) => setTimeout(r, 0));
+    await React.act(async () => {
+      button.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    const alert = container.querySelector('[role="alert"]');
+    assert.ok(alert, `${status} must render a visible alert — a refused bulk save must never look like success`);
+    assert.equal(alert!.textContent, expected);
+    await unmount();
   });
-
-  // TERMINAL (ticket went COMPLETE/CANCELLED mid-edit) is a different,
-  // pre-existing rejection this component doesn't render text for today
-  // — this test only pins that it is NOT mistaken for the STALE_READING
-  // banner specifically, so a future regression can't silently merge the
-  // two into one misleading message.
-  assert.equal(container.querySelector('[role="alert"]'), null);
-  await unmount();
-});
+}

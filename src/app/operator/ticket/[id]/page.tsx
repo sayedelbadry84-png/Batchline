@@ -172,7 +172,7 @@ export default async function OperatorTicketPage({
 
       <RecordActualsForm
         ticketId={ticket.id}
-        messages={{ staleConflict: d.recordActualsStaleConflict }}
+        messages={{ staleConflict: d.recordActualsStaleConflict, terminal: d.recordActualsTerminal, notFound: d.recordActualsNotFound, genericFailure: d.recordActualsGenericFailure }}
         className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm"
       >
         <h2 className="font-display text-base font-semibold">{d.targetVsActual}</h2>

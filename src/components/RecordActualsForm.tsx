@@ -3,8 +3,18 @@
 import { useActionState } from "react";
 import { recordActuals, type RecordActualsActionState } from "@/app/(app)/production/actions";
 
+// PL-R12-P2-01, twelfth production-lifecycle review: only STALE_READING
+// was ever rendered. A ticket going COMPLETE/CANCELLED while readings are
+// being entered is an ordinary production race, and it refuses the WHOLE
+// bulk submit — so the operator pressed "Save readings", nothing was
+// saved, and the page simply reloaded with no explanation at all. Every
+// non-OK state now has its own text, plus a generic fallback so a status
+// added later can never silently render as success.
 export type RecordActualsMessages = {
   staleConflict: string;
+  terminal: string;
+  notFound: string;
+  genericFailure: string;
 };
 
 // PL-R10-P1-04, tenth production-lifecycle review: was a plain
@@ -35,16 +45,34 @@ export function RecordActualsForm({
   action?: (prevState: RecordActualsActionState, formData: FormData) => Promise<RecordActualsActionState>;
 }) {
   const [state, formAction] = useActionState(action, null as RecordActualsActionState);
+  const error = state === null || state.status === "OK" ? null : failureText(state.status, messages);
 
   return (
     <form action={formAction} className={className}>
       <input type="hidden" name="batchTicketId" value={ticketId} />
-      {state?.status === "STALE_READING" && (
+      {error && (
         <p role="alert" className="mb-3 rounded-md border border-critical/30 bg-critical-soft px-3 py-2 text-sm text-critical">
-          {messages.staleConflict}
+          {error}
         </p>
       )}
       {children}
     </form>
   );
+}
+
+// Deliberately NOT an exhaustive switch over the union: a status added to
+// RecordActualsActionState later must fall through to the generic
+// message rather than render nothing, since rendering nothing is exactly
+// the false-success behaviour this whole component exists to prevent.
+function failureText(status: string, messages: RecordActualsMessages): string {
+  switch (status) {
+    case "STALE_READING":
+      return messages.staleConflict;
+    case "TERMINAL":
+      return messages.terminal;
+    case "NOT_FOUND":
+      return messages.notFound;
+    default:
+      return messages.genericFailure;
+  }
 }
