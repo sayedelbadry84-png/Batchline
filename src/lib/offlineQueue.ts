@@ -11,6 +11,24 @@ export type QueuedAction = {
   kind: string;
   fields: Record<string, string>;
   createdAt: number;
+  // PL-R12-P1-01, twelfth production-lifecycle review. `id` alone is NOT
+  // a safe settlement key: enqueue coalesces a newer offline reading onto
+  // the SAME id (PL-R10-P1-03), while flushQueue necessarily sends its
+  // snapshot OUTSIDE the lock — so an older in-flight request could come
+  // back and delete an item whose value had meanwhile been replaced,
+  // losing the operator's newest reading without ever sending it.
+  // `generation` increments on every coalesce, making the settlement key
+  // (id, generation): the pair a replay actually sent. A settlement whose
+  // generation no longer matches never deletes anything — it hands the
+  // authoritative server version to the successor instead.
+  generation: number;
+  // The claim half of the same fix. A replay claims an item under the
+  // Web Lock before sending, so a second tab cannot send the same
+  // snapshot concurrently (which is what produced duplicate sends and
+  // false "rejected" records). The lease expires so a tab that dies
+  // mid-flight can never strand a reading forever.
+  leaseOwner: string | null;
+  leaseExpiresAt: number | null;
 };
 
 export type RejectedAction = QueuedAction & { reason: string; rejectedAt: number };
@@ -25,7 +43,13 @@ export type RejectedAction = QueuedAction & { reason: string; rejectedAt: number
 // (same as a thrown exception always has); REJECTED moves it to a
 // visible dead-letter list instead of deleting it, so a supervisor can
 // still see the discarded value and why.
-export type ReplayOutcome = { status: "APPLIED" } | { status: "RETRYABLE" } | { status: "REJECTED"; reason: string };
+// PL-R12-P1-01: APPLIED now carries the authoritative version the server
+// returned. A newer generation coalesced onto the same item while this
+// replay was in flight needs exactly that number as its own next
+// expectedVersion — without it, the successor would replay against the
+// pre-offline version the server has already moved past, and be refused
+// as STALE_READING for a conflict that never happened.
+export type ReplayOutcome = { status: "APPLIED"; version?: number } | { status: "RETRYABLE" } | { status: "REJECTED"; reason: string };
 
 export type PersistResult = { status: "OK" } | { status: "STORAGE_UNAVAILABLE"; error?: unknown };
 
@@ -120,10 +144,25 @@ function isStringRecord(v: unknown): v is Record<string, string> {
 // still get through, then break rendering or sit forever unreplayable
 // (flushQueue has no handler-kind match, forever RETRYABLE-shaped).
 // Every item is now validated field-by-field, not just array-shaped.
+// generation/leaseOwner/leaseExpiresAt are deliberately NOT required here
+// (PL-R12-P1-01): a payload written by an older build of this app is
+// still perfectly valid queued work — an operator's real unsent readings
+// — and must never be treated as corrupt and swept into a backup key.
+// normalizeQueuedAction below fills the new fields in with their
+// first-generation, unleased defaults on read.
 function isQueuedAction(v: unknown): v is QueuedAction {
   if (typeof v !== "object" || v === null) return false;
   const o = v as Record<string, unknown>;
   return typeof o.id === "string" && typeof o.kind === "string" && typeof o.createdAt === "number" && isStringRecord(o.fields);
+}
+
+function normalizeQueuedAction<T extends QueuedAction>(v: T): T {
+  return {
+    ...v,
+    generation: typeof v.generation === "number" ? v.generation : 0,
+    leaseOwner: typeof v.leaseOwner === "string" ? v.leaseOwner : null,
+    leaseExpiresAt: typeof v.leaseExpiresAt === "number" ? v.leaseExpiresAt : null,
+  };
 }
 
 function isRejectedAction(v: unknown): v is RejectedAction {
@@ -162,7 +201,15 @@ function readState(storage: StorageAdapter): ReadStateResult {
   if (!raw) return { status: "OK", state: emptyState() };
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (isOfflineStateV1(parsed)) return { status: "OK", state: parsed };
+    if (isOfflineStateV1(parsed)) {
+      // PL-R12-P1-01: normalized on the way in, so every code path below
+      // can rely on generation/lease being real values even for items a
+      // previous build of this app wrote without them.
+      return {
+        status: "OK",
+        state: { version: 1, pending: parsed.pending.map(normalizeQueuedAction), rejected: parsed.rejected.map(normalizeQueuedAction) },
+      };
+    }
   } catch {
     // fall through — CORRUPT below covers both a JSON parse failure and
     // a validly-parsed value that isn't a real OfflineStateV1 shape.
@@ -303,7 +350,27 @@ export function emitReplaySuccess(key: string, version: number): void {
 // actually uses, but tests construct their own instance over a fake
 // StorageAdapter (including one that always throws) to exercise failure
 // paths deterministically, with no browser/jsdom involved.
+// How long a replay claim is honoured before another tab may take the
+// item over (PL-R12-P1-01). Long enough that a slow batching-floor
+// connection finishes its round trip; short enough that a tab closed
+// mid-flight cannot strand an operator's reading for a whole shift.
+const LEASE_MS = 60_000;
+
 export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAdapter | null = getDefaultLock()) {
+  // Identifies THIS queue instance (one per tab in practice) as a lease
+  // holder. Not persisted anywhere but inside the claims it takes.
+  const ownerId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  // (id:generation) → the APPLIED result whose settlement could not be
+  // durably stored. Deliberately in-memory only: the very failure being
+  // recovered from is a storage write failure, so there is nowhere
+  // durable to put it. This reconciles the realistic case (a transient
+  // quota/write failure inside one session). If the tab closes first,
+  // the item stays queued and a later replay may be refused as
+  // STALE_READING — a false rejection, which is the SAFE direction (the
+  // value is on the server; the operator is told to check rather than
+  // silently losing it), and is called out as the residual limitation
+  // rather than hidden.
+  const unsettledApplied = new Map<string, ReplayOutcome>();
   // PL-R10-P2-02, tenth production-lifecycle review: the old fallback
   // here ran every mutation unserialized when no lock was available,
   // reasoning that this was "no worse than before" Web Locks existed —
@@ -373,14 +440,31 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
       const existingIndex = read.state.pending.findIndex((i) => logicalKey(i.kind, i.fields, mutableField) === key);
       if (existingIndex !== -1) {
         const existing = read.state.pending[existingIndex];
-        const merged: QueuedAction = { ...existing, fields: { ...existing.fields, [mutableField]: fields[mutableField] } };
+        // PL-R12-P1-01: the coalesce BUMPS THE GENERATION. A replay
+        // already in flight for the previous generation can therefore no
+        // longer settle (delete) this item — it will find the generation
+        // moved on and hand its authoritative server version to this
+        // newer value instead of destroying it.
+        const merged: QueuedAction = {
+          ...existing,
+          fields: { ...existing.fields, [mutableField]: fields[mutableField] },
+          generation: existing.generation + 1,
+        };
         const nextPending = [...read.state.pending];
         nextPending[existingIndex] = merged;
         const result = persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
         return result.status === "OK" ? { status: "OK", item: merged } : { status: "STORAGE_UNAVAILABLE" };
       }
 
-      const item: QueuedAction = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, kind, fields, createdAt: Date.now() };
+      const item: QueuedAction = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind,
+        fields,
+        createdAt: Date.now(),
+        generation: 0,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      };
       const result = persistState(storage!, { version: 1, pending: [...read.state.pending, item], rejected: read.state.rejected });
       return result.status === "OK" ? { status: "OK", item } : { status: "STORAGE_UNAVAILABLE" };
     });
@@ -396,87 +480,157 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
     });
   }
 
-  // Replays every queued item whose kind has a matching handler.
-  // APPLIED and REJECTED each commit their pending→(gone|rejected)
-  // transition as ONE persistState call carrying the full next state —
-  // never a dequeue followed by a separate rejected-list write. If that
-  // single write fails, the item is left exactly as it was in storage
-  // (still pending), never partially transitioned.
+  // PL-R12-P1-01: claims one item for replay, under the lock. Refuses an
+  // item another owner still holds an unexpired lease on — that is what
+  // stops two tabs from sending the SAME snapshot concurrently, which
+  // previously produced both duplicate sends and false "rejected"
+  // records (one tab's write applies, the other's identical write comes
+  // back STALE_READING and was recorded as a rejected reading).
+  // Re-claiming our OWN lease is allowed: it is how a settlement whose
+  // storage write failed gets retried without waiting out the lease.
+  function claimForReplay(itemId: string): { status: "CLAIMED"; item: QueuedAction } | { status: "SKIP" } | { status: "STORAGE_UNAVAILABLE" } {
+    const read = readForMutation();
+    if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
+    const current = read.state.pending.find((i) => i.id === itemId);
+    if (!current) return { status: "SKIP" }; // resolved by someone else since the listing
+    const heldByAnother = current.leaseOwner !== null && current.leaseOwner !== ownerId && (current.leaseExpiresAt ?? 0) > Date.now();
+    if (heldByAnother) return { status: "SKIP" };
+
+    const claimed: QueuedAction = { ...current, leaseOwner: ownerId, leaseExpiresAt: Date.now() + LEASE_MS };
+    const nextPending = read.state.pending.map((i) => (i.id === itemId ? claimed : i));
+    const persisted = persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
+    if (persisted.status !== "OK") return { status: "STORAGE_UNAVAILABLE" };
+    return { status: "CLAIMED", item: claimed };
+  }
+
+  // Releases our own claim without resolving the item — used when the
+  // replay could not be completed (still offline, RETRYABLE), so the
+  // next flush can pick it straight back up rather than waiting out the
+  // full lease.
+  function releaseClaim(snapshot: QueuedAction): void {
+    const read = readForMutation();
+    if (read.status === "STORAGE_UNAVAILABLE") return;
+    const current = read.state.pending.find((i) => i.id === snapshot.id);
+    if (!current || current.leaseOwner !== ownerId || current.generation !== snapshot.generation) return;
+    const nextPending = read.state.pending.map((i) => (i.id === snapshot.id ? { ...i, leaseOwner: null, leaseExpiresAt: null } : i));
+    persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
+  }
+
+  type Settlement =
+    | { status: "SETTLED" }
+    // The item was replaced by a NEWER value (a fresh offline edit)
+    // while this replay was in flight. The successor is kept and its
+    // expectedVersion advanced from the applied response — never deleted
+    // on the strength of an outcome for a value it already replaced.
+    | { status: "SUPERSEDED" }
+    | { status: "GONE" }
+    | { status: "LEASE_LOST" }
+    | { status: "STORAGE_UNAVAILABLE" };
+
+  function settleReplay(snapshot: QueuedAction, outcome: ReplayOutcome, versionField: string): Settlement {
+    const read = readForMutation();
+    if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
+    const current = read.state.pending.find((i) => i.id === snapshot.id);
+    if (!current) return { status: "GONE" };
+    // Another owner took over after our lease expired — its own
+    // settlement is authoritative for whatever it sent; ours must not
+    // also act on this item.
+    if (current.leaseOwner !== null && current.leaseOwner !== ownerId) return { status: "LEASE_LOST" };
+
+    if (current.generation !== snapshot.generation) {
+      // Superseded. An APPLIED result still carries real information the
+      // successor needs: the server's authoritative version. Handing it
+      // over is what stops the successor from replaying against the
+      // pre-offline version and being refused for a conflict that never
+      // happened. A REJECTED result is simply dropped — it judged a
+      // value the operator has already replaced.
+      const nextFields =
+        outcome.status === "APPLIED" && typeof outcome.version === "number" ? { ...current.fields, [versionField]: String(outcome.version) } : current.fields;
+      const nextPending = read.state.pending.map((i) => (i.id === snapshot.id ? { ...i, fields: nextFields, leaseOwner: null, leaseExpiresAt: null } : i));
+      const persisted = persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
+      return persisted.status === "OK" ? { status: "SUPERSEDED" } : { status: "STORAGE_UNAVAILABLE" };
+    }
+
+    const nextPending = read.state.pending.filter((i) => i.id !== snapshot.id);
+    const nextRejected =
+      outcome.status === "REJECTED" ? [...read.state.rejected, { ...snapshot, reason: outcome.reason, rejectedAt: Date.now() }] : read.state.rejected;
+    const persisted = persistState(storage!, { version: 1, pending: nextPending, rejected: nextRejected });
+    return persisted.status === "OK" ? { status: "SETTLED" } : { status: "STORAGE_UNAVAILABLE" };
+  }
+
+  // Replays every queued item whose kind has a matching handler, one at a
+  // time: claim under the lock → send OUTSIDE the lock (a network round
+  // trip must never block another tab's enqueue) → settle under the lock
+  // against the exact (id, generation) that was actually sent.
+  //
+  // onSettled fires only AFTER a settlement is durably stored, never on
+  // the handler's own return (PL-R12-P1-01) — a caller publishing "this
+  // reading is saved, here is its new version" must not do so for a
+  // settlement that failed to persist.
   async function flushQueue(
     handlers: Record<string, (fields: Record<string, string>) => Promise<ReplayOutcome>>,
+    opts?: { versionField?: string; onSettled?: (item: QueuedAction, outcome: ReplayOutcome, settlement: "SETTLED" | "SUPERSEDED") => void },
   ): Promise<{ flushed: number; remaining: number; rejected: number; readStatus: ReadStatus }> {
+    const versionField = opts?.versionField ?? "expectedVersion";
     const initial = readForMutation();
     if (initial.status === "STORAGE_UNAVAILABLE") return { flushed: 0, remaining: 0, rejected: 0, readStatus: "STORAGE_UNAVAILABLE" };
+    // PL-R10-P2-02: fails closed with no lock — every mutation below is a
+    // read-modify-write that would otherwise race other tabs.
+    if (!lock) return { flushed: 0, remaining: initial.state.pending.length, rejected: initial.state.rejected.length, readStatus: "STORAGE_UNAVAILABLE" };
     let readStatus: ReadStatus = initial.status;
     let flushed = 0;
 
-    for (const item of initial.state.pending) {
-      const handler = handlers[item.kind];
-      if (!handler) continue;
-      let outcome: ReplayOutcome;
-      try {
-        outcome = await handler(item.fields);
-      } catch {
-        continue; // Still offline, or a real transport error — leave it queued, unchanged.
-      }
-      if (outcome.status === "RETRYABLE") continue; // leave it queued, exactly as-is, for the next flush.
+    for (const listed of initial.state.pending) {
+      if (!handlers[listed.kind]) continue;
 
-      // The read-modify-write below runs under the SAME named lock
-      // enqueue/dismissRejected use (PL-R9-P2-01) — without it, this
-      // re-read-then-persist step is exactly the same unserialized
-      // getItem→setItem race as a plain enqueue, just with flushQueue as
-      // the writer instead. The handler call above stays OUTSIDE the
-      // lock deliberately: it can be a slow network round-trip, and
-      // holding a cross-tab lock across that would block every other
-      // tab's own enqueue/dismiss/flush for as long as this one request
-      // takes.
-      //
-      // PL-R10-P2-02: fails closed with no lock, same as enqueue/
-      // dismissRejected — a handler that already succeeded server-side
-      // stays queued rather than risk an unserialized write here; it
-      // will simply be re-applied (idempotently) on the next flush once
-      // a lock is available again.
-      if (!lock) {
+      const claim = await withLock(() => claimForReplay(listed.id));
+      if (claim.status === "STORAGE_UNAVAILABLE") {
         readStatus = "STORAGE_UNAVAILABLE";
         continue;
       }
-      const writeOutcome = await withLock(() => {
-        // Re-read the FRESHEST state right before this one item's write,
-        // not the snapshot flushQueue started with — two concurrent
-        // flushQueue calls (e.g. two open tabs on the same ticket) can
-        // otherwise each work from a stale snapshot and clobber each
-        // other's already-persisted removals.
-        const fresh = readForMutation();
-        if (fresh.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" as const };
-        if (!fresh.state.pending.some((i) => i.id === item.id)) {
-          // Already gone — a concurrent flushQueue call already resolved
-          // this exact item between our handler call and this write.
-          // Re-applying REJECTED here would append a duplicate rejected
-          // entry for the same reading; simply not touching it is
-          // correct either way.
-          return { status: "ALREADY_RESOLVED" as const };
-        }
-        const nextPending = fresh.state.pending.filter((i) => i.id !== item.id);
-        const nextRejected =
-          outcome.status === "REJECTED" ? [...fresh.state.rejected, { ...item, reason: outcome.reason, rejectedAt: Date.now() }] : fresh.state.rejected;
-        const persisted = persistState(storage!, { version: 1, pending: nextPending, rejected: nextRejected });
-        return persisted.status === "OK"
-          ? { status: "OK" as const, readStatus: fresh.status === "RECOVERED_FROM_CORRUPT" ? ("RECOVERED_FROM_CORRUPT" as const) : undefined }
-          : { status: "STORAGE_UNAVAILABLE" as const };
-      });
+      if (claim.status === "SKIP") continue;
+      const snapshot = claim.item;
 
-      if (writeOutcome.status === "OK") {
-        if (writeOutcome.readStatus === "RECOVERED_FROM_CORRUPT") readStatus = "RECOVERED_FROM_CORRUPT";
-        if (outcome.status === "APPLIED") flushed++;
-      } else if (writeOutcome.status === "STORAGE_UNAVAILABLE") {
-        // The write failed (or couldn't safely read first) — the item is
-        // untouched in storage (still pending), so nothing was lost;
-        // replaying either outcome again next flush is safe (APPLIED is
-        // idempotent, REJECTED is re-derived fresh).
-        readStatus = "STORAGE_UNAVAILABLE";
+      // A previous flush in THIS session got an APPLIED result it could
+      // not durably settle (a localStorage write failure). Re-sending
+      // would now come back STALE_READING — the server already holds
+      // this exact value — and would turn an accepted reading into a
+      // false rejection. Reconcile from the remembered result instead of
+      // asking the server again.
+      const remembered = unsettledApplied.get(`${snapshot.id}:${snapshot.generation}`);
+      const outcome: ReplayOutcome | null = remembered ?? null;
+
+      let result: ReplayOutcome;
+      if (outcome) {
+        result = outcome;
+      } else {
+        try {
+          result = await handlers[snapshot.kind](snapshot.fields);
+        } catch {
+          // Still offline, or a real transport error — leave it queued,
+          // unchanged, and give up our claim so the next flush can retry
+          // immediately.
+          await withLock(() => releaseClaim(snapshot));
+          continue;
+        }
+        if (result.status === "RETRYABLE") {
+          await withLock(() => releaseClaim(snapshot));
+          continue;
+        }
       }
-      // ALREADY_RESOLVED: nothing to update — a concurrent flush already
-      // persisted this item's outcome.
+
+      const settlement = await withLock(() => settleReplay(snapshot, result, versionField));
+      if (settlement.status === "STORAGE_UNAVAILABLE") {
+        readStatus = "STORAGE_UNAVAILABLE";
+        // Remember an APPLIED we could not record, so a retry in this
+        // same session reconciles instead of re-sending (see above).
+        if (result.status === "APPLIED") unsettledApplied.set(`${snapshot.id}:${snapshot.generation}`, result);
+        continue;
+      }
+      unsettledApplied.delete(`${snapshot.id}:${snapshot.generation}`);
+      if (settlement.status === "GONE" || settlement.status === "LEASE_LOST") continue;
+      if (result.status === "APPLIED") flushed++;
+      opts?.onSettled?.(snapshot, result, settlement.status);
     }
 
     const final = readForMutation();

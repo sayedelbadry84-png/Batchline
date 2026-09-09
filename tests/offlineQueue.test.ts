@@ -219,6 +219,142 @@ test("a corrupt stored payload is backed up under a separate key, not silently d
   assert.equal(storage.store.get(backupKeys[0]), "{not valid json this is a corrupt payload}");
 });
 
+// ---- PL-R12-P1-01, twelfth production-lifecycle review: `id` alone was
+// ---- not a safe settlement key. enqueue coalesces a newer reading onto
+// ---- the SAME id, while flushQueue necessarily sends outside the lock,
+// ---- so an older in-flight replay could settle by id and DELETE a newer
+// ---- value that was never sent. These are the three deterministic
+// ---- proofs the review asked for, in its own order.
+
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+test("a newer value coalesced during an in-flight replay is never deleted by the older replay's settlement — it inherits the returned server version and applies next", async () => {
+  const storage = memoryStorage();
+  const queue = createOfflineQueue(storage, sharedLock());
+  await queue.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "10", expectedVersion: "0" });
+
+  const firstSendStarted = deferred();
+  const releaseFirstSend = deferred();
+  const sent: { value: string; expectedVersion: string }[] = [];
+
+  const flushPromise = queue.flushQueue({
+    recordActualField: async (fields) => {
+      sent.push({ value: fields.value, expectedVersion: fields.expectedVersion });
+      firstSendStarted.resolve();
+      await releaseFirstSend.promise;
+      return { status: "APPLIED", version: 1 };
+    },
+  });
+
+  // A newer reading arrives while value 10 is genuinely still in flight.
+  await firstSendStarted.promise;
+  assert.equal((await queue.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "20", expectedVersion: "0" })).status, "OK");
+  releaseFirstSend.resolve();
+  await flushPromise;
+
+  const pending = queue.peekQueue().items;
+  assert.equal(pending.length, 1, "the newer value must still be queued — the older replay's settlement must never delete it");
+  assert.equal(pending[0].fields.value, "20");
+  assert.equal(pending[0].fields.expectedVersion, "1", "the successor must inherit the authoritative version the applied replay returned");
+  assert.deepEqual(queue.peekRejected().items, [], "nothing may be rejected here — no conflict actually happened");
+
+  // And it applies on the next flush, against exactly that inherited version.
+  const second = await queue.flushQueue({
+    recordActualField: async (fields) => {
+      sent.push({ value: fields.value, expectedVersion: fields.expectedVersion });
+      return { status: "APPLIED", version: 2 };
+    },
+  });
+  assert.equal(second.flushed, 1);
+  assert.deepEqual(sent, [
+    { value: "10", expectedVersion: "0" },
+    { value: "20", expectedVersion: "1" },
+  ]);
+  assert.deepEqual(queue.peekQueue().items, [], "the successor must now be fully settled");
+});
+
+test("two queue instances over one stored snapshot produce exactly one effective write, no duplicate effect, and no false rejection", async () => {
+  const storage = memoryStorage();
+  const lock = sharedLock();
+  const tabA = createOfflineQueue(storage, lock);
+  const tabB = createOfflineQueue(storage, lock);
+  await tabA.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "42", expectedVersion: "0" });
+
+  // A version-aware fake server — applies only when expectedVersion
+  // matches, exactly like recordActualField's own CAS, so a duplicate
+  // send of the same snapshot would come back STALE_READING and (before
+  // the lease claim) be recorded as a false rejected reading.
+  let serverVersion = 0;
+  let serverValue: string | null = null;
+  const applied: string[] = [];
+  const handler = async (fields: Record<string, string>): Promise<ReplayOutcome> => {
+    await new Promise((r) => setTimeout(r, 5));
+    if (Number(fields.expectedVersion) !== serverVersion) return { status: "REJECTED", reason: "STALE_READING" };
+    serverVersion += 1;
+    serverValue = fields.value;
+    applied.push(fields.value);
+    return { status: "APPLIED", version: serverVersion };
+  };
+
+  await Promise.all([tabA.flushQueue({ recordActualField: handler }), tabB.flushQueue({ recordActualField: handler })]);
+
+  assert.deepEqual(applied, ["42"], "exactly one effective server write — the second tab must never send the same claimed snapshot");
+  assert.equal(serverValue, "42");
+  assert.deepEqual(tabA.peekRejected().items, [], "no false rejection may be recorded for a reading that actually applied");
+  assert.deepEqual(tabA.peekQueue().items, [], "the reading must be settled exactly once");
+});
+
+test("an APPLIED result whose settlement cannot be stored is reconciled on the next flush, never re-sent into a false stale rejection", async () => {
+  const inner = memoryStorage();
+  let writes = 0;
+  let failWriteNumber: number | null = null;
+  const storage: StorageAdapter = {
+    getItem: (key) => inner.getItem(key),
+    setItem: (key, value) => {
+      writes += 1;
+      if (writes === failWriteNumber) throw new Error("simulated quota failure");
+      inner.setItem(key, value);
+    },
+  };
+  const queue = createOfflineQueue(storage, sharedLock());
+  await queue.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "7", expectedVersion: "0" }); // write 1
+
+  let serverVersion = 0;
+  const sends: string[] = [];
+  const handler = async (fields: Record<string, string>): Promise<ReplayOutcome> => {
+    sends.push(fields.value);
+    if (Number(fields.expectedVersion) !== serverVersion) return { status: "REJECTED", reason: "STALE_READING" };
+    serverVersion += 1;
+    return { status: "APPLIED", version: serverVersion };
+  };
+
+  // Write 2 is the replay claim; write 3 is the settlement — fail only
+  // the settlement, so the server has genuinely accepted the value but
+  // this client could not record that fact.
+  failWriteNumber = 3;
+  const first = await queue.flushQueue({ recordActualField: handler });
+  assert.deepEqual(sends, ["7"]);
+  assert.equal(first.readStatus, "STORAGE_UNAVAILABLE", "an unstorable settlement must be reported, never counted as clean");
+  assert.equal(first.flushed, 0);
+
+  // Storage recovers. Re-sending would now be answered STALE_READING
+  // (the server already advanced past version 0) and would turn an
+  // ACCEPTED reading into a rejected one — the exact false rejection
+  // this reconciliation exists to prevent.
+  failWriteNumber = null;
+  const second = await queue.flushQueue({ recordActualField: handler });
+  assert.deepEqual(sends, ["7"], "must not re-send a value the server already accepted");
+  assert.equal(second.flushed, 1);
+  assert.deepEqual(queue.peekQueue().items, []);
+  assert.deepEqual(queue.peekRejected().items, [], "an accepted reading must never end up in the rejected list");
+});
+
 test("two concurrent flush attempts against the same storage produce no duplicate rejected item and no lost pending item", async () => {
   const storage = memoryStorage();
   const queue = createOfflineQueue(storage, sharedLock());

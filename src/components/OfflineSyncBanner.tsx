@@ -19,18 +19,15 @@ const HANDLERS: Record<string, (fields: Record<string, string>) => Promise<Repla
     const fd = new FormData();
     for (const [k, v] of Object.entries(fields)) fd.set(k, v);
     const result = await recordActualField(fd);
-    if (result.status === "OK") {
-      // PL-R10-P1-03, tenth production-lifecycle review: the mounted
-      // AutoSaveField that originally queued this item has no way to
-      // learn the server's fresh version on its own — emitted here,
-      // keyed exactly the same way that instance itself computes the key
-      // (see logicalKey's own comment), so its currentVersion ref is
-      // corrected before its next save, online or offline, instead of
-      // that next save carrying the stale pre-offline version and being
-      // refused as STALE_READING for no real reason.
-      emitReplaySuccess(logicalKey("recordActualField", fields), result.version);
-      return { status: "APPLIED" };
-    }
+    // PL-R12-P1-01, twelfth production-lifecycle review: the version is
+    // returned to flushQueue rather than published from inside the
+    // handler. Publishing here fired BEFORE the settlement was durably
+    // stored — and before it was known whether this replay's own
+    // generation was still the current one — so a superseded or unstored
+    // replay could still tell the mounted field "saved, here is your new
+    // version". flushQueue now publishes through onSettled below, only
+    // once the settlement has actually persisted.
+    if (result.status === "OK") return { status: "APPLIED", version: result.version };
     return { status: "REJECTED", reason: result.status };
   },
 };
@@ -74,7 +71,20 @@ export function OfflineSyncBanner({
   const [readStatus, setReadStatus] = useState<ReadStatus>("OK");
 
   const trySync = useCallback(async () => {
-    const { flushed, remaining, readStatus: flushReadStatus } = await offlineQueue.flushQueue(HANDLERS);
+    const { flushed, remaining, readStatus: flushReadStatus } = await offlineQueue.flushQueue(HANDLERS, {
+      // PL-R10-P1-03: the mounted AutoSaveField that queued this reading
+      // has no way to learn the server's fresh version on its own — its
+      // next save would otherwise carry the stale pre-offline version and
+      // be refused as STALE_READING for no real conflict. PL-R12-P1-01
+      // moved this out of the handler: it now fires only once the
+      // settlement is DURABLY STORED, and for a superseded item the
+      // successor's own expectedVersion has already been advanced to the
+      // same number in storage, so the ref and the queue agree.
+      onSettled: (item, outcome) => {
+        if (outcome.status !== "APPLIED" || typeof outcome.version !== "number") return;
+        emitReplaySuccess(logicalKey(item.kind, item.fields), outcome.version);
+      },
+    });
     const rejectedRead = offlineQueue.peekRejected();
     setPendingCount(remaining);
     setRejected(rejectedRead.items);
