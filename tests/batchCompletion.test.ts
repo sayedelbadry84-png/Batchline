@@ -45,6 +45,8 @@ const { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketCompo
 const { claimTripSlot, applyReclaimCredit } = await import("../src/lib/tripDispatch");
 const { requestShortageOverride, approveShortageOverrideRequest, rejectShortageOverrideRequest } = await import("../src/lib/shortageOverrideRequests");
 const { createRequisitionIfNeeded, stageAutoRequisitionIntent, processPendingAutoRequisition, retryPendingAutoRequisitions, notifyRequisitionCreated } = await import("../src/lib/materialRequisition");
+const { listDeadLetters, requeueDeadLetter, dismissDeadLetter } = await import("../src/lib/deadLetterQueue");
+const { MAX_ATTEMPTS_BEFORE_DEAD_LETTER } = await import("../src/lib/retryBackoff");
 
 const prisma = new PrismaClient();
 
@@ -1750,6 +1752,136 @@ test("an automatic requisition notification reaches the same-site manager and AD
     await cleanupDelete(() => prisma.user.deleteMany({ where: { id: { in: recipients } } }));
     await cleanupDelete(() => prisma.plant.delete({ where: { id: otherPlant.id } }));
     await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+  }
+});
+
+// ---- PL-R12-P2-03, twelfth production-lifecycle review: dead-lettered
+// ---- rows had no operations path at all — nothing showed them, and no
+// ---- action could requeue or drop one, so an abandoned consequence (a
+// ---- requisition never opened) left only a console line behind. These
+// ---- cover the review's own required cases: the attempt-14 transition,
+// ---- automatic exclusion from claims, site scoping, manual requeue and
+// ---- dismissal.
+
+test("an intent dead-letters exactly at the attempt threshold, and is then excluded from every further sweep", async () => {
+  const bogusMaterialId = `test-suite-bc-deadletter-material-${Date.now()}`;
+  const intent = await prisma.pendingAutoRequisition.create({
+    data: {
+      batchTicketId: "test-suite-bc-fake-ticket-id",
+      materialId: bogusMaterialId,
+      siteId,
+      newLevel: 2,
+      capacity: 100,
+      minThresholdPct: 50,
+      unit: "TONS",
+      // One short of the threshold: the next failure is the one that must
+      // park it.
+      attempts: MAX_ATTEMPTS_BEFORE_DEAD_LETTER - 1,
+    },
+  });
+
+  try {
+    const failing = await retryPendingAutoRequisitions(200);
+    assert.ok(failing.claimed >= 1);
+
+    const parked = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+    assert.equal(parked.attempts, MAX_ATTEMPTS_BEFORE_DEAD_LETTER);
+    assert.ok(parked.deadLetteredAt, "the attempt that reaches the threshold must park the row, not retry it forever");
+
+    // Automatic exclusion: even with its nextAttemptAt forced back into
+    // the past, a dead-lettered row must never be claimed again.
+    await prisma.pendingAutoRequisition.update({ where: { id: intent.id }, data: { nextAttemptAt: new Date(Date.now() - 60 * 60 * 1000) } });
+    const afterParking = await retryPendingAutoRequisitions(200);
+    const stillParked = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+    assert.equal(stillParked.attempts, MAX_ATTEMPTS_BEFORE_DEAD_LETTER, "a dead-lettered row must be excluded from automatic claims entirely");
+    assert.ok(afterParking.deadLettered >= 1, "the sweep must report how many rows are parked awaiting a human");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: bogusMaterialId } }));
+  }
+});
+
+test("dead letters are site-scoped: a site-scoped operator sees and can act on their own site's rows only", async () => {
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-BC-DL-${Date.now()}`, name: "TEST-SUITE-BC-DL-SITE-B", city: "Test", country: "Test" } });
+  const mine = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: `test-suite-bc-dl-mine-${Date.now()}`, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date() },
+  });
+  const theirs = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: `test-suite-bc-dl-theirs-${Date.now()}`, siteId: otherSite.id, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date() },
+  });
+
+  try {
+    const scoped = await listDeadLetters(siteId);
+    const scopedIds = scoped.map((r) => r.id);
+    assert.ok(scopedIds.includes(mine.id), "an operator must see their own site's abandoned work");
+    assert.ok(!scopedIds.includes(theirs.id), "another site's abandoned work must never be listed");
+    // Blob deletions have no site of their own, so a site-scoped caller
+    // is never shown them (documented rule in deadLetterQueue.ts).
+    assert.ok(!scoped.some((r) => r.kind === "BLOB_DELETION"), "storage cleanups are org-wide-only rows");
+
+    const orgWide = await listDeadLetters(null);
+    const orgWideIds = orgWide.map((r) => r.id);
+    assert.ok(orgWideIds.includes(mine.id) && orgWideIds.includes(theirs.id), "an org-wide (ADMIN) caller sees every site");
+
+    // Acting across the scope boundary resolves to NOT_FOUND — never a
+    // distinct "forbidden" that would confirm the row exists.
+    const refused = await requeueDeadLetter("AUTO_REQUISITION", theirs.id, { id: adminUserId, role: "PLANT_MANAGER" }, siteId);
+    assert.equal(refused.status, "NOT_FOUND");
+    const untouched = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: theirs.id } });
+    assert.ok(untouched.deadLetteredAt, "a cross-site requeue must change nothing at all");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: { in: [mine.id, theirs.id] } } }));
+    await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+  }
+});
+
+test("requeueing a dead letter makes it claimable again with a fresh attempt budget, and is audited", async () => {
+  const parked = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date(), lastError: "the original failure", leaseOwner: "someone-who-died", leaseExpiresAt: new Date(Date.now() + 60_000) },
+  });
+
+  try {
+    const result = await requeueDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "ADMIN" }, null);
+    assert.equal(result.status, "OK");
+
+    const requeued = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: parked.id } });
+    assert.equal(requeued.deadLetteredAt, null);
+    assert.equal(requeued.attempts, 0, "a manual requeue must restore the attempt budget, or one more failure would instantly re-park it");
+    assert.equal(requeued.leaseOwner, null, "a stale lease must not leave a requeued row unclaimable");
+    assert.equal(requeued.lastError, "the original failure", "the failure history is kept — that is why the operator requeued it");
+
+    const audit = await prisma.auditEvent.findFirst({ where: { recordId: parked.id, reasonCode: "DEAD_LETTER_REQUEUED" } });
+    assert.ok(audit, "remediating abandoned work must be audited");
+
+    // A second requeue is refused: the row is no longer dead-lettered.
+    const again = await requeueDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "ADMIN" }, null);
+    assert.equal(again.status, "NOT_DEAD_LETTERED");
+
+    // And it is genuinely claimable again.
+    const sweep = await retryPendingAutoRequisitions(200, async () => {});
+    assert.ok(sweep.claimed >= 1);
+  } finally {
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: parked.id } }));
+  }
+});
+
+test("dismissing a dead letter removes it for good, and records that the consequence was abandoned knowingly", async () => {
+  const parked = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: `test-suite-bc-dismiss-${Date.now()}`, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date() },
+  });
+
+  try {
+    const result = await dismissDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "ADMIN" }, null);
+    assert.equal(result.status, "OK");
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: parked.id } }), null);
+
+    const audit = await prisma.auditEvent.findFirst({ where: { recordId: parked.id, reasonCode: "DEAD_LETTER_DISMISSED" } });
+    assert.ok(audit, "discarding abandoned work must leave a record that a human decided to drop it");
+
+    const again = await dismissDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "ADMIN" }, null);
+    assert.equal(again.status, "NOT_FOUND");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: parked.id } }));
   }
 });
 

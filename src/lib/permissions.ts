@@ -58,6 +58,14 @@ export const MODULE_ROLES = {
   // reconciliation — kept tight, financial data rather than an
   // operational screen.
   finance: ["ACCOUNTANT", "ADMIN"],
+  // PL-R12-P2-03, twelfth production-lifecycle review: the dead-letter
+  // view for the two database-backed retry queues. A row parked here
+  // means a real consequence was abandoned (a purchasing requisition
+  // never opened, an orphaned delivery photo never cleaned up) — until
+  // this screen existed, the only evidence was a console line. Kept to
+  // the operations/management roster: this is remediation work, not
+  // day-to-day plant operation.
+  queues: ["ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER"],
 } as const satisfies Record<string, readonly string[] | null>;
 
 export type ModuleKey = keyof typeof MODULE_ROLES;
@@ -110,6 +118,7 @@ export const VIEW_NAV: { key: ModuleKey; href: string; labelKey: keyof Dictionar
   { key: "trips", href: "/trips", labelKey: "trips" },
   { key: "quality", href: "/quality", labelKey: "quality" },
   { key: "reports", href: "/reports", labelKey: "reports" },
+  { key: "queues", href: "/queues", labelKey: "queues" },
 ];
 
 export const MODULE_KEYS = Object.keys(MODULE_ROLES) as ModuleKey[];
@@ -456,6 +465,14 @@ export const ACTION_ROLES = {
     removeTrainingAttendee: ["QUALITY_SUPERVISOR", "ADMIN"],
     createMaterialLabTest: ["QUALITY_SUPERVISOR", "ADMIN"],
     setMaterialLabTestStatus: ["QUALITY_SUPERVISOR", "ADMIN"],
+  },
+  // PL-R12-P2-03: remediating an abandoned queue row is a deliberate
+  // operations decision, so it is narrower than merely VIEWING the
+  // dead-letter list — a plant manager can see what was dropped at their
+  // own site without being able to requeue or discard it.
+  queues: {
+    requeueDeadLetter: ["ADMIN", "OPERATIONS_MANAGER", "PLANTS_MANAGER"],
+    dismissDeadLetter: ["ADMIN", "OPERATIONS_MANAGER", "PLANTS_MANAGER"],
   },
 } as const satisfies Record<string, Record<string, readonly string[]>>;
 
