@@ -1,5 +1,5 @@
 import "server-only";
-import { createHmac, randomBytes } from "crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 
 // RFC 6238 TOTP (RFC 4226 HOTP underneath), hand-rolled on Node's built-in
 // crypto — no external auth/SMS service, works with any standard
@@ -79,12 +79,16 @@ export function totpUri(secret: string, accountLabel: string, issuer = "Batchlin
 }
 
 export function verifyTotpCode(secret: string, code: string): boolean {
+  return matchingTotpStep(secret, code) !== null;
+}
+
+export function matchingTotpStep(secret: string, code: string): number | null {
   const trimmed = code.trim();
-  if (!/^\d{6}$/.test(trimmed)) return false;
+  if (!/^\d{6}$/.test(trimmed)) return null;
   const key = base32Decode(secret);
   const currentStep = Math.floor(Date.now() / 1000 / STEP_SECONDS);
   for (let delta = -WINDOW_STEPS; delta <= WINDOW_STEPS; delta++) {
-    if (hotp(key, currentStep + delta) === trimmed) return true;
+    if (timingSafeEqual(Buffer.from(hotp(key, currentStep + delta)), Buffer.from(trimmed))) return currentStep + delta;
   }
-  return false;
+  return null;
 }

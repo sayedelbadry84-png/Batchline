@@ -460,10 +460,13 @@ export const ACTION_LIST: { moduleKey: ActionModuleKey; actionKey: string }[] = 
 );
 
 export async function getEffectiveActionRoles(moduleKey: ActionModuleKey, actionKey: string): Promise<readonly string[]> {
+  const moduleDefaults: Record<string, readonly string[]> = ACTION_ROLES[moduleKey];
+  // A misspelled/new action must fail closed, not grant every staff role.
+  // Only registered actions may consult editable permission overrides.
+  if (!Object.hasOwn(moduleDefaults, actionKey)) return [];
   const rows = await prisma.actionPermission.findMany({ where: { moduleKey, actionKey } });
   if (rows.length > 0) return rows.map((r) => r.role);
-  const moduleDefaults: Record<string, readonly string[]> = ACTION_ROLES[moduleKey];
-  return moduleDefaults[actionKey] ?? ASSIGNABLE_ROLES;
+  return moduleDefaults[actionKey];
 }
 
 export async function canPerformAction(role: string, moduleKey: ActionModuleKey, actionKey: string): Promise<boolean> {

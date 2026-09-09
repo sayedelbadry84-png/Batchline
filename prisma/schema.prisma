@@ -61,6 +61,8 @@ model User {
   totpSecret          String?
   totpTempSecret      String?
   totpEnabled         Boolean         @default(false)
+  // Last successfully consumed RFC 6238 counter, claimed atomically.
+  totpLastUsedStep    Int?
   createdAt           DateTime        @default(now())
   updatedAt           DateTime        @updatedAt
 

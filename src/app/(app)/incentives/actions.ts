@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
+import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
 
 export async function updateIncentivePolicy(formData: FormData) {
@@ -18,6 +19,7 @@ export async function updateIncentivePolicy(formData: FormData) {
   const tier3RateSar = Number(formData.get("tier3RateSar") ?? 0);
   const beyondRateSar = Number(formData.get("beyondRateSar") ?? 0);
   if (!siteId || !role) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
   const before = await prisma.driverIncentivePolicy.findUnique({ where: { siteId_role: { siteId, role } } });
 
@@ -52,6 +54,7 @@ export async function updatePumpIncentivePolicy(formData: FormData) {
   const role = String(formData.get("role") ?? "").trim();
   const freeVolumeM3 = Number(formData.get("freeVolumeM3") ?? 0) || 0;
   if (!siteId || !role) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
   await prisma.pumpIncentivePolicy.upsert({
     where: { siteId_role: { siteId, role } },
@@ -81,6 +84,7 @@ export async function addPumpRateBracket(formData: FormData) {
   const maxReachM = Number(formData.get("maxReachM") ?? 0) || null;
   const ratePerM3Sar = Number(formData.get("ratePerM3Sar") ?? 0);
   if (!siteId || !role || !ratePerM3Sar) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
   const policy = await prisma.pumpIncentivePolicy.upsert({
     where: { siteId_role: { siteId, role } },
@@ -110,6 +114,10 @@ export async function deletePumpRateBracket(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
+  const bracket = await prisma.pumpReachRateBracket.findUnique({
+    where: { id }, select: { policy: { select: { siteId: true } } },
+  });
+  if (!bracket || !isSiteInScope(bracket.policy.siteId, effectiveSiteId(user))) return;
   await prisma.pumpReachRateBracket.delete({ where: { id } });
 
   await logAudit({ module: "Fleet", recordId: id, reasonCode: "PUMP_RATE_BRACKET_REMOVED" });
@@ -131,6 +139,7 @@ export async function setFlatVolumeRate(formData: FormData) {
   const role = String(formData.get("role") ?? "").trim();
   const ratePerM3Sar = Number(formData.get("ratePerM3Sar") ?? 0);
   if (!siteId || !role) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
   const policy = await prisma.pumpIncentivePolicy.upsert({
     where: { siteId_role: { siteId, role } },
@@ -165,6 +174,7 @@ export async function setIncentiveMethod(formData: FormData) {
   const role = String(formData.get("role") ?? "").trim();
   const method = String(formData.get("method") ?? "").trim();
   if (!siteId || !role || (method !== "TRIP_COUNT" && method !== "VOLUME_M3")) return;
+  if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
   await prisma.incentiveMethod.upsert({
     where: { siteId_role: { siteId, role } },

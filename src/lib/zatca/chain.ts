@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import { zatcaGenesisPreviousHash } from "./invoiceXml";
 
 // ZATCA's ICV (invoice counter value) and PIH (previous invoice hash)
@@ -7,7 +7,14 @@ import { zatcaGenesisPreviousHash } from "./invoiceXml";
 // chain per document type. Both generateZatcaDocuments (invoices) and
 // generateZatcaCreditNoteDocuments (credit notes) call this so neither
 // type can silently form its own separate chain.
-export async function getNextZatcaChainPosition(siteId: string): Promise<{ icv: number; previousHash: string }> {
+// Both document types must hold this same lock until their XML is saved.
+// Use ReadCommitted so a waiter reads the predecessor that just committed,
+// not a Serializable snapshot taken before it acquired the lock.
+export async function lockSiteChain(tx: Prisma.TransactionClient, siteId: string): Promise<void> {
+  await tx.$queryRaw`SELECT "id" FROM "Site" WHERE "id" = ${siteId} FOR UPDATE`;
+}
+
+export async function getNextZatcaChainPosition(prisma: Prisma.TransactionClient, siteId: string): Promise<{ icv: number; previousHash: string; generatedAt: Date }> {
   const [lastInvoice, lastCreditNote, invoiceCount, creditNoteCount] = await Promise.all([
     prisma.invoice.findFirst({
       where: { plant: { siteId }, zatcaInvoiceHash: { not: null } },
@@ -27,5 +34,8 @@ export async function getNextZatcaChainPosition(siteId: string): Promise<{ icv: 
   candidates.sort((a, b) => b.zatcaGeneratedAt!.getTime() - a.zatcaGeneratedAt!.getTime());
   const previousHash = candidates[0]?.zatcaInvoiceHash ?? zatcaGenesisPreviousHash();
 
-  return { icv: invoiceCount + creditNoteCount + 1, previousHash };
+  // Millisecond ties (or clocks on different application instances) must
+  // not make the next lookup choose an older document as the predecessor.
+  const generatedAt = new Date(Math.max(Date.now(), (candidates[0]?.zatcaGeneratedAt?.getTime() ?? 0) + 1));
+  return { icv: invoiceCount + creditNoteCount + 1, previousHash, generatedAt };
 }

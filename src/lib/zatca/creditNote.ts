@@ -4,7 +4,7 @@ import { getZatcaReadiness } from "./settings";
 import { buildZatcaQrPayload, zatcaTimestamp } from "./qr";
 import { buildZatcaInvoiceXml } from "./invoiceXml";
 import { hashInvoiceXml, signInvoiceXml } from "./sign";
-import { getNextZatcaChainPosition } from "./chain";
+import { getNextZatcaChainPosition, lockSiteChain } from "./chain";
 
 // A credit note is the only legal way to amend an already-issued
 // invoice, so ZATCA requires it to go through the same QR/XML generation
@@ -28,55 +28,67 @@ export async function generateZatcaCreditNoteDocuments(creditNoteId: string): Pr
   const readiness = await getZatcaReadiness(creditNote.invoice.plant.siteId);
   if (readiness.level === "NOT_CONFIGURED") return { ok: false, reason: "NOT_CONFIGURED" };
 
-  const { icv, previousHash: previousInvoiceHash } = await getNextZatcaChainPosition(creditNote.invoice.plant.siteId);
+  const siteId = creditNote.invoice.plant.siteId;
+  return prisma.$transaction(async (tx): Promise<ZatcaCreditNoteGenerateResult> => {
+    await lockSiteChain(tx, siteId);
+    // The preflight above is only an optimization. Re-read under the shared
+    // site lock so concurrent calls cannot regenerate the same document.
+    const creditNote = await tx.creditNote.findUnique({
+      where: { id: creditNoteId }, include: { invoice: { include: { customer: true, plant: true } } },
+    });
+    if (!creditNote) return { ok: false, reason: "NOT_FOUND" };
+    if (creditNote.zatcaStatus) return { ok: false, reason: "ALREADY_GENERATED" };
+    if (!creditNote.invoice.plant) return { ok: false, reason: "NO_PLANT" };
+    const { icv, previousHash: previousInvoiceHash, generatedAt } = await getNextZatcaChainPosition(tx, creditNote.invoice.plant.siteId);
 
-  const taxRatePct = creditNote.invoice.taxRatePct;
-  const subtotal = taxRatePct > 0 ? creditNote.amount / (1 + taxRatePct / 100) : creditNote.amount;
-  const taxAmount = creditNote.amount - subtotal;
+    const taxRatePct = creditNote.invoice.taxRatePct;
+    const subtotal = taxRatePct > 0 ? creditNote.amount / (1 + taxRatePct / 100) : creditNote.amount;
+    const taxAmount = creditNote.amount - subtotal;
 
-  const uuid = randomUUID();
-  const issueDate = creditNote.createdAt;
-  const qrCode = buildZatcaQrPayload({
-    sellerName: readiness.seller.sellerLegalName,
-    vatNumber: readiness.seller.vatNumber,
-    timestampIso: zatcaTimestamp(issueDate),
-    invoiceTotal: creditNote.amount,
-    vatTotal: taxAmount,
-  });
+    const uuid = randomUUID();
+    const issueDate = creditNote.createdAt;
+    const qrCode = buildZatcaQrPayload({
+      sellerName: readiness.seller.sellerLegalName,
+      vatNumber: readiness.seller.vatNumber,
+      timestampIso: zatcaTimestamp(issueDate),
+      invoiceTotal: creditNote.amount,
+      vatTotal: taxAmount,
+    });
 
-  const xml = buildZatcaInvoiceXml({
-    invoiceNumber: creditNote.creditNoteNumber,
-    uuid,
-    issueDate,
-    currency: creditNote.invoice.currency,
-    seller: { legalName: readiness.seller.sellerLegalName, vatNumber: readiness.seller.vatNumber, crNumber: readiness.seller.crNumber },
-    buyer: { legalName: creditNote.invoice.customer.legalName, vatNumber: creditNote.invoice.customer.taxId },
-    lines: [{ description: creditNote.reason, volumeM3: 1, unitCode: "C62", unitPrice: subtotal, lineTotal: subtotal }],
-    subtotal,
-    taxRatePct,
-    taxAmount,
-    total: creditNote.amount,
-    icv,
-    previousInvoiceHash,
-    qrCode,
-    documentTypeCode: "381",
-    billingReferenceInvoiceNumber: creditNote.invoice.invoiceNumber,
-  });
+    const xml = buildZatcaInvoiceXml({
+      invoiceNumber: creditNote.creditNoteNumber,
+      uuid,
+      issueDate,
+      currency: creditNote.invoice.currency,
+      seller: { legalName: readiness.seller.sellerLegalName, vatNumber: readiness.seller.vatNumber, crNumber: readiness.seller.crNumber },
+      buyer: { legalName: creditNote.invoice.customer.legalName, vatNumber: creditNote.invoice.customer.taxId },
+      lines: [{ description: creditNote.reason, volumeM3: 1, unitCode: "C62", unitPrice: subtotal, lineTotal: subtotal }],
+      subtotal,
+      taxRatePct,
+      taxAmount,
+      total: creditNote.amount,
+      icv,
+      previousInvoiceHash,
+      qrCode,
+      documentTypeCode: "381",
+      billingReferenceInvoiceNumber: creditNote.invoice.invoiceNumber,
+    });
 
-  await prisma.creditNote.update({
-    where: { id: creditNoteId },
-    data: {
-      zatcaUuid: uuid,
-      zatcaInvoiceHash: hashInvoiceXml(xml),
-      zatcaPreviousHash: previousInvoiceHash,
-      zatcaQrCode: qrCode,
-      zatcaXml: xml,
-      zatcaStatus: "GENERATED",
-      zatcaGeneratedAt: new Date(),
-    },
-  });
+    await tx.creditNote.update({
+      where: { id: creditNoteId },
+      data: {
+        zatcaUuid: uuid,
+        zatcaInvoiceHash: hashInvoiceXml(xml),
+        zatcaPreviousHash: previousInvoiceHash,
+        zatcaQrCode: qrCode,
+        zatcaXml: xml,
+        zatcaStatus: "GENERATED",
+        zatcaGeneratedAt: generatedAt,
+      },
+    });
 
-  return { ok: true };
+    return { ok: true };
+  }, { timeout: 15000, isolationLevel: "ReadCommitted" });
 }
 
 const DEFAULT_SANDBOX_URL = "https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal/invoices/clearance/single";

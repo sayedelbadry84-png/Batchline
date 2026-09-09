@@ -2,13 +2,15 @@ import { prisma } from "@/lib/prisma";
 
 const DEFAULT_NET_DAYS = 30;
 
-// Customer.paymentTerms is a free-text field like "Net 30" — pull the
-// number out of it for a due-date calculation, falling back to a sane
-// default rather than failing when a term doesn't parse ("Due on receipt",
-// "COD", or something a user typed by hand).
+// Discount terms contain several numbers: "2/10 Net 30" is due in 30
+// days, not two. Ambiguous free text must not silently shorten the term.
 export function parseNetDays(paymentTerms: string): number {
-  const match = paymentTerms.match(/\d+/);
-  return match ? Number(match[0]) : DEFAULT_NET_DAYS;
+  const terms = paymentTerms.trim().replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)));
+  if (/^(cod|cash on delivery|due on receipt|cash|نقد[ًاا]*|عند الاستلام|الدفع عند الاستلام)$/i.test(terms)) return 0;
+  const net = terms.match(/(?:\bnet|صافي)\s*(\d+)/i);
+  const numbers = terms.match(/\d+/g) ?? [];
+  const days = net ? Number(net[1]) : numbers.length === 1 ? Number(numbers[0]) : DEFAULT_NET_DAYS;
+  return Number.isSafeInteger(days) && days >= 0 && days <= 3650 ? days : DEFAULT_NET_DAYS;
 }
 
 // The one true "what's still owed on this invoice" calculation — total

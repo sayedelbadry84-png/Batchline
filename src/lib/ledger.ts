@@ -81,10 +81,18 @@ export async function postJournalEntry(
 ): Promise<void> {
   const totalDebit = params.lines.reduce((sum, l) => sum + (l.debit ?? 0), 0);
   const totalCredit = params.lines.reduce((sum, l) => sum + (l.credit ?? 0), 0);
+  if (params.lines.some(l => !Number.isFinite(l.debit ?? 0) || !Number.isFinite(l.credit ?? 0) || (l.debit ?? 0) < 0 || (l.credit ?? 0) < 0)) {
+    throw new Error("Journal amounts must be finite and non-negative.");
+  }
   if (Math.abs(totalDebit - totalCredit) > 0.01) {
     throw new Error(`Unbalanced journal entry for ${params.sourceModule}/${params.sourceRecordId}: debit ${totalDebit} != credit ${totalCredit}`);
   }
 
+  // JE numbers are global, including across unrelated sites/accounts.
+  // Serialize allocation before any account upsert. Retrying a unique
+  // violation inside this transaction cannot work: Postgres has already
+  // aborted it, including the caller's financial source record.
+  await db.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(729431, 1)`;
   const accountIds = await Promise.all(params.lines.map((l) => ensureAccount(db, l.account)));
 
   await withSequentialNumber(

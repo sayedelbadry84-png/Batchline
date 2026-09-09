@@ -4,11 +4,12 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { createSession, destroySession, setPending2faUser, getPending2faUserId, clearPending2fa } from "@/lib/session";
 import { getClientIp, isIpRateLimited, recordFailedAttempt } from "@/lib/rateLimit";
-import { verifyTotpCode } from "@/lib/totp";
+import { consumeTotpCode, recordAccountFailure } from "@/lib/loginSecurity";
 import { redirect } from "next/navigation";
 
-const MAX_FAILED_ATTEMPTS = 5;
-const LOCKOUT_MINUTES = 15;
+// Same cost as provisioned passwords; missing/disabled accounts must do
+// comparable password work instead of exposing a fast enumeration path.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync("not-a-login-password", 10);
 
 // DRIVER and PUMP_OPERATOR each have their own phone-first surface instead
 // of the back-office sidebar — see the matching redirect in
@@ -30,6 +31,7 @@ export async function login(formData: FormData) {
   if (await isIpRateLimited(ip)) redirect("/login?error=1");
 
   const user = await prisma.user.findUnique({ where: { email } });
+  const valid = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
   if (!user) {
     await recordFailedAttempt(ip);
     redirect("/login?error=1");
@@ -50,15 +52,9 @@ export async function login(formData: FormData) {
     redirect("/login?error=1");
   }
 
-  const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) {
     await recordFailedAttempt(ip);
-    const failedLoginAttempts = user.failedLoginAttempts + 1;
-    const lockedUntil =
-      failedLoginAttempts >= MAX_FAILED_ATTEMPTS
-        ? new Date(Date.now() + LOCKOUT_MINUTES * 60 * 1000)
-        : null;
-    await prisma.user.update({ where: { id: user.id }, data: { failedLoginAttempts, lockedUntil } });
+    await recordAccountFailure(user.id);
     redirect("/login?error=1");
   }
 
@@ -90,23 +86,17 @@ export async function verifyTotpLogin(formData: FormData) {
   if (await isIpRateLimited(ip)) redirect("/login?error=1");
 
   const user = await prisma.user.findUnique({ where: { id: userId } });
-  if (!user || !user.totpEnabled || !user.totpSecret) {
+  if (!user || user.status !== "ACTIVE" || (user.lockedUntil && user.lockedUntil > new Date()) || !user.totpEnabled || !user.totpSecret) {
     await clearPending2fa();
     redirect("/login");
   }
 
-  if (!verifyTotpCode(user.totpSecret, code)) {
+  if (!(await consumeTotpCode(user.id, user.totpSecret, code))) {
     await recordFailedAttempt(ip);
-    const failedLoginAttempts = user.failedLoginAttempts + 1;
-    const lockedUntil =
-      failedLoginAttempts >= MAX_FAILED_ATTEMPTS
-        ? new Date(Date.now() + LOCKOUT_MINUTES * 60 * 1000)
-        : null;
-    await prisma.user.update({ where: { id: user.id }, data: { failedLoginAttempts, lockedUntil } });
+    await recordAccountFailure(user.id);
     redirect("/login/verify?error=1");
   }
 
-  await prisma.user.update({ where: { id: user.id }, data: { failedLoginAttempts: 0, lockedUntil: null } });
   await clearPending2fa();
   await destroySession();
   await createSession(user.id);
