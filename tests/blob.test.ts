@@ -100,4 +100,53 @@ test("retryPendingBlobDeletions leaves a row queued and records the new error wh
   assert.equal(stillQueued!.attempts, 1);
   assert.ok(stillQueued!.lastError?.includes("simulated blob-storage delete failure"));
   assert.ok(stillQueued!.lastTriedAt);
+  // PL-R10-P2-03: real backoff, not "retry again in the very next sweep
+  // no matter what" — and nowhere near the dead-letter threshold yet.
+  assert.ok(stillQueued!.nextAttemptAt.getTime() > queued.nextAttemptAt.getTime(), "a failed retry must push nextAttemptAt further into the future");
+  assert.equal(stillQueued!.deadLetteredAt, null);
+});
+
+// PL-R10-P2-03's own explicit required proof: "test that 200 poison rows
+// do not starve a newer resolvable row." A small claim limit (1) proves
+// the same general mechanism a real 200-row backlog relies on — the old
+// blind `orderBy: createdAt` would re-select the identical oldest,
+// permanently-failing row on every sweep, forever; real backoff moves a
+// failing row's own nextAttemptAt into the future, so the very next
+// sweep naturally reaches whatever resolvable row is queued behind it.
+test("a permanently-failing deletion does not starve a newer resolvable one — a second sweep reaches the resolvable row instead of re-claiming the poisoned one", async () => {
+  const poisonUrl = `${TEST_URL_PREFIX}${Date.now()}-poison.jpg`;
+  const resolvableUrl = `${TEST_URL_PREFIX}${Date.now()}-resolvable.jpg`;
+  // Staged in this order so the poison row's own nextAttemptAt sorts no
+  // later than the resolvable one — same as a REAL older failing row.
+  await deleteFileDurable(poisonUrl, "DELIVERY_PHOTO_COMPENSATION", alwaysFails);
+  await deleteFileDurable(resolvableUrl, "DELIVERY_PHOTO_COMPENSATION", alwaysFails);
+  const poison = await prisma.pendingBlobDeletion.findFirstOrThrow({ where: { url: poisonUrl } });
+
+  // limit=1: the first sweep can only claim the oldest-by-nextAttemptAt
+  // row — the poison one — and fails it again, pushing its nextAttemptAt
+  // further into the future.
+  const resolvedPathnames: string[] = [];
+  const flakyDeleter = async (pathname: string) => {
+    if (pathname === poisonUrl.replace("/api/files/", "")) throw new Error("still failing");
+    resolvedPathnames.push(pathname);
+  };
+
+  const first = await retryPendingBlobDeletions(flakyDeleter, 1);
+  assert.equal(first.attempted, 1);
+  assert.equal(first.succeeded, 0);
+  const poisonAfterFirst = await prisma.pendingBlobDeletion.findUniqueOrThrow({ where: { id: poison.id } });
+  assert.equal(poisonAfterFirst.attempts, 1);
+
+  // A second sweep, same tiny limit — if the poison row still occupied
+  // the only claim slot (the actual Round 10 bug), this would try to
+  // delete the SAME poison url again instead of the resolvable one
+  // queued right behind it.
+  const second = await retryPendingBlobDeletions(flakyDeleter, 1);
+  assert.equal(second.attempted, 1);
+  assert.equal(second.succeeded, 1, "the resolvable deletion must be reachable on the very next sweep — a permanently-failing row must never occupy every claim slot forever");
+  assert.deepEqual(resolvedPathnames, [resolvableUrl.replace("/api/files/", "")]);
+
+  assert.equal(await prisma.pendingBlobDeletion.findFirst({ where: { url: resolvableUrl } }), null, "the resolvable row must have actually been deleted and removed");
+  const poisonStillThere = await prisma.pendingBlobDeletion.findUniqueOrThrow({ where: { id: poison.id } });
+  assert.equal(poisonStillThere.attempts, 1, "the poison row must NOT have been reattempted in the second sweep — it's still correctly backed off");
 });

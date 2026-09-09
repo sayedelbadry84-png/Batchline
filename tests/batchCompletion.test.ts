@@ -1655,6 +1655,53 @@ test("a notification failure after requisition creation is retried independently
   }
 });
 
+// PL-R10-P2-03's own explicit required proof: "test that 200 poison rows
+// do not starve a newer resolvable row." A small claim limit (1) proves
+// the SAME general mechanism a real 200-row backlog relies on — a blind
+// `orderBy: createdAt` (the actual Round 10 bug) would re-select the
+// identical oldest, permanently-failing row on every single sweep,
+// forever; real backoff moves a failing row's own nextAttemptAt into the
+// future, so the very next sweep naturally reaches whatever resolvable
+// row is queued right behind it, regardless of how many failing rows
+// came before it.
+test("a permanently-failing intent does not starve a newer resolvable one — a second sweep reaches the resolvable row instead of re-claiming the poisoned one", async () => {
+  const bogusMaterialId = "test-suite-bc-starvation-poison-material";
+  // Staged in this order so the poison row's own nextAttemptAt is
+  // strictly earlier (or equal) — same as how a REAL older failing row
+  // would sort ahead of a genuinely newer one.
+  const poison = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId: bogusMaterialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+  const resolvable = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+
+  try {
+    // limit=1: the first sweep can only claim ONE row — the oldest by
+    // nextAttemptAt, i.e. the poison one — and fails it, pushing its own
+    // nextAttemptAt into the future via the same backoff every genuinely
+    // poisoned row gets.
+    const first = await retryPendingAutoRequisitions(1);
+    assert.equal(first.attempted, 1);
+    assert.equal(first.resolved, 0);
+    const poisonAfterFirst = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: poison.id } });
+    assert.equal(poisonAfterFirst.attempts, 1);
+
+    // A second sweep, same tiny limit — if the poison row still occupied
+    // the only claim slot (the actual Round 10 bug), this would claim the
+    // SAME poison row again instead of the resolvable one queued right
+    // behind it.
+    const second = await retryPendingAutoRequisitions(1);
+    assert.equal(second.attempted, 1);
+    assert.equal(second.resolved, 1, "the resolvable intent must be reachable on the very next sweep — a permanently-failing row must never occupy every claim slot forever");
+
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: resolvable.id } }), null, "the resolvable intent must have actually been processed and removed");
+    const poisonStillThere = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: poison.id } });
+    assert.equal(poisonStillThere.attempts, 1, "the poison row must NOT have been reattempted in the second sweep — it's still correctly backed off");
+
+    materialRequisitionIds.push((await prisma.materialRequisition.findFirstOrThrow({ where: { materialId, siteId } })).id);
+  } finally {
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: { in: [materialId, bogusMaterialId] }, siteId } }));
+  }
+});
+
 // ---- 7/8. Reversal restores exact quantities once; a second reversal --
 // ---- is a no-op --------------------------------------------------------
 
