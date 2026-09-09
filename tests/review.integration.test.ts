@@ -57,7 +57,7 @@ async function asUser(userId: string) {
 }
 async function invoice(total = 115) {
   const row = await prisma.invoice.create({ data: {
-    invoiceNumber: `${prefix}-${invoiceIds.length}`, customerId, plantId, currency: "SAR",
+    invoiceNumber: `${prefix}-${randomUUID()}`, customerId, plantId, currency: "SAR",
     subtotal: total / 1.15, taxAmount: total - total / 1.15, taxRatePct: 15, total,
     dueDate: new Date(), status: "SENT",
   } });
