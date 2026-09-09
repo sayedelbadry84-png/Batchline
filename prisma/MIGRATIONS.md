@@ -23,6 +23,35 @@ Applies every migration in `prisma/migrations/` in order, from the baseline forw
 4. Apply it: `npx prisma migrate deploy`, then `npx prisma migrate status` to confirm a clean "up to date," then `npx prisma generate`.
 5. If `prisma generate` fails with `EPERM ... query_engine-windows.dll.node`, a running dev server has the engine DLL locked — stop it first, then retry.
 
+## Preflight for migrations that add a constraint to an existing table
+
+CI only ever applies migrations to an **empty** database, so a green CI run is
+evidence that a migration *installs*, never that it *upgrades*. Any migration
+that adds a `UNIQUE`/`CHECK` constraint to a table that already holds rows can
+still abort part-way through `prisma migrate deploy` against a populated
+database, with a raw Postgres violation rather than anything actionable.
+
+Before deploying such a migration to a database with real rows:
+
+1. Run the matching script in `prisma/preflight/` and **retain its output with
+   the deployment record**.
+2. If it reports conflicts, apply that script's documented merge policy inside
+   an explicit transaction, re-run the detection query, and only commit once it
+   returns nothing.
+3. Rehearse the whole sequence against a production-like snapshot (a Neon branch
+   of the real database) before running it for real.
+
+Current preflights:
+
+| Migration | Constraint | Script |
+|---|---|---|
+| `20260908060000_harden_production_lifecycle_round10` | `PendingAutoRequisition_batchTicketId_materialId_siteId_key` | `prisma/preflight/pending_auto_requisition_uniqueness.sql` |
+
+The migration itself is deliberately **not** edited to include the preflight:
+Prisma checksums applied migrations, so changing one that any database has
+already applied breaks `migrate status`/`deploy` for that database (see Hard
+rules below). The preflight is a deployment step, not a schema step.
+
 ## Staging verification
 
 There is currently only one Postgres database configured for this project (the Neon instance behind `DATABASE_URL`/`DIRECT_URL`) — there is no separate staging database today. Until one exists, treat every migration as going straight to the database real usage depends on: review the generated SQL by hand before applying (step 2 above), and prefer additive changes (new nullable columns, new tables) over anything that rewrites or drops existing data. A genuine staging environment should be a separate Neon branch (or project) with its own `DATABASE_URL`/`DIRECT_URL`, migrated first, before repeating the same `migrate deploy` against the real one.
