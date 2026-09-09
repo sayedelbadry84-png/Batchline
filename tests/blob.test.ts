@@ -106,6 +106,62 @@ test("retryPendingBlobDeletions leaves a row queued and records the new error wh
   assert.equal(stillQueued!.deadLetteredAt, null);
 });
 
+// PL-R12-P2-06, twelfth production-lifecycle review: the small test below
+// proves the scheduling RULE, but the acceptance case was stated as 200
+// poison rows and a 201st resolvable one at the real production claim
+// size — the boundary where a full batch of failures could still occupy
+// every slot. This is that literal case.
+test("200 always-failing rows plus a 201st resolvable one at the real claim size: the resolvable row is still reached on the next sweep", async () => {
+  const stamp = Date.now();
+  const poisonPrefix = `${TEST_URL_PREFIX}${stamp}-bulk-poison-`;
+  const resolvableUrl = `${TEST_URL_PREFIX}${stamp}-bulk-resolvable.jpg`;
+
+  // Explicit nextAttemptAt so eligibility ordering is controlled, not
+  // dependent on insertion timing: every poison row sorts strictly ahead
+  // of the resolvable one, which is the worst case for starvation.
+  const base = Date.now() - 60 * 60 * 1000;
+  await prisma.pendingBlobDeletion.createMany({
+    data: Array.from({ length: 200 }, (_, i) => ({
+      url: `${poisonPrefix}${i}.jpg`,
+      reason: "DELIVERY_PHOTO_COMPENSATION",
+      nextAttemptAt: new Date(base + i),
+    })),
+  });
+  await prisma.pendingBlobDeletion.create({
+    data: { url: resolvableUrl, reason: "DELIVERY_PHOTO_COMPENSATION", nextAttemptAt: new Date(base + 1000) },
+  });
+
+  const deleted: string[] = [];
+  const deleter = async (pathname: string) => {
+    if (pathname.includes("bulk-poison")) throw new Error("permanently failing");
+    deleted.push(pathname);
+  };
+
+  try {
+    // The REAL production claim size — exactly the batch boundary where a
+    // full set of failures could otherwise fill every slot forever.
+    const first = await retryPendingBlobDeletions(deleter, 200);
+    assert.equal(first.claimed, 200);
+    assert.equal(first.resolved, 0);
+    assert.equal(first.externalFailed, 200);
+    assert.deepEqual(deleted, [], "the resolvable row is behind all 200 — it must not be reached on the first sweep");
+
+    const second = await retryPendingBlobDeletions(deleter, 200);
+    assert.equal(second.resolved, 1, "the 201st row must be reached on the very next sweep — 200 permanent failures must never occupy every claim slot");
+    assert.deepEqual(deleted, [resolvableUrl.replace("/api/files/", "")]);
+    assert.equal(await prisma.pendingBlobDeletion.count({ where: { url: resolvableUrl } }), 0);
+
+    // The poison rows are all still queued, all backed off, none
+    // dead-lettered after a single failure apiece.
+    const poisonRows = await prisma.pendingBlobDeletion.findMany({ where: { url: { startsWith: poisonPrefix } } });
+    assert.equal(poisonRows.length, 200);
+    assert.ok(poisonRows.every((r) => r.attempts === 1 && r.deadLetteredAt === null));
+  } finally {
+    await prisma.pendingBlobDeletion.deleteMany({ where: { url: { startsWith: poisonPrefix } } });
+    await prisma.pendingBlobDeletion.deleteMany({ where: { url: resolvableUrl } });
+  }
+});
+
 // PL-R10-P2-03's own explicit required proof: "test that 200 poison rows
 // do not starve a newer resolvable row." A small claim limit (1) proves
 // the same general mechanism a real 200-row backlog relies on — the old

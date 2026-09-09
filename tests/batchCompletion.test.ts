@@ -1753,6 +1753,70 @@ test("an automatic requisition notification reaches the same-site manager and AD
   }
 });
 
+// PL-R12-P2-06, twelfth production-lifecycle review: the small test below
+// proves the scheduling RULE, but the acceptance case was stated as 200
+// poison rows and a 201st resolvable one at the real production claim
+// size — the boundary where a full batch of failures could still occupy
+// every slot. This is that literal case.
+test("200 always-failing intents plus a 201st resolvable one at the real claim size: the resolvable intent is still reached on the next sweep", async () => {
+  const stamp = Date.now();
+  const poisonTicketId = `test-suite-bc-bulk-poison-${stamp}`;
+  const poisonMaterialPrefix = `test-suite-bc-bulk-poison-material-${stamp}-`;
+
+  // Explicit nextAttemptAt so eligibility ordering is controlled rather
+  // than dependent on insertion timing: every poison intent sorts
+  // strictly ahead of the resolvable one — the worst case for starvation.
+  // Distinct materialIds keep each row unique under the
+  // (batchTicketId, materialId, siteId) index.
+  const base = Date.now() - 60 * 60 * 1000;
+  await prisma.pendingAutoRequisition.createMany({
+    data: Array.from({ length: 200 }, (_, i) => ({
+      batchTicketId: poisonTicketId,
+      materialId: `${poisonMaterialPrefix}${i}`,
+      siteId,
+      newLevel: 2,
+      capacity: 100,
+      minThresholdPct: 50,
+      unit: "TONS",
+      nextAttemptAt: new Date(base + i),
+    })),
+  });
+  const resolvable = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: poisonTicketId, materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", nextAttemptAt: new Date(base + 1000) },
+  });
+
+  const notified: string[] = [];
+  const notify = async ({ requisitionNumber }: { requisitionNumber: string }) => {
+    notified.push(requisitionNumber);
+  };
+
+  try {
+    // The REAL production claim size — exactly the batch boundary where a
+    // full set of failures could otherwise fill every slot forever.
+    const first = await retryPendingAutoRequisitions(200, notify);
+    assert.ok(first.claimed >= 200);
+    assert.equal(first.resolved, 0, "no poison intent can resolve — each one's requisition create fails on a nonexistent material");
+    assert.deepEqual(notified, [], "the resolvable intent is behind all 200 — it must not be reached on the first sweep");
+
+    const second = await retryPendingAutoRequisitions(200, notify);
+    assert.equal(second.resolved, 1, "the 201st intent must be reached on the very next sweep — 200 permanent failures must never occupy every claim slot");
+    assert.equal(notified.length, 1);
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: resolvable.id } }), null, "the resolvable intent must be fully drained");
+
+    const created = await prisma.materialRequisition.findFirstOrThrow({ where: { materialId, siteId } });
+    materialRequisitionIds.push(created.id);
+
+    // The poison intents are all still queued, all backed off, none
+    // dead-lettered after a single failure apiece.
+    const poisonRows = await prisma.pendingAutoRequisition.findMany({ where: { batchTicketId: poisonTicketId, materialId: { startsWith: poisonMaterialPrefix } } });
+    assert.equal(poisonRows.length, 200);
+    assert.ok(poisonRows.every((r) => r.attempts === 1 && r.deadLetteredAt === null));
+  } finally {
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { batchTicketId: poisonTicketId } }));
+  }
+});
+
 // PL-R10-P2-03's own explicit required proof: "test that 200 poison rows
 // do not starve a newer resolvable row." A small claim limit (1) proves
 // the SAME general mechanism a real 200-row backlog relies on — a blind

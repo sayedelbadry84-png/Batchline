@@ -14,19 +14,31 @@ Ready-mix concrete plant operations platform. Next.js 16 (App Router) · React 1
 Prisma 5 · PostgreSQL · Tailwind 4. ~51k lines, 205 TS/TSX files, 96 Prisma models,
 13 business modules. Arabic/English with full RTL.
 
-Deployed on Vercel. Storage is Vercel Blob (private). No Redis, no queue — background
-work runs through Vercel Cron hitting `/api/cron/cleanup`.
+Deployed on Vercel. Storage is Vercel Blob (private). There is no external message
+broker or worker fleet (no Redis, no SQS, no BullMQ) — but there ARE two durable,
+database-backed retry queues, `PendingAutoRequisition` and `PendingBlobDeletion`,
+drained by Vercel Cron hitting `/api/cron/cleanup`. Both use the same claim/backoff/
+dead-letter policy (`src/lib/retryBackoff.ts`, `src/lib/queueSweep.ts`); work that
+must survive a crash goes in one of them, not in a fire-and-forget promise.
 
 ## Verify before claiming done
 
 ```bash
 npm run lint          # must be clean — it currently is, keep it that way
 npm run typecheck     # NOTE: needs `npx next typegen` first, or LayoutProps/PageProps fail
-npm test              # needs TEST_DATABASE_URL; 94 of 98 cases are integration tests
+npm test              # most cases need TEST_DATABASE_URL (real PostgreSQL)
 ```
 
-`npm test` without `TEST_DATABASE_URL` runs only `tests/releaseRouting.test.ts`.
-Pure-logic changes must still ship a test that runs without a database.
+`npm test` runs every `tests/**/*.test.ts` and `tests/**/*.test.tsx`. The
+database-backed suites (`batchCompletion`, `productionLifecycle`,
+`reservationMixRevision`, `blob`) refuse to run at all unless
+`TEST_DATABASE_URL` is set AND differs from `DATABASE_URL`; the rest
+(`offlineQueue`, `releaseRouting`, and the jsdom-rendered `AutoSaveField`/
+`RecordActualsForm` suites) run anywhere. Deliberately no test counts here —
+they change every round and a stale number is worse than none.
+
+Pure-logic and component changes must still ship a test that runs without a
+database.
 
 CI (`.github/workflows/ci.yml`) runs lint → typegen → typecheck → build → migrate →
 test **twice against the same database** (proves teardown leaves zero residue).
@@ -79,9 +91,23 @@ Never `UPDATE` a silo/hopper/tank level directly. `src/lib/inventoryLedger.ts` d
 atomic claim. It also handles shortage authorization and reversal. Bypassing it loses
 the ledger row and the concurrency guarantee.
 
-**5. Audit → `logAudit` on every write to a priced, weighed, or certified record**
+**5. Audit → `writeAudit` inside the transaction, `logAudit` only outside one**
 
-Resolves the actor from the session automatically; machine writes resolve to `SYSTEM`.
+Every write to a priced, weighed, or certified record is audited. Which helper
+you use is not a style choice:
+
+- `writeAudit(tx, actor, event)` for any business mutation that must never
+  commit without its audit row. It writes through the SAME transaction client,
+  so the audit and the mutation succeed or roll back together, and it takes the
+  actor explicitly rather than reading the session itself.
+- `logAudit(event)` only for standalone/post-commit events where atomicity is
+  deliberately not required. It uses the singleton client, so it cannot join a
+  caller's transaction — using it for a transactional mutation silently
+  reintroduces the "audit row missing for a committed write" class this branch
+  spent several rounds removing.
+
+Both resolve a machine write to `SYSTEM`; `logAudit` resolves the actor from the
+session, `writeAudit` never does.
 
 **6. Money is currently `Float` — round at write time**
 
@@ -121,7 +147,14 @@ established style. Hand-write the migration when you need `CHECK` or
   This is the repo's strongest asset. Match it; don't strip it.
 - No `any`. `strict` is on.
 - Arabic and English dictionaries (`src/lib/i18n/dictionaries/`) must stay key-identical.
-- Server Actions return `void` and `revalidatePath`; they don't return data to the client.
+- Server Actions used by interactive mutations return a typed action state
+  whenever the UI must distinguish success, validation, conflict, terminal,
+  authorization-safe not-found, or retryable failure — consumed with
+  `useActionState` (see `CompleteBatchForm`, `RecordActualsForm`). Plain
+  `void` + `revalidatePath` actions are acceptable only where a failure
+  cannot be silently mistaken for success. Returning `void` from an action
+  whose refusal the operator needs to see is the exact false-success class
+  several review rounds were spent removing.
 - Validate `typeof x === "number"` **plus** `Number.isFinite(x)` plus a range —
   `typeof` alone accepts `Infinity` and out-of-range values.
 
