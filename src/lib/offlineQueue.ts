@@ -370,7 +370,15 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
   // value is on the server; the operator is told to check rather than
   // silently losing it), and is called out as the residual limitation
   // rather than hidden.
-  const unsettledApplied = new Map<string, ReplayOutcome>();
+  // PL-R13-P2-02, thirteenth production-lifecycle review: keyed by ITEM
+  // ID, carrying the generation the result belongs to. Keying by
+  // `id:generation` meant a newer offline edit — which bumps the
+  // generation while keeping the pre-offline expectedVersion — hid the
+  // remembered result entirely: the next flush found nothing under
+  // `id:1`, re-sent the newer value against the stale version, and the
+  // server refused it as STALE_READING. A false rejection for a conflict
+  // that never happened, recoverable inside the same session.
+  const unsettledApplied = new Map<string, { generation: number; outcome: ReplayOutcome; version?: number }>();
   // PL-R10-P2-02, tenth production-lifecycle review: the old fallback
   // here ran every mutation unserialized when no lock was available,
   // reasoning that this was "no worse than before" Web Locks existed —
@@ -503,6 +511,27 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
     return { status: "CLAIMED", item: claimed };
   }
 
+  // PL-R13-P2-02: rebases a still-queued item onto the version the server
+  // actually reached, for the case where an APPLIED result could not be
+  // durably settled AND a newer edit has since coalesced onto the same
+  // item. The successor's expectedVersion is still the pre-offline one,
+  // which the server has already moved past — sending it unchanged would
+  // be refused as STALE_READING for a conflict that never happened.
+  // Normally settleReplay does this rebase; this covers the path where
+  // the settlement write itself failed.
+  function adoptVersion(snapshot: QueuedAction, version: number, versionField: string): { status: "REBASED"; item: QueuedAction } | { status: "SKIP" } | { status: "STORAGE_UNAVAILABLE" } {
+    const read = readForMutation();
+    if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
+    const current = read.state.pending.find((i) => i.id === snapshot.id);
+    if (!current || current.leaseOwner !== ownerId) return { status: "SKIP" };
+    if (current.fields[versionField] === String(version)) return { status: "REBASED", item: current };
+
+    const rebased: QueuedAction = { ...current, fields: { ...current.fields, [versionField]: String(version) } };
+    const nextPending = read.state.pending.map((i) => (i.id === snapshot.id ? rebased : i));
+    const persisted = persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
+    return persisted.status === "OK" ? { status: "REBASED", item: rebased } : { status: "STORAGE_UNAVAILABLE" };
+  }
+
   // Releases our own claim without resolving the item — used when the
   // replay could not be completed (still offline, RETRYABLE), so the
   // next flush can pick it straight back up rather than waiting out the
@@ -594,43 +623,61 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
       // A previous flush in THIS session got an APPLIED result it could
       // not durably settle (a localStorage write failure). Re-sending
       // would now come back STALE_READING — the server already holds
-      // this exact value — and would turn an accepted reading into a
-      // false rejection. Reconcile from the remembered result instead of
-      // asking the server again.
-      const remembered = unsettledApplied.get(`${snapshot.id}:${snapshot.generation}`);
-      const outcome: ReplayOutcome | null = remembered ?? null;
-
+      // that value — and would turn an accepted reading into a false
+      // rejection. Reconcile from the remembered result instead of asking
+      // the server again.
+      //
+      // PL-R13-P2-02: the remembered result may belong to an OLDER
+      // generation than the item now carries, because a newer offline
+      // edit coalesced onto it in the meantime (bumping the generation,
+      // keeping the pre-offline expectedVersion). That newer value has
+      // NOT been sent, so it still must be — but it has to go out against
+      // the version the server actually reached, which is exactly what
+      // the remembered result carries. Older generation: adopt its
+      // version and send. Same generation: nothing new to send, just
+      // settle what already applied.
+      const remembered = unsettledApplied.get(snapshot.id);
+      let sendable = snapshot;
       let result: ReplayOutcome;
-      if (outcome) {
-        result = outcome;
+
+      if (remembered && remembered.generation === snapshot.generation) {
+        result = remembered.outcome;
       } else {
+        if (remembered && typeof remembered.version === "number") {
+          const rebased = await withLock(() => adoptVersion(snapshot, remembered.version!, versionField));
+          if (rebased.status === "STORAGE_UNAVAILABLE") {
+            readStatus = "STORAGE_UNAVAILABLE";
+            continue;
+          }
+          if (rebased.status === "REBASED") sendable = rebased.item;
+        }
         try {
-          result = await handlers[snapshot.kind](snapshot.fields);
+          result = await handlers[sendable.kind](sendable.fields);
         } catch {
           // Still offline, or a real transport error — leave it queued,
           // unchanged, and give up our claim so the next flush can retry
           // immediately.
-          await withLock(() => releaseClaim(snapshot));
+          await withLock(() => releaseClaim(sendable));
           continue;
         }
         if (result.status === "RETRYABLE") {
-          await withLock(() => releaseClaim(snapshot));
+          await withLock(() => releaseClaim(sendable));
           continue;
         }
       }
 
-      const settlement = await withLock(() => settleReplay(snapshot, result, versionField));
+      const settlement = await withLock(() => settleReplay(sendable, result, versionField));
       if (settlement.status === "STORAGE_UNAVAILABLE") {
         readStatus = "STORAGE_UNAVAILABLE";
         // Remember an APPLIED we could not record, so a retry in this
         // same session reconciles instead of re-sending (see above).
-        if (result.status === "APPLIED") unsettledApplied.set(`${snapshot.id}:${snapshot.generation}`, result);
+        if (result.status === "APPLIED") unsettledApplied.set(sendable.id, { generation: sendable.generation, outcome: result, version: result.version });
         continue;
       }
-      unsettledApplied.delete(`${snapshot.id}:${snapshot.generation}`);
+      unsettledApplied.delete(sendable.id);
       if (settlement.status === "GONE" || settlement.status === "LEASE_LOST") continue;
       if (result.status === "APPLIED") flushed++;
-      opts?.onSettled?.(snapshot, result, settlement.status);
+      opts?.onSettled?.(sendable, result, settlement.status);
     }
 
     const final = readForMutation();

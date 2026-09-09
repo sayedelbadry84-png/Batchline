@@ -355,6 +355,69 @@ test("an APPLIED result whose settlement cannot be stored is reconciled on the n
   assert.deepEqual(queue.peekRejected().items, [], "an accepted reading must never end up in the rejected list");
 });
 
+// PL-R13-P2-02, thirteenth production-lifecycle review: the composite of
+// the two cases above, which the per-case fixes did not cover together.
+// The unsettled-APPLIED memo was keyed by `id:generation`, but a newer
+// offline edit bumps the generation while keeping the pre-offline
+// expectedVersion — so the memo was invisible on the next flush, the
+// newer value went out against a version the server had already moved
+// past, and came back STALE_READING. A false rejection for a conflict
+// that never happened.
+test("an unstorable APPLIED followed by a newer offline edit still sends the newer value once, at the right version, with no false rejection", async () => {
+  const inner = memoryStorage();
+  let writes = 0;
+  let failWriteNumber: number | null = null;
+  const storage: StorageAdapter = {
+    getItem: (key) => inner.getItem(key),
+    setItem: (key, value) => {
+      writes += 1;
+      if (writes === failWriteNumber) throw new Error("simulated quota failure");
+      inner.setItem(key, value);
+    },
+  };
+  const queue = createOfflineQueue(storage, sharedLock());
+  const identity = { batchTicketId: "t1", componentId: "c1", field: "actual" };
+  await queue.enqueue("recordActualField", { ...identity, value: "10", expectedVersion: "0" }); // write 1
+
+  let serverVersion = 0;
+  let serverValue: string | null = null;
+  const sent: { value: string; expectedVersion: string }[] = [];
+  const handler = async (fields: Record<string, string>): Promise<ReplayOutcome> => {
+    sent.push({ value: fields.value, expectedVersion: fields.expectedVersion });
+    if (Number(fields.expectedVersion) !== serverVersion) return { status: "REJECTED", reason: "STALE_READING" };
+    serverVersion += 1;
+    serverValue = fields.value;
+    return { status: "APPLIED", version: serverVersion };
+  };
+
+  // 1+2. Value 10 applies on the server (version → 1), but the
+  //      settlement write fails (write 3: claim is write 2).
+  failWriteNumber = 3;
+  const first = await queue.flushQueue({ recordActualField: handler });
+  assert.equal(first.readStatus, "STORAGE_UNAVAILABLE");
+  assert.deepEqual(sent, [{ value: "10", expectedVersion: "0" }]);
+  assert.equal(serverValue, "10");
+
+  // 3. A newer offline reading coalesces onto the same item: generation
+  //    bumps, expectedVersion stays at the pre-offline 0.
+  failWriteNumber = null;
+  assert.equal((await queue.enqueue("recordActualField", { ...identity, value: "20", expectedVersion: "0" })).status, "OK");
+
+  // 4+5. The next flush must send 20 exactly once, against the version
+  //      the server actually reached (1) — not against the stale 0, which
+  //      would come back STALE_READING and dead-letter the operator's
+  //      latest reading for no real conflict.
+  const second = await queue.flushQueue({ recordActualField: handler });
+  assert.deepEqual(sent, [
+    { value: "10", expectedVersion: "0" },
+    { value: "20", expectedVersion: "1" },
+  ]);
+  assert.equal(serverValue, "20");
+  assert.equal(second.flushed, 1);
+  assert.deepEqual(queue.peekQueue().items, [], "the newer reading must be fully settled");
+  assert.deepEqual(queue.peekRejected().items, [], "and never rejected — there was no real conflict at any point");
+});
+
 test("two concurrent flush attempts against the same storage produce no duplicate rejected item and no lost pending item", async () => {
   const storage = memoryStorage();
   const queue = createOfflineQueue(storage, sharedLock());

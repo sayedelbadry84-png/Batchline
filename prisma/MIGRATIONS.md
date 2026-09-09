@@ -33,19 +33,37 @@ database, with a raw Postgres violation rather than anything actionable.
 
 Before deploying such a migration to a database with real rows:
 
-1. Run the matching script in `prisma/preflight/` and **retain its output with
-   the deployment record**.
-2. If it reports conflicts, apply that script's documented merge policy inside
-   an explicit transaction, re-run the detection query, and only commit once it
-   returns nothing.
-3. Rehearse the whole sequence against a production-like snapshot (a Neon branch
-   of the real database) before running it for real.
+1. **Rehearse first.** Branch the real database in Neon, apply migrations up to
+   (but not including) the constraint migration, insert deliberate duplicates,
+   then run steps 2–5 end to end on that branch. Only proceed once the rehearsal
+   ends with the constraint built and the data as expected.
+2. **Open a maintenance window** that stops the writers which can create the
+   conflicting rows, and keep it open until the constraint exists. For
+   `PendingAutoRequisition` the only writer is `stageAutoRequisitionIntent`,
+   which runs inside batch completion — so no batch may be completed between the
+   cleanup and the end of `prisma migrate deploy`. Without this, the application
+   can re-create a duplicate in the gap and the index build still fails
+   (PL-R13-P1-02).
+3. Run the `*_detect.sql` script and **retain its output with the deployment
+   record**. It is read-only.
+4. If (and only if) it reported conflicts, run the matching `*_remediate.sql`.
+   It takes a `SHARE ROW EXCLUSIVE` lock, applies the documented merge policy,
+   and **asserts in SQL** that no duplicate group survives — raising and rolling
+   back if one does, rather than committing and reporting success.
+5. Re-run `*_detect.sql` (expect zero rows), then `npx prisma migrate deploy`,
+   then close the window.
+
+Preflight scripts must only reference columns that exist on the schema version
+they run against — the version *before* the migration they guard. The first
+version of the script below sorted on `requisitionId`/`notificationDeliveredAt`,
+which are added by that migration and a later one, so it could not run on the
+only database that would ever need it.
 
 Current preflights:
 
-| Migration | Constraint | Script |
-|---|---|---|
-| `20260908060000_harden_production_lifecycle_round10` | `PendingAutoRequisition_batchTicketId_materialId_siteId_key` | `prisma/preflight/pending_auto_requisition_uniqueness.sql` |
+| Migration | Constraint | Detect | Remediate |
+|---|---|---|---|
+| `20260908060000_harden_production_lifecycle_round10` | `PendingAutoRequisition_batchTicketId_materialId_siteId_key` | `prisma/preflight/pending_auto_requisition_uniqueness_detect.sql` | `prisma/preflight/pending_auto_requisition_uniqueness_remediate.sql` |
 
 The migration itself is deliberately **not** edited to include the preflight:
 Prisma checksums applied migrations, so changing one that any database has

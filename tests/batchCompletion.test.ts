@@ -1891,15 +1891,15 @@ test("dead letters are site-scoped: a site-scoped operator sees and can act on t
 
   try {
     const scoped = await listDeadLetters(siteId);
-    const scopedIds = scoped.map((r) => r.id);
+    const scopedIds = scoped.rows.map((r) => r.id);
     assert.ok(scopedIds.includes(mine.id), "an operator must see their own site's abandoned work");
     assert.ok(!scopedIds.includes(theirs.id), "another site's abandoned work must never be listed");
     // Blob deletions have no site of their own, so a site-scoped caller
     // is never shown them (documented rule in deadLetterQueue.ts).
-    assert.ok(!scoped.some((r) => r.kind === "BLOB_DELETION"), "storage cleanups are org-wide-only rows");
+    assert.ok(!scoped.rows.some((r) => r.kind === "BLOB_DELETION"), "storage cleanups are org-wide-only rows");
 
     const orgWide = await listDeadLetters(null);
-    const orgWideIds = orgWide.map((r) => r.id);
+    const orgWideIds = orgWide.rows.map((r) => r.id);
     assert.ok(orgWideIds.includes(mine.id) && orgWideIds.includes(theirs.id), "an org-wide (ADMIN) caller sees every site");
 
     // Acting across the scope boundary resolves to NOT_FOUND — never a
@@ -1911,6 +1911,80 @@ test("dead letters are site-scoped: a site-scoped operator sees and can act on t
   } finally {
     await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: { in: [mine.id, theirs.id] } } }));
     await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+  }
+});
+
+// PL-R13-P2-01's own required proof: the site check must be part of the
+// WRITE, not a separately-timed read. A row that moves to another site
+// between the scope read and the mutation must not still be actionable by
+// the original site's operator.
+test("a dead letter that moves to another site between the scope read and the write is refused, with nothing mutated and nothing audited", async () => {
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-BC-TOCTOU-${Date.now()}`, name: "TEST-SUITE-BC-TOCTOU-SITE", city: "Test", country: "Test" } });
+  const parked = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: `test-suite-bc-toctou-${Date.now()}`, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date() },
+  });
+
+  try {
+    // The row genuinely belongs to `siteId` at scope-read time — this is
+    // the window the old code left open.
+    const listed = await listDeadLetters(siteId);
+    assert.ok(listed.rows.some((r) => r.id === parked.id));
+
+    // It moves to another site before the operator's action lands.
+    await prisma.pendingAutoRequisition.update({ where: { id: parked.id }, data: { siteId: otherSite.id } });
+
+    const requeue = await requeueDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "PLANT_MANAGER" }, siteId);
+    assert.equal(requeue.status, "NOT_FOUND", "the write's own site condition must refuse a row that has moved out of scope");
+    const afterRequeue = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: parked.id } });
+    assert.ok(afterRequeue.deadLetteredAt, "nothing may have been mutated");
+    assert.equal(afterRequeue.attempts, 14);
+
+    const dismiss = await dismissDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "PLANT_MANAGER" }, siteId);
+    assert.equal(dismiss.status, "NOT_FOUND");
+    assert.ok(await prisma.pendingAutoRequisition.findUnique({ where: { id: parked.id } }), "the row must still exist");
+
+    const audits = await prisma.auditEvent.count({ where: { recordId: parked.id } });
+    assert.equal(audits, 0, "a refused action must never write an audit event");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: parked.id } }));
+    await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+  }
+});
+
+// PL-R13-P2-03's own required proof: 201 rows, an accurate total, and the
+// last row genuinely reachable.
+test("the dead-letter list reports the true total and pages past the first screenful", async () => {
+  const prefix = `test-suite-bc-paging-${Date.now()}-`;
+  const base = Date.now();
+  await prisma.pendingAutoRequisition.createMany({
+    data: Array.from({ length: 201 }, (_, i) => ({
+      batchTicketId: "test-suite-bc-paging-ticket",
+      materialId: `${prefix}${i}`,
+      siteId,
+      newLevel: 2,
+      capacity: 100,
+      minThresholdPct: 50,
+      unit: "TONS",
+      attempts: 14,
+      // Descending deadLetteredAt ordering, so row i sits at index i.
+      deadLetteredAt: new Date(base - i * 1000),
+    })),
+  });
+
+  try {
+    const pageSize = 50;
+    const first = await listDeadLetters(siteId, 0, pageSize);
+    assert.equal(first.total, 201, "the total must be the real count, not the size of one page");
+    assert.equal(first.rows.length, pageSize);
+
+    // Walk to the final page and prove the 201st row is genuinely
+    // reachable rather than hidden behind the cap.
+    const last = await listDeadLetters(siteId, 4, pageSize);
+    assert.equal(last.total, 201);
+    assert.equal(last.rows.length, 1, "the 201st row must be on its own final page");
+    assert.equal(last.rows[0].subject, `${prefix}200`, "and it must be the oldest dead letter, not a repeat of the first page");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: { startsWith: prefix } } }));
   }
 });
 
