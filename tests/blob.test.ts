@@ -12,7 +12,7 @@
 //
 // Requires TEST_DATABASE_URL, same safety guard as batchCompletion.test.ts
 // and productionLifecycle.test.ts — see those files' own comments.
-import { test, after } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
@@ -32,6 +32,16 @@ const { deleteFileDurable, retryPendingBlobDeletions } = await import("../src/li
 const prisma = new PrismaClient();
 
 const TEST_URL_PREFIX = "/api/files/delivery-photos/TEST-SUITE-BLOB-";
+
+// PL-R13-P1-01, thirteenth production-lifecycle review: retryPendingBlobDeletions
+// sweeps EVERY eligible row, not only this suite's fixtures. With
+// `--test-concurrency=1` no sibling suite can be mid-flight, but a suite
+// that leaked rows would still silently change what these sweeps do — so
+// the precondition is asserted rather than assumed.
+before(async () => {
+  const foreignEligible = await prisma.pendingBlobDeletion.count({ where: { deadLetteredAt: null } });
+  assert.equal(foreignEligible, 0, "another suite left sweep-eligible PendingBlobDeletion rows behind — the sweep tests below would be measuring someone else's fixtures");
+});
 
 after(async () => {
   await prisma.pendingBlobDeletion.deleteMany({ where: { url: { startsWith: TEST_URL_PREFIX } } });
@@ -140,15 +150,18 @@ test("200 always-failing rows plus a 201st resolvable one at the real claim size
   try {
     // The REAL production claim size — exactly the batch boundary where a
     // full set of failures could otherwise fill every slot forever.
+    // PL-R13-P1-01, thirteenth production-lifecycle review: assertions are
+    // about THIS test's own rows. The sweep drains every eligible row in
+    // the database, so its counters include rows this test does not own —
+    // asserting an exact global count is what turned CI red for the
+    // sibling auto-requisition test.
     const first = await retryPendingBlobDeletions(deleter, 200);
-    assert.equal(first.claimed, 200);
-    assert.equal(first.resolved, 0);
-    assert.equal(first.externalFailed, 200);
+    assert.ok(first.claimed >= 200, "the first sweep must fill its batch with the 200 poison rows queued ahead of everything else");
     assert.deepEqual(deleted, [], "the resolvable row is behind all 200 — it must not be reached on the first sweep");
+    assert.equal(await prisma.pendingBlobDeletion.count({ where: { url: resolvableUrl } }), 1);
 
-    const second = await retryPendingBlobDeletions(deleter, 200);
-    assert.equal(second.resolved, 1, "the 201st row must be reached on the very next sweep — 200 permanent failures must never occupy every claim slot");
-    assert.deepEqual(deleted, [resolvableUrl.replace("/api/files/", "")]);
+    await retryPendingBlobDeletions(deleter, 200);
+    assert.deepEqual(deleted, [resolvableUrl.replace("/api/files/", "")], "the 201st row must be reached on the very next sweep — 200 permanent failures must never occupy every claim slot");
     assert.equal(await prisma.pendingBlobDeletion.count({ where: { url: resolvableUrl } }), 0);
 
     // The poison rows are all still queued, all backed off, none
@@ -172,10 +185,14 @@ test("200 always-failing rows plus a 201st resolvable one at the real claim size
 test("a permanently-failing deletion does not starve a newer resolvable one — a second sweep reaches the resolvable row instead of re-claiming the poisoned one", async () => {
   const poisonUrl = `${TEST_URL_PREFIX}${Date.now()}-poison.jpg`;
   const resolvableUrl = `${TEST_URL_PREFIX}${Date.now()}-resolvable.jpg`;
-  // Staged in this order so the poison row's own nextAttemptAt sorts no
-  // later than the resolvable one — same as a REAL older failing row.
-  await deleteFileDurable(poisonUrl, "DELIVERY_PHOTO_COMPENSATION", alwaysFails);
-  await deleteFileDurable(resolvableUrl, "DELIVERY_PHOTO_COMPENSATION", alwaysFails);
+  // PL-R13-P1-01: explicit far-past eligibility rather than insertion
+  // order. With limit=1 the sweep claims the globally oldest eligible
+  // row, so these two must be provably older than anything another test
+  // could leave behind — otherwise which row is claimed is not this
+  // test's decision.
+  const base = Date.now() - 6 * 60 * 60 * 1000;
+  await prisma.pendingBlobDeletion.create({ data: { url: poisonUrl, reason: "DELIVERY_PHOTO_COMPENSATION", nextAttemptAt: new Date(base) } });
+  await prisma.pendingBlobDeletion.create({ data: { url: resolvableUrl, reason: "DELIVERY_PHOTO_COMPENSATION", nextAttemptAt: new Date(base + 1000) } });
   const poison = await prisma.pendingBlobDeletion.findFirstOrThrow({ where: { url: poisonUrl } });
 
   // limit=1: the first sweep can only claim the oldest-by-nextAttemptAt
@@ -187,20 +204,17 @@ test("a permanently-failing deletion does not starve a newer resolvable one — 
     resolvedPathnames.push(pathname);
   };
 
-  const first = await retryPendingBlobDeletions(flakyDeleter, 1);
-  assert.equal(first.claimed, 1);
-  assert.equal(first.resolved, 0);
+  await retryPendingBlobDeletions(flakyDeleter, 1);
   const poisonAfterFirst = await prisma.pendingBlobDeletion.findUniqueOrThrow({ where: { id: poison.id } });
-  assert.equal(poisonAfterFirst.attempts, 1);
+  assert.equal(poisonAfterFirst.attempts, 1, "the poison row must be the one claimed first — it is the oldest eligible row");
+  assert.deepEqual(resolvedPathnames, [], "the resolvable row must not have been reached yet");
 
   // A second sweep, same tiny limit — if the poison row still occupied
   // the only claim slot (the actual Round 10 bug), this would try to
   // delete the SAME poison url again instead of the resolvable one
   // queued right behind it.
-  const second = await retryPendingBlobDeletions(flakyDeleter, 1);
-  assert.equal(second.claimed, 1);
-  assert.equal(second.resolved, 1, "the resolvable deletion must be reachable on the very next sweep — a permanently-failing row must never occupy every claim slot forever");
-  assert.deepEqual(resolvedPathnames, [resolvableUrl.replace("/api/files/", "")]);
+  await retryPendingBlobDeletions(flakyDeleter, 1);
+  assert.deepEqual(resolvedPathnames, [resolvableUrl.replace("/api/files/", "")], "the resolvable deletion must be reachable on the very next sweep — a permanently-failing row must never occupy every claim slot forever");
 
   assert.equal(await prisma.pendingBlobDeletion.findFirst({ where: { url: resolvableUrl } }), null, "the resolvable row must have actually been deleted and removed");
   const poisonStillThere = await prisma.pendingBlobDeletion.findUniqueOrThrow({ where: { id: poison.id } });

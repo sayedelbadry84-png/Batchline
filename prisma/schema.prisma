@@ -3168,7 +3168,21 @@ model Notification {
   module    String
   readAt    DateTime?
   createdAt DateTime  @default(now())
+  // PL-R13-P1-03, thirteenth production-lifecycle review: an idempotency
+  // key for notifications raised by a RETRYABLE background job. The
+  // automatic-requisition processor previously stamped
+  // MaterialRequisition.autoRequisitionNotifiedAt BEFORE calling notify —
+  // so a crash in between left a requisition marked "announced" with no
+  // Notification row anywhere and no intent left to retry. Creating the
+  // rows and stamping delivery now happen in ONE transaction; this key
+  // (with skipDuplicates) is what makes a re-run of that transaction
+  // safe, so retrying can never fan out a second copy to the same user.
+  // Null for every ordinary, non-retried notification — Postgres treats
+  // NULLs as distinct, so the unique index below constrains only keyed
+  // ones.
+  dedupeKey String?
 
+  @@unique([userId, dedupeKey])
   @@index([userId, readAt])
 }
 

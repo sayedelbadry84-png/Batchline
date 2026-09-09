@@ -12,7 +12,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/**/*.test.ts tests/**/*.test.tsx",
+    "test": "tsx --test --test-concurrency=1 tests/**/*.test.ts tests/**/*.test.tsx",
     "postinstall": "prisma generate"
   },
   "dependencies": {

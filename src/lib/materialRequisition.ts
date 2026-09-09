@@ -2,7 +2,7 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withSequentialNumber } from "@/lib/sequence";
-import { notifyRoles } from "@/lib/notify";
+import { resolveRoleRecipients, createNotificationsInTx, pushToRecipients } from "@/lib/notify";
 import { REQUISITION_APPROVAL_ROLES } from "@/lib/permissions";
 import { computeNextAttempt, MAX_ATTEMPTS_BEFORE_DEAD_LETTER } from "@/lib/retryBackoff";
 import type { QueueSweepCounts } from "@/lib/queueSweep";
@@ -156,19 +156,32 @@ export async function createRequisitionIfNeeded(
 // same class of leak on shortage overrides, FR-P1-02) always keeps ADMIN
 // in scope, so nothing that legitimately needs org-wide visibility is
 // lost by scoping this.
-export type RequisitionNotifier = (params: { requisitionNumber: string; materialName: string; siteId: string }) => Promise<void>;
+// PL-R13-P1-03, thirteenth production-lifecycle review: runs INSIDE the
+// caller's transaction and returns the recipients it created rows for, so
+// the caller can push after commit. Previously this owned its own write
+// and was called AFTER the requisition had already been stamped
+// "notified" — a crash in between left a requisition marked announced
+// with no Notification row and no intent left to retry it.
+export type RequisitionNotifier = (tx: Tx, params: { requisitionId: string; requisitionNumber: string; materialName: string; siteId: string }) => Promise<string[]>;
 
-export const notifyRequisitionCreated: RequisitionNotifier = async ({ requisitionNumber, materialName, siteId }) => {
-  await notifyRoles(
-    REQUISITION_APPROVAL_ROLES,
+export function autoRequisitionDedupeKey(requisitionId: string): string {
+  return `auto-requisition:${requisitionId}`;
+}
+
+export const notifyRequisitionCreated: RequisitionNotifier = async (tx, { requisitionId, requisitionNumber, materialName, siteId }) => {
+  const recipients = await resolveRoleRecipients(tx, REQUISITION_APPROVAL_ROLES, { siteId });
+  await createNotificationsInTx(
+    tx,
+    recipients,
     {
       title: requisitionNumber,
       body: `${materialName} — auto-requested, stock at or below threshold`,
       link: "/warehouses?tab=rawMaterials&sub=silos",
       module: "Warehouses",
     },
-    { siteId },
+    autoRequisitionDedupeKey(requisitionId),
   );
+  return recipients;
 };
 
 function toKgConverter(unit: string, specificGravity: number | null): (units: number) => number {
@@ -241,10 +254,13 @@ async function claimAutoRequisitionIntent(intentId: string, owner: string): Prom
 // here used to swallow a failed delete and still report RESOLVED, so a
 // row that was still sitting in the queue was counted as drained and the
 // operator-visible counters said the sweep was clean.
-async function finishIntent(intentId: string): Promise<ProcessIntentResult> {
+async function finishIntent(intentId: string, owner: string): Promise<ProcessIntentResult> {
   try {
-    await prisma.pendingAutoRequisition.delete({ where: { id: intentId } });
-    return { status: "RESOLVED" };
+    // PL-R13-P1-03: fenced on the lease. `delete({ where: { id } })` let
+    // an owner whose lease had already expired remove work the CURRENT
+    // owner was mid-way through.
+    const removed = await prisma.pendingAutoRequisition.deleteMany({ where: { id: intentId, leaseOwner: owner } });
+    return removed.count === 1 ? { status: "RESOLVED" } : { status: "BUSY" };
   } catch (error) {
     console.error(`[materialRequisition] intent ${intentId} completed its work but could not be removed from the queue:`, error);
     return { status: "BOOKKEEPING_FAILED" };
@@ -309,7 +325,7 @@ export async function processPendingAutoRequisition(intentId: string, notify: Re
         // PL-R12-P2-02: a delete that fails is a BOOKKEEPING failure, not
         // a resolution. Reporting RESOLVED for a row that is still on
         // file is exactly how a stuck queue looked healthy.
-        return finishIntent(intentId);
+        return finishIntent(intentId, owner);
       }
       // PL-R12-P1-02: ALREADY_OPEN no longer deletes the intent on the
       // ASSUMPTION that whoever created that requisition also notified
@@ -321,44 +337,69 @@ export async function processPendingAutoRequisition(intentId: string, notify: Re
       requisitionId = created.requisitionId;
       requisitionNumber = created.requisitionNumber;
       materialName = created.materialName;
-      await prisma.pendingAutoRequisition.update({
-        // CREATED and ALREADY_OPEN alike: record the requisition progress
-        // durably BEFORE attempting notification, so a notify failure can
-        // never cause a retry to re-attempt creation.
-        where: { id: intentId },
+      // CREATED and ALREADY_OPEN alike: record the requisition progress
+      // durably BEFORE attempting notification, so a notify failure can
+      // never cause a retry to re-attempt creation. PL-R13-P1-03: fenced
+      // on our own lease — an owner whose lease has expired must not
+      // write over whoever holds it now.
+      const progress = await prisma.pendingAutoRequisition.updateMany({
+        where: { id: intentId, leaseOwner: owner },
         data: { requisitionId, requisitionNumber, materialName },
       });
+      if (progress.count === 0) return { status: "BUSY" };
     }
 
-    if (!intent.notificationDeliveredAt) {
-      // The cross-intent idempotency key: claim the right to announce
-      // THIS requisition with a conditional update. count === 0 means
-      // another intent already delivered it, so this one is genuinely
-      // owed nothing — a fact read from the database, never assumed.
-      const claimedDelivery = await prisma.materialRequisition.updateMany({
-        where: { id: requisitionId!, autoRequisitionNotifiedAt: null },
-        data: { autoRequisitionNotifiedAt: new Date() },
-      });
-      if (claimedDelivery.count === 1) {
-        try {
-          await notify({ requisitionNumber: requisitionNumber!, materialName: materialName!, siteId: intent.siteId });
-        } catch (notifyError) {
-          // Release the delivery claim so the next attempt (this intent
-          // or another) can genuinely retry it, rather than every future
-          // pass believing it was already sent.
-          await prisma.materialRequisition.updateMany({ where: { id: requisitionId! }, data: { autoRequisitionNotifiedAt: null } });
-          throw notifyError;
+    // PL-R13-P1-03: delivery and cleanup are ONE transaction.
+    //
+    // The previous version stamped MaterialRequisition.autoRequisitionNotifiedAt
+    // FIRST and then called the notifier — but the notifier is what
+    // creates the durable Notification rows. A process crash in between
+    // left a requisition marked "announced", no notification anywhere,
+    // and (once the lease expired) a next processor that saw the stamp,
+    // skipped the notification, and deleted the intent. Rolling the stamp
+    // back in a catch cannot help with a crash.
+    //
+    // Now: create the rows, stamp the requisition, and remove the intent
+    // all inside one transaction. Either every one of those facts is true
+    // afterwards or none is — so the intent can never be deleted before a
+    // durable Notification exists. The dedupeKey + skipDuplicates in
+    // createNotificationsInTx makes re-running this after a rollback safe.
+    let recipients: string[] = [];
+    const settled = await prisma.$transaction(async (tx) => {
+      if (!intent.notificationDeliveredAt) {
+        // Whether anything is still owed is read from the requisition's
+        // own stamp — a fact in the database, never an assumption that
+        // some other intent must have delivered it.
+        const requisition = await tx.materialRequisition.findUnique({ where: { id: requisitionId! }, select: { autoRequisitionNotifiedAt: true } });
+        if (requisition && requisition.autoRequisitionNotifiedAt === null) {
+          recipients = await notify(tx, { requisitionId: requisitionId!, requisitionNumber: requisitionNumber!, materialName: materialName!, siteId: intent.siteId });
+          await tx.materialRequisition.updateMany({ where: { id: requisitionId!, autoRequisitionNotifiedAt: null }, data: { autoRequisitionNotifiedAt: new Date() } });
         }
       }
-      await prisma.pendingAutoRequisition.update({ where: { id: intentId }, data: { notificationDeliveredAt: new Date() } });
-    }
+      // Fenced: only the lease holder may retire the intent.
+      const removed = await tx.pendingAutoRequisition.deleteMany({ where: { id: intentId, leaseOwner: owner } });
+      return removed.count === 1;
+    });
+    if (!settled) return { status: "BUSY" };
 
-    return finishIntent(intentId);
+    // Push AFTER commit and outside the transaction — best-effort by
+    // design, and it must never hold a transaction open or turn an
+    // already-committed delivery into a failure.
+    await pushToRecipients(recipients, {
+      title: requisitionNumber!,
+      body: `${materialName} — auto-requested, stock at or below threshold`,
+      link: "/warehouses?tab=rawMaterials&sub=silos",
+    });
+    return { status: "RESOLVED" };
   } catch (error) {
     const attempts = intent.attempts + 1;
     try {
-      await prisma.pendingAutoRequisition.update({
-        where: { id: intentId },
+      // PL-R13-P1-03: fenced on our own lease, like every other write to
+      // this row. If the lease has already been taken over, recording OUR
+      // failure would overwrite the new owner's state — count === 0 here
+      // means exactly that, and nothing further may be transitioned.
+      const recorded = await prisma.pendingAutoRequisition.updateMany({
+        where: { id: intentId, leaseOwner: owner },
         data: {
           attempts,
           lastError: String(error),
@@ -373,7 +414,7 @@ export async function processPendingAutoRequisition(intentId: string, notify: Re
           leaseExpiresAt: null,
         },
       });
-      return { status: "RETRY" };
+      return recorded.count === 1 ? { status: "RETRY" } : { status: "BUSY" };
     } catch (bookkeepingError) {
       // PL-R12-P2-02: previously `.catch(() => {})`. A failure to record
       // the attempt means this row keeps its OLD nextAttemptAt and lease
