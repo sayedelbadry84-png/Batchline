@@ -16,7 +16,9 @@ export async function POST(request: NextRequest) {
   if (authError) return authError;
 
   const body = await request.json().catch(() => null);
-  if (!body || typeof body.deviceId !== "string" || typeof body.lat !== "number" || typeof body.lng !== "number") {
+  if (!body || typeof body.deviceId !== "string" || !body.deviceId.trim() ||
+      typeof body.lat !== "number" || !Number.isFinite(body.lat) || Math.abs(body.lat) > 90 ||
+      typeof body.lng !== "number" || !Number.isFinite(body.lng) || Math.abs(body.lng) > 180) {
     return NextResponse.json(
       { error: "Expected { deviceId: string, lat: number, lng: number }" },
       { status: 400 },

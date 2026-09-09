@@ -9,6 +9,7 @@ import { generateZatcaDocuments } from "@/lib/zatca/generate";
 import { submitInvoiceForClearance } from "@/lib/zatca/submit";
 import { generateZatcaCreditNoteDocuments, submitCreditNoteForClearance } from "@/lib/zatca/creditNote";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
+import { withRetry } from "@/lib/inventoryLedger";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -97,14 +98,11 @@ export async function generateInvoiceForProject(formData: FormData) {
 
     if (lines.length === 0) continue;
 
-    const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0);
     // Snapshotted from the plant's current rate/label rather than referenced
     // live — a later change to Plant.taxRatePct must never rewrite the
     // numbers on an invoice that already went out.
     const taxRatePct = plant.taxRatePct;
     const taxLabel = plant.taxLabel;
-    const taxAmount = subtotal * (taxRatePct / 100);
-    const total = subtotal + taxAmount;
     const dueDate = new Date(Date.now() + parseNetDays(project.customer.paymentTerms) * 24 * 60 * 60 * 1000);
 
     // Invoice creation and its journal entry commit as one unit — without
@@ -112,35 +110,47 @@ export async function generateInvoiceForProject(formData: FormData) {
     // would leave a real invoice on file with no matching journal entry,
     // silently understating AR and Revenue on the Trial Balance forever
     // with nothing to detect or reconcile the gap.
-    const invoice = await prisma.$transaction(async (tx) => {
-      const invoiceCount = await tx.invoice.count();
-      const invoiceNumber = `INV-${new Date().getFullYear()}-${String(invoiceCount + 1).padStart(4, "0")}`;
+    const invoice = await withSequentialNumber(
+      "INV",
+      (yr) => prisma.invoice.count({ where: { createdAt: yr } }),
+      (invoiceNumber) => withRetry(() => prisma.$transaction(async (tx) => {
+        // Every invoicer of this project waits here before deciding which
+        // trips remain unbilled; repeated clicks become a harmless no-op.
+        await tx.$queryRaw`SELECT "id" FROM "Project" WHERE "id" = ${projectId} FOR UPDATE`;
+        const billed = await tx.invoiceLine.findMany({ where: { tripId: { in: lines.map(l => l.tripId) } }, select: { tripId: true } });
+        const billedIds = new Set(billed.map(l => l.tripId));
+        const availableLines = lines.filter(l => !billedIds.has(l.tripId));
+        if (availableLines.length === 0) return null;
+        const subtotal = availableLines.reduce((sum, l) => sum + l.lineTotal, 0);
+        const taxAmount = subtotal * (taxRatePct / 100);
+        const total = subtotal + taxAmount;
+        const invoice = await tx.invoice.create({
+          data: {
+            invoiceNumber,
+            customerId: project.customerId,
+            projectId,
+            plantId: plant.id,
+            dueDate,
+            subtotal,
+            taxRatePct,
+            taxLabel,
+            taxAmount,
+            total,
+            currency: plant.currency,
+            lines: { create: availableLines },
+          },
+        });
 
-      const invoice = await tx.invoice.create({
-        data: {
-          invoiceNumber,
-          customerId: project.customerId,
-          projectId,
-          plantId: plant.id,
-          dueDate,
-          subtotal,
-          taxRatePct,
-          taxLabel,
-          taxAmount,
-          total,
-          currency: plant.currency,
-          lines: { create: lines },
-        },
-      });
-
-      await postInvoice(tx, { siteId: plant.siteId, currency: plant.currency, invoiceId: invoice.id, subtotal, taxAmount, total });
-      return invoice;
-    }, TX_OPTIONS);
+        await postInvoice(tx, { siteId: plant.siteId, currency: plant.currency, invoiceId: invoice.id, subtotal, taxAmount, total });
+        return invoice;
+      }, { ...TX_OPTIONS, isolationLevel: "ReadCommitted" })),
+    );
+    if (!invoice) continue;
 
     await logAudit({
       module: "Billing",
       recordId: invoice.id,
-      afterValue: `${invoice.invoiceNumber} — ${subtotal} + ${taxLabel} ${taxAmount} = ${total} ${plant.currency}`,
+      afterValue: `${invoice.invoiceNumber} — ${invoice.subtotal} + ${taxLabel} ${invoice.taxAmount} = ${invoice.total} ${plant.currency}`,
       reasonCode: "INVOICE_GENERATED",
     });
 
@@ -164,7 +174,8 @@ export async function markInvoiceSent(formData: FormData) {
   if (!invoice || invoice.status !== "DRAFT") return;
   if (!(await invoiceInScope(id, effectiveSiteId(user)))) return;
 
-  await prisma.invoice.update({ where: { id }, data: { status: "SENT" } });
+  const claim = await prisma.invoice.updateMany({ where: { id, status: "DRAFT" }, data: { status: "SENT" } });
+  if (claim.count === 0) return;
   await logAudit({ module: "Billing", recordId: id, field: "status", afterValue: "SENT", reasonCode: "INVOICE_SENT" });
 
   revalidatePath(`/finance/invoices/${id}`);
@@ -196,11 +207,18 @@ export async function cancelInvoice(formData: FormData) {
   // original Dr AR / Cr Revenue entry was never reversed, permanently
   // overstating AR and Revenue on the Trial Balance with nothing left to
   // correct it.
-  await prisma.$transaction(async (tx) => {
+  const cancelled = await withRetry(() => prisma.$transaction(async (tx) => {
+    // Payments, credit notes, generation and cancellation share this row
+    // lock. Re-check all eligibility here, after any competing commit.
+    await tx.$queryRaw`SELECT "id" FROM "Invoice" WHERE "id" = ${id} FOR UPDATE`;
+    const fresh = await tx.invoice.findUnique({ where: { id }, include: { payments: true, creditNotes: true } });
+    if (!fresh || fresh.status === "CANCELLED" || fresh.status === "PAID" || fresh.zatcaStatus || fresh.payments.length > 0 || fresh.creditNotes.length > 0) return false;
     await tx.invoiceLine.deleteMany({ where: { invoiceId: id } });
     await tx.invoice.update({ where: { id }, data: { status: "CANCELLED" } });
     await reverseJournalEntry(tx, "Billing", id, "Invoice cancelled");
-  }, TX_OPTIONS);
+    return true;
+  }, { ...TX_OPTIONS, isolationLevel: "ReadCommitted" }));
+  if (!cancelled) return;
 
   await logAudit({
     module: "Billing",
@@ -223,7 +241,7 @@ export async function recordPayment(formData: FormData) {
   const amount = Number(formData.get("amount") ?? 0);
   const method = String(formData.get("method") ?? "") || null;
   const reference = String(formData.get("reference") ?? "").trim() || null;
-  if (!invoiceId || !amount || amount <= 0) return;
+  if (!invoiceId || !Number.isFinite(amount) || amount <= 0) return;
 
   const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { plant: true } });
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return;
@@ -232,13 +250,12 @@ export async function recordPayment(formData: FormData) {
   // The payment and its journal entry commit as one unit — same rationale
   // as generateInvoiceForProject above. amountDue is also now (re)computed
   // INSIDE the transaction (not from the snapshot fetched above) and the
-  // whole thing runs Serializable — two payments recorded concurrently
+  // invoice row is locked — two payments recorded concurrently
   // against the same invoice used to each compute totalPaid from a
   // payments list that didn't include the other's just-created row, so an
   // invoice that was actually fully paid by the combination could sit
-  // stuck at SENT forever. Serializable makes Postgres detect that
-  // read-write conflict and abort one of the two competing transactions
-  // instead.
+  // stuck at SENT forever. The shared row lock makes the second request
+  // see the first payment after it commits; cancellation takes this lock too.
   //
   // The amount itself was never checked against what's actually still
   // owed — issueCreditNote already refuses to credit more than amountDue,
@@ -247,9 +264,10 @@ export async function recordPayment(formData: FormData) {
   // settled) could push it well past PAID with nothing to catch it and no
   // refund/credit-balance workflow to make sense of the overage.
   try {
-    await prisma.$transaction(async (tx) => {
+    await withRetry(() => prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Invoice" WHERE "id" = ${invoiceId} FOR UPDATE`;
       const fresh = await tx.invoice.findUnique({ where: { id: invoiceId }, include: { payments: true, creditNotes: true } });
-      if (!fresh) throw new Error("NOT_FOUND");
+      if (!fresh || fresh.status === "CANCELLED" || fresh.status === "PAID") throw new Error("INVOICE_NOT_PAYABLE");
       const amountDue = invoiceAmountDue(fresh);
       if (amount > amountDue + 0.01) throw new Error("EXCEEDS_AMOUNT_DUE");
 
@@ -263,7 +281,7 @@ export async function recordPayment(formData: FormData) {
       // case invoiceInScope already treats specially (an invoice that
       // predates plant-scoping, or had no in-scope trips at generation time).
       if (invoice.plant) await postPayment(tx, { siteId: invoice.plant.siteId, currency: invoice.currency, paymentId: payment.id, amount });
-    }, { ...TX_OPTIONS, isolationLevel: "Serializable" });
+    }, { ...TX_OPTIONS, isolationLevel: "ReadCommitted" }));
   } catch {
     return;
   }
@@ -293,43 +311,43 @@ export async function issueCreditNote(formData: FormData) {
   const amount = Number(formData.get("amount") ?? 0);
   const reason = String(formData.get("reason") ?? "");
   const notes = String(formData.get("notes") ?? "").trim() || null;
-  if (!invoiceId || !amount || amount <= 0 || !reason) return;
+  if (!invoiceId || !Number.isFinite(amount) || amount <= 0 || !reason) return;
 
   const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { plant: true } });
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return;
   if (!(await invoiceInScope(invoiceId, effectiveSiteId(user)))) return;
 
   // amountDue is now (re)computed INSIDE the transaction, from a fresh read,
-  // not the snapshot fetched above — and the whole thing runs Serializable.
+  // not the snapshot fetched above — after acquiring the invoice row lock.
   // Two credit notes issued concurrently against the same invoice used to
   // each check `amount > amountDue` against the same stale amountDue, so
   // both could pass even though together they credit more than was ever
-  // due. Serializable makes Postgres detect that read-write conflict and
-  // abort one of the two competing transactions instead.
+  // due. The invoice mutex serializes payments, credits and cancellation.
+  // Number retries wrap the WHOLE transaction, never an aborted transaction.
   let creditNote;
   try {
-    creditNote = await prisma.$transaction(async (tx) => {
-      const fresh = await tx.invoice.findUnique({ where: { id: invoiceId }, include: { payments: true, creditNotes: true } });
-      if (!fresh) throw new Error("NOT_FOUND");
-      const amountDue = invoiceAmountDue(fresh);
-      if (amount > amountDue + 0.01) throw new Error("EXCEEDS_AMOUNT_DUE");
+    creditNote = await withSequentialNumber(
+      "CN",
+      (yr) => prisma.creditNote.count({ where: { createdAt: yr } }),
+      (creditNoteNumber) => withRetry(() => prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "Invoice" WHERE "id" = ${invoiceId} FOR UPDATE`;
+        const fresh = await tx.invoice.findUnique({ where: { id: invoiceId }, include: { payments: true, creditNotes: true } });
+        if (!fresh || fresh.status === "CANCELLED" || fresh.status === "PAID") throw new Error("INVOICE_NOT_PAYABLE");
+        const amountDue = invoiceAmountDue(fresh);
+        if (amount > amountDue + 0.01) throw new Error("EXCEEDS_AMOUNT_DUE");
 
-      const cn = await withSequentialNumber(
-        "CN",
-        (yr) => tx.creditNote.count({ where: { createdAt: yr } }),
-        (creditNoteNumber) =>
-          tx.creditNote.create({
-            data: { creditNoteNumber, invoiceId, amount, reason, notes, issuedById: user!.id },
-          }),
-      );
+        const cn = await tx.creditNote.create({
+          data: { creditNoteNumber, invoiceId, amount, reason, notes, issuedById: user!.id },
+        });
 
-      if (amountDue - amount <= 0.01) {
-        await tx.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
-      }
+        if (amountDue - amount <= 0.01) {
+          await tx.invoice.update({ where: { id: invoiceId }, data: { status: "PAID" } });
+        }
 
-      if (invoice.plant) await postCreditNote(tx, { siteId: invoice.plant.siteId, currency: invoice.currency, creditNoteId: cn.id, amount });
-      return cn;
-    }, { ...TX_OPTIONS, isolationLevel: "Serializable" });
+        if (invoice.plant) await postCreditNote(tx, { siteId: invoice.plant.siteId, currency: invoice.currency, creditNoteId: cn.id, amount });
+        return cn;
+      }, { ...TX_OPTIONS, isolationLevel: "ReadCommitted" })),
+    );
   } catch {
     return;
   }

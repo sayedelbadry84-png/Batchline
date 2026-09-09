@@ -43,19 +43,22 @@ not placeholders.
   `src/app/(app)` route group (sidebar layout); the driver app
   (`src/app/driver`) is a separate route tree with its own minimal layout —
   they share only the root `layout.tsx` (fonts, HTML shell).
-- Prisma 5 ORM, SQLite for local dev (swap the datasource to PostgreSQL for
-  production — one line in `prisma/schema.prisma` plus `DATABASE_URL`)
+- Prisma 5 ORM with PostgreSQL in development and production; transactional
+  row locks and migration constraints require PostgreSQL (not SQLite).
 - Tailwind CSS v4
 - Oswald / IBM Plex Sans / IBM Plex Mono, matching the Batchline design system
 
 ## Getting started
 
 ```bash
-npm install
-npx prisma db push      # create/sync the local SQLite database
-npx prisma db seed      # load a demo plant, mix design, customer, project, fleet
+# Set DATABASE_URL and DIRECT_URL for a new, disposable PostgreSQL database.
+npm ci
+npx prisma migrate deploy
+# Optional, disposable demo databases only: npx prisma db seed
 npm run dev
 ```
+
+See [the migration runbook](prisma/MIGRATIONS.md) before using an existing database.
 
 Open [http://localhost:3000](http://localhost:3000) and sign in — the seed
 prints a list of demo accounts (one per role) to the console, all with

@@ -11,7 +11,7 @@ export type IntegrationScope = "TELEMATICS" | "SCADA" | "REPORTS";
 // byte at a time. timingSafeEqual needs equal-length buffers, so a length
 // mismatch is itself compared against a dummy buffer of the right length
 // rather than short-circuiting (which would leak the length check timing).
-function safeEqual(a: string, b: string): boolean {
+export function safeEqual(a: string, b: string): boolean {
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
   if (bufA.length !== bufB.length) {
