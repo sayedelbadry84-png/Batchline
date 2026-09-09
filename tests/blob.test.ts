@@ -79,8 +79,8 @@ test("retryPendingBlobDeletions resolves a queued row once the delete actually s
   const result = await retryPendingBlobDeletions(async (pathname) => {
     deletedPathnames.push(pathname);
   });
-  assert.ok(result.attempted >= 1);
-  assert.ok(result.succeeded >= 1);
+  assert.ok(result.claimed >= 1);
+  assert.ok(result.resolved >= 1);
   assert.ok(deletedPathnames.includes(url.replace("/api/files/", "")));
 
   const stillQueued = await prisma.pendingBlobDeletion.findUnique({ where: { id: queued.id } });
@@ -93,7 +93,7 @@ test("retryPendingBlobDeletions leaves a row queued and records the new error wh
   const queued = await prisma.pendingBlobDeletion.findFirstOrThrow({ where: { url } });
 
   const result = await retryPendingBlobDeletions(alwaysFails);
-  assert.ok(result.attempted >= 1);
+  assert.ok(result.claimed >= 1);
 
   const stillQueued = await prisma.pendingBlobDeletion.findUnique({ where: { id: queued.id } });
   assert.ok(stillQueued, "a retry that fails again must leave the row queued for the next sweep, not silently drop it");
@@ -132,8 +132,8 @@ test("a permanently-failing deletion does not starve a newer resolvable one — 
   };
 
   const first = await retryPendingBlobDeletions(flakyDeleter, 1);
-  assert.equal(first.attempted, 1);
-  assert.equal(first.succeeded, 0);
+  assert.equal(first.claimed, 1);
+  assert.equal(first.resolved, 0);
   const poisonAfterFirst = await prisma.pendingBlobDeletion.findUniqueOrThrow({ where: { id: poison.id } });
   assert.equal(poisonAfterFirst.attempts, 1);
 
@@ -142,8 +142,8 @@ test("a permanently-failing deletion does not starve a newer resolvable one — 
   // delete the SAME poison url again instead of the resolvable one
   // queued right behind it.
   const second = await retryPendingBlobDeletions(flakyDeleter, 1);
-  assert.equal(second.attempted, 1);
-  assert.equal(second.succeeded, 1, "the resolvable deletion must be reachable on the very next sweep — a permanently-failing row must never occupy every claim slot forever");
+  assert.equal(second.claimed, 1);
+  assert.equal(second.resolved, 1, "the resolvable deletion must be reachable on the very next sweep — a permanently-failing row must never occupy every claim slot forever");
   assert.deepEqual(resolvedPathnames, [resolvableUrl.replace("/api/files/", "")]);
 
   assert.equal(await prisma.pendingBlobDeletion.findFirst({ where: { url: resolvableUrl } }), null, "the resolvable row must have actually been deleted and removed");

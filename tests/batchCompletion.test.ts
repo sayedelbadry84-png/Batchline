@@ -44,7 +44,7 @@ const { postSiloMovement } = await import("../src/lib/inventoryLedger");
 const { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } = await import("../src/lib/batchComponentEdits");
 const { claimTripSlot, applyReclaimCredit } = await import("../src/lib/tripDispatch");
 const { requestShortageOverride, approveShortageOverrideRequest, rejectShortageOverrideRequest } = await import("../src/lib/shortageOverrideRequests");
-const { createRequisitionIfNeeded, stageAutoRequisitionIntent, processPendingAutoRequisition, retryPendingAutoRequisitions } = await import("../src/lib/materialRequisition");
+const { createRequisitionIfNeeded, stageAutoRequisitionIntent, processPendingAutoRequisition, retryPendingAutoRequisitions, notifyRequisitionCreated } = await import("../src/lib/materialRequisition");
 
 const prisma = new PrismaClient();
 
@@ -1565,7 +1565,7 @@ test("retryPendingAutoRequisitions resolves a staged intent for real and removes
 
   try {
     const result = await retryPendingAutoRequisitions();
-    assert.ok(result.attempted >= 1);
+    assert.ok(result.claimed >= 1);
     assert.ok(result.resolved >= 1);
 
     const stillQueued = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
@@ -1592,7 +1592,7 @@ test("retryPendingAutoRequisitions leaves an intent queued, backed off, and reco
 
   try {
     const result = await retryPendingAutoRequisitions();
-    assert.ok(result.attempted >= 1);
+    assert.ok(result.claimed >= 1);
 
     const stillQueued = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
     assert.ok(stillQueued, "a retry that fails again must leave the row queued for the next sweep, not silently drop it");
@@ -1621,7 +1621,7 @@ test("a notification failure after requisition creation is retried independently
   const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
 
   const notifyCalls: string[] = [];
-  const failingNotify = async (requisitionNumber: string) => {
+  const failingNotify = async ({ requisitionNumber }: { requisitionNumber: string }) => {
     notifyCalls.push(requisitionNumber);
     throw new Error("simulated notifyRoles failure");
   };
@@ -1635,7 +1635,7 @@ test("a notification failure after requisition creation is retried independently
     const requisitionCountAfterFirst = await prisma.materialRequisition.count({ where: { id: afterFirst.requisitionId! } });
     assert.equal(requisitionCountAfterFirst, 1);
 
-    const succeedingNotify = async (requisitionNumber: string) => {
+    const succeedingNotify = async ({ requisitionNumber }: { requisitionNumber: string }) => {
       notifyCalls.push(requisitionNumber);
     };
     const second = await processPendingAutoRequisition(intent.id, succeedingNotify);
@@ -1652,6 +1652,104 @@ test("a notification failure after requisition creation is retried independently
   } finally {
     await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
     await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId, siteId } }));
+  }
+});
+
+// PL-R12-P1-02's own explicit required proof: "Overlap the immediate call
+// and cron retry for the same intent id using barriers around requisition
+// creation. Assert exactly one requisition, a durable notification
+// outcome, no premature deletion, and no duplicate notification."
+//
+// The barrier is the injectable notifier: the immediate processor is held
+// INSIDE its notification, still holding the intent's lease, while the
+// cron sweep runs against the very same intent id. Before the owner lease
+// existed, both processors read requisitionId = null, one created the
+// requisition and the other saw ALREADY_OPEN and deleted the intent out
+// from under it — losing the notification work entirely.
+test("the immediate processor and the cron sweep cannot consume the same intent concurrently — one requisition, one notification, no premature deletion", async () => {
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+
+  const notifyCalls: string[] = [];
+  let signalInsideNotify!: () => void;
+  const insideNotify = new Promise<void>((resolve) => {
+    signalInsideNotify = resolve;
+  });
+  let releaseNotify!: () => void;
+  const heldNotify = new Promise<void>((resolve) => {
+    releaseNotify = resolve;
+  });
+
+  try {
+    const immediate = processPendingAutoRequisition(intent.id, async ({ requisitionNumber }) => {
+      notifyCalls.push(requisitionNumber);
+      signalInsideNotify();
+      await heldNotify;
+    });
+
+    // The immediate processor now holds the lease and is mid-notification.
+    await insideNotify;
+
+    const cron = await retryPendingAutoRequisitions(200, async ({ requisitionNumber }) => {
+      notifyCalls.push(`cron:${requisitionNumber}`);
+    });
+    assert.equal(cron.resolved, 0, "the cron sweep must not resolve an intent another processor is actively holding");
+    assert.ok(cron.busy >= 1, "the overlapping intent must be reported BUSY — real in-flight work owned elsewhere, never counted as finished");
+
+    const duringOverlap = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
+    assert.ok(duringOverlap, "the intent must NOT have been deleted while its owner was still working on it");
+    assert.equal(await prisma.materialRequisition.count({ where: { materialId, siteId } }), 1, "exactly one requisition may exist across both processors");
+
+    releaseNotify();
+    const result = await immediate;
+    assert.equal(result.status, "RESOLVED");
+
+    assert.deepEqual(notifyCalls.length, 1, "exactly one notification — the cron sweep must never have sent a duplicate");
+    assert.equal(await prisma.materialRequisition.count({ where: { materialId, siteId } }), 1);
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } }), null, "the intent is removed only once its work is genuinely complete");
+    const created = await prisma.materialRequisition.findFirstOrThrow({ where: { materialId, siteId } });
+    assert.ok(created.autoRequisitionNotifiedAt, "delivery must be stamped durably on the requisition itself");
+    materialRequisitionIds.push(created.id);
+  } finally {
+    releaseNotify();
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId, siteId } }));
+  }
+});
+
+// PL-R12-P1-03's own explicit required proof: "Test a same-site manager,
+// another-site manager, and an admin; only the same-site manager and
+// admin should receive the event." REQUISITION_APPROVAL_ROLES includes
+// plant managers, and the notification previously went out org-wide — so
+// a manager at another site was told the requisition number and material
+// name belonging to this site's shortage.
+test("an automatic requisition notification reaches the same-site manager and ADMIN, never a manager at another site", async () => {
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-BC-NOTIFY-${Date.now()}`, name: "TEST-SUITE-BC-NOTIFY-SITE-B", city: "Test", country: "Test" } });
+  const otherPlant = await prisma.plant.create({ data: { siteId: otherSite.id, name: "TEST-SUITE-BC-NOTIFY-PLANT-B" } });
+  const sameSiteManager = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-NOTIFY-SAME-SITE", email: `test-suite-bc-same-${Date.now()}@example.invalid`, passwordHash: "x", role: "PLANT_MANAGER", status: "ACTIVE", plantId },
+  });
+  const otherSiteManager = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-NOTIFY-OTHER-SITE", email: `test-suite-bc-other-${Date.now()}@example.invalid`, passwordHash: "x", role: "PLANT_MANAGER", status: "ACTIVE", plantId: otherPlant.id },
+  });
+  const admin = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-NOTIFY-ADMIN", email: `test-suite-bc-admin-${Date.now()}@example.invalid`, passwordHash: "x", role: "ADMIN", status: "ACTIVE", plantId: otherPlant.id },
+  });
+  const recipients = [sameSiteManager.id, otherSiteManager.id, admin.id];
+
+  try {
+    // The REAL notifier, not a fake — this is the exact function the
+    // intent processor calls.
+    await notifyRequisitionCreated({ requisitionNumber: "TEST-SUITE-BC-MTR-SCOPE", materialName: "TEST-SUITE-BC-MATERIAL", siteId });
+
+    const notified = await prisma.notification.findMany({ where: { userId: { in: recipients }, title: "TEST-SUITE-BC-MTR-SCOPE" }, select: { userId: true } });
+    const notifiedIds = notified.map((n) => n.userId).sort();
+    assert.deepEqual(notifiedIds, [sameSiteManager.id, admin.id].sort(), "only the same-site manager and ADMIN may be notified");
+    assert.ok(!notifiedIds.includes(otherSiteManager.id), "a manager at another site must never receive this site's requisition details");
+  } finally {
+    await cleanupDelete(() => prisma.notification.deleteMany({ where: { userId: { in: recipients } } }));
+    await cleanupDelete(() => prisma.user.deleteMany({ where: { id: { in: recipients } } }));
+    await cleanupDelete(() => prisma.plant.delete({ where: { id: otherPlant.id } }));
+    await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
   }
 });
 
@@ -1678,7 +1776,7 @@ test("a permanently-failing intent does not starve a newer resolvable one — a 
     // nextAttemptAt into the future via the same backoff every genuinely
     // poisoned row gets.
     const first = await retryPendingAutoRequisitions(1);
-    assert.equal(first.attempted, 1);
+    assert.equal(first.claimed, 1);
     assert.equal(first.resolved, 0);
     const poisonAfterFirst = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: poison.id } });
     assert.equal(poisonAfterFirst.attempts, 1);
@@ -1688,7 +1786,7 @@ test("a permanently-failing intent does not starve a newer resolvable one — a 
     // SAME poison row again instead of the resolvable one queued right
     // behind it.
     const second = await retryPendingAutoRequisitions(1);
-    assert.equal(second.attempted, 1);
+    assert.equal(second.claimed, 1);
     assert.equal(second.resolved, 1, "the resolvable intent must be reachable on the very next sweep — a permanently-failing row must never occupy every claim slot forever");
 
     assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: resolvable.id } }), null, "the resolvable intent must have actually been processed and removed");

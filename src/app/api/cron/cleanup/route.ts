@@ -78,15 +78,18 @@ export async function GET(request: NextRequest) {
   // PendingAutoRequisition's own comment in schema.prisma.
   const autoRequisitions = await retryPendingAutoRequisitions();
 
+  // PL-R12-P2-02/P2-03, twelfth production-lifecycle review: the full
+  // structured counts, not just attempted/succeeded. bookkeepingFailed
+  // and deadLettered are the two an operator actually has to act on — a
+  // sweep that resolved nothing and dead-lettered rows previously looked
+  // identical here to a completely clean run.
   return NextResponse.json({
     ranAt: now.toISOString(),
     expiredSessionsDeleted: expiredSessions.count,
     staleLoginAttemptsDeleted: staleLoginAttempts.count,
     abandonedTotpSetupsCleared: abandonedTotpSetups.count,
     quotesExpired: staleQuotes.length,
-    pendingBlobDeletionsAttempted: blobDeletions.attempted,
-    pendingBlobDeletionsSucceeded: blobDeletions.succeeded,
-    pendingAutoRequisitionsAttempted: autoRequisitions.attempted,
-    pendingAutoRequisitionsResolved: autoRequisitions.resolved,
+    pendingBlobDeletions: blobDeletions,
+    pendingAutoRequisitions: autoRequisitions,
   });
 }

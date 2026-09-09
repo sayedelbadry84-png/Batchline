@@ -1,6 +1,7 @@
 import { put, del, get } from "@vercel/blob";
 import { prisma } from "@/lib/prisma";
 import { computeNextAttempt, MAX_ATTEMPTS_BEFORE_DEAD_LETTER } from "@/lib/retryBackoff";
+import type { QueueSweepCounts } from "@/lib/queueSweep";
 
 // The one place in the app that talks to object storage — Vercel Blob,
 // since the app is already deployed on Vercel and this needs no separate
@@ -104,19 +105,18 @@ async function claimEligiblePendingBlobDeletions(limit: number): Promise<{ id: s
 // MAX_ATTEMPTS_BEFORE_DEAD_LETTER, since an orphaned blob costs storage,
 // not correctness, and retrying forever with nobody ever noticing serves
 // no one either.
-export async function retryPendingBlobDeletions(deleteFn: BlobDeleter = defaultDeleter, limit = 200): Promise<{ attempted: number; succeeded: number }> {
+export async function retryPendingBlobDeletions(deleteFn: BlobDeleter = defaultDeleter, limit = 200): Promise<QueueSweepCounts> {
   const claimed = await claimEligiblePendingBlobDeletions(limit);
-  let succeeded = 0;
+  const counts: QueueSweepCounts = { claimed: claimed.length, resolved: 0, busy: 0, externalFailed: 0, bookkeepingFailed: 0, deadLettered: 0 };
   for (const row of claimed) {
     const pathname = row.url.replace(/^\/api\/files\//, "");
     try {
       await deleteFn(pathname);
-      await prisma.pendingBlobDeletion.delete({ where: { id: row.id } }).catch(() => {});
-      succeeded++;
     } catch (error) {
+      counts.externalFailed++;
       const attempts = row.attempts + 1;
-      await prisma.pendingBlobDeletion
-        .update({
+      try {
+        await prisma.pendingBlobDeletion.update({
           where: { id: row.id },
           data: {
             attempts,
@@ -125,11 +125,28 @@ export async function retryPendingBlobDeletions(deleteFn: BlobDeleter = defaultD
             nextAttemptAt: computeNextAttempt(attempts),
             deadLetteredAt: attempts >= MAX_ATTEMPTS_BEFORE_DEAD_LETTER ? new Date() : undefined,
           },
-        })
-        .catch(() => {});
+        });
+      } catch (bookkeepingError) {
+        counts.bookkeepingFailed++;
+        console.error(`[blob] pending deletion ${row.id} failed AND its failure could not be recorded:`, error, bookkeepingError);
+      }
+      continue;
+    }
+    // PL-R12-P2-02: `succeeded` used to be incremented right after the
+    // external delete, with the row removal swallowed by
+    // `.catch(() => {})` — so a row still sitting in the queue was
+    // reported as a clean success. Success now means the database
+    // transition actually committed.
+    try {
+      await prisma.pendingBlobDeletion.delete({ where: { id: row.id } });
+      counts.resolved++;
+    } catch (error) {
+      counts.bookkeepingFailed++;
+      console.error(`[blob] blob ${row.url} was deleted but its queue row ${row.id} could not be removed:`, error);
     }
   }
-  return { attempted: claimed.length, succeeded };
+  counts.deadLettered = await prisma.pendingBlobDeletion.count({ where: { deadLetteredAt: { not: null } } });
+  return counts;
 }
 
 // Used only by the /api/files route — reads the same private blob back so

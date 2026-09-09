@@ -5,6 +5,7 @@ import { withSequentialNumber } from "@/lib/sequence";
 import { notifyRoles } from "@/lib/notify";
 import { REQUISITION_APPROVAL_ROLES } from "@/lib/permissions";
 import { computeNextAttempt, MAX_ATTEMPTS_BEFORE_DEAD_LETTER } from "@/lib/retryBackoff";
+import type { QueueSweepCounts } from "@/lib/queueSweep";
 import type { RequisitionCandidate } from "@/lib/batchCompletion";
 
 type Tx = Prisma.TransactionClient;
@@ -145,14 +146,30 @@ export async function createRequisitionIfNeeded(
   return { status: "CREATED", requisitionId: requisition.id, requisitionNumber: requisition.requisitionNumber, materialName: requisition.material.name };
 }
 
-export async function notifyRequisitionCreated(requisitionNumber: string, materialName: string): Promise<void> {
-  await notifyRoles(REQUISITION_APPROVAL_ROLES, {
-    title: requisitionNumber,
-    body: `${materialName} — auto-requested, stock at or below threshold`,
-    link: "/warehouses?tab=rawMaterials&sub=silos",
-    module: "Warehouses",
-  });
-}
+// PL-R12-P1-03, twelfth production-lifecycle review: siteId is now a
+// REQUIRED argument, not an omitted option. REQUISITION_APPROVAL_ROLES
+// includes plant managers, and notifyRoles without a site filter fans a
+// notification out org-wide — so a manager at site B was told the
+// requisition number and material name belonging to site A's shortage,
+// even though every page and action they could reach afterwards would
+// correctly refuse them. notifyRoles' own siteId option (added for the
+// same class of leak on shortage overrides, FR-P1-02) always keeps ADMIN
+// in scope, so nothing that legitimately needs org-wide visibility is
+// lost by scoping this.
+export type RequisitionNotifier = (params: { requisitionNumber: string; materialName: string; siteId: string }) => Promise<void>;
+
+export const notifyRequisitionCreated: RequisitionNotifier = async ({ requisitionNumber, materialName, siteId }) => {
+  await notifyRoles(
+    REQUISITION_APPROVAL_ROLES,
+    {
+      title: requisitionNumber,
+      body: `${materialName} — auto-requested, stock at or below threshold`,
+      link: "/warehouses?tab=rawMaterials&sub=silos",
+      module: "Warehouses",
+    },
+    { siteId },
+  );
+};
 
 function toKgConverter(unit: string, specificGravity: number | null): (units: number) => number {
   return unit === "LITERS" ? (liters: number) => liters * (specificGravity ?? 1) : (tons: number) => tons * 1000;
@@ -183,7 +200,56 @@ export async function stageAutoRequisitionIntent(tx: Tx, batchTicketId: string, 
   });
 }
 
-export type ProcessIntentResult = { status: "RESOLVED" } | { status: "RETRY" };
+export type ProcessIntentResult =
+  | { status: "RESOLVED" }
+  | { status: "RETRY"; bookkeepingFailed?: boolean }
+  // PL-R12-P1-02: another processor holds an unexpired lease on this
+  // exact intent. Deliberately NOT folded into RESOLVED — the work is
+  // someone else's in-flight responsibility, not finished, and counting
+  // it as done is precisely how the concurrent-consumption bug hid.
+  | { status: "BUSY" }
+  // PL-R12-P2-02: the external work succeeded but recording that fact
+  // did not. Never RESOLVED: the row is still there, so the operator-
+  // visible counters must say so rather than reporting a clean sweep.
+  | { status: "BOOKKEEPING_FAILED" };
+
+// How long one processor may hold an intent before another may take it
+// over. Comfortably longer than a requisition create + notify round
+// trip, short enough that a crashed process frees the row well within
+// the daily sweep cadence.
+const INTENT_LEASE_MS = 5 * 60 * 1000;
+
+// PL-R12-P1-02: the ONE claim every entry point goes through — both
+// completeBatch's immediate post-commit attempt and the cron sweep. A
+// conditional updateMany, so the claim is decided by the database, not
+// by a read-then-write the other processor can interleave with.
+async function claimAutoRequisitionIntent(intentId: string, owner: string): Promise<{ status: "CLAIMED" } | { status: "BUSY" } | { status: "GONE" }> {
+  const now = new Date();
+  const claimed = await prisma.pendingAutoRequisition.updateMany({
+    where: {
+      id: intentId,
+      OR: [{ leaseOwner: null }, { leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }],
+    },
+    data: { leaseOwner: owner, leaseExpiresAt: new Date(now.getTime() + INTENT_LEASE_MS) },
+  });
+  if (claimed.count === 1) return { status: "CLAIMED" };
+  const stillThere = await prisma.pendingAutoRequisition.count({ where: { id: intentId } });
+  return stillThere === 0 ? { status: "GONE" } : { status: "BUSY" };
+}
+
+// PL-R12-P2-02: the cleanup that decides RESOLVED. A `.catch(() => {})`
+// here used to swallow a failed delete and still report RESOLVED, so a
+// row that was still sitting in the queue was counted as drained and the
+// operator-visible counters said the sweep was clean.
+async function finishIntent(intentId: string): Promise<ProcessIntentResult> {
+  try {
+    await prisma.pendingAutoRequisition.delete({ where: { id: intentId } });
+    return { status: "RESOLVED" };
+  } catch (error) {
+    console.error(`[materialRequisition] intent ${intentId} completed its work but could not be removed from the queue:`, error);
+    return { status: "BOOKKEEPING_FAILED" };
+  }
+}
 
 // The one place that actually drains a staged intent — called both by
 // completeBatch's own right-after-commit best-effort attempt (actions.ts)
@@ -203,15 +269,25 @@ export type ProcessIntentResult = { status: "RESOLVED" } | { status: "RETRY" };
 // "requisition created, notification fails, retry sends notification
 // exactly once, never a duplicate create" provable in a real integration
 // test without needing to force a genuine notifyRoles failure.
-export async function processPendingAutoRequisition(intentId: string, notify: (requisitionNumber: string, materialName: string) => Promise<void> = notifyRequisitionCreated): Promise<ProcessIntentResult> {
+export async function processPendingAutoRequisition(intentId: string, notify: RequisitionNotifier = notifyRequisitionCreated): Promise<ProcessIntentResult> {
+  // PL-R12-P1-02: claim BEFORE reading, so no two processors ever act on
+  // one intent's state. The previous version opened with an unlocked
+  // findUnique, which is exactly how the immediate post-commit caller and
+  // a cron worker could both see requisitionId = null.
+  const owner = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const claim = await claimAutoRequisitionIntent(intentId, owner);
+  if (claim.status === "GONE") return { status: "RESOLVED" }; // already fully resolved (and deleted) by a previous attempt
+  if (claim.status === "BUSY") return { status: "BUSY" };
+
   const intent = await prisma.pendingAutoRequisition.findUnique({ where: { id: intentId } });
-  if (!intent) return { status: "RESOLVED" }; // already resolved (and deleted) by a concurrent attempt
+  if (!intent) return { status: "RESOLVED" };
 
   try {
+    let requisitionId = intent.requisitionId;
     let requisitionNumber = intent.requisitionNumber;
     let materialName = intent.materialName;
 
-    if (!intent.requisitionId) {
+    if (!requisitionId) {
       const toKg = toKgConverter(intent.unit, intent.specificGravity);
       const created = await createRequisitionIfNeeded(intent.materialId, intent.siteId, intent.newLevel, intent.capacity, intent.minThresholdPct, toKg);
 
@@ -230,38 +306,58 @@ export async function processPendingAutoRequisition(intentId: string, notify: (r
         // or skip one that has genuinely resolved (over-ordering); the
         // snapshot is the one thing this intent can prove actually
         // happened at completion time.
-        await prisma.pendingAutoRequisition.delete({ where: { id: intentId } }).catch(() => {});
-        return { status: "RESOLVED" };
+        // PL-R12-P2-02: a delete that fails is a BOOKKEEPING failure, not
+        // a resolution. Reporting RESOLVED for a row that is still on
+        // file is exactly how a stuck queue looked healthy.
+        return finishIntent(intentId);
       }
-      if (created.status === "ALREADY_OPEN") {
-        // Someone else's completion already created (and already
-        // notified for) this exact material+site — nothing left for
-        // THIS intent to do.
-        await prisma.pendingAutoRequisition.delete({ where: { id: intentId } }).catch(() => {});
-        return { status: "RESOLVED" };
-      }
-
-      // CREATED — record the requisition progress durably BEFORE
-      // attempting notification, so a notifyRoles failure next can never
-      // cause a retry to re-attempt creation.
+      // PL-R12-P1-02: ALREADY_OPEN no longer deletes the intent on the
+      // ASSUMPTION that whoever created that requisition also notified
+      // for it — that assumption is what let a concurrent processor
+      // destroy the creator's outstanding notification work. The winning
+      // requisition is attached to this intent and the explicit
+      // notification state below decides, from the requisition's own
+      // delivery stamp, whether anything is still owed.
+      requisitionId = created.requisitionId;
       requisitionNumber = created.requisitionNumber;
       materialName = created.materialName;
       await prisma.pendingAutoRequisition.update({
+        // CREATED and ALREADY_OPEN alike: record the requisition progress
+        // durably BEFORE attempting notification, so a notify failure can
+        // never cause a retry to re-attempt creation.
         where: { id: intentId },
-        data: { requisitionId: created.requisitionId, requisitionNumber, materialName },
+        data: { requisitionId, requisitionNumber, materialName },
       });
     }
 
-    // requisitionId is now set either way — only the notification is
-    // still owed (an ALREADY_OPEN intent above already returned; only a
-    // genuine CREATED reaches here).
-    await notify(requisitionNumber!, materialName!);
-    await prisma.pendingAutoRequisition.delete({ where: { id: intentId } }).catch(() => {});
-    return { status: "RESOLVED" };
+    if (!intent.notificationDeliveredAt) {
+      // The cross-intent idempotency key: claim the right to announce
+      // THIS requisition with a conditional update. count === 0 means
+      // another intent already delivered it, so this one is genuinely
+      // owed nothing — a fact read from the database, never assumed.
+      const claimedDelivery = await prisma.materialRequisition.updateMany({
+        where: { id: requisitionId!, autoRequisitionNotifiedAt: null },
+        data: { autoRequisitionNotifiedAt: new Date() },
+      });
+      if (claimedDelivery.count === 1) {
+        try {
+          await notify({ requisitionNumber: requisitionNumber!, materialName: materialName!, siteId: intent.siteId });
+        } catch (notifyError) {
+          // Release the delivery claim so the next attempt (this intent
+          // or another) can genuinely retry it, rather than every future
+          // pass believing it was already sent.
+          await prisma.materialRequisition.updateMany({ where: { id: requisitionId! }, data: { autoRequisitionNotifiedAt: null } });
+          throw notifyError;
+        }
+      }
+      await prisma.pendingAutoRequisition.update({ where: { id: intentId }, data: { notificationDeliveredAt: new Date() } });
+    }
+
+    return finishIntent(intentId);
   } catch (error) {
     const attempts = intent.attempts + 1;
-    await prisma.pendingAutoRequisition
-      .update({
+    try {
+      await prisma.pendingAutoRequisition.update({
         where: { id: intentId },
         data: {
           attempts,
@@ -269,10 +365,23 @@ export async function processPendingAutoRequisition(intentId: string, notify: (r
           lastTriedAt: new Date(),
           nextAttemptAt: computeNextAttempt(attempts),
           deadLetteredAt: attempts >= MAX_ATTEMPTS_BEFORE_DEAD_LETTER ? new Date() : undefined,
+          // PL-R12-P1-02: release our own lease on the way out, so the
+          // next sweep can retry as soon as the backoff allows instead of
+          // waiting out the full lease behind a processor that is already
+          // finished with this row.
+          leaseOwner: null,
+          leaseExpiresAt: null,
         },
-      })
-      .catch(() => {});
-    return { status: "RETRY" };
+      });
+      return { status: "RETRY" };
+    } catch (bookkeepingError) {
+      // PL-R12-P2-02: previously `.catch(() => {})`. A failure to record
+      // the attempt means this row keeps its OLD nextAttemptAt and lease
+      // and will be re-attempted with no backoff at all — a real
+      // operational fact the sweep's counters must be able to report.
+      console.error(`[materialRequisition] intent ${intentId} failed AND its failure could not be recorded:`, error, bookkeepingError);
+      return { status: "RETRY", bookkeepingFailed: true };
+    }
   }
 }
 
@@ -306,15 +415,19 @@ async function claimEligiblePendingAutoRequisitions(limit: number): Promise<{ id
 // claimEligiblePendingAutoRequisitions) and drains each through the
 // exact same processPendingAutoRequisition completeBatch's own best-
 // effort attempt uses.
-export async function retryPendingAutoRequisitions(
-  limit = 200,
-  notify: (requisitionNumber: string, materialName: string) => Promise<void> = notifyRequisitionCreated,
-): Promise<{ attempted: number; resolved: number }> {
+export async function retryPendingAutoRequisitions(limit = 200, notify: RequisitionNotifier = notifyRequisitionCreated): Promise<QueueSweepCounts> {
   const claimed = await claimEligiblePendingAutoRequisitions(limit);
-  let resolved = 0;
+  const counts: QueueSweepCounts = { claimed: claimed.length, resolved: 0, busy: 0, externalFailed: 0, bookkeepingFailed: 0, deadLettered: 0 };
   for (const row of claimed) {
     const outcome = await processPendingAutoRequisition(row.id, notify);
-    if (outcome.status === "RESOLVED") resolved++;
+    if (outcome.status === "RESOLVED") counts.resolved++;
+    else if (outcome.status === "BUSY") counts.busy++;
+    else if (outcome.status === "BOOKKEEPING_FAILED") counts.bookkeepingFailed++;
+    else {
+      counts.externalFailed++;
+      if (outcome.bookkeepingFailed) counts.bookkeepingFailed++;
+    }
   }
-  return { attempted: claimed.length, resolved };
+  counts.deadLettered = await prisma.pendingAutoRequisition.count({ where: { deadLetteredAt: { not: null } } });
+  return counts;
 }

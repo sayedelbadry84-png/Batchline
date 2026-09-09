@@ -1535,22 +1535,40 @@ model Trip {
 // approval-notification delivery as separately tracked progress within
 // one row, per PL-R10-P2-01's own "record separate progress" requirement.
 model PendingAutoRequisition {
-  id                String    @id @default(cuid())
-  batchTicketId     String
-  materialId        String
-  siteId            String
-  newLevel          Float
-  capacity          Float
-  minThresholdPct   Float
-  unit              String // TONS, LITERS — mirrors RequisitionCandidate.unit
-  specificGravity   Float?
-  requisitionId     String?
-  requisitionNumber String?
-  materialName      String?
-  attempts          Int       @default(0)
-  lastError         String?
-  createdAt         DateTime  @default(now())
-  lastTriedAt       DateTime?
+  id                      String    @id @default(cuid())
+  batchTicketId           String
+  materialId              String
+  siteId                  String
+  newLevel                Float
+  capacity                Float
+  minThresholdPct         Float
+  unit                    String // TONS, LITERS — mirrors RequisitionCandidate.unit
+  specificGravity         Float?
+  requisitionId           String?
+  requisitionNumber       String?
+  materialName            String?
+  // PL-R12-P1-02, twelfth production-lifecycle review: the cron sweep's
+  // FOR UPDATE SKIP LOCKED claim protected cron workers from each other,
+  // but completeBatch's own immediate post-commit processor did not enter
+  // through it at all — so both could read requisitionId = null for the
+  // SAME intent, one create the requisition, the other see ALREADY_OPEN
+  // and delete the intent out from under the creator, losing the
+  // notification work entirely. Every entry point now takes this owner
+  // lease first (claimAutoRequisitionIntent in materialRequisition.ts);
+  // a second processor gets BUSY instead of a concurrent read. The lease
+  // expires so a crashed process can never strand an intent.
+  leaseOwner              String?
+  leaseExpiresAt          DateTime?
+  // Set only after the approval notification has actually been
+  // delivered, and always BEFORE the intent row is cleaned up — so
+  // "requisition created" and "purchasing was told about it" are two
+  // separately durable facts, and a crash between them retries only the
+  // half that is genuinely still owed.
+  notificationDeliveredAt DateTime?
+  attempts                Int       @default(0)
+  lastError               String?
+  createdAt               DateTime  @default(now())
+  lastTriedAt             DateTime?
   // PL-R10-P2-03, tenth production-lifecycle review: both retry tables
   // used a blind `orderBy: createdAt, take: 200` — once the OLDEST 200
   // rows are permanent failures, every sweep re-selects the same 200
@@ -1565,8 +1583,8 @@ model PendingAutoRequisition {
   // deadLetteredAt stops automatic retries past a defined attempt
   // threshold while leaving the row on file (excluded from claims, not
   // deleted) for a human to inspect or manually clear.
-  nextAttemptAt     DateTime  @default(now())
-  deadLetteredAt    DateTime?
+  nextAttemptAt           DateTime  @default(now())
+  deadLetteredAt          DateTime?
 
   @@unique([batchTicketId, materialId, siteId])
   @@index([nextAttemptAt])
@@ -2690,24 +2708,33 @@ model SparePartsRequisition {
 // one before creating another, so a run of many low batches doesn't flood
 // Purchasing with duplicates for the same shortage.
 model MaterialRequisition {
-  id                  String             @id @default(cuid())
-  requisitionNumber   String             @unique // MTR-YYYY-NNNN
-  materialId          String
-  material            Material           @relation(fields: [materialId], references: [id])
-  siteId              String
-  site                Site               @relation(fields: [siteId], references: [id])
-  quantityNeededKg    Float
-  status              String             @default("PENDING_APPROVAL") // PENDING_APPROVAL, APPROVED, REJECTED, ORDERED, FULFILLED, CANCELLED
-  requestedById       String?
-  requestedBy         User?              @relation("MTRRequestedBy", fields: [requestedById], references: [id])
-  approvedById        String?
-  approvedBy          User?              @relation("MTRApprovedBy", fields: [approvedById], references: [id])
-  approvedAt          DateTime?
-  purchaseOrderLineId String?            @unique
-  purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id])
-  notes               String?
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
+  id                        String             @id @default(cuid())
+  requisitionNumber         String             @unique // MTR-YYYY-NNNN
+  materialId                String
+  material                  Material           @relation(fields: [materialId], references: [id])
+  siteId                    String
+  site                      Site               @relation(fields: [siteId], references: [id])
+  quantityNeededKg          Float
+  status                    String             @default("PENDING_APPROVAL") // PENDING_APPROVAL, APPROVED, REJECTED, ORDERED, FULFILLED, CANCELLED
+  requestedById             String?
+  requestedBy               User?              @relation("MTRRequestedBy", fields: [requestedById], references: [id])
+  approvedById              String?
+  approvedBy                User?              @relation("MTRApprovedBy", fields: [approvedById], references: [id])
+  approvedAt                DateTime?
+  purchaseOrderLineId       String?            @unique
+  purchaseOrderLine         PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id])
+  notes                     String?
+  // PL-R12-P1-02: the cross-intent idempotency key for the automatic
+  // approval notification. Two DIFFERENT PendingAutoRequisition intents
+  // (two tickets that both ran the same material at the same site) can
+  // legitimately resolve to this one requisition — the second gets
+  // ALREADY_OPEN. Stamping delivery here, on the thing actually being
+  // announced, is what stops that second intent from sending purchasing a
+  // duplicate notification, without ever letting it merely ASSUME the
+  // first one delivered.
+  autoRequisitionNotifiedAt DateTime?
+  createdAt                 DateTime           @default(now())
+  updatedAt                 DateTime           @updatedAt
 }
 
 // ---------------------------------------------------------------------------
