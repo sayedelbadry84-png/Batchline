@@ -25,7 +25,15 @@ export function parseMoneyInput(raw: FormDataEntryValue | null): number | null {
   const trimmed = raw.trim();
   if (!MONEY_INPUT.test(trimmed)) return null;
   const amount = Number(trimmed);
-  return Number.isFinite(amount) ? amount : null;
+  if (!Number.isFinite(amount)) return null;
+  // PR4-R2 hardening note 1: the regex admits arbitrarily long digit
+  // strings, and a big enough one stops being exactly representable in
+  // minor units — every comparison and every sum against it would then be
+  // approximate in a way no rounding policy can recover. Refuse it here
+  // rather than let it into the ledger. (The Decimal migration is still
+  // the durable fix; this is the boundary that must hold until then.)
+  if (!Number.isSafeInteger(Math.round(amount * 100))) return null;
+  return amount;
 }
 
 // Whole minor units (halalas) for exact comparison. Only ever called on a

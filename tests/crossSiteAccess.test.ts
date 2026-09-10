@@ -894,6 +894,147 @@ test("a failed audit insert rolls back the quote response and the WON transition
   );
 });
 
+// PR4-R3-P1-01 — the same cross-site bridge class as createQuote, found
+// in Finance: a bill could name another site's purchase order.
+test("a supplier bill cannot be linked to another site's or another supplier's purchase order", async () => {
+  const theirOrder = await makePurchaseOrder(siteB);
+  const billsBefore = await prisma.supplierBill.count();
+
+  await asUser(accountantId);
+  await finance.createSupplierBill(
+    form({ supplierId, siteId: siteA, purchaseOrderId: theirOrder.id, dueDate: "2026-12-31", subtotal: "100", taxAmount: "15" }),
+  );
+  assert.equal(await prisma.supplierBill.count(), billsBefore, "a Site A bill must not attach to a Site B purchase order");
+  assert.equal(await prisma.journalEntry.count({ where: { siteId: siteB } }), 0, "and nothing may post against the other site");
+
+  // Right site, wrong supplier: the order is claimed by id + site +
+  // supplier, so this is refused too.
+  const otherSupplier = await prisma.supplier.create({ data: { name: `${prefix}-SUPPLIER-2` } });
+  const myOrder = await makePurchaseOrder(siteA);
+  await finance.createSupplierBill(
+    form({ supplierId: otherSupplier.id, siteId: siteA, purchaseOrderId: myOrder.id, dueDate: "2026-12-31", subtotal: "100" }),
+  );
+  assert.equal(await prisma.supplierBill.count(), billsBefore, "a bill must not attach to another supplier's order");
+
+  // Positive control: this caller's own site and supplier.
+  await finance.createSupplierBill(
+    form({ supplierId, siteId: siteA, purchaseOrderId: myOrder.id, dueDate: "2026-12-31", subtotal: "100", taxAmount: "15" }),
+  );
+  const created = await prisma.supplierBill.findFirst({ where: { purchaseOrderId: myOrder.id } });
+  assert.ok(created, "the caller's own order must still be billable");
+  supplierBillIds.push(created.id);
+  assert.equal(created.total, 115);
+
+  await prisma.supplier.delete({ where: { id: otherSupplier.id } });
+});
+
+// PR4-R3-P1-02 — the bill is where a number enters the ledger, so the
+// currency policy has to hold there, not only on the payment.
+test("a supplier bill refuses amounts that cannot exist in the currency", async () => {
+  await asUser(accountantId);
+  const before = await prisma.supplierBill.count();
+
+  for (const [label, fields] of [
+    ["sub-halala subtotal", { subtotal: "100.004" }],
+    ["negative subtotal", { subtotal: "-100" }],
+    ["zero subtotal", { subtotal: "0" }],
+    ["negative tax", { subtotal: "100", taxAmount: "-15" }],
+    ["sub-halala tax", { subtotal: "100", taxAmount: "15.004" }],
+    ["non-numeric", { subtotal: "1e3" }],
+    ["beyond safe minor units", { subtotal: "900719925474099.91" }],
+  ] as [string, Record<string, string>][]) {
+    await finance.createSupplierBill(form({ supplierId, siteId: siteA, dueDate: "2026-12-31", ...fields }));
+    assert.equal(await prisma.supplierBill.count(), before, `${label} must not create a bill`);
+  }
+
+  // A bill of 100.004 was the concrete harm: 100.00 leaves 0.004
+  // outstanding, and the smallest payable amount, 0.01, exceeds it — so
+  // the bill could never be settled at all.
+  await finance.createSupplierBill(form({ supplierId, siteId: siteA, dueDate: "2026-12-31", subtotal: "100", taxAmount: "0.01" }));
+  const ok = await prisma.supplierBill.findFirst({ where: { siteId: siteA, total: 100.01 } });
+  assert.ok(ok, "a valid two-decimal bill is still accepted");
+  supplierBillIds.push(ok.id);
+});
+
+// PR4-R3-P1-03 — the ledger document and its audit row commit together or
+// not at all. Without this, a failed audit left a numbered bill and its
+// journal committed while the caller saw a failure, and a retry created a
+// SECOND numbered document and posted again.
+test("a failed audit insert rolls back the supplier bill and its journal entry", async () => {
+  await asUser(accountantId);
+  const billsBefore = await prisma.supplierBill.count();
+  const journalBefore = await prisma.journalEntry.count({ where: { siteId: siteA } });
+
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_xs_reject_bill_audit() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."reasonCode" = 'SUPPLIER_BILL_CREATED' THEN
+        RAISE EXCEPTION 'injected audit failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER test_xs_reject_bill_audit_trigger BEFORE INSERT ON "AuditEvent"
+    FOR EACH ROW EXECUTE FUNCTION test_xs_reject_bill_audit();
+  `);
+  try {
+    await assert.rejects(
+      () => finance.createSupplierBill(form({ supplierId, siteId: siteA, dueDate: "2026-12-31", subtotal: "250" })),
+      "the caller is told the action failed",
+    );
+    assert.equal(await prisma.supplierBill.count(), billsBefore, "no numbered bill may survive an audit failure");
+    assert.equal(await prisma.journalEntry.count({ where: { siteId: siteA } }), journalBefore, "and nothing may be left posted to the ledger");
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_reject_bill_audit_trigger ON "AuditEvent";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_reject_bill_audit();`);
+  }
+
+  await finance.createSupplierBill(form({ supplierId, siteId: siteA, dueDate: "2026-12-31", subtotal: "250" }));
+  const settled = await prisma.supplierBill.findFirst({ where: { siteId: siteA, total: 250 } });
+  assert.ok(settled, "and the same call succeeds once the trigger is gone");
+  supplierBillIds.push(settled.id);
+  assert.equal(
+    await prisma.auditEvent.count({ where: { reasonCode: "SUPPLIER_BILL_CREATED", recordId: settled.id } }),
+    1,
+    "with its audit row committed alongside it",
+  );
+});
+
+test("a failed audit insert rolls back a cash transaction and its journal entry", async () => {
+  await asUser(accountantId);
+  const journalBefore = await prisma.journalEntry.count({ where: { siteId: siteA } });
+
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_xs_reject_cash_audit() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."reasonCode" = 'CASH_TRANSACTION_RECORDED' THEN
+        RAISE EXCEPTION 'injected audit failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER test_xs_reject_cash_audit_trigger BEFORE INSERT ON "AuditEvent"
+    FOR EACH ROW EXECUTE FUNCTION test_xs_reject_cash_audit();
+  `);
+  try {
+    await assert.rejects(() =>
+      finance.createCashTransaction(form({ siteId: siteA, direction: "IN", category: "OTHER", amount: "75", description: `${prefix}-CASH` })),
+    );
+    assert.equal(await prisma.cashTransaction.count({ where: { description: `${prefix}-CASH` } }), 0);
+    assert.equal(await prisma.journalEntry.count({ where: { siteId: siteA } }), journalBefore);
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_reject_cash_audit_trigger ON "AuditEvent";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_reject_cash_audit();`);
+  }
+
+  await finance.createCashTransaction(form({ siteId: siteA, direction: "IN", category: "OTHER", amount: "75", description: `${prefix}-CASH` }));
+  assert.equal(await prisma.cashTransaction.count({ where: { description: `${prefix}-CASH` } }), 1);
+});
+
 after(async () => {
   const users = [operatorId, salesId, accountantId, adminId, salesManagerId, salesSupervisorId, supervisorId].filter(Boolean);
   await prisma.session.deleteMany({ where: { userId: { in: users } } });
@@ -903,6 +1044,8 @@ after(async () => {
   const touchedAccounts = (await prisma.journalLine.findMany({ where: { siteId: { in: sites } }, select: { accountId: true } })).map((l) => l.accountId);
   await prisma.journalEntry.deleteMany({ where: { siteId: { in: sites } } });
   await prisma.account.deleteMany({ where: { id: { in: touchedAccounts.filter((id) => !initialAccountIds.includes(id)) }, journalLines: { none: {} } } });
+  await prisma.cashTransaction.deleteMany({ where: { description: { startsWith: prefix } } });
+  await prisma.supplierBill.deleteMany({ where: { billNumber: { startsWith: prefix } } });
   await prisma.supplierPayment.deleteMany({ where: { supplierBillId: { in: supplierBillIds } } });
   await prisma.supplierBill.deleteMany({ where: { id: { in: supplierBillIds } } });
   await prisma.priceListEntry.deleteMany({ where: { customerId } });
@@ -944,6 +1087,8 @@ after(async () => {
   assert.equal(await prisma.batchTicket.count({ where: { ticketNumber: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.site.count({ where: { code: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.supplierBill.count({ where: { billNumber: { startsWith: prefix } } }), 0);
+  assert.equal(await prisma.cashTransaction.count({ where: { description: { startsWith: prefix } } }), 0);
+  assert.equal(await prisma.supplier.count({ where: { name: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.opportunity.count({ where: { opportunityNumber: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.fieldVisit.count({ where: { visitNumber: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.quote.count({ where: { quoteNumber: { startsWith: prefix } } }), 0);

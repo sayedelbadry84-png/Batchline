@@ -18,6 +18,22 @@ import { revalidatePath } from "next/cache";
 const TX_OPTIONS = { timeout: 15000 };
 
 
+// PR4-R3-P1-01: thrown inside the bill transaction when the purchase
+// order named on the form is not this site's and this supplier's, so the
+// bill and its journal entry unwind with it. Turned back into the silent
+// refusal every other action here uses — an answer that distinguished
+// "not yours" from "does not exist" would confirm the order exists.
+class BillSourceRefused extends Error {}
+
+async function silentOnRefusal<T>(run: () => Promise<T>): Promise<T | null> {
+  try {
+    return await run();
+  } catch (e) {
+    if (e instanceof BillSourceRefused) return null;
+    throw e;
+  }
+}
+
 export async function createSupplierBill(formData: FormData) {
   const actor = await getCurrentUser();
   await requireActionPermission(actor, "finance", "createSupplierBill");
@@ -26,43 +42,87 @@ export async function createSupplierBill(formData: FormData) {
   const purchaseOrderId = String(formData.get("purchaseOrderId") ?? "") || null;
   const siteId = String(formData.get("siteId") ?? "");
   const dueDateRaw = String(formData.get("dueDate") ?? "");
-  const subtotal = Number(formData.get("subtotal") ?? 0);
-  const taxAmount = Number(formData.get("taxAmount") ?? 0) || 0;
+  // PR4-R3-P1-02: the payment path already refused amounts that cannot
+  // exist in the currency, but the SOURCE document did not — it took
+  // `Number(...)` straight from the form. That admitted a negative
+  // subtotal (which reverses the journal's economic direction), and
+  // values like 100.004: a bill totalling 100.004 can never be settled,
+  // because paying 100.00 leaves 0.004 outstanding while the smallest
+  // payable amount, 0.01, exceeds it. The bill is where the number enters
+  // the ledger, so it is where the policy has to hold.
+  const subtotal = parseMoneyInput(formData.get("subtotal"));
+  const taxAmount = formData.get("taxAmount") === null || String(formData.get("taxAmount")).trim() === "" ? 0 : parseMoneyInput(formData.get("taxAmount"));
   const notes = String(formData.get("notes") ?? "").trim() || null;
 
-  if (!supplierId || !siteId || !dueDateRaw || !subtotal) return;
+  if (!supplierId || !siteId || !dueDateRaw) return;
+  if (subtotal === null || subtotal <= 0) return;
+  if (taxAmount === null || taxAmount < 0) return;
   if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
 
   const { currency } = await resolvePlantBillingDefaults(siteId);
   const total = subtotal + taxAmount;
+  // The sum of two valid amounts can still leave the representable range.
+  if (!Number.isSafeInteger(toMinorUnits(total))) return;
 
-  // The bill and its journal entry commit as one unit — see the same
-  // rationale on generateInvoiceForProject in billing/actions.ts.
-  const bill = await prisma.$transaction(async (tx) => {
-    const bill = await withSequentialNumber(
+  // PR4-R3-P1-01: purchaseOrderId arrived from the form and was written
+  // onto the bill without ever being loaded — the same cross-site bridge
+  // class already fixed in createQuote, here in Finance. A Site A
+  // accountant could submit their own permitted siteId together with a
+  // known Site B purchase order (or another supplier's), and the schema
+  // has no invariant tying SupplierBill.siteId to PurchaseOrder.siteId.
+  // The order is now claimed inside the transaction by id + site +
+  // supplier, so the three cannot name different owners.
+  //
+  // PR4-R3-P1-03: the audit row moved inside the transaction. It used to
+  // run after the commit, so a failed audit insert left a numbered bill
+  // and its journal entry committed while the caller saw a failure — and
+  // an operator retry created a SECOND numbered document and posted the
+  // ledger again.
+  //
+  // The transaction now sits INSIDE withSequentialNumber rather than the
+  // other way round. That ordering matters: a P2002 on billNumber aborts
+  // the whole transaction, so the old shape retried its next candidate
+  // inside a transaction Postgres had already poisoned.
+  const bill = await silentOnRefusal(() =>
+    withSequentialNumber(
       "BILL",
-      (yr) => tx.supplierBill.count({ where: { createdAt: yr } }),
+      (yr) => prisma.supplierBill.count({ where: { createdAt: yr } }),
       (billNumber) =>
-        tx.supplierBill.create({
-          data: {
-            billNumber,
-            supplierId,
-            purchaseOrderId,
-            siteId,
-            dueDate: new Date(dueDateRaw),
-            subtotal,
-            taxAmount,
-            total,
-            currency,
-            notes,
-          },
-        }),
-    );
-    await postSupplierBill(tx, { siteId, currency, billId: bill.id, total });
-    return bill;
-  }, TX_OPTIONS);
+        prisma.$transaction(async (tx) => {
+          if (purchaseOrderId) {
+            const order = await tx.purchaseOrder.findFirst({
+              where: { id: purchaseOrderId, siteId, supplierId },
+              select: { id: true },
+            });
+            if (!order) throw new BillSourceRefused();
+          }
+          const created = await tx.supplierBill.create({
+            data: {
+              billNumber,
+              supplierId,
+              purchaseOrderId,
+              siteId,
+              dueDate: new Date(dueDateRaw),
+              subtotal,
+              taxAmount,
+              total,
+              currency,
+              notes,
+            },
+          });
+          await postSupplierBill(tx, { siteId, currency, billId: created.id, total });
+          await writeAudit(tx, { id: actor!.id, role: actor!.role }, {
+            module: "Finance",
+            recordId: created.id,
+            afterValue: `${created.billNumber} — ${total} ${currency}`,
+            reasonCode: "SUPPLIER_BILL_CREATED",
+          });
+          return created;
+        }, TX_OPTIONS),
+    ),
+  );
+  if (!bill) return;
 
-  await logAudit({ module: "Finance", recordId: bill.id, afterValue: `${bill.billNumber} — ${total} ${currency}`, reasonCode: "SUPPLIER_BILL_CREATED" });
   revalidatePath("/finance");
 }
 
@@ -233,12 +293,14 @@ export async function createCashTransaction(formData: FormData) {
 
   // The transaction and its journal entry commit as one unit — see the
   // same rationale on generateInvoiceForProject in billing/actions.ts.
-  const txn = await prisma.$transaction(async (tx) => {
-    const txn = await withSequentialNumber(
-      "TXN",
-      (yr) => tx.cashTransaction.count({ where: { createdAt: yr } }),
-      (txnNumber) =>
-        tx.cashTransaction.create({
+  // PR4-R3-P1-03 and the same withSequentialNumber/transaction ordering
+  // fix as createSupplierBill above.
+  await withSequentialNumber(
+    "TXN",
+    (yr) => prisma.cashTransaction.count({ where: { createdAt: yr } }),
+    (txnNumber) =>
+      prisma.$transaction(async (tx) => {
+        const txn = await tx.cashTransaction.create({
           data: {
             txnNumber,
             siteId,
@@ -251,13 +313,18 @@ export async function createCashTransaction(formData: FormData) {
             occurredAt: occurredAtRaw ? new Date(occurredAtRaw) : new Date(),
             createdById: actor!.id,
           },
-        }),
-    );
-    await postCashTransaction(tx, { siteId, currency, txnId: txn.id, direction: direction as "IN" | "OUT", category, amount, description });
-    return txn;
-  }, TX_OPTIONS);
+        });
+        await postCashTransaction(tx, { siteId, currency, txnId: txn.id, direction: direction as "IN" | "OUT", category, amount, description });
+        await writeAudit(tx, { id: actor!.id, role: actor!.role }, {
+          module: "Finance",
+          recordId: txn.id,
+          afterValue: `${direction} ${amount} ${currency} — ${category}`,
+          reasonCode: "CASH_TRANSACTION_RECORDED",
+        });
+        return txn;
+      }, TX_OPTIONS),
+  );
 
-  await logAudit({ module: "Finance", recordId: txn.id, afterValue: `${direction} ${amount} ${currency} — ${category}`, reasonCode: "CASH_TRANSACTION_RECORDED" });
   revalidatePath("/finance");
 }
 
@@ -303,7 +370,17 @@ export async function reconcileMovement(formData: FormData) {
   }
   if (marked.count !== 1) return;
 
-  await logAudit({ module: "Finance", recordId: id, afterValue: `${kind} reconciled`, reasonCode: "BANK_RECONCILED" });
+  // PR4-R3-P1-03 sweep: smaller blast radius than a ledger posting, but
+  // the same rule — a reconciliation that commits without its audit row
+  // is an unexplained change to financial state.
+  await prisma.$transaction((tx) =>
+    writeAudit(tx, { id: actor!.id, role: actor!.role }, {
+      module: "Finance",
+      recordId: id,
+      afterValue: `${kind} reconciled`,
+      reasonCode: "BANK_RECONCILED",
+    }),
+  );
   revalidatePath("/finance");
 }
 

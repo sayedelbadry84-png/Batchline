@@ -33,3 +33,12 @@ test("minor units are exact for values the parser accepts", () => {
   assert.equal(toMinorUnits(8.32), 832);
   assert.equal(toMinorUnits(100.5), 10050);
 });
+
+test("an amount too large to hold exactly in minor units is refused", () => {
+  // Number.MAX_SAFE_INTEGER is 9007199254740991 halalas, i.e. about
+  // 90,071,992,547,409.91. Past that, the minor-unit value a comparison
+  // or a sum would use is no longer the number that was typed.
+  assert.equal(parseMoneyInput("90071992547409.91"), 90071992547409.91);
+  assert.equal(parseMoneyInput("900719925474099.91"), null, "beyond safe minor units must not enter the ledger");
+  assert.equal(parseMoneyInput("99999999999999999999.99"), null);
+});
