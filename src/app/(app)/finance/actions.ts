@@ -2,7 +2,7 @@
 
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { logAudit, writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
@@ -14,6 +14,21 @@ import { revalidatePath } from "next/cache";
 // sequential round trips to Neon inside one interactive transaction can
 // exceed Prisma's 5s default timeout, especially on a cold connection.
 const TX_OPTIONS = { timeout: 15000 };
+
+// PR4-R1-P1-03, second external-review validation round: money columns are
+// still Float (BL-CR-P2-02 tracks the Decimal migration), so comparing a
+// submitted amount against a computed balance directly means comparing two
+// approximations. The previous guard papered over that with a ±0.005
+// epsilon — which by construction ACCEPTS a payment up to half a halala
+// above the outstanding balance.
+//
+// Comparing in minor units instead removes the tolerance entirely: both
+// sides are rounded to whole halalas exactly once, and the comparison is
+// then integer-exact. This is also the rounding policy AGENTS.md already
+// requires at write time, applied at the point the decision is made.
+function toMinorUnits(amount: number): number {
+  return Math.round(amount * 100);
+}
 
 export async function createSupplierBill(formData: FormData) {
   const actor = await getCurrentUser();
@@ -107,34 +122,48 @@ export async function recordSupplierPayment(formData: FormData) {
   // genuinely serialize instead of interleaving.
   const allowedSiteId = effectiveSiteId(actor);
   const posted = await prisma.$transaction(async (tx) => {
+    // PR4-R1-P1-03: the caller's site is part of the locked SELECT itself,
+    // so a crafted request cannot even take the lock on another site's
+    // bill — previously it locked the row and only then found out it was
+    // not allowed to, which is a denial-of-service handle on a stranger's
+    // billing row. `${allowedSiteId}::text IS NULL` is the ADMIN case.
     const locked = await tx.$queryRaw<{ id: string; siteId: string; currency: string; total: number; status: string; billNumber: string }[]>`
       SELECT "id", "siteId", "currency", "total", "status", "billNumber"
       FROM "SupplierBill"
       WHERE "id" = ${supplierBillId}
+        AND (${allowedSiteId}::text IS NULL OR "siteId" = ${allowedSiteId})
       FOR UPDATE
     `;
     const bill = locked[0];
     if (!bill) return null;
-    if (allowedSiteId !== null && bill.siteId !== allowedSiteId) return null;
     if (bill.status === "CANCELLED") return null;
 
     // Summed inside the same locked transaction, so a concurrent payment
     // is either already counted here or still waiting on our lock.
     const alreadyPaid = (await tx.supplierPayment.aggregate({ where: { supplierBillId }, _sum: { amount: true } }))._sum.amount ?? 0;
-    const outstanding = bill.total - alreadyPaid;
-    // Half a halala of tolerance: these columns are Float (see
-    // BL-CR-P2-02 on migrating money to Decimal), so an exact-settlement
-    // payment must not be refused by a representation error.
-    if (amount > outstanding + 0.005) return null;
+    // Integer-exact: no epsilon, so nothing above the balance is accepted
+    // and exact settlement is never refused by a float representation.
+    if (toMinorUnits(amount) > toMinorUnits(bill.total) - toMinorUnits(alreadyPaid)) return null;
 
     const payment = await tx.supplierPayment.create({ data: { supplierBillId, amount, method, reference } });
     await recomputeBillStatus(tx, supplierBillId);
     await postSupplierPayment(tx, { siteId: bill.siteId, currency: bill.currency, paymentId: payment.id, amount });
+    // PR4-R1-P1-03: writeAudit inside the transaction, not logAudit after
+    // it. Post-commit audit left exactly the failure this finding
+    // prohibits — a committed payment and journal entry whose audit row
+    // failed to insert, reported to the caller as a failure they may then
+    // retry. Now the money, the journal and the audit commit together or
+    // not at all.
+    await writeAudit(tx, { id: actor!.id, role: actor!.role }, {
+      module: "Finance",
+      recordId: payment.id,
+      afterValue: `${amount} against ${bill.billNumber}`,
+      reasonCode: "SUPPLIER_PAYMENT_RECORDED",
+    });
     return { paymentId: payment.id, billNumber: bill.billNumber };
   }, TX_OPTIONS);
   if (!posted) return;
 
-  await logAudit({ module: "Finance", recordId: posted.paymentId, afterValue: `${amount} against ${posted.billNumber}`, reasonCode: "SUPPLIER_PAYMENT_RECORDED" });
   revalidatePath("/finance");
 }
 
@@ -153,12 +182,16 @@ export async function cancelSupplierBill(formData: FormData) {
   // own entry was then reversed.
   const allowedSiteId = effectiveSiteId(actor);
   const cancelled = await prisma.$transaction(async (tx) => {
+    // PR4-R1-P1-03: site in the locked predicate, same as
+    // recordSupplierPayment above.
     const locked = await tx.$queryRaw<{ id: string; siteId: string; status: string }[]>`
-      SELECT "id", "siteId", "status" FROM "SupplierBill" WHERE "id" = ${id} FOR UPDATE
+      SELECT "id", "siteId", "status" FROM "SupplierBill"
+      WHERE "id" = ${id}
+        AND (${allowedSiteId}::text IS NULL OR "siteId" = ${allowedSiteId})
+      FOR UPDATE
     `;
     const bill = locked[0];
     if (!bill) return false;
-    if (allowedSiteId !== null && bill.siteId !== allowedSiteId) return false;
     // Tightened to unpaid-only (was PAID-only before) — same reasoning as
     // cancelInvoice's own guard: cancelling a bill that already has real
     // SupplierPayment money moved against it can't be undone by simply
@@ -174,11 +207,17 @@ export async function cancelSupplierBill(formData: FormData) {
     // COGS/Materials / Cr AP) — see the same reasoning on cancelInvoice's
     // own reversal call in billing/actions.ts.
     await reverseJournalEntry(tx, "Finance", id, "Supplier bill cancelled");
+    // PR4-R1-P1-03: audited inside the same transaction as the reversal.
+    await writeAudit(tx, { id: actor!.id, role: actor!.role }, {
+      module: "Finance",
+      recordId: id,
+      afterValue: "CANCELLED",
+      reasonCode: "SUPPLIER_BILL_CANCELLED",
+    });
     return true;
   }, TX_OPTIONS);
   if (!cancelled) return;
 
-  await logAudit({ module: "Finance", recordId: id, afterValue: "CANCELLED", reasonCode: "SUPPLIER_BILL_CANCELLED" });
   revalidatePath("/finance");
 }
 

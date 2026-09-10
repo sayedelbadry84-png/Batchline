@@ -557,6 +557,205 @@ test("two concurrent payments against one bill cannot together overpay it", asyn
   assert.equal((await prisma.supplierBill.findUniqueOrThrow({ where: { id: bill.id } })).status, "PARTIALLY_PAID");
 });
 
+// ===================================================================
+// PR4-R1-P1-01 / PR4-R1-P1-02, second external-review validation round.
+//
+// The first pass fixed the mutations the report named, and CI went green
+// — which is exactly why the reviewer's point lands: a green suite proves
+// only what it calls. These cover the Sales actions the first suite never
+// touched, including the one that turned out to be a direct cross-site
+// bridge rather than a race.
+// ===================================================================
+
+// createQuote takes repeated line fields, so it cannot use the `form`
+// helper above (FormData.set would keep only the last of each).
+function quoteForm(fields: Record<string, string>, lines: { mixId: string; volume: string; price: string }[]) {
+  const data = new FormData();
+  for (const [k, v] of Object.entries(fields)) data.set(k, v);
+  for (const l of lines) {
+    data.append("mixId", l.mixId);
+    data.append("estimatedVolumeM3", l.volume);
+    data.append("unitPrice", l.price);
+  }
+  return data;
+}
+
+test("createQuote cannot bridge two sites through a foreign opportunity id", async () => {
+  const theirs = await makeOpportunity(siteB, { customerId, prospectName: null, status: "NEW" });
+  const quotesBefore = await prisma.quote.count();
+
+  await asUser(salesId);
+  // The crafted request: the caller's OWN permitted siteId, another
+  // site's opportunityId. Nothing in the schema ties the two together.
+  await sales.createQuote(
+    quoteForm({ opportunityId: theirs.id, siteId: siteA }, [{ mixId, volume: "10", price: "100" }]),
+  );
+
+  assert.equal(await prisma.quote.count(), quotesBefore, "no quote may be created against another site's opportunity");
+  const untouched = await prisma.opportunity.findUniqueOrThrow({ where: { id: theirs.id } });
+  assert.equal(untouched.status, "NEW", "and the foreign opportunity's stage must not be advanced by it");
+
+  // Positive control: the identical call inside the caller's own site.
+  const mine = await makeOpportunity(siteA, { customerId, prospectName: null, status: "NEW" });
+  await sales.createQuote(
+    quoteForm({ opportunityId: mine.id, siteId: siteA }, [{ mixId, volume: "10", price: "100" }]),
+  );
+  const created = await prisma.quote.findFirst({ where: { opportunityId: mine.id } });
+  assert.ok(created, "quoting the caller's own opportunity must still work");
+  quoteIds.push(created.id);
+  assert.equal(created.siteId, siteA);
+  assert.equal((await prisma.opportunity.findUniqueOrThrow({ where: { id: mine.id } })).status, "QUOTED");
+});
+
+test("a quote already bridged to a foreign opportunity cannot be accepted", async () => {
+  // Constructed directly, because createQuote can no longer produce it —
+  // this is the legacy row such a request would have left behind.
+  const theirs = await makeOpportunity(siteB, { customerId, prospectName: null, status: "QUOTED" });
+  const bridged = await prisma.quote.create({
+    data: {
+      quoteNumber: `${prefix}-QT-${randomUUID().slice(0, 8)}`,
+      opportunityId: theirs.id,
+      customerId,
+      siteId: siteA,
+      status: "SENT",
+      currency: "SAR",
+      subtotal: 100,
+      total: 100,
+      preparedById: salesId,
+    },
+  });
+  quoteIds.push(bridged.id);
+
+  await asUser(salesId);
+  await sales.recordQuoteResponse(form({ id: bridged.id, response: "ACCEPTED" }));
+
+  assert.equal(
+    (await prisma.quote.findUniqueOrThrow({ where: { id: bridged.id } })).status,
+    "SENT",
+    "accepting must roll back entirely when the linked opportunity is out of scope — not half-apply",
+  );
+  assert.equal(
+    (await prisma.opportunity.findUniqueOrThrow({ where: { id: theirs.id } })).status,
+    "QUOTED",
+    "and the foreign opportunity must never be marked WON",
+  );
+});
+
+test("updateOpportunity and advanceOpportunityStage refuse another site's record", async () => {
+  const theirs = await makeOpportunity(siteB, { customerId, status: "NEW", finalApprovedAt: new Date(), finalApprovedById: adminId });
+
+  await asUser(salesId);
+  await sales.updateOpportunity(form({ id: theirs.id, notes: `${prefix}-HACKED` }));
+  assert.notEqual((await prisma.opportunity.findUniqueOrThrow({ where: { id: theirs.id } })).notes, `${prefix}-HACKED`);
+
+  await sales.advanceOpportunityStage(form({ id: theirs.id, status: "WON" }));
+  assert.equal((await prisma.opportunity.findUniqueOrThrow({ where: { id: theirs.id } })).status, "NEW", "another site's deal must not be closed on its behalf");
+
+  // Positive controls, and the approval precondition that now lives in
+  // the write's own predicate rather than beside it.
+  const mine = await makeOpportunity(siteA, { customerId, status: "NEW" });
+  await sales.updateOpportunity(form({ id: mine.id, notes: `${prefix}-OK` }));
+  assert.equal((await prisma.opportunity.findUniqueOrThrow({ where: { id: mine.id } })).notes, `${prefix}-OK`);
+
+  await sales.advanceOpportunityStage(form({ id: mine.id, status: "WON" }));
+  assert.equal((await prisma.opportunity.findUniqueOrThrow({ where: { id: mine.id } })).status, "NEW", "WON still requires final approval on file");
+
+  await prisma.opportunity.update({ where: { id: mine.id }, data: { finalApprovedAt: new Date(), finalApprovedById: adminId } });
+  await sales.advanceOpportunityStage(form({ id: mine.id, status: "WON" }));
+  assert.equal((await prisma.opportunity.findUniqueOrThrow({ where: { id: mine.id } })).status, "WON", "and goes through once it is");
+});
+
+test("updateQuote refuses another site's draft", async () => {
+  const theirs = await makeQuote(siteB);
+  await asUser(salesId);
+  await sales.updateQuote(form({ id: theirs.id, notes: `${prefix}-HACKED` }));
+  assert.notEqual((await prisma.quote.findUniqueOrThrow({ where: { id: theirs.id } })).notes, `${prefix}-HACKED`);
+
+  const mine = await makeQuote(siteA);
+  await sales.updateQuote(form({ id: mine.id, notes: `${prefix}-OK` }));
+  assert.equal((await prisma.quote.findUniqueOrThrow({ where: { id: mine.id } })).notes, `${prefix}-OK`);
+});
+
+test("a quote line from another site cannot be converted into a reservation", async () => {
+  const theirs = await makeQuote(siteB);
+  const project = await prisma.project.create({ data: { name: `${prefix}-PROJ`, customerId, siteAddress: "Test" } });
+  projectIds.push(project.id);
+  await prisma.quote.update({ where: { id: theirs.id }, data: { status: "ACCEPTED", projectId: project.id } });
+  const line = await prisma.quoteLine.create({
+    data: { quoteId: theirs.id, mixId, estimatedVolumeM3: 10, unitPrice: 100, lineTotal: 1000 },
+  });
+
+  await asUser(salesId);
+  const before = await prisma.reservation.count();
+  await sales.convertQuoteLineToReservation(form({ quoteLineId: line.id }));
+  assert.equal(await prisma.reservation.count(), before, "another site's accepted quote must not book production here");
+});
+
+// PR4-R1-P1-03 — the audit write is inside the money transaction, proved
+// by making that write fail and showing nothing else survived.
+test("a failed audit insert rolls back the payment, the bill status and the journal", async () => {
+  const bill = await makeSupplierBill(siteA, 100);
+  await asUser(accountantId);
+
+  // Failure injection at the database, not in application code: a
+  // temporary trigger that rejects exactly this suite's audit row. If the
+  // audit write were still post-commit, the payment and its journal entry
+  // would already be committed by the time it fired.
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_xs_reject_audit() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."reasonCode" = 'SUPPLIER_PAYMENT_RECORDED' AND NEW."afterValue" LIKE '%${prefix}%' THEN
+        RAISE EXCEPTION 'injected audit failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER test_xs_reject_audit_trigger BEFORE INSERT ON "AuditEvent"
+    FOR EACH ROW EXECUTE FUNCTION test_xs_reject_audit();
+  `);
+  try {
+    await assert.rejects(
+      () => finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "50" })),
+      "the caller is told the action failed",
+    );
+    assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: bill.id } }), 0, "no payment may survive an audit failure");
+    assert.equal((await prisma.supplierBill.findUniqueOrThrow({ where: { id: bill.id } })).status, "UNPAID", "and the derived status must not have moved");
+    assert.equal(await prisma.journalEntry.count({ where: { siteId: siteA } }), 0, "and no journal entry may be left behind");
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_reject_audit_trigger ON "AuditEvent";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_reject_audit();`);
+  }
+
+  // With the trigger gone the same payment goes through, which is what
+  // proves the rollback above came from the injected failure and not from
+  // some unrelated refusal.
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "50" }));
+  assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: bill.id } }), 1);
+  assert.equal(
+    await prisma.auditEvent.count({ where: { reasonCode: "SUPPLIER_PAYMENT_RECORDED", afterValue: { contains: prefix } } }),
+    1,
+    "and the audit row committed with it",
+  );
+});
+
+test("a payment above the outstanding balance is refused to the halala, with no epsilon", async () => {
+  const bill = await makeSupplierBill(siteA, 100);
+  await asUser(accountantId);
+
+  // One halala over. The previous ±0.005 tolerance accepted exactly this.
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "100.01" }));
+  assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: bill.id } }), 0, "nothing above the balance may be posted, however small");
+
+  // A value that is not exactly representable in binary floating point
+  // must still settle a bill of the same value.
+  const awkward = await makeSupplierBill(siteA, 0.1 + 0.2);
+  await finance.recordSupplierPayment(form({ supplierBillId: awkward.id, amount: "0.3" }));
+  assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: awkward.id } }), 1, "exact settlement must never be refused by a representation error");
+  assert.equal((await prisma.supplierBill.findUniqueOrThrow({ where: { id: awkward.id } })).status, "PAID");
+});
+
 after(async () => {
   const users = [operatorId, salesId, accountantId, adminId, salesManagerId, salesSupervisorId].filter(Boolean);
   await prisma.session.deleteMany({ where: { userId: { in: users } } });
@@ -584,7 +783,11 @@ after(async () => {
   await prisma.truck.deleteMany({ where: { id: { in: truckIds } } });
   await prisma.employee.deleteMany({ where: { id: { in: driverIds } } });
   await prisma.invoice.deleteMany({ where: { id: { in: invoiceIds } } });
+  await prisma.reservation.deleteMany({ where: { quoteLine: { quoteId: { in: quoteIds } } } });
+  await prisma.quoteLine.deleteMany({ where: { quoteId: { in: quoteIds } } });
+  await prisma.quote.deleteMany({ where: { quoteNumber: { startsWith: prefix } } });
   await prisma.quote.deleteMany({ where: { id: { in: quoteIds } } });
+  await prisma.opportunity.deleteMany({ where: { opportunityNumber: { startsWith: prefix } } });
   await prisma.opportunity.deleteMany({ where: { id: { in: opportunityIds } } });
   await prisma.purchaseOrder.deleteMany({ where: { id: { in: purchaseOrderIds } } });
   await prisma.reservation.deleteMany({ where: { id: { in: reservationIds } } });
@@ -604,4 +807,6 @@ after(async () => {
   assert.equal(await prisma.supplierBill.count({ where: { billNumber: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.opportunity.count({ where: { opportunityNumber: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.fieldVisit.count({ where: { visitNumber: { startsWith: prefix } } }), 0);
+  assert.equal(await prisma.quote.count({ where: { quoteNumber: { startsWith: prefix } } }), 0);
+  assert.equal(await prisma.reservation.count({ where: { reservationNumber: { startsWith: prefix } } }), 0);
 });
