@@ -86,19 +86,55 @@ export async function recordSupplierPayment(formData: FormData) {
   const reference = String(formData.get("reference") ?? "").trim() || null;
   if (!supplierBillId || !amount || amount <= 0) return;
 
-  const bill = await prisma.supplierBill.findUnique({ where: { id: supplierBillId } });
-  if (!bill || bill.status === "CANCELLED") return;
+  // BL-CR-P1-02 and BL-CR-P1-07, external-review validation (2026-09-10).
+  // Three defects, one cause: the bill was read OUTSIDE the transaction
+  // that then wrote against it.
+  //
+  //  1. no site check at all — role permission let an accountant at one
+  //     site post cash against another site's supplier bill and its
+  //     journals;
+  //  2. no comparison against the outstanding balance — a single payment
+  //     could exceed what was owed, still flip the bill to PAID, and post
+  //     the whole excess to AP/cash;
+  //  3. the stale read raced both a concurrent payment (two payments each
+  //     sized against the same pre-payment balance overpay together) and
+  //     cancelSupplierBill (a payment landing against a bill whose entry
+  //     had just been reversed).
+  //
+  // The row is now locked FOR UPDATE inside the transaction and every
+  // decision — scope, status, outstanding balance — is made from that
+  // locked read. cancelSupplierBill takes the same lock, so the two
+  // genuinely serialize instead of interleaving.
+  const allowedSiteId = effectiveSiteId(actor);
+  const posted = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<{ id: string; siteId: string; currency: string; total: number; status: string; billNumber: string }[]>`
+      SELECT "id", "siteId", "currency", "total", "status", "billNumber"
+      FROM "SupplierBill"
+      WHERE "id" = ${supplierBillId}
+      FOR UPDATE
+    `;
+    const bill = locked[0];
+    if (!bill) return null;
+    if (allowedSiteId !== null && bill.siteId !== allowedSiteId) return null;
+    if (bill.status === "CANCELLED") return null;
 
-  // The payment and its journal entry commit as one unit — see the same
-  // rationale on generateInvoiceForProject in billing/actions.ts.
-  const payment = await prisma.$transaction(async (tx) => {
+    // Summed inside the same locked transaction, so a concurrent payment
+    // is either already counted here or still waiting on our lock.
+    const alreadyPaid = (await tx.supplierPayment.aggregate({ where: { supplierBillId }, _sum: { amount: true } }))._sum.amount ?? 0;
+    const outstanding = bill.total - alreadyPaid;
+    // Half a halala of tolerance: these columns are Float (see
+    // BL-CR-P2-02 on migrating money to Decimal), so an exact-settlement
+    // payment must not be refused by a representation error.
+    if (amount > outstanding + 0.005) return null;
+
     const payment = await tx.supplierPayment.create({ data: { supplierBillId, amount, method, reference } });
     await recomputeBillStatus(tx, supplierBillId);
     await postSupplierPayment(tx, { siteId: bill.siteId, currency: bill.currency, paymentId: payment.id, amount });
-    return payment;
+    return { paymentId: payment.id, billNumber: bill.billNumber };
   }, TX_OPTIONS);
+  if (!posted) return;
 
-  await logAudit({ module: "Finance", recordId: payment.id, afterValue: `${amount} against ${bill.billNumber}`, reasonCode: "SUPPLIER_PAYMENT_RECORDED" });
+  await logAudit({ module: "Finance", recordId: posted.paymentId, afterValue: `${amount} against ${posted.billNumber}`, reasonCode: "SUPPLIER_PAYMENT_RECORDED" });
   revalidatePath("/finance");
 }
 
@@ -109,25 +145,38 @@ export async function cancelSupplierBill(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  // Tightened to unpaid-only (was PAID-only before) — same reasoning as
-  // cancelInvoice's own guard: cancelling a bill that already has real
-  // SupplierPayment money moved against it can't be undone by simply
-  // reversing the bill's own entry (the payment's own Dr AP/Cr Cash entry
-  // would be left referencing a since-reversed AP balance). A
-  // partially-paid bill needs a credit memo from the supplier or a
-  // manual correction, not a one-click cancel — out of scope here.
-  const bill = await prisma.supplierBill.findUnique({ where: { id }, include: { payments: true } });
-  if (!bill || bill.status === "CANCELLED" || bill.status === "PAID" || bill.payments.length > 0) return;
+  // BL-CR-P1-02 / BL-CR-P1-07: same treatment as recordSupplierPayment
+  // above — the bill is locked inside the transaction and every decision
+  // (site scope, status, whether any payment exists) is made from that
+  // locked state. The old outside-the-transaction read let a payment
+  // commit in the gap and leave real money posted against a bill whose
+  // own entry was then reversed.
+  const allowedSiteId = effectiveSiteId(actor);
+  const cancelled = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<{ id: string; siteId: string; status: string }[]>`
+      SELECT "id", "siteId", "status" FROM "SupplierBill" WHERE "id" = ${id} FOR UPDATE
+    `;
+    const bill = locked[0];
+    if (!bill) return false;
+    if (allowedSiteId !== null && bill.siteId !== allowedSiteId) return false;
+    // Tightened to unpaid-only (was PAID-only before) — same reasoning as
+    // cancelInvoice's own guard: cancelling a bill that already has real
+    // SupplierPayment money moved against it can't be undone by simply
+    // reversing the bill's own entry (the payment's own Dr AP/Cr Cash
+    // entry would be left referencing a since-reversed AP balance). A
+    // partially-paid bill needs a credit memo from the supplier or a
+    // manual correction, not a one-click cancel — out of scope here.
+    if (bill.status === "CANCELLED" || bill.status === "PAID") return false;
+    if ((await tx.supplierPayment.count({ where: { supplierBillId: id } })) > 0) return false;
 
-  // The cancellation and its reversing journal entry commit as one unit —
-  // see the same rationale on cancelInvoice in billing/actions.ts.
-  await prisma.$transaction(async (tx) => {
     await tx.supplierBill.update({ where: { id }, data: { status: "CANCELLED" } });
     // Reverses whatever postSupplierBill posted at creation time (Dr
     // COGS/Materials / Cr AP) — see the same reasoning on cancelInvoice's
     // own reversal call in billing/actions.ts.
     await reverseJournalEntry(tx, "Finance", id, "Supplier bill cancelled");
+    return true;
   }, TX_OPTIONS);
+  if (!cancelled) return;
 
   await logAudit({ module: "Finance", recordId: id, afterValue: "CANCELLED", reasonCode: "SUPPLIER_BILL_CANCELLED" });
   revalidatePath("/finance");
@@ -194,16 +243,35 @@ export async function reconcileMovement(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
+  // BL-CR-P1-02: each of these three is site-owned through a different
+  // relation — a customer payment through its invoice's plant, a supplier
+  // payment through its bill, a cash transaction through its own column —
+  // and none of them was checking any of it. The scope is now part of the
+  // conditional write, so marking another site's money as reconciled
+  // matches no row.
   const now = new Date();
+  const allowedSiteId = effectiveSiteId(actor);
+  const data = { reconciled: true, reconciledAt: now };
+  let marked: { count: number };
   if (kind === "payment") {
-    await prisma.payment.update({ where: { id }, data: { reconciled: true, reconciledAt: now } });
+    marked = await prisma.payment.updateMany({
+      where: { id, ...(allowedSiteId ? { invoice: { plant: { siteId: allowedSiteId } } } : {}) },
+      data,
+    });
   } else if (kind === "supplierPayment") {
-    await prisma.supplierPayment.update({ where: { id }, data: { reconciled: true, reconciledAt: now } });
+    marked = await prisma.supplierPayment.updateMany({
+      where: { id, ...(allowedSiteId ? { supplierBill: { siteId: allowedSiteId } } : {}) },
+      data,
+    });
   } else if (kind === "cashTransaction") {
-    await prisma.cashTransaction.update({ where: { id }, data: { reconciled: true, reconciledAt: now } });
+    marked = await prisma.cashTransaction.updateMany({
+      where: { id, ...(allowedSiteId ? { siteId: allowedSiteId } : {}) },
+      data,
+    });
   } else {
     return;
   }
+  if (marked.count !== 1) return;
 
   await logAudit({ module: "Finance", recordId: id, afterValue: `${kind} reconciled`, reasonCode: "BANK_RECONCILED" });
   revalidatePath("/finance");

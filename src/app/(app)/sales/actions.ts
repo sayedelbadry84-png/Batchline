@@ -1,5 +1,6 @@
 "use server";
 
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
@@ -21,6 +22,44 @@ const APPROVAL_ACTION_KEY: Record<ApprovableRecordType, { initial: "approveOppor
   visit: { initial: "approveVisitInitial", final: "approveVisitFinal" },
   quote: { initial: "approveQuoteInitial", final: "approveQuoteFinal" },
 };
+
+// BL-CR-P1-02, external-review validation (2026-09-10): every mutation in
+// this module took a record id from the form, checked the caller's ROLE,
+// and then wrote — with no check that the record belongs to the caller's
+// site. Role and scope are different questions: a SALES_REP at one site
+// legitimately holds "may send a quote", which is not permission to send
+// another site's quote. The scope now travels INSIDE each mutation's own
+// WHERE clause, so an out-of-scope id matches no row and the write simply
+// does not happen; there is no window between an outer read and the write
+// for the record to move sites, and no distinguishable "forbidden" answer
+// that would confirm the record exists.
+//
+// Opportunity and Quote carry their own siteId. FieldVisit does not: its
+// site is the opportunity it belongs to, and — for a visit logged against
+// a customer with no opportunity — the site of the rep who made it. A
+// visit whose rep has no plant assigned matches nothing and is therefore
+// approvable only by ADMIN, which is the fail-closed direction.
+// One builder per model, rather than one shared object: Prisma's where
+// types are model-specific, and a single union-typed predicate cannot be
+// handed to three different delegates.
+function ownSiteScope(allowedSiteId: string | null): { siteId?: string } {
+  return allowedSiteId === null ? {} : { siteId: allowedSiteId }; // null = ADMIN, unrestricted
+}
+
+function visitScope(allowedSiteId: string | null): Prisma.FieldVisitWhereInput {
+  if (allowedSiteId === null) return {};
+  return {
+    OR: [
+      { opportunity: { siteId: allowedSiteId } },
+      { opportunityId: null, visitedBy: { plant: { siteId: allowedSiteId } } },
+    ],
+  };
+}
+
+// Thrown inside promoteProspectToCustomer's transaction when the
+// conditional claim loses, so Prisma unwinds the Customer row the same
+// transaction had just created. Returning a value instead would commit it.
+class PromotionLostError extends Error {}
 
 export async function createOpportunity(formData: FormData) {
   const actor = await getCurrentUser();
@@ -155,18 +194,33 @@ export async function promoteProspectToCustomer(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  const opportunity = await prisma.opportunity.findUnique({ where: { id } });
-  if (!opportunity || opportunity.customerId || !opportunity.prospectName) return;
+  // BL-CR-P1-02: read and write are one transaction, and BOTH carry the
+  // scope — the read so another site's prospect is never even seen, the
+  // conditional write so a concurrent promotion cannot produce a second
+  // Customer for the same prospect. A claim that matches no row rolls the
+  // just-created Customer back with it rather than leaving an orphan.
+  const allowedSiteId = effectiveSiteId(actor);
+  const customer = await prisma.$transaction(async (tx) => {
+    const opportunity = await tx.opportunity.findFirst({
+      where: { id, customerId: null, ...ownSiteScope(allowedSiteId) },
+    });
+    if (!opportunity || !opportunity.prospectName) return null;
 
-  const customer = await prisma.customer.create({
-    data: {
-      legalName: opportunity.prospectName,
-      contactEmail: opportunity.prospectEmail,
-      contactPhone: opportunity.prospectPhone,
-    },
+    const created = await tx.customer.create({
+      data: {
+        legalName: opportunity.prospectName,
+        contactEmail: opportunity.prospectEmail,
+        contactPhone: opportunity.prospectPhone,
+      },
+    });
+    const claimed = await tx.opportunity.updateMany({ where: { id, customerId: null }, data: { customerId: created.id } });
+    if (claimed.count !== 1) throw new PromotionLostError();
+    return created;
+  }).catch((e) => {
+    if (e instanceof PromotionLostError) return null;
+    throw e;
   });
-
-  await prisma.opportunity.update({ where: { id }, data: { customerId: customer.id } });
+  if (!customer) return;
 
   await logAudit({ module: "Sales", recordId: id, afterValue: `promoted to customer ${customer.id}`, reasonCode: "PROSPECT_PROMOTED" });
   revalidatePath("/sales");
@@ -188,6 +242,20 @@ export async function logFieldVisit(formData: FormData) {
   const followUpDateRaw = String(formData.get("followUpDate") ?? "");
 
   if (!notes) return;
+
+  // BL-CR-P1-02: opportunityId arrives from the form and is written
+  // straight onto the visit — and the block further down advances that
+  // opportunity's own status. Both are refused unless the opportunity is
+  // in the caller's scope; an out-of-scope id is dropped rather than
+  // reported, exactly like a nonexistent one.
+  const allowedSiteId = effectiveSiteId(actor);
+  if (opportunityId) {
+    const inScope = await prisma.opportunity.findFirst({
+      where: { id: opportunityId, ...ownSiteScope(allowedSiteId) },
+      select: { id: true },
+    });
+    if (!inScope) return;
+  }
 
   const visit = await withSequentialNumber(
     "FV",
@@ -214,10 +282,12 @@ export async function logFieldVisit(formData: FormData) {
   // enough signal to move it forward on its own — same "the action IS the
   // stage change" reasoning as approveReservationFinal clearing ON_HOLD.
   if (opportunityId) {
-    const opp = await prisma.opportunity.findUnique({ where: { id: opportunityId } });
-    if (opp?.status === "NEW" || opp?.status === "CONTACTED") {
-      await prisma.opportunity.update({ where: { id: opportunityId }, data: { status: "SITE_VISIT" } });
-    }
+    // Conditional, so the status only advances from the two states this
+    // rule covers — and only for an opportunity still in scope.
+    await prisma.opportunity.updateMany({
+      where: { id: opportunityId, status: { in: ["NEW", "CONTACTED"] }, ...ownSiteScope(allowedSiteId) },
+      data: { status: "SITE_VISIT" },
+    });
   }
 
   await logAudit({ module: "Sales", recordId: visit.id, reasonCode: "FIELD_VISIT_LOGGED" });
@@ -330,14 +400,20 @@ export async function markQuoteSent(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  const quote = await prisma.quote.findUnique({ where: { id }, include: { lines: true } });
-  if (!quote || quote.status !== "DRAFT") return;
-  // A price offer never reaches the customer without final (Plants
-  // Manager) sign-off on file — same reasoning as Reservation approval
-  // gating production release. See the model comment on Quote.
-  if (!quote.finalApprovedAt) return;
+  // BL-CR-P1-02: the whole precondition — this quote, in this caller's
+  // scope, still DRAFT, and finally approved — is the WHERE clause of the
+  // write itself. A price offer never reaches the customer without final
+  // (Plants Manager) sign-off on file: same reasoning as Reservation
+  // approval gating production release, see the model comment on Quote.
+  const allowedSiteId = effectiveSiteId(actor);
+  const sent = await prisma.quote.updateMany({
+    where: { id, status: "DRAFT", finalApprovedAt: { not: null }, ...ownSiteScope(allowedSiteId) },
+    data: { status: "SENT", sentAt: new Date() },
+  });
+  if (sent.count !== 1) return;
 
-  await prisma.quote.update({ where: { id }, data: { status: "SENT", sentAt: new Date() } });
+  // Safe to read unconditionally now: this call owns the transition.
+  const quote = await prisma.quote.findUniqueOrThrow({ where: { id }, include: { lines: true } });
 
   // The moment a fully-approved quote goes out is exactly "last quote
   // submitted to the customer, approved, and still valid" — so this is
@@ -368,10 +444,15 @@ export async function recordQuoteResponse(formData: FormData) {
   const response = String(formData.get("response") ?? "");
   if (!id || !["ACCEPTED", "DECLINED"].includes(response)) return;
 
-  const quote = await prisma.quote.findUnique({ where: { id } });
-  if (!quote || quote.status !== "SENT") return;
-
-  await prisma.quote.update({ where: { id }, data: { status: response, respondedAt: new Date() } });
+  // BL-CR-P1-02: scope and state are both in the write's own WHERE, so a
+  // quote from another site (or one already answered) matches nothing.
+  const allowedSiteId = effectiveSiteId(actor);
+  const answered = await prisma.quote.updateMany({
+    where: { id, status: "SENT", ...ownSiteScope(allowedSiteId) },
+    data: { status: response, respondedAt: new Date() },
+  });
+  if (answered.count !== 1) return;
+  const quote = await prisma.quote.findUniqueOrThrow({ where: { id } });
 
   if (response === "ACCEPTED" && quote.opportunityId) {
     await prisma.opportunity.update({ where: { id: quote.opportunityId }, data: { status: "WON" } }).catch(() => {});
@@ -453,16 +534,35 @@ export async function convertQuoteLineToReservation(formData: FormData) {
 // this branches explicitly per type rather than trying to share one
 // generic delegate call — still one pair of exported actions, just an
 // internal switch instead of a shared client reference.
-async function findApprovable(recordType: ApprovableRecordType, id: string) {
-  if (recordType === "opportunity") return prisma.opportunity.findUnique({ where: { id } });
-  if (recordType === "visit") return prisma.fieldVisit.findUnique({ where: { id } });
-  return prisma.quote.findUnique({ where: { id } });
+// BL-CR-P1-02: both halves carry the scope. The read is what the final
+// stage needs in order to decide whether to backfill the junior stage;
+// the write re-states the same scope AND the "not already approved"
+// precondition, so the decision made from the read can never be applied
+// to a record that moved out of scope (or got approved by someone else)
+// in between.
+type ApprovalStageWrite = { initialApprovedAt?: Date; initialApprovedById?: string; finalApprovedAt?: Date; finalApprovedById?: string };
+
+async function findApprovable(recordType: ApprovableRecordType, id: string, allowedSiteId: string | null) {
+  if (recordType === "opportunity") return prisma.opportunity.findFirst({ where: { id, ...ownSiteScope(allowedSiteId) } });
+  if (recordType === "visit") return prisma.fieldVisit.findFirst({ where: { id, ...visitScope(allowedSiteId) } });
+  return prisma.quote.findFirst({ where: { id, ...ownSiteScope(allowedSiteId) } });
 }
 
-async function updateApprovable(recordType: ApprovableRecordType, id: string, data: { initialApprovedAt?: Date; initialApprovedById?: string; finalApprovedAt?: Date; finalApprovedById?: string }) {
-  if (recordType === "opportunity") return prisma.opportunity.update({ where: { id }, data });
-  if (recordType === "visit") return prisma.fieldVisit.update({ where: { id }, data });
-  return prisma.quote.update({ where: { id }, data });
+async function claimApprovable(
+  recordType: ApprovableRecordType,
+  id: string,
+  allowedSiteId: string | null,
+  stage: "initial" | "final",
+  data: ApprovalStageWrite,
+): Promise<boolean> {
+  const unapproved = stage === "initial" ? { initialApprovedAt: null } : { finalApprovedAt: null };
+  const claimed =
+    recordType === "opportunity"
+      ? await prisma.opportunity.updateMany({ where: { id, ...unapproved, ...ownSiteScope(allowedSiteId) }, data })
+      : recordType === "visit"
+        ? await prisma.fieldVisit.updateMany({ where: { id, ...unapproved, ...visitScope(allowedSiteId) }, data })
+        : await prisma.quote.updateMany({ where: { id, ...unapproved, ...ownSiteScope(allowedSiteId) }, data });
+  return claimed.count === 1;
 }
 
 // First (junior) stage — Sales Supervisor for Opportunity/FieldVisit,
@@ -478,10 +578,11 @@ export async function approveInitialStage(formData: FormData) {
   const type = recordType as ApprovableRecordType;
   await requireActionPermission(actor, "sales", APPROVAL_ACTION_KEY[type].initial);
 
-  const existing = await findApprovable(type, id);
-  if (!existing || existing.initialApprovedAt) return;
-
-  await updateApprovable(type, id, { initialApprovedAt: new Date(), initialApprovedById: actor!.id });
+  const claimed = await claimApprovable(type, id, effectiveSiteId(actor), "initial", {
+    initialApprovedAt: new Date(),
+    initialApprovedById: actor!.id,
+  });
+  if (!claimed) return;
 
   await logAudit({ module: "Sales", recordId: id, afterValue: `${type} initial approved`, reasonCode: "SALES_INITIAL_APPROVED" });
   revalidatePath("/sales");
@@ -501,15 +602,17 @@ export async function approveFinalStage(formData: FormData) {
   const type = recordType as ApprovableRecordType;
   await requireActionPermission(actor, "sales", APPROVAL_ACTION_KEY[type].final);
 
-  const existing = await findApprovable(type, id);
+  const allowedSiteId = effectiveSiteId(actor);
+  const existing = await findApprovable(type, id, allowedSiteId);
   if (!existing || existing.finalApprovedAt) return;
 
   const now = new Date();
-  await updateApprovable(type, id, {
+  const claimed = await claimApprovable(type, id, allowedSiteId, "final", {
     finalApprovedAt: now,
     finalApprovedById: actor!.id,
     ...(!existing.initialApprovedAt ? { initialApprovedAt: now, initialApprovedById: actor!.id } : {}),
   });
+  if (!claimed) return;
 
   await logAudit({ module: "Sales", recordId: id, afterValue: `${type} final approved`, reasonCode: "SALES_FINAL_APPROVED" });
   revalidatePath("/sales");
