@@ -740,7 +740,9 @@ test("a failed audit insert rolls back the payment, the bill status and the jour
   await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "50" }));
   assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: bill.id } }), 1);
   assert.equal(
-    await prisma.auditEvent.count({ where: { reasonCode: "SUPPLIER_PAYMENT_RECORDED", afterValue: { contains: prefix } } }),
+    // This bill's own number, not the suite prefix: earlier tests in this
+    // file post real payments against other bills that share the prefix.
+    await prisma.auditEvent.count({ where: { reasonCode: "SUPPLIER_PAYMENT_RECORDED", afterValue: { contains: bill.billNumber } } }),
     1,
     "and the audit row committed with it",
   );
