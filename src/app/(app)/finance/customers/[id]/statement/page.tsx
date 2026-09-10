@@ -3,6 +3,7 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
 import { PrintButton } from "@/components/PrintButton";
 
@@ -30,7 +31,7 @@ export default async function CustomerStatementPage({
   params: Promise<{ id: string }>;
   searchParams: Promise<{ from?: string; to?: string }>;
 }) {
-  await requirePageAccess("finance");
+  const user = await requirePageAccess("finance");
   const { id } = await params;
   const { from: fromRaw, to: toRaw } = await searchParams;
   const { dict } = await getDictionary();
@@ -42,8 +43,17 @@ export default async function CustomerStatementPage({
 
   // Real receivables only — DRAFT never went out, CANCELLED never was one
   // (same filter getCustomerOutstandingBalance uses).
+  //
+  // BL-CR-P1-01, external-review validation: Customer itself is a
+  // company-wide record (no site column), but its INVOICES are not — and
+  // this statement was listing every one of them, so a finance user at
+  // one site could read another site's invoice numbers, totals, payments
+  // and credit notes for a shared customer. Scoped the same way every
+  // other invoice query in this module is (finance/page.tsx), so the
+  // statement now shows exactly the receivables the reader is entitled
+  // to and its running balance is computed from those alone.
   const invoices = await prisma.invoice.findMany({
-    where: { customerId: id, status: { notIn: ["DRAFT", "CANCELLED"] } },
+    where: { customerId: id, status: { notIn: ["DRAFT", "CANCELLED"] }, ...plantScopeWhere(await getActiveSiteId(user)) },
     include: { payments: true, creditNotes: true },
     orderBy: { issueDate: "asc" },
   });

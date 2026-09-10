@@ -74,12 +74,21 @@ export function plantScopeWhere(siteId: string | null | undefined, plantId?: str
   return siteId ? { plant: { siteId } } : {};
 }
 
+// For any model carrying its own siteId scalar — booked/owned at the
+// factory (Site) level rather than at a specific station (Plant):
+// Reservation, Quote, Opportunity, PurchaseOrder, SupplierBill,
+// SupplierPayment. Same null-means-unrestricted (ADMIN) contract as
+// plantScopeWhere above.
+export function siteScopeWhere(siteId: string | null | undefined) {
+  return siteId ? { siteId } : {};
+}
+
 // For Reservation, which carries its own siteId scalar directly — it's
 // booked against a factory (Site), not a specific station (Plant); which
 // station actually produces it is chosen later, at batch-ticket release
 // time (see the Reservation model comment).
 export function reservationSiteScopeWhere(siteId: string | null | undefined) {
-  return siteId ? { siteId } : {};
+  return siteScopeWhere(siteId);
 }
 
 // For Trip and anything hanging off it (DrumReturn, TestBatch), which has

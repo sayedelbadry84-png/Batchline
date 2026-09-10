@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { requirePageAccess } from "@/lib/session";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
 import { PrintButton } from "@/components/PrintButton";
 
@@ -73,12 +74,22 @@ const REASON_LABEL: Record<string, string> = {
 };
 
 export default async function DeliveryNoteSupplementPage({ params }: { params: Promise<{ id: string }> }) {
-  await requirePageAccess("production");
+  const user = await requirePageAccess("production");
   const { id } = await params;
   const { dict } = await getDictionary();
 
-  const ticket = await prisma.batchTicket.findUnique({
-    where: { id },
+  // BL-CR-P1-01, external-review validation: the route parameter is not
+  // an authorization boundary. requirePageAccess above proves the caller
+  // may use this MODULE; it says nothing about whether this particular
+  // record belongs to their site. Folding the scope into the database
+  // predicate (findFirst, not findUnique-by-id) is what makes a
+  // cross-site id behave exactly like a nonexistent one — including for
+  // ADMIN, whose effectiveSiteId is null and whose predicate is
+  // therefore unrestricted, unchanged. Deliberately NOT a fetch-then-
+  // compare: a distinguishable "forbidden" answer still confirms the
+  // record exists.
+  const ticket = await prisma.batchTicket.findFirst({
+    where: { id, ...plantScopeWhere(effectiveSiteId(user)) },
     include: {
       reservation: { include: { project: { include: { customer: true } } } },
       mix: true,
