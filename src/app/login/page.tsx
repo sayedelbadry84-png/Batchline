@@ -58,15 +58,28 @@ export default async function LoginPage({
         </button>
       </form>
 
-      <div className="rounded-lg border border-dashed border-border p-3 text-xs text-ink-muted">
-        <p className="mb-1 font-medium text-ink">{dict.login.demoTitle}</p>
-        <p dir="ltr" className="text-start">plant.operator@batchline.dev · quality@batchline.dev</p>
-        <p dir="ltr" className="text-start">accountant@batchline.dev · admin@batchline.dev</p>
-        <p dir="ltr" className="text-start">karim.driver@batchline.dev · hassan.driver@batchline.dev</p>
-        <p className="mt-1">
-          {dict.login.demoPasswordLabel} <span className="font-mono" dir="ltr">batchline123</span>
-        </p>
-      </div>
+      {/* Security audit (2026-09-10): this block lists six real seeded
+          accounts — including admin@batchline.dev — and the shared
+          password prisma/seed.ts assigns them all. Its label says "dev
+          only" but nothing enforced that, so on any deployed instance
+          whose database had ever been seeded it was a published
+          administrator credential.
+
+          NODE_ENV is "production" for `next build`/`next start` (what a
+          real deployment runs) and "development" for `next dev`, so this
+          is the same switch the session cookie's own `secure` flag uses
+          — no new environment variable to remember to set. */}
+      {process.env.NODE_ENV !== "production" && (
+        <div className="rounded-lg border border-dashed border-border p-3 text-xs text-ink-muted">
+          <p className="mb-1 font-medium text-ink">{dict.login.demoTitle}</p>
+          <p dir="ltr" className="text-start">plant.operator@batchline.dev · quality@batchline.dev</p>
+          <p dir="ltr" className="text-start">accountant@batchline.dev · admin@batchline.dev</p>
+          <p dir="ltr" className="text-start">karim.driver@batchline.dev · hassan.driver@batchline.dev</p>
+          <p className="mt-1">
+            {dict.login.demoPasswordLabel} <span className="font-mono" dir="ltr">batchline123</span>
+          </p>
+        </div>
+      )}
     </div>
   );
 }
