@@ -91,3 +91,50 @@ Neon (the Postgres provider this project uses) keeps continuous point-in-time re
 - Never run `prisma migrate reset`, `prisma db push`, or `prisma db seed` against a database this project actually depends on (dev or production) — both `reset` and `push` can silently drop and recreate data.
 - Never hand-edit an already-applied migration's `migration.sql` — Prisma checksums it; edit forward with a new migration instead.
 - If the deployed database's actual state can't be determined (e.g. `migrate status` reports drift you can't explain), stop and report it rather than guessing a baseline or forcing a migration through.
+
+## Index migrations and `CREATE INDEX CONCURRENTLY`
+
+A plain `CREATE INDEX` takes a `SHARE` lock: reads continue, **writes to
+that table block for the whole build**. On `AuditEvent` — which takes a
+row for every SCADA reading, every telematics ping and every audited
+mutation — that stalls the application, so index builds on it use
+`CONCURRENTLY`.
+
+Postgres refuses `CREATE INDEX CONCURRENTLY` inside a transaction block,
+which raises the question of whether Prisma wraps a migration in one.
+**Neither blanket answer is right.** The reported behaviour is that Prisma
+wraps a migration file only when it contains more than one statement; a
+single-statement file is sent as-is. That is a behaviour, not a documented
+guarantee, and it has changed across versions — so:
+
+- **one statement per migration file** when using `CONCURRENTLY`, with no
+  comments in the file, so nothing can be counted as a second statement;
+- the four `20260910120000`–`20260910120003` index migrations follow this,
+  and CI applies them to a real PostgreSQL 16 on every run. **That CI step
+  is the rehearsal**: if this Prisma version wrapped them, the migration
+  would fail with `CREATE INDEX CONCURRENTLY cannot run inside a
+  transaction block` and the run would go red. A green run is evidence for
+  this exact `prisma@5.22.x` + PostgreSQL 16 pairing and nothing broader —
+  re-check it after any Prisma upgrade.
+
+Before running these against a large production table:
+
+1. Record row count and table size (`pg_total_relation_size`).
+2. Capture `EXPLAIN (ANALYZE, BUFFERS)` for the audit-log list (unfiltered
+   and module-filtered) and for session revocation by `userId`, so the
+   improvement is measured rather than assumed.
+3. Set a `lock_timeout` for the session running the deploy, and agree an
+   abort criterion in advance.
+4. A failed `CONCURRENTLY` build leaves an **INVALID** index behind, and
+   `IF NOT EXISTS` will then happily skip re-creating it. Check for that
+   before and after:
+
+   ```sql
+   SELECT c.relname, i.indisvalid
+   FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+   WHERE c.relname IN ('AuditEvent_createdAt_idx', 'AuditEvent_module_createdAt_idx',
+                       'Session_userId_idx', 'Session_expiresAt_idx');
+   ```
+
+   Drop any row with `indisvalid = false` and re-run that one migration.
+5. Verify all four exist and are valid afterwards with the same query.
