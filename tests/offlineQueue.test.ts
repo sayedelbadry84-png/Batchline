@@ -15,6 +15,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createOfflineQueue, logicalKey, onReplaySuccess, emitReplaySuccess, type StorageAdapter, type ReplayOutcome, type LockAdapter } from "../src/lib/offlineQueue";
+// PL-R15-P2-01: the production result-to-outcome mapping itself, so the
+// replay tests below drive the real decision logic instead of a copy of
+// it written into a fake handler.
+import { toReplayOutcome, sameFiniteReading } from "../src/lib/recordActualFieldReplay";
+import type { RecordActualFieldResult } from "../src/app/(app)/production/actions";
 
 // A real in-memory Map-backed adapter — genuinely persists across calls
 // within one test, exactly like localStorage would, just without a
@@ -418,6 +423,34 @@ test("an unstorable APPLIED followed by a newer offline edit still sends the new
   assert.deepEqual(queue.peekRejected().items, [], "and never rejected — there was no real conflict at any point");
 });
 
+// A fake recordActualField server, standing in for the real Server
+// Action: it holds the reading as a NUMBER (the database column's own
+// type — see BatchComponentActual.actualMassKg), parses the submitted
+// text exactly the way recordActualField does before writing it, and
+// enforces the same per-field optimistic-version check. Its answers are
+// real RecordActualFieldResult values, so what the handler under test
+// runs is the production mapping (toReplayOutcome), not a paraphrase of
+// it living in this file.
+function fakeFieldServer() {
+  const state = { version: 0, value: null as number | null, sends: [] as string[] };
+  const send = async (fields: Record<string, string>): Promise<RecordActualFieldResult> => {
+    state.sends.push(fields.value);
+    const parsed = Number(fields.value);
+    if (!Number.isFinite(parsed) || parsed < 0) return { status: "INVALID_VALUE" };
+    if (Number(fields.expectedVersion) !== state.version) {
+      // PL-R14-P2-03: the refusal reports what the server actually holds.
+      return { status: "STALE_READING", currentVersion: state.version, currentValue: state.value };
+    }
+    state.version += 1;
+    state.value = parsed;
+    return { status: "OK", version: state.version };
+  };
+  // Exactly the handler OfflineSyncBanner registers, minus the FormData
+  // transport: the REAL result-to-outcome mapping.
+  const handler = async (fields: Record<string, string>): Promise<ReplayOutcome> => toReplayOutcome(await send(fields), fields);
+  return { state, send, handler };
+}
+
 // PL-R14-P2-03, fourteenth production-lifecycle review: the in-memory
 // reconciliation above only covers ONE queue instance. If the tab is
 // closed or reloaded, or another tab picks the queue up, that map is gone
@@ -427,9 +460,14 @@ test("an unstorable APPLIED followed by a newer offline edit still sends the new
 //
 // The durable half of the fix is server-side: STALE_READING now reports
 // the value and version the server actually holds, so ANY client can tell
-// "this is already the value I sent" from a real conflict. This models
-// exactly that handler contract (see OfflineSyncBanner's own handler)
-// against a brand-new queue instance over the surviving stored state.
+// "this is already the value I sent" from a real conflict.
+//
+// PL-R15-P2-01, fifteenth production-lifecycle review: this test used to
+// send "12.5" on both sides, so what it actually proved was TEXT
+// equality — and text equality is precisely what was broken. The reading
+// here is entered as "12.50" (an ordinary thing to type into a number
+// input, and what the queue stores verbatim) against a server holding
+// 12.5, which is the SAME measurement. The two must reconcile.
 test("a new queue instance over surviving state does not falsely reject a reading the server already holds", async () => {
   const inner = memoryStorage();
   let writes = 0;
@@ -443,32 +481,17 @@ test("a new queue instance over surviving state does not falsely reject a readin
     },
   };
   const lock = sharedLock();
-
-  // A version-aware fake server, plus the real handler contract: a
-  // STALE_READING whose current value equals what we sent is APPLIED.
-  let serverVersion = 0;
-  let serverValue: string | null = null;
-  const sends: string[] = [];
-  const handler = async (fields: Record<string, string>): Promise<ReplayOutcome> => {
-    sends.push(fields.value);
-    if (Number(fields.expectedVersion) !== serverVersion) {
-      if (serverValue === fields.value) return { status: "APPLIED", version: serverVersion };
-      return { status: "REJECTED", reason: "STALE_READING" };
-    }
-    serverVersion += 1;
-    serverValue = fields.value;
-    return { status: "APPLIED", version: serverVersion };
-  };
+  const server = fakeFieldServer();
 
   // Session 1: the server accepts the reading, but the settlement write
   // fails (write 1 = enqueue, 2 = claim, 3 = settle).
   const session1 = createOfflineQueue(storage, lock);
-  await session1.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "12.5", expectedVersion: "0" });
+  await session1.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "12.50", expectedVersion: "0" });
   failWriteNumber = 3;
-  const first = await session1.flushQueue({ recordActualField: handler });
+  const first = await session1.flushQueue({ recordActualField: server.handler });
   assert.equal(first.readStatus, "STORAGE_UNAVAILABLE");
-  assert.deepEqual(sends, ["12.5"]);
-  assert.equal(serverValue, "12.5");
+  assert.deepEqual(server.state.sends, ["12.50"]);
+  assert.equal(server.state.value, 12.5, "the server stores the parsed measurement, not the text the operator typed");
 
   // Session 2: a brand-new instance — the tab reloaded, or another tab
   // took over. Nothing of session 1's in-memory state survives.
@@ -484,11 +507,70 @@ test("a new queue instance over surviving state does not falsely reject a readin
   stored.pending[0].leaseExpiresAt = Date.now() - 1000;
   inner.setItem("bl_offline_queue_v1", JSON.stringify(stored));
 
-  const second = await session2.flushQueue({ recordActualField: handler });
-  assert.deepEqual(sends, ["12.5", "12.5"], "the new instance re-sends, having no memory of the accepted result");
+  const second = await session2.flushQueue({ recordActualField: server.handler });
+  assert.deepEqual(server.state.sends, ["12.50", "12.50"], "the new instance re-sends, having no memory of the accepted result");
   assert.equal(second.flushed, 1, "and the server's answer identifies it as already applied, not a conflict");
   assert.deepEqual(session2.peekQueue().items, [], "so the item settles");
   assert.deepEqual(session2.peekRejected().items, [], "and the operator's accepted reading is never dead-lettered as a false conflict");
+});
+
+// The other half of PL-R15-P2-01: reconciling equivalent numbers must not
+// quietly reconcile DIFFERENT ones. A genuine conflict — somebody else's
+// newer reading on the same field — still has to reach the operator.
+test("a genuine conflict on a replayed reading is still rejected, not absorbed as already-applied", async () => {
+  const storage = memoryStorage();
+  const server = fakeFieldServer();
+  const queue = createOfflineQueue(storage, sharedLock());
+
+  // Another writer (another tab, the bulk save, another device) already
+  // recorded 12.6 against this field, so the server is at version 1.
+  await server.send({ batchTicketId: "t1", componentId: "c1", field: "actual", value: "12.6", expectedVersion: "0" });
+
+  await queue.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "12.50", expectedVersion: "0" });
+  const result = await queue.flushQueue({ recordActualField: server.handler });
+
+  assert.equal(result.flushed, 0, "nothing was applied — the replay was refused");
+  assert.equal(result.remaining, 0, "and the item does not sit in the queue retrying a write that will never be accepted");
+  assert.equal(server.state.value, 12.6, "the other writer's reading stands — a replay must never overwrite it");
+  assert.deepEqual(
+    queue.peekRejected().items.map((i) => i.reason),
+    ["STALE_READING"],
+    "a real disagreement between the queued value and the server's value must surface to the operator",
+  );
+});
+
+// Unit coverage for the mapping itself, exercised directly rather than
+// through the queue — these are the boundary cases that decide whether an
+// operator's reading is silently swallowed or falsely dead-lettered, and
+// they would each need a full replay setup to reach otherwise.
+test("toReplayOutcome settles equivalent numeric representations and nothing else", () => {
+  const staleAt = (currentValue: number | null): RecordActualFieldResult => ({ status: "STALE_READING", currentVersion: 7, currentValue });
+
+  assert.deepEqual(toReplayOutcome({ status: "OK", version: 3 }, { value: "12.50" }), { status: "APPLIED", version: 3 });
+  // Same measurement, different text — the case that used to dead-letter.
+  assert.deepEqual(toReplayOutcome(staleAt(12.5), { value: "12.50" }), { status: "APPLIED", version: 7 });
+  assert.deepEqual(toReplayOutcome(staleAt(1.5), { value: "001.500" }), { status: "APPLIED", version: 7 });
+  assert.deepEqual(toReplayOutcome(staleAt(12.5), { value: " 12.5 " }), { status: "APPLIED", version: 7 }, "Number() ignores surrounding whitespace, and so must this");
+  // Genuinely different measurements stay conflicts.
+  assert.deepEqual(toReplayOutcome(staleAt(12.6), { value: "12.50" }), { status: "REJECTED", reason: "STALE_READING" });
+  // Nothing that isn't a finite number may ever settle an item: a blank
+  // value, junk text, and a server row that no longer holds a reading at
+  // all must all keep flowing down the genuine-conflict path.
+  assert.deepEqual(toReplayOutcome(staleAt(12.5), { value: "" }), { status: "REJECTED", reason: "STALE_READING" });
+  assert.deepEqual(toReplayOutcome(staleAt(12.5), { value: "   " }), { status: "REJECTED", reason: "STALE_READING" });
+  assert.deepEqual(toReplayOutcome(staleAt(12.5), { value: "twelve" }), { status: "REJECTED", reason: "STALE_READING" });
+  assert.deepEqual(toReplayOutcome(staleAt(12.5), { value: "Infinity" }), { status: "REJECTED", reason: "STALE_READING" });
+  assert.deepEqual(toReplayOutcome(staleAt(null), { value: "12.50" }), { status: "REJECTED", reason: "STALE_READING" });
+  // `Number("")` is 0, so a blank value would "equal" a server reading of
+  // 0 under any comparison that skipped the emptiness check first — the
+  // trap sameFiniteReading exists to refuse.
+  assert.equal(sameFiniteReading("", 0), false);
+  assert.equal(sameFiniteReading("0", 0), true);
+  assert.equal(sameFiniteReading(undefined, 0), false);
+  // Every other typed refusal is a rejection, unchanged.
+  assert.deepEqual(toReplayOutcome({ status: "TERMINAL" }, { value: "12.50" }), { status: "REJECTED", reason: "TERMINAL" });
+  assert.deepEqual(toReplayOutcome({ status: "NOT_FOUND" }, { value: "12.50" }), { status: "REJECTED", reason: "NOT_FOUND" });
+  assert.deepEqual(toReplayOutcome({ status: "INVALID_VALUE" }, { value: "12.50" }), { status: "REJECTED", reason: "INVALID_VALUE" });
 });
 
 test("two concurrent flush attempts against the same storage produce no duplicate rejected item and no lost pending item", async () => {

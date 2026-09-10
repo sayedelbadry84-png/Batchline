@@ -12,8 +12,20 @@
 // - claimed: rows this sweep took responsibility for.
 // - resolved: rows whose work AND whose database transition both
 //   committed. Nothing else counts as done.
-// - busy: rows another processor held a live lease on (auto-requisition
-//   only) — real, in-flight work owned elsewhere, never "finished".
+// - busy: rows this sweep CLAIMED and then could not take, because
+//   another processor held a live lease on them (auto-requisition only)
+//   — real, in-flight work owned elsewhere, never "finished".
+//   PL-R15-P1-01, fifteenth production-lifecycle review: this counter is
+//   deliberately NOT "every row someone else is working on". A row whose
+//   owner is mid-transaction is ROW-LOCKED, and the claim query
+//   (claimEligiblePendingAutoRequisitions) uses FOR UPDATE SKIP LOCKED,
+//   so such a row is excluded before selection: it is not claimed, not
+//   processed, and appears in NO counter this sweep returns. `busy`
+//   therefore only ever covers the narrower race where the claim
+//   succeeded — the row was not locked at select time — and the lease
+//   turned out to belong to someone else by the time it was processed.
+//   A sweep reporting claimed: 0 across the board is the normal, correct
+//   result while another worker is actively holding the only queued row.
 // - externalFailed: the outside-world step (requisition/notify, blob
 //   delete) failed; the row remains queued with backoff recorded.
 // - bookkeepingFailed: the outside-world step succeeded (or its failure

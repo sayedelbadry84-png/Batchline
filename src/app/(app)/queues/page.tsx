@@ -106,9 +106,17 @@ export default async function QueuesPage({ searchParams }: { searchParams: Promi
             </table>
           </div>
         )}
-        {rows.length > 0 && (
+        {/* PL-R15-P3-02, fifteenth production-lifecycle review: the
+            controls used to render only when the page had rows, so any
+            way of landing on an empty page past the first — a bookmarked
+            ?page=2, or a page whose rows were all just requeued — left
+            the operator on a dead end with no way back but editing the
+            URL. A page beyond the first always offers its way back, rows
+            or no rows; only the "showing x–y of n" line needs rows to be
+            meaningful. */}
+        {(rows.length > 0 || page > 0) && (
           <div className="mt-3 flex items-center justify-between gap-3">
-            <span className="text-xs text-ink-muted">{m.showing(shownFrom, shownFrom + rows.length - 1, total)}</span>
+            <span className="text-xs text-ink-muted">{rows.length > 0 ? m.showing(shownFrom, shownFrom + rows.length - 1, total) : null}</span>
             <span className="flex gap-3">
               {page > 0 && (
                 <Link href={`/queues?page=${page - 1}`} className="text-xs font-medium text-accent-strong hover:underline">

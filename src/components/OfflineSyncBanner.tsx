@@ -3,47 +3,25 @@
 import { useCallback, useEffect, useState } from "react";
 import { offlineQueue, logicalKey, emitReplaySuccess, type RejectedAction, type ReplayOutcome, type ReadStatus } from "@/lib/offlineQueue";
 import { recordActualField } from "@/app/(app)/production/actions";
+import { toReplayOutcome } from "@/lib/recordActualFieldReplay";
 
 // Registry of queueable action kinds this banner knows how to replay —
 // see the "opt-in, not automatic" note on AutoSaveField's offlineQueueKind
 // for why only idempotent field-overwrite actions ever appear here.
 //
-// Maps recordActualField's own typed result to a ReplayOutcome (PL-R6-
-// P2-02, sixth production-lifecycle review) — OK is the only APPLIED
-// outcome; every other typed status is REJECTED (the business write was
-// genuinely refused, replaying it again would refuse it again forever);
-// a thrown exception (still offline, a real transport error) is left to
-// flushQueue's own try/catch, which treats it as RETRYABLE.
+// This banner owns the transport only: build the FormData, call the
+// Server Action. Deciding the ReplayOutcome from the server's typed
+// answer is toReplayOutcome's job (src/lib/recordActualFieldReplay.ts) —
+// PL-R15-P2-01, fifteenth production-lifecycle review, moved it there so
+// the tests drive the REAL mapping instead of a paraphrase of it written
+// into a fake handler, which is exactly how the text-vs-number
+// comparison bug ("12.50" treated as a conflict with the server's own
+// 12.5) survived a passing test.
 const HANDLERS: Record<string, (fields: Record<string, string>) => Promise<ReplayOutcome>> = {
   recordActualField: async (fields) => {
     const fd = new FormData();
     for (const [k, v] of Object.entries(fields)) fd.set(k, v);
-    const result = await recordActualField(fd);
-    // PL-R12-P1-01, twelfth production-lifecycle review: the version is
-    // returned to flushQueue rather than published from inside the
-    // handler. Publishing here fired BEFORE the settlement was durably
-    // stored — and before it was known whether this replay's own
-    // generation was still the current one — so a superseded or unstored
-    // replay could still tell the mounted field "saved, here is your new
-    // version". flushQueue now publishes through onSettled below, only
-    // once the settlement has actually persisted.
-    if (result.status === "OK") return { status: "APPLIED", version: result.version };
-
-    // PL-R14-P2-03, fourteenth production-lifecycle review: a
-    // STALE_READING whose current server value IS the value we just sent
-    // means this exact reading already applied — almost always THIS
-    // client's own earlier attempt, whose local settlement failed to
-    // save. Treating it as a conflict dead-lettered the operator's own
-    // accepted reading and asked them to re-enter a number the database
-    // already held. The in-memory reconciliation in offlineQueue.ts only
-    // covers one session; this covers a reload, another tab, or another
-    // device, because it is decided from the server's own response.
-    // Either way the outcome is the same: the queued value is what the
-    // server holds, so the item is settled at the server's version.
-    if (result.status === "STALE_READING" && result.currentValue !== null && String(result.currentValue) === fields.value) {
-      return { status: "APPLIED", version: result.currentVersion };
-    }
-    return { status: "REJECTED", reason: result.status };
+    return toReplayOutcome(await recordActualField(fd), fields);
   },
 };
 

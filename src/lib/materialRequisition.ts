@@ -220,6 +220,15 @@ export type ProcessIntentResult =
   // exact intent. Deliberately NOT folded into RESOLVED — the work is
   // someone else's in-flight responsibility, not finished, and counting
   // it as done is precisely how the concurrent-consumption bug hid.
+  //
+  // PL-R15-P1-01, fifteenth production-lifecycle review: reaching this
+  // status at all means the row WAS selected and only then found to be
+  // owned elsewhere — either the owner was between transactions when the
+  // claim ran (so the row carried no lock to skip), or the lease was lost
+  // mid-flight. It is NOT the general "someone else is working on it"
+  // signal: a row whose owner is inside an open transaction is row-locked
+  // and never reaches this function at all, because the cron sweep's
+  // claim uses FOR UPDATE SKIP LOCKED. See QueueSweepCounts.busy.
   | { status: "BUSY" }
   // PL-R12-P2-02: the external work succeeded but recording that fact
   // did not. Never RESOLVED: the row is still there, so the operator-
@@ -479,6 +488,11 @@ export async function processPendingAutoRequisition(intentId: string, notify: Re
 // then either deletes the row (resolved) or recomputes the real backoff
 // on failure. SKIP LOCKED is what makes two overlapping cron invocations
 // safe: each one only ever claims rows the other isn't already holding.
+// PL-R15-P1-01: "isn't already holding" is decided by the Postgres row
+// lock, not by the lease column — a row inside another transaction is
+// skipped here silently and is reported in no counter at all (it is not
+// claimed, so it cannot be BUSY). That is the intended contract; the
+// owner's own transaction is what will finish or release it.
 async function claimEligiblePendingAutoRequisitions(limit: number): Promise<{ id: string }[]> {
   const provisionalLease = computeNextAttempt(0);
   return prisma.$queryRaw<{ id: string }[]>`

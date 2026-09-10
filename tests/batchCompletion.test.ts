@@ -1729,14 +1729,35 @@ test("the immediate processor and the cron sweep cannot consume the same intent 
     // The immediate processor now holds the lease and is mid-notification.
     await insideNotify;
 
+    // PL-R15-P1-01, fifteenth production-lifecycle review: the row this
+    // sweep must leave alone is, at this instant, physically ROW-LOCKED
+    // by the immediate processor's still-open settlement transaction
+    // (PL-R14-P1-02 made re-asserting the lease the transaction's first
+    // statement, and that UPDATE takes the lock). The claim query uses
+    // FOR UPDATE SKIP LOCKED, so the row is excluded from the claim
+    // ENTIRELY — it is never selected, never processed, and therefore
+    // never reported BUSY. `nextAttemptAt` is the durable proof of that:
+    // claimEligiblePendingAutoRequisitions provisionally bumps it forward
+    // on every row it claims, so an unchanged value on this row means the
+    // claim genuinely never touched it. That is a per-row fact, unlike
+    // any global counter.
+    const beforeSweep = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
     const cron = await retryPendingAutoRequisitions(200, async (_tx, { requisitionNumber }) => {
       notifyCalls.push(`cron:${requisitionNumber}`);
       return [];
     });
-    // PL-R13-P1-01: `busy >= 1` is a safe global assertion (this intent
-    // is provably one of them); the fact that matters for THIS intent is
-    // asserted directly on its own row below, not via a global counter.
-    assert.ok(cron.busy >= 1, "the overlapping intent must be reported BUSY — real in-flight work owned elsewhere, never counted as finished");
+    const afterSweep = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+    assert.equal(afterSweep.nextAttemptAt.getTime(), beforeSweep.nextAttemptAt.getTime(), "SKIP LOCKED must have excluded the locked row from the claim itself — a claimed row always has its nextAttemptAt bumped");
+    assert.equal(afterSweep.leaseOwner, beforeSweep.leaseOwner, "and the owner's lease must be untouched by the sweep");
+    // The corrected counter contract: BUSY means a row the sweep DID
+    // claim and then lost the lease race on. A row excluded by SKIP
+    // LOCKED before selection is counted in nothing at all, so expecting
+    // `busy >= 1` here was asserting the opposite of the real (and
+    // correct) queue semantics — that is what turned CI #56 red, not any
+    // production defect. Zero is the right expectation: this suite runs
+    // serially (--test-concurrency=1), so the locked intent above is the
+    // only lease held by any live processor anywhere.
+    assert.equal(cron.busy, 0, "a row another transaction holds is skipped before selection, so it is never counted BUSY");
     assert.ok(!notifyCalls.some((c) => c.startsWith("cron:")), "the cron sweep must not have notified for an intent another processor is actively holding");
 
     const duringOverlap = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
