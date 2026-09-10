@@ -1035,6 +1035,82 @@ test("a failed audit insert rolls back a cash transaction and its journal entry"
   assert.equal(await prisma.cashTransaction.count({ where: { description: `${prefix}-CASH` } }), 1);
 });
 
+// PR4-R5-P1-01 — the reviewer's exact counterexample. Nothing here is
+// malformed input: 0.10 and 0.20 are ordinary amounts, and their binary
+// float sum is 0.30000000000000004. The bill used to store that, so a
+// later payment of exactly 0.30 left it PARTIALLY_PAID with a remainder
+// no one could ever pay off.
+test("a bill whose parts do not sum exactly in binary float is still settled by the exact payment", async () => {
+  await asUser(accountantId);
+  await finance.createSupplierBill(form({ supplierId, siteId: siteA, dueDate: "2026-12-31", subtotal: "0.10", taxAmount: "0.20" }));
+  const bill = await prisma.supplierBill.findFirst({ where: { siteId: siteA, billNumber: { startsWith: "BILL-" }, subtotal: 0.1 }, orderBy: { createdAt: "desc" } });
+  assert.ok(bill, "the bill is created");
+  supplierBillIds.push(bill.id);
+  assert.equal(bill.total, 0.3, "the stored total is the currency amount, not the float sum 0.30000000000000004");
+
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "0.30" }));
+  assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: bill.id } }), 1, "the exact settlement is accepted");
+  assert.equal(
+    (await prisma.supplierBill.findUniqueOrThrow({ where: { id: bill.id } })).status,
+    "PAID",
+    "and settles the bill — an exactly paid bill must never be left PARTIALLY_PAID by representation error",
+  );
+
+  // Aggregation: three amounts that each carry their own representation
+  // error must still add up to a settled bill rather than drifting.
+  await finance.createSupplierBill(form({ supplierId, siteId: siteA, dueDate: "2026-12-31", subtotal: "0.70", taxAmount: "0.03" }));
+  const drifty = await prisma.supplierBill.findFirst({ where: { siteId: siteA, subtotal: 0.7 }, orderBy: { createdAt: "desc" } });
+  assert.ok(drifty);
+  supplierBillIds.push(drifty.id);
+  assert.equal(drifty.total, 0.73);
+  for (const amount of ["0.29", "0.29", "0.15"]) {
+    await finance.recordSupplierPayment(form({ supplierBillId: drifty.id, amount }));
+  }
+  assert.equal((await prisma.supplierBill.findUniqueOrThrow({ where: { id: drifty.id } })).status, "PAID", "repeated fractional payments still settle exactly");
+  await finance.recordSupplierPayment(form({ supplierBillId: drifty.id, amount: "0.01" }));
+  assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: drifty.id } }), 3, "and nothing more is payable on top");
+});
+
+// PR4-R5-P1-02 — the audit sweep, finished. reconcileMovement marked the
+// movement and then opened a SEPARATE transaction for its audit, so a
+// failed audit left the money reconciled while the caller saw an error.
+test("a failed audit insert rolls back the reconciliation flag itself", async () => {
+  const bill = await makeSupplierBill(siteA, 40);
+  await asUser(accountantId);
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "40" }));
+  const payment = await prisma.supplierPayment.findFirstOrThrow({ where: { supplierBillId: bill.id } });
+
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_xs_reject_recon_audit() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."reasonCode" = 'BANK_RECONCILED' AND NEW."recordId" = '${payment.id}' THEN
+        RAISE EXCEPTION 'injected audit failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER test_xs_reject_recon_audit_trigger BEFORE INSERT ON "AuditEvent"
+    FOR EACH ROW EXECUTE FUNCTION test_xs_reject_recon_audit();
+  `);
+  try {
+    await assert.rejects(() => finance.reconcileMovement(form({ kind: "supplierPayment", id: payment.id })));
+    assert.equal(
+      (await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled,
+      false,
+      "money must not stay marked reconciled when the record of who reconciled it failed",
+    );
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_reject_recon_audit_trigger ON "AuditEvent";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_reject_recon_audit();`);
+  }
+
+  await finance.reconcileMovement(form({ kind: "supplierPayment", id: payment.id }));
+  assert.equal((await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled, true);
+  assert.equal(await prisma.auditEvent.count({ where: { reasonCode: "BANK_RECONCILED", recordId: payment.id } }), 1);
+});
+
 after(async () => {
   const users = [operatorId, salesId, accountantId, adminId, salesManagerId, salesSupervisorId, supervisorId].filter(Boolean);
   await prisma.session.deleteMany({ where: { userId: { in: users } } });

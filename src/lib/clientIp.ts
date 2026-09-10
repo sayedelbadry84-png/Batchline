@@ -23,6 +23,8 @@
 // non-Vercel deployment ever needs real per-IP limits, name the trusted
 // proxy header here — that is a configuration decision someone has to
 // make on purpose, not a default.
+import { isIP } from "node:net";
+
 export const UNKNOWN_CLIENT_IP = "unknown";
 
 // Rejects the empty string, header chains, and anything that is not a
@@ -31,13 +33,12 @@ export const UNKNOWN_CLIENT_IP = "unknown";
 function asSingleIp(value: string | null | undefined): string | null {
   if (!value) return null;
   const trimmed = value.trim();
-  if (!trimmed || trimmed.length > 45 || trimmed.includes(",")) return null;
-  const ipv4 = /^(\d{1,3}\.){3}\d{1,3}$/;
-  const ipv6 = /^[0-9a-fA-F:]+$/;
-  if (ipv4.test(trimmed)) {
-    return trimmed.split(".").every((o) => Number(o) <= 255) ? trimmed : null;
-  }
-  return ipv6.test(trimmed) && trimmed.includes(":") ? trimmed : null;
+  if (!trimmed || trimmed.includes(",")) return null;
+  // node:net's own parser rather than a hand-rolled one: the hand-rolled
+  // IPv6 check accepted colon-only strings like ":::" (harmless under the
+  // Vercel trust boundary, but wrong), and there is no reason to
+  // re-implement something the runtime already does correctly.
+  return isIP(trimmed) === 0 ? null : trimmed;
 }
 
 export function resolveClientIp(

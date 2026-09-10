@@ -3,7 +3,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { resolvePlantBillingDefaults } from "@/lib/plantBilling";
-import { logAudit, writeAudit } from "@/lib/audit";
+import { writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
@@ -60,9 +60,18 @@ export async function createSupplierBill(formData: FormData) {
   if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
 
   const { currency } = await resolvePlantBillingDefaults(siteId);
-  const total = subtotal + taxAmount;
-  // The sum of two valid amounts can still leave the representable range.
-  if (!Number.isSafeInteger(toMinorUnits(total))) return;
+  // PR4-R5-P1-01: the sum is computed in MINOR UNITS and the stored amount
+  // derived back from it. Validating `subtotal + taxAmount` and then
+  // persisting that raw float was not enough — the check looked at the
+  // rounded value while the unrounded one went to the database. Ordinary
+  // input is all it takes: 0.10 + 0.20 is 0.30000000000000004 in binary
+  // floating point, so a later, perfectly valid payment of 0.30 left the
+  // bill PARTIALLY_PAID forever, with a remainder too small to pay off.
+  // Exactly the unpayable-remainder class the text parser was added to
+  // remove, reintroduced by arithmetic instead of by input.
+  const totalMinor = toMinorUnits(subtotal) + toMinorUnits(taxAmount);
+  if (!Number.isSafeInteger(totalMinor)) return;
+  const total = totalMinor / 100;
 
   // PR4-R3-P1-01: purchaseOrderId arrived from the form and was written
   // onto the bill without ever being loaded — the same cross-site bridge
@@ -132,8 +141,13 @@ export async function createSupplierBill(formData: FormData) {
 async function recomputeBillStatus(db: Prisma.TransactionClient, supplierBillId: string) {
   const bill = await db.supplierBill.findUnique({ where: { id: supplierBillId }, include: { payments: true } });
   if (!bill) return;
-  const paid = bill.payments.reduce((sum, p) => sum + p.amount, 0);
-  const status = paid <= 0 ? "UNPAID" : paid >= bill.total ? "PAID" : "PARTIALLY_PAID";
+  // PR4-R5-P1-01: summed and compared in whole minor units. `paid >=
+  // bill.total` on floats is where an exactly settled bill stayed
+  // PARTIALLY_PAID, and repeated partial payments each contributed their
+  // own representation error to the running sum.
+  const paidMinor = bill.payments.reduce((sum, p) => sum + toMinorUnits(p.amount), 0);
+  const totalMinor = toMinorUnits(bill.total);
+  const status = paidMinor <= 0 ? "UNPAID" : paidMinor >= totalMinor ? "PAID" : "PARTIALLY_PAID";
   if (status !== bill.status) await db.supplierBill.update({ where: { id: supplierBillId }, data: { status } });
 }
 
@@ -346,41 +360,37 @@ export async function reconcileMovement(formData: FormData) {
   // and none of them was checking any of it. The scope is now part of the
   // conditional write, so marking another site's money as reconciled
   // matches no row.
+  if (kind !== "payment" && kind !== "supplierPayment" && kind !== "cashTransaction") return;
+
   const now = new Date();
   const allowedSiteId = effectiveSiteId(actor);
   const data = { reconciled: true, reconciledAt: now };
-  let marked: { count: number };
-  if (kind === "payment") {
-    marked = await prisma.payment.updateMany({
-      where: { id, ...(allowedSiteId ? { invoice: { plant: { siteId: allowedSiteId } } } : {}) },
-      data,
-    });
-  } else if (kind === "supplierPayment") {
-    marked = await prisma.supplierPayment.updateMany({
-      where: { id, ...(allowedSiteId ? { supplierBill: { siteId: allowedSiteId } } : {}) },
-      data,
-    });
-  } else if (kind === "cashTransaction") {
-    marked = await prisma.cashTransaction.updateMany({
-      where: { id, ...(allowedSiteId ? { siteId: allowedSiteId } : {}) },
-      data,
-    });
-  } else {
-    return;
-  }
-  if (marked.count !== 1) return;
 
-  // PR4-R3-P1-03 sweep: smaller blast radius than a ledger posting, but
-  // the same rule — a reconciliation that commits without its audit row
-  // is an unexplained change to financial state.
-  await prisma.$transaction((tx) =>
-    writeAudit(tx, { id: actor!.id, role: actor!.role }, {
+  // PR4-R5-P1-02: the flag and its audit row are ONE transaction. The
+  // previous version marked the movement reconciled and then opened a
+  // SEPARATE transaction for the audit — so a failed audit insert left
+  // the money marked reconciled while the caller saw an error. Splitting
+  // the commit is the defect; putting the audit in a transaction of its
+  // own does not fix it.
+  const reconciled = await prisma.$transaction(async (tx) => {
+    const marked =
+      kind === "payment"
+        ? await tx.payment.updateMany({ where: { id, ...(allowedSiteId ? { invoice: { plant: { siteId: allowedSiteId } } } : {}) }, data })
+        : kind === "supplierPayment"
+          ? await tx.supplierPayment.updateMany({ where: { id, ...(allowedSiteId ? { supplierBill: { siteId: allowedSiteId } } : {}) }, data })
+          : await tx.cashTransaction.updateMany({ where: { id, ...(allowedSiteId ? { siteId: allowedSiteId } : {}) }, data });
+    if (marked.count !== 1) return false;
+
+    await writeAudit(tx, { id: actor!.id, role: actor!.role }, {
       module: "Finance",
       recordId: id,
       afterValue: `${kind} reconciled`,
       reasonCode: "BANK_RECONCILED",
-    }),
-  );
+    });
+    return true;
+  }, TX_OPTIONS);
+  if (!reconciled) return;
+
   revalidatePath("/finance");
 }
 
@@ -440,14 +450,21 @@ export async function importBankStatement(formData: FormData) {
         else await tx.cashTransaction.update({ where: { id: match.id }, data: { reconciled: true, reconciledAt: now } });
       }
     }
+
+    // PR4-R5-P1-02: audited inside the same transaction as the import.
+    // Post-commit, a failed audit left every statement line and every
+    // auto-reconciliation committed while the caller saw an error — and a
+    // retry re-imports the same file, because nothing about this import is
+    // idempotent. The audit row is the only record of what was already
+    // brought in, so it must not be the part that can go missing.
+    const matchedCount = matched.filter((m) => m.match).length;
+    await writeAudit(tx, { id: actor!.id, role: actor!.role }, {
+      module: "Finance",
+      recordId: siteId,
+      afterValue: `Imported ${lines.length} bank statement lines, ${matchedCount} auto-matched, ${lines.length - matchedCount} unmatched, ${errors.length} rows skipped`,
+      reasonCode: "BANK_STATEMENT_IMPORTED",
+    });
   }, TX_OPTIONS);
 
-  const matchedCount = matched.filter((m) => m.match).length;
-  await logAudit({
-    module: "Finance",
-    recordId: siteId,
-    afterValue: `Imported ${lines.length} bank statement lines, ${matchedCount} auto-matched, ${lines.length - matchedCount} unmatched, ${errors.length} rows skipped`,
-    reasonCode: "BANK_STATEMENT_IMPORTED",
-  });
   revalidatePath("/finance");
 }

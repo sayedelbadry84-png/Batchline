@@ -136,5 +136,44 @@ Before running these against a large production table:
                        'Session_userId_idx', 'Session_expiresAt_idx');
    ```
 
-   Drop any row with `indisvalid = false` and re-run that one migration.
+   Drop any row with `indisvalid = false`.
+
+   **Then reconcile Prisma's own history before retrying** (PR4-R5-P2-02).
+   A migration that failed mid-deploy is recorded as failed in
+   `_prisma_migrations`, and `migrate deploy` refuses to move past it. Do
+   not delete the row by hand:
+
+   ```bash
+   npx prisma migrate resolve --rolled-back 20260910120000_index_audit_event_created_at
+   npx prisma migrate deploy
+   ```
+
+   Use the exact directory name of the migration that failed. Confirm
+   `npx prisma migrate status` reports no failed migration before
+   deploying again, and abort the window if it still does — a half-applied
+   index chain is a state to stop and think about, not to retry blindly.
+
 5. Verify all four exist and are valid afterwards with the same query.
+
+## Migration lineage on a persistent database
+
+PR4-R5-P2-01. CI always starts from an empty database, so a green run
+proves the chain applies **from zero** — never that it upgrades cleanly
+from a database that already has history. Before deploying to any
+persistent target (production, staging, a long-lived preview):
+
+```sql
+SELECT migration_name, finished_at, rolled_back_at
+FROM _prisma_migrations
+ORDER BY started_at;
+```
+
+Compare that list against `prisma/migrations/`. In particular, this branch
+**replaced** `20260910120000_index_audit_and_session_lookups` with four
+separately named migrations. If the old name appears in a target's
+`_prisma_migrations`, `migrate deploy` will see a name it no longer has
+and the four new ones it has never applied, while the indexes themselves
+may already exist. Do not run it blind: decide the forward plan
+explicitly, rehearse it on a copy of that database, and only then deploy.
+If the old name is absent — which is the expected case, since it was only
+ever applied in CI — the new chain proceeds normally.
