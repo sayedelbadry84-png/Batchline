@@ -8,6 +8,7 @@ import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/sit
 import { withSequentialNumber } from "@/lib/sequence";
 import { postSupplierBill, postSupplierPayment, postCashTransaction, reverseJournalEntry } from "@/lib/ledger";
 import { parseBankStatementCsv, matchBankStatementLines, type ReconciliationCandidate } from "@/lib/bankReconciliation";
+import { parseMoneyInput, toMinorUnits } from "@/lib/money";
 import { revalidatePath } from "next/cache";
 
 // See the same note on billing/actions.ts's own TX_OPTIONS — several
@@ -15,20 +16,6 @@ import { revalidatePath } from "next/cache";
 // exceed Prisma's 5s default timeout, especially on a cold connection.
 const TX_OPTIONS = { timeout: 15000 };
 
-// PR4-R1-P1-03, second external-review validation round: money columns are
-// still Float (BL-CR-P2-02 tracks the Decimal migration), so comparing a
-// submitted amount against a computed balance directly means comparing two
-// approximations. The previous guard papered over that with a ±0.005
-// epsilon — which by construction ACCEPTS a payment up to half a halala
-// above the outstanding balance.
-//
-// Comparing in minor units instead removes the tolerance entirely: both
-// sides are rounded to whole halalas exactly once, and the comparison is
-// then integer-exact. This is also the rounding policy AGENTS.md already
-// requires at write time, applied at the point the decision is made.
-function toMinorUnits(amount: number): number {
-  return Math.round(amount * 100);
-}
 
 export async function createSupplierBill(formData: FormData) {
   const actor = await getCurrentUser();
@@ -96,10 +83,14 @@ export async function recordSupplierPayment(formData: FormData) {
   await requireActionPermission(actor, "finance", "recordSupplierPayment");
 
   const supplierBillId = String(formData.get("supplierBillId") ?? "");
-  const amount = Number(formData.get("amount") ?? 0);
+  // PR4-R2-P1-01: parsed and validated as CURRENCY before anything else
+  // looks at it. The previous version accepted any finite number and only
+  // compared it in rounded minor units, so 100.004 against a 100.00
+  // balance passed the check and was then persisted and posted in full.
+  const amount = parseMoneyInput(formData.get("amount"));
   const method = String(formData.get("method") ?? "").trim() || null;
   const reference = String(formData.get("reference") ?? "").trim() || null;
-  if (!supplierBillId || !amount || amount <= 0) return;
+  if (!supplierBillId || amount === null || amount <= 0) return;
 
   // BL-CR-P1-02 and BL-CR-P1-07, external-review validation (2026-09-10).
   // Three defects, one cause: the bill was read OUTSIDE the transaction
@@ -228,12 +219,15 @@ export async function createCashTransaction(formData: FormData) {
   const siteId = String(formData.get("siteId") ?? "");
   const direction = String(formData.get("direction") ?? "");
   const category = String(formData.get("category") ?? "");
-  const amount = Number(formData.get("amount") ?? 0);
+  // Same currency validation as recordSupplierPayment (PR4-R2-P1-01):
+  // this amount is posted to the cash ledger, so a value that cannot be
+  // expressed in halalas must not reach it either.
+  const amount = parseMoneyInput(formData.get("amount"));
   const description = String(formData.get("description") ?? "").trim();
   const reference = String(formData.get("reference") ?? "").trim() || null;
   const occurredAtRaw = String(formData.get("occurredAt") ?? "");
 
-  if (!siteId || !["IN", "OUT"].includes(direction) || !category || !amount || amount <= 0 || !description) return;
+  if (!siteId || !["IN", "OUT"].includes(direction) || !category || amount === null || amount <= 0 || !description) return;
   if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
 
   const plantId = await resolvePlantIdForSite(siteId);

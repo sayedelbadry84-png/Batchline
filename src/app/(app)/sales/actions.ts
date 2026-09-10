@@ -486,32 +486,51 @@ export async function markQuoteSent(formData: FormData) {
   // write itself. A price offer never reaches the customer without final
   // (Plants Manager) sign-off on file: same reasoning as Reservation
   // approval gating production release, see the model comment on Quote.
+  //
+  // PR4-R2-P1-02 (the reviewer's "review markQuoteSent next"): the
+  // transition, the standing prices it establishes and its audit row were
+  // three separate operations, so a failure between them left a quote
+  // marked SENT with the customer's new prices half-written and no audit
+  // trail. All of it is one transaction now.
   const allowedSiteId = effectiveSiteId(actor);
-  const sent = await prisma.quote.updateMany({
-    where: { id, status: "DRAFT", finalApprovedAt: { not: null }, ...ownSiteScope(allowedSiteId) },
-    data: { status: "SENT", sentAt: new Date() },
-  });
-  if (sent.count !== 1) return;
-
-  // Safe to read unconditionally now: this call owns the transition.
-  const quote = await prisma.quote.findUniqueOrThrow({ where: { id }, include: { lines: true } });
-
-  // The moment a fully-approved quote goes out is exactly "last quote
-  // submitted to the customer, approved, and still valid" — so this is
-  // where it becomes the customer's standing per-m3 price for billing and
-  // for suggesting future quote lines (see QuoteLineRows' suggestedPrice),
-  // until a later quote's own send supersedes it the same way.
-  if (!quote.validUntil || quote.validUntil >= new Date()) {
-    for (const line of quote.lines) {
-      await prisma.priceListEntry.upsert({
-        where: { customerId_mixId: { customerId: quote.customerId, mixId: line.mixId } },
-        create: { customerId: quote.customerId, mixId: line.mixId, pricePerM3: line.unitPrice },
-        update: { pricePerM3: line.unitPrice },
+  const sent = await silentOnScopeLoss(() =>
+    prisma.$transaction(async (tx) => {
+      const claimed = await tx.quote.updateMany({
+        where: { id, status: "DRAFT", finalApprovedAt: { not: null }, ...ownSiteScope(allowedSiteId) },
+        data: { status: "SENT", sentAt: new Date() },
       });
-    }
-  }
+      if (claimed.count !== 1) throw new ScopeLostError();
 
-  await logAudit({ module: "Sales", recordId: id, afterValue: "SENT", reasonCode: "QUOTE_SENT" });
+      // Safe to read unconditionally now: this call owns the transition.
+      const quote = await tx.quote.findUniqueOrThrow({ where: { id }, include: { lines: true } });
+
+      // The moment a fully-approved quote goes out is exactly "last quote
+      // submitted to the customer, approved, and still valid" — so this is
+      // where it becomes the customer's standing per-m3 price for billing
+      // and for suggesting future quote lines (see QuoteLineRows'
+      // suggestedPrice), until a later quote's own send supersedes it the
+      // same way.
+      if (!quote.validUntil || quote.validUntil >= new Date()) {
+        for (const line of quote.lines) {
+          await tx.priceListEntry.upsert({
+            where: { customerId_mixId: { customerId: quote.customerId, mixId: line.mixId } },
+            create: { customerId: quote.customerId, mixId: line.mixId, pricePerM3: line.unitPrice },
+            update: { pricePerM3: line.unitPrice },
+          });
+        }
+      }
+
+      await writeAudit(tx, { id: actor!.id, role: actor!.role }, {
+        module: "Sales",
+        recordId: id,
+        afterValue: "SENT",
+        reasonCode: "QUOTE_SENT",
+      });
+      return true;
+    }),
+  );
+  if (!sent) return;
+
   revalidatePath("/sales");
   revalidatePath(`/sales/quotes/${id}`);
   revalidatePath("/finance");
@@ -554,12 +573,25 @@ export async function recordQuoteResponse(formData: FormData) {
         // touch must not be recordable as accepted at all.
         if (won.count !== 1) throw new ScopeLostError();
       }
+
+      // PR4-R2-P1-02, second external-review validation round: audited
+      // INSIDE the transaction. logAudit ran after it committed, so an
+      // audit insert that failed left the quote ACCEPTED and the
+      // opportunity WON while this action threw — the same
+      // committed-business-state / missing-audit / reported-failure class
+      // just removed from supplier payments, and against a priced record,
+      // which AGENTS.md rule 5 already says must use writeAudit.
+      await writeAudit(tx, { id: actor!.id, role: actor!.role }, {
+        module: "Sales",
+        recordId: id,
+        afterValue: response,
+        reasonCode: "QUOTE_RESPONSE_RECORDED",
+      });
       return true;
     }),
   );
   if (!accepted) return;
 
-  await logAudit({ module: "Sales", recordId: id, afterValue: response, reasonCode: "QUOTE_RESPONSE_RECORDED" });
   revalidatePath("/sales");
   revalidatePath(`/sales/quotes/${id}`);
 }
@@ -593,6 +625,13 @@ export async function convertQuoteLineToReservation(formData: FormData) {
       (yr) => prisma.reservation.count({ where: { createdAt: yr } }),
       (reservationNumber) =>
         prisma.$transaction(async (tx) => {
+          // PR4-R2-P2-03: a plain read does not claim the line, so two
+          // concurrent conversions could both see it unconverted and race
+          // to the unique index — one of them surfacing a raw database
+          // error instead of a quiet "already converted". Locking the row
+          // first makes the second caller wait and then see the
+          // reservation the first one created.
+          await tx.$queryRaw`SELECT "id" FROM "QuoteLine" WHERE "id" = ${quoteLineId} FOR UPDATE`;
           const line = await tx.quoteLine.findFirst({
             where: {
               id: quoteLineId,

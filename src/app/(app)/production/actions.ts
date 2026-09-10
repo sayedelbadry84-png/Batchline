@@ -874,8 +874,8 @@ export async function reverseBatchTicket(_prevState: ReverseBatchActionState, fo
 //
 // So the decision is gated and recorded here rather than left to the
 // browser: the client asks BEFORE moving anything, an operator without
-// the permission is refused, and every granted adoption leaves an audit
-// event naming the actor and how many readings they took over. A client
+// the permission is refused, and every granted take-over leaves an audit
+// event naming the actor and the count the device reported. A client
 // that skipped this call would only be rearranging its own local storage
 // — every replayed reading still goes through recordActualField's own
 // ticket/site authorization — but it would lose the record of who
@@ -887,13 +887,22 @@ export async function authorizeOfflineQueueAdoption(formData: FormData): Promise
   if (!user) return { status: "FORBIDDEN" };
   if (!(await canPerformAction(user.role, "production", "adoptOfflineQueue"))) return { status: "FORBIDDEN" };
 
+  // PR4-R2-P2-01, second external-review validation round: the event is
+  // named for what the server can actually prove. This runs BEFORE the
+  // browser moves anything, and the count comes from the client, so
+  // "adopted" overstated it — a local storage failure would still have
+  // left a record saying the work had been taken over. What is true here
+  // is that this actor was authorized to take it over, and that is what
+  // the row now says. The completed move is observable where it matters:
+  // the replayed readings themselves are audited by recordActualField
+  // under this actor.
   const pending = Number(formData.get("pending") ?? 0);
   await logAudit({
     module: "Production",
     recordId: user.id,
     field: "offlineQueue",
-    afterValue: `adopted ${Number.isFinite(pending) && pending > 0 ? pending : "?"} stranded reading(s) from another sign-in on this device`,
-    reasonCode: "OFFLINE_QUEUE_ADOPTED",
+    afterValue: `authorized to take over ${Number.isFinite(pending) && pending > 0 ? pending : "an unreported number of"} stranded reading(s) reported by this device from another sign-in`,
+    reasonCode: "OFFLINE_QUEUE_ADOPTION_AUTHORIZED",
   });
   return { status: "OK" };
 }

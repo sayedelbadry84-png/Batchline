@@ -770,7 +770,7 @@ test("a payment above the outstanding balance is refused to the halala, with no 
 // re-attributes them, in the audit log, to whoever replays them. The
 // decision is therefore gated and recorded on the server, not left to the
 // browser that is doing the re-attributing.
-test("adopting another sign-in's stranded readings needs supervisor permission and is audited", async () => {
+test("taking over another sign-in's stranded readings needs supervisor permission and the grant is audited", async () => {
   const fd = new FormData();
   fd.set("pending", "3");
 
@@ -780,7 +780,7 @@ test("adopting another sign-in's stranded readings needs supervisor permission a
     { status: "FORBIDDEN" },
     "an ordinary operator must not be able to file another person's readings under their own name",
   );
-  assert.equal(await prisma.auditEvent.count({ where: { reasonCode: "OFFLINE_QUEUE_ADOPTED", actorId: operatorId } }), 0, "and a refusal leaves no record of a grant");
+  assert.equal(await prisma.auditEvent.count({ where: { reasonCode: "OFFLINE_QUEUE_ADOPTION_AUTHORIZED", actorId: operatorId } }), 0, "and a refusal leaves no record of a grant");
 
   // PLANT_ADMIN holds the same sign-off level as a shortage override.
   const supervisor = await prisma.user.create({
@@ -790,9 +790,108 @@ test("adopting another sign-in's stranded readings needs supervisor permission a
   await asUser(supervisorId);
   assert.deepEqual(await production.authorizeOfflineQueueAdoption(fd), { status: "OK" });
 
-  const granted = await prisma.auditEvent.findFirst({ where: { reasonCode: "OFFLINE_QUEUE_ADOPTED", actorId: supervisorId } });
-  assert.ok(granted, "every granted adoption must name who decided it");
-  assert.ok(granted.afterValue?.includes("3"), "and how many readings they took over");
+  const granted = await prisma.auditEvent.findFirst({ where: { reasonCode: "OFFLINE_QUEUE_ADOPTION_AUTHORIZED", actorId: supervisorId } });
+  assert.ok(granted, "every granted take-over must name who decided it");
+  assert.ok(granted.afterValue?.includes("3"), "and how many readings the device reported");
+  // PR4-R2-P2-01: the event says AUTHORIZED, not adopted. This call runs
+  // before the browser moves anything and its count comes from the client,
+  // so it cannot honestly claim the move completed.
+  assert.ok(granted.afterValue?.startsWith("authorized to take over"), "and must not overstate itself as a completed adoption");
+});
+
+// PR4-R2-P1-01 — a value that cannot be expressed in the currency must
+// never reach the ledger, however small the excess.
+test("a fraction of a halala above the balance is refused, not rounded into the ledger", async () => {
+  const bill = await makeSupplierBill(siteA, 100);
+  await asUser(accountantId);
+
+  // Rounds to exactly the outstanding balance in minor units, which is
+  // how it used to pass the comparison — and was then persisted and
+  // posted as 100.004.
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "100.004" }));
+  assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: bill.id } }), 0, "a sub-halala amount must be refused outright");
+
+  // The halfway case rounds UP under Math.round, so it never passed the
+  // old comparison — but it is still not a payable amount.
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "100.005" }));
+  assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: bill.id } }), 0);
+
+  // And the currency-valid settlement still goes through, stored exactly.
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "100.00" }));
+  const settled = await prisma.supplierPayment.findMany({ where: { supplierBillId: bill.id } });
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].amount, 100, "the amount persisted is the amount submitted, to the halala");
+  assert.equal((await prisma.supplierBill.findUniqueOrThrow({ where: { id: bill.id } })).status, "PAID");
+
+  // Repeated partial payments must still add up exactly rather than
+  // drifting a fraction at a time.
+  const partial = await makeSupplierBill(siteA, 10);
+  for (const amount of ["3.33", "3.33", "3.34"]) {
+    await finance.recordSupplierPayment(form({ supplierBillId: partial.id, amount }));
+  }
+  assert.equal((await prisma.supplierBill.findUniqueOrThrow({ where: { id: partial.id } })).status, "PAID", "three exact thirds settle the bill");
+  await finance.recordSupplierPayment(form({ supplierBillId: partial.id, amount: "0.01" }));
+  assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: partial.id } }), 3, "and nothing more may be paid on top");
+});
+
+// PR4-R2-P1-02 — the quote response, the opportunity it closes and its
+// audit row are one transaction.
+test("a failed audit insert rolls back the quote response and the WON transition together", async () => {
+  const opportunity = await makeOpportunity(siteA, { customerId, prospectName: null, status: "QUOTED" });
+  const quote = await prisma.quote.create({
+    data: {
+      quoteNumber: `${prefix}-QT-${randomUUID().slice(0, 8)}`,
+      opportunityId: opportunity.id,
+      customerId,
+      siteId: siteA,
+      status: "SENT",
+      currency: "SAR",
+      subtotal: 100,
+      total: 100,
+      preparedById: salesId,
+    },
+  });
+  quoteIds.push(quote.id);
+
+  await asUser(salesId);
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_xs_reject_quote_audit() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."reasonCode" = 'QUOTE_RESPONSE_RECORDED' AND NEW."recordId" = '${quote.id}' THEN
+        RAISE EXCEPTION 'injected audit failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER test_xs_reject_quote_audit_trigger BEFORE INSERT ON "AuditEvent"
+    FOR EACH ROW EXECUTE FUNCTION test_xs_reject_quote_audit();
+  `);
+  try {
+    await assert.rejects(() => sales.recordQuoteResponse(form({ id: quote.id, response: "ACCEPTED" })), "the caller is told the action failed");
+    const afterFailure = await prisma.quote.findUniqueOrThrow({ where: { id: quote.id } });
+    assert.equal(afterFailure.status, "SENT", "an accepted price offer must not survive an audit failure");
+    assert.equal(afterFailure.respondedAt, null);
+    assert.equal(
+      (await prisma.opportunity.findUniqueOrThrow({ where: { id: opportunity.id } })).status,
+      "QUOTED",
+      "and the deal must not be closed without the record of who closed it",
+    );
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_reject_quote_audit_trigger ON "AuditEvent";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_reject_quote_audit();`);
+  }
+
+  // With the trigger gone the same call commits all three facts.
+  await sales.recordQuoteResponse(form({ id: quote.id, response: "ACCEPTED" }));
+  assert.equal((await prisma.quote.findUniqueOrThrow({ where: { id: quote.id } })).status, "ACCEPTED");
+  assert.equal((await prisma.opportunity.findUniqueOrThrow({ where: { id: opportunity.id } })).status, "WON");
+  assert.equal(
+    await prisma.auditEvent.count({ where: { reasonCode: "QUOTE_RESPONSE_RECORDED", recordId: quote.id } }),
+    1,
+    "and the audit row committed with them",
+  );
 });
 
 after(async () => {
