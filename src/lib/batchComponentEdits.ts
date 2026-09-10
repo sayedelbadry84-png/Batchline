@@ -91,7 +91,18 @@ export async function claimAndRecordActuals(ticketId: string, writes: BulkCompon
   }
 }
 
-export type RecordActualFieldClaimResult = { status: "OK"; version: number } | { status: "TERMINAL" } | { status: "STALE_READING" };
+// PL-R14-P2-03, fourteenth production-lifecycle review: STALE_READING now
+// reports what the server actually holds. Without it, a client that had a
+// reading ACCEPTED but failed to record that locally (and then reloaded,
+// or handed the queue to another tab) could not tell "the value on the
+// server is already mine" from "someone else genuinely overwrote this" —
+// so it dead-lettered its own accepted reading as a false conflict. With
+// the current value and version in the refusal, any client, in any
+// session, can make that distinction from the response alone.
+export type RecordActualFieldClaimResult =
+  | { status: "OK"; version: number }
+  | { status: "TERMINAL" }
+  | { status: "STALE_READING"; currentVersion: number; currentValue: number | null };
 
 // expectedVersion is the optimistic-concurrency token PL-R8-P1-03
 // (eighth production-lifecycle review) added specifically for this
@@ -130,7 +141,21 @@ export async function claimAndRecordActualField(
       where: field === "actual" ? { id: componentId, actualVersion: expectedVersion } : { id: componentId, moistureVersion: expectedVersion },
       data: field === "actual" ? { actualMassKg: value, actualVersion: { increment: 1 } } : { moisturePct: value, moistureVersion: { increment: 1 } },
     });
-    if (updated.count === 0) return { status: "STALE_READING" as const };
+    if (updated.count === 0) {
+      // PL-R14-P2-03: report what the server actually holds, so a client
+      // whose own accepted write it failed to record locally can tell
+      // "this is already my reading" from a genuine conflict — including
+      // after a reload, in a different tab, or from another device.
+      const current = await tx.batchComponentActual.findUnique({
+        where: { id: componentId },
+        select: { actualMassKg: true, moisturePct: true, actualVersion: true, moistureVersion: true },
+      });
+      return {
+        status: "STALE_READING" as const,
+        currentVersion: current ? (field === "actual" ? current.actualVersion : current.moistureVersion) : 0,
+        currentValue: current ? (field === "actual" ? current.actualMassKg : current.moisturePct) : null,
+      };
+    }
 
     await writeAudit(tx, actor, {
       module: "Production",

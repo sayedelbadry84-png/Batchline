@@ -1,4 +1,5 @@
 import "server-only";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { writeAudit } from "@/lib/audit";
 
@@ -51,44 +52,80 @@ export type DeadLetterActionResult = { status: "OK" } | { status: "NOT_FOUND" } 
 export const DEAD_LETTER_PAGE_SIZE = 50;
 
 export async function listDeadLetters(allowedSiteId: string | null, page = 0, pageSize = DEAD_LETTER_PAGE_SIZE): Promise<{ rows: DeadLetterRow[]; total: number; page: number; pageSize: number }> {
-  const skip = Math.max(0, page) * pageSize;
-  const [requisitions, blobs, total] = await Promise.all([
-    prisma.pendingAutoRequisition.findMany({
-      where: { deadLetteredAt: { not: null }, ...(allowedSiteId === null ? {} : { siteId: allowedSiteId }) },
-      orderBy: { deadLetteredAt: "desc" },
-      skip,
-      take: pageSize,
-    }),
-    allowedSiteId === null
-      ? prisma.pendingBlobDeletion.findMany({ where: { deadLetteredAt: { not: null } }, orderBy: { deadLetteredAt: "desc" }, skip, take: pageSize })
-      : Promise.resolve([]),
+  const safePage = Math.max(0, page);
+  const skip = safePage * pageSize;
+
+  // PL-R14-P2-01, fourteenth production-lifecycle review: paginate the
+  // ORDERED UNION, not each table separately.
+  //
+  // Taking `pageSize` from each queue and merging afterwards produced a
+  // page of up to 2 × pageSize rows for an ADMIN (who sees both kinds),
+  // made the "showing X–Y" range wrong, and could offer a "next" link to
+  // an empty page — 25 + 25 dead letters filled a 50-row page exactly,
+  // so `rows.length === pageSize` claimed another page existed when it
+  // did not. One UNION ALL with a single ORDER BY / LIMIT / OFFSET is the
+  // only shape where a page is a genuine global slice.
+  //
+  // Ordered by deadLetteredAt DESC then kind, id so the sort is TOTAL:
+  // two rows parked in the same millisecond must still have a stable
+  // relative order, or paging could repeat or skip one at a page seam.
+  const siteFilter = allowedSiteId === null ? Prisma.sql`TRUE` : Prisma.sql`p."siteId" = ${allowedSiteId}`;
+  // Blob deletions carry no site of their own, so a site-scoped caller is
+  // never shown them (see this function's own scoping note above).
+  const blobFilter = allowedSiteId === null ? Prisma.sql`TRUE` : Prisma.sql`FALSE`;
+
+  const [raw, total] = await Promise.all([
+    prisma.$queryRaw<
+      { kind: DeadLetterKind; id: string; subject: string; reason: string; attempts: number; lastError: string | null; deadLetteredAt: Date; siteId: string | null }[]
+    >`
+      SELECT * FROM (
+        SELECT
+          'AUTO_REQUISITION' AS kind,
+          p."id"             AS id,
+          COALESCE(p."requisitionNumber", p."materialName", p."materialId") AS subject,
+          CASE WHEN p."requisitionId" IS NOT NULL THEN 'NOTIFICATION_UNDELIVERED' ELSE 'REQUISITION_NOT_OPENED' END AS reason,
+          p."attempts"       AS attempts,
+          p."lastError"      AS "lastError",
+          p."deadLetteredAt" AS "deadLetteredAt",
+          p."siteId"         AS "siteId"
+        FROM "PendingAutoRequisition" p
+        WHERE p."deadLetteredAt" IS NOT NULL AND ${siteFilter}
+
+        UNION ALL
+
+        SELECT
+          'BLOB_DELETION'    AS kind,
+          b."id"             AS id,
+          b."url"            AS subject,
+          b."reason"         AS reason,
+          b."attempts"       AS attempts,
+          b."lastError"      AS "lastError",
+          b."deadLetteredAt" AS "deadLetteredAt",
+          NULL               AS "siteId"
+        FROM "PendingBlobDeletion" b
+        WHERE b."deadLetteredAt" IS NOT NULL AND ${blobFilter}
+      ) AS dead_letters
+      ORDER BY "deadLetteredAt" DESC, kind ASC, id ASC
+      LIMIT ${pageSize} OFFSET ${skip}
+    `,
     countDeadLetters(allowedSiteId),
   ]);
 
-  const rows = [
-    ...requisitions.map((r) => ({
-      kind: "AUTO_REQUISITION" as const,
-      id: r.id,
-      subject: r.requisitionNumber ?? r.materialName ?? r.materialId,
-      reason: r.requisitionId ? "NOTIFICATION_UNDELIVERED" : "REQUISITION_NOT_OPENED",
-      attempts: r.attempts,
-      lastError: r.lastError,
-      deadLetteredAt: r.deadLetteredAt!,
-      siteId: r.siteId,
-    })),
-    ...blobs.map((b) => ({
-      kind: "BLOB_DELETION" as const,
-      id: b.id,
-      subject: b.url,
-      reason: b.reason,
-      attempts: b.attempts,
-      lastError: b.lastError,
-      deadLetteredAt: b.deadLetteredAt!,
-      siteId: null,
-    })),
-  ].sort((a, b) => b.deadLetteredAt.getTime() - a.deadLetteredAt.getTime());
+  // attempts comes back from Postgres as a number already, but the raw
+  // query bypasses Prisma's own mapping — normalized here so callers get
+  // exactly the DeadLetterRow shape the typed path returned.
+  const rows: DeadLetterRow[] = raw.map((r) => ({
+    kind: r.kind,
+    id: r.id,
+    subject: r.subject,
+    reason: r.reason,
+    attempts: Number(r.attempts),
+    lastError: r.lastError,
+    deadLetteredAt: r.deadLetteredAt,
+    siteId: r.siteId,
+  }));
 
-  return { rows, total, page: Math.max(0, page), pageSize };
+  return { rows, total, page: safePage, pageSize };
 }
 
 export async function countDeadLetters(allowedSiteId: string | null): Promise<number> {
@@ -107,21 +144,32 @@ function siteCondition(allowedSiteId: string | null): { siteId?: string } {
   return allowedSiteId === null ? {} : { siteId: allowedSiteId };
 }
 
-// A scope mismatch resolves to NOT_FOUND, never a distinct "forbidden" —
-// the same convention every other domain command in this app uses, so a
-// caller with no authority over a row can't even learn it exists.
-async function inScope(kind: DeadLetterKind, id: string, allowedSiteId: string | null): Promise<{ ok: true; siteId: string | null } | { ok: false }> {
-  if (kind === "AUTO_REQUISITION") {
-    const row = await prisma.pendingAutoRequisition.findUnique({ where: { id }, select: { siteId: true, deadLetteredAt: true } });
-    if (!row) return { ok: false };
-    if (allowedSiteId !== null && row.siteId !== allowedSiteId) return { ok: false };
-    return { ok: true, siteId: row.siteId };
+// PL-R14-P2-02, fourteenth production-lifecycle review: classifies a
+// mutation that matched NOTHING, and runs only AFTER that mutation.
+//
+// There used to be an inScope() pre-read gating the whole action. It made
+// the write's own site condition untestable — a row moved between the
+// read and the write was already rejected by the re-read, so the
+// condition inside the UPDATE never got exercised — and it was a second,
+// separately-timed authorization decision on top of the real one. The
+// mutation is now the single authorization point; this only decides
+// which refusal to report, and it re-applies the caller's own scope so a
+// row outside it is indistinguishable from one that does not exist.
+async function classifyMiss(kind: DeadLetterKind, id: string, allowedSiteId: string | null): Promise<DeadLetterActionResult> {
+  if (kind === "BLOB_DELETION") {
+    // Blob deletions carry no site, so a site-scoped caller can never act
+    // on one at all — reported as NOT_FOUND rather than disclosing it.
+    if (allowedSiteId !== null) return { status: "NOT_FOUND" };
+    const row = await prisma.pendingBlobDeletion.findUnique({ where: { id }, select: { deadLetteredAt: true } });
+    if (!row) return { status: "NOT_FOUND" };
+    return { status: "NOT_DEAD_LETTERED" };
   }
-  // Blob deletions have no site to scope by — org-wide callers only, same
-  // rule listDeadLetters applies.
-  if (allowedSiteId !== null) return { ok: false };
-  const row = await prisma.pendingBlobDeletion.findUnique({ where: { id }, select: { deadLetteredAt: true } });
-  return row ? { ok: true, siteId: null } : { ok: false };
+  const row = await prisma.pendingAutoRequisition.findFirst({
+    where: { id, ...siteCondition(allowedSiteId) },
+    select: { deadLetteredAt: true },
+  });
+  if (!row) return { status: "NOT_FOUND" };
+  return { status: "NOT_DEAD_LETTERED" };
 }
 
 // Puts an abandoned row back in front of the sweep: clears the
@@ -130,54 +178,59 @@ async function inScope(kind: DeadLetterKind, id: string, allowedSiteId: string |
 // lastError is deliberately KEPT — the operator requeuing this needs the
 // history of why it was parked in the first place.
 export async function requeueDeadLetter(kind: DeadLetterKind, id: string, actor: { id: string | null; role: string }, allowedSiteId: string | null): Promise<DeadLetterActionResult> {
-  const scope = await inScope(kind, id, allowedSiteId);
-  if (!scope.ok) return { status: "NOT_FOUND" };
-
-  return prisma.$transaction(async (tx) => {
+  // PL-R14-P2-02: no pre-read. The conditional mutation below IS the
+  // authorization decision — site, existence and dead-letter state are
+  // all decided by the same statement that writes.
+  const missed = await prisma.$transaction(async (tx) => {
     const claim =
       kind === "AUTO_REQUISITION"
         ? await tx.pendingAutoRequisition.updateMany({
-            // PL-R13-P2-01, thirteenth production-lifecycle review: the
-            // site condition is part of the WRITE, not only of the
-            // separate inScope() read above. Checking scope and then
-            // writing on `id` alone left a window where the row's siteId
-            // could change in between, letting the old site's operator
-            // act on a row that had already moved to another site.
+            // PL-R13-P2-01: the site condition is part of the WRITE, so a
+            // row that moves to another site between an operator loading
+            // the page and pressing the button cannot still be acted on.
             where: { id, deadLetteredAt: { not: null }, ...siteCondition(allowedSiteId) },
             // leaseOwner/leaseExpiresAt cleared too: a row parked while a
             // processor still nominally held it must not stay unclaimable.
             data: { deadLetteredAt: null, attempts: 0, nextAttemptAt: new Date(), leaseOwner: null, leaseExpiresAt: null },
           })
-        : await tx.pendingBlobDeletion.updateMany({
-            where: { id, deadLetteredAt: { not: null } },
-            data: { deadLetteredAt: null, attempts: 0, nextAttemptAt: new Date() },
-          });
-    if (claim.count === 0) return { status: "NOT_DEAD_LETTERED" as const };
+        : allowedSiteId !== null
+          ? { count: 0 } // blob deletions have no site — site-scoped callers can never act on one
+          : await tx.pendingBlobDeletion.updateMany({
+              where: { id, deadLetteredAt: { not: null } },
+              data: { deadLetteredAt: null, attempts: 0, nextAttemptAt: new Date() },
+            });
+    if (claim.count === 0) return true;
 
     await writeAudit(tx, actor, { module: "Operations", recordId: id, field: kind, reasonCode: "DEAD_LETTER_REQUEUED" });
-    return { status: "OK" as const };
+    return false;
   });
+
+  // Classified only after the write matched nothing, so the refusal never
+  // depends on a read taken before it.
+  return missed ? classifyMiss(kind, id, allowedSiteId) : { status: "OK" };
 }
 
 // Drops the row for good. Only ever a deliberate human decision — the
 // audit event is the record that the consequence was abandoned knowingly,
 // which is precisely what was missing when these rows simply sat there.
 export async function dismissDeadLetter(kind: DeadLetterKind, id: string, actor: { id: string | null; role: string }, allowedSiteId: string | null): Promise<DeadLetterActionResult> {
-  const scope = await inScope(kind, id, allowedSiteId);
-  if (!scope.ok) return { status: "NOT_FOUND" };
-
-  return prisma.$transaction(async (tx) => {
+  // PL-R14-P2-02: no pre-read — the conditional delete is the single
+  // authorization decision, same as requeue above.
+  const missed = await prisma.$transaction(async (tx) => {
     const claim =
       kind === "AUTO_REQUISITION"
-        ? // PL-R13-P2-01: site condition inside the delete itself, same
-          // reasoning as requeue above — a row that moved to another site
-          // between the scope read and this write must not be droppable
-          // by the old site's operator.
+        ? // PL-R13-P2-01: site condition inside the delete itself, so a
+          // row that moved to another site cannot be dropped by the old
+          // site's operator.
           await tx.pendingAutoRequisition.deleteMany({ where: { id, deadLetteredAt: { not: null }, ...siteCondition(allowedSiteId) } })
-        : await tx.pendingBlobDeletion.deleteMany({ where: { id, deadLetteredAt: { not: null } } });
-    if (claim.count === 0) return { status: "NOT_DEAD_LETTERED" as const };
+        : allowedSiteId !== null
+          ? { count: 0 } // blob deletions have no site — site-scoped callers can never act on one
+          : await tx.pendingBlobDeletion.deleteMany({ where: { id, deadLetteredAt: { not: null } } });
+    if (claim.count === 0) return true;
 
     await writeAudit(tx, actor, { module: "Operations", recordId: id, field: kind, reasonCode: "DEAD_LETTER_DISMISSED" });
-    return { status: "OK" as const };
+    return false;
   });
+
+  return missed ? classifyMiss(kind, id, allowedSiteId) : { status: "OK" };
 }

@@ -226,6 +226,17 @@ export type ProcessIntentResult =
   // visible counters must say so rather than reporting a clean sweep.
   | { status: "BOOKKEEPING_FAILED" };
 
+// PL-R14-P1-02: thrown from inside the settlement transaction when this
+// worker no longer holds the lease, so Prisma unwinds every write the
+// transaction had made. Returning a value instead (the previous shape)
+// let a worker that had already lost the lease commit its notification
+// rows and delivery stamp and only then report BUSY.
+class LeaseLostError extends Error {
+  constructor() {
+    super("The lease on this auto-requisition intent is no longer held by this processor.");
+  }
+}
+
 // How long one processor may hold an intent before another may take it
 // over. Comfortably longer than a requisition create + notify round
 // trip, short enough that a crashed process frees the row well within
@@ -364,27 +375,60 @@ export async function processPendingAutoRequisition(intentId: string, notify: Re
     // afterwards or none is — so the intent can never be deleted before a
     // durable Notification exists. The dedupeKey + skipDuplicates in
     // createNotificationsInTx makes re-running this after a rollback safe.
+    // PL-R14-P1-02, fourteenth production-lifecycle review: losing the
+    // lease must ROLL BACK, and only one worker may push.
+    //
+    // The previous version returned `false` from the transaction callback
+    // when the fenced delete matched nothing — which still COMMITTED the
+    // notification rows and the stamp it had already written, then
+    // reported BUSY and pushed anyway. A worker whose lease had expired
+    // could therefore leave committed side effects behind, and two
+    // overlapping workers could each push to the same people even though
+    // the dedupeKey stopped a duplicate Notification row.
+    //
+    // Now: (1) re-assert the lease FIRST, with a conditional update that
+    // also takes the row lock, so a lost lease throws and unwinds
+    // everything; (2) claim the right to announce with a conditional
+    // update on the requisition itself, so exactly one worker wins;
+    // (3) only that winner creates rows and pushes.
     let recipients: string[] = [];
-    const settled = await prisma.$transaction(async (tx) => {
-      if (!intent.notificationDeliveredAt) {
-        // Whether anything is still owed is read from the requisition's
-        // own stamp — a fact in the database, never an assumption that
-        // some other intent must have delivered it.
-        const requisition = await tx.materialRequisition.findUnique({ where: { id: requisitionId! }, select: { autoRequisitionNotifiedAt: true } });
-        if (requisition && requisition.autoRequisitionNotifiedAt === null) {
-          recipients = await notify(tx, { requisitionId: requisitionId!, requisitionNumber: requisitionNumber!, materialName: materialName!, siteId: intent.siteId });
-          await tx.materialRequisition.updateMany({ where: { id: requisitionId!, autoRequisitionNotifiedAt: null }, data: { autoRequisitionNotifiedAt: new Date() } });
+    try {
+      await prisma.$transaction(async (tx) => {
+        const held = await tx.pendingAutoRequisition.updateMany({
+          where: { id: intentId, leaseOwner: owner, leaseExpiresAt: { gt: new Date() } },
+          data: { lastTriedAt: new Date() },
+        });
+        if (held.count !== 1) throw new LeaseLostError();
+
+        if (!intent.notificationDeliveredAt) {
+          // The delivery claim IS the winner selection — a conditional
+          // update, not a read-then-decide. count === 0 means another
+          // worker (or another intent for the same requisition) already
+          // owns delivery, so this one must not create rows OR push.
+          const deliveryClaim = await tx.materialRequisition.updateMany({
+            where: { id: requisitionId!, autoRequisitionNotifiedAt: null },
+            data: { autoRequisitionNotifiedAt: new Date() },
+          });
+          if (deliveryClaim.count === 1) {
+            recipients = await notify(tx, { requisitionId: requisitionId!, requisitionNumber: requisitionNumber!, materialName: materialName!, siteId: intent.siteId });
+          }
         }
-      }
-      // Fenced: only the lease holder may retire the intent.
-      const removed = await tx.pendingAutoRequisition.deleteMany({ where: { id: intentId, leaseOwner: owner } });
-      return removed.count === 1;
-    });
-    if (!settled) return { status: "BUSY" };
+
+        // Fenced: only the lease holder may retire the intent. A miss
+        // here throws rather than returning, so nothing above it commits.
+        const removed = await tx.pendingAutoRequisition.deleteMany({ where: { id: intentId, leaseOwner: owner } });
+        if (removed.count !== 1) throw new LeaseLostError();
+      });
+    } catch (settlementError) {
+      if (settlementError instanceof LeaseLostError) return { status: "BUSY" };
+      throw settlementError;
+    }
 
     // Push AFTER commit and outside the transaction — best-effort by
     // design, and it must never hold a transaction open or turn an
-    // already-committed delivery into a failure.
+    // already-committed delivery into a failure. `recipients` is empty
+    // unless THIS worker won the delivery claim above, so a losing worker
+    // pushes nothing.
     await pushToRecipients(recipients, {
       title: requisitionNumber!,
       body: `${materialName} — auto-requested, stock at or below threshold`,

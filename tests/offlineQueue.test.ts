@@ -418,6 +418,79 @@ test("an unstorable APPLIED followed by a newer offline edit still sends the new
   assert.deepEqual(queue.peekRejected().items, [], "and never rejected — there was no real conflict at any point");
 });
 
+// PL-R14-P2-03, fourteenth production-lifecycle review: the in-memory
+// reconciliation above only covers ONE queue instance. If the tab is
+// closed or reloaded, or another tab picks the queue up, that map is gone
+// — and the surviving queued item still carries its pre-offline version,
+// so a naive replay is refused as STALE_READING and the operator's
+// already-accepted reading is dead-lettered as a false conflict.
+//
+// The durable half of the fix is server-side: STALE_READING now reports
+// the value and version the server actually holds, so ANY client can tell
+// "this is already the value I sent" from a real conflict. This models
+// exactly that handler contract (see OfflineSyncBanner's own handler)
+// against a brand-new queue instance over the surviving stored state.
+test("a new queue instance over surviving state does not falsely reject a reading the server already holds", async () => {
+  const inner = memoryStorage();
+  let writes = 0;
+  let failWriteNumber: number | null = null;
+  const storage: StorageAdapter = {
+    getItem: (key) => inner.getItem(key),
+    setItem: (key, value) => {
+      writes += 1;
+      if (writes === failWriteNumber) throw new Error("simulated quota failure");
+      inner.setItem(key, value);
+    },
+  };
+  const lock = sharedLock();
+
+  // A version-aware fake server, plus the real handler contract: a
+  // STALE_READING whose current value equals what we sent is APPLIED.
+  let serverVersion = 0;
+  let serverValue: string | null = null;
+  const sends: string[] = [];
+  const handler = async (fields: Record<string, string>): Promise<ReplayOutcome> => {
+    sends.push(fields.value);
+    if (Number(fields.expectedVersion) !== serverVersion) {
+      if (serverValue === fields.value) return { status: "APPLIED", version: serverVersion };
+      return { status: "REJECTED", reason: "STALE_READING" };
+    }
+    serverVersion += 1;
+    serverValue = fields.value;
+    return { status: "APPLIED", version: serverVersion };
+  };
+
+  // Session 1: the server accepts the reading, but the settlement write
+  // fails (write 1 = enqueue, 2 = claim, 3 = settle).
+  const session1 = createOfflineQueue(storage, lock);
+  await session1.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "12.5", expectedVersion: "0" });
+  failWriteNumber = 3;
+  const first = await session1.flushQueue({ recordActualField: handler });
+  assert.equal(first.readStatus, "STORAGE_UNAVAILABLE");
+  assert.deepEqual(sends, ["12.5"]);
+  assert.equal(serverValue, "12.5");
+
+  // Session 2: a brand-new instance — the tab reloaded, or another tab
+  // took over. Nothing of session 1's in-memory state survives.
+  failWriteNumber = null;
+  const session2 = createOfflineQueue(storage, lock);
+  assert.equal(session2.peekQueue().items.length, 1, "the item is still queued, still carrying its pre-offline version");
+
+  // Session 1 died holding the claim, so session 2 is correctly locked
+  // out until that lease lapses — which is exactly what the wall clock
+  // does 60s after a tab disappears. Expiring it here is what makes the
+  // takeover happen now rather than making the test wait for it.
+  const stored = JSON.parse(inner.getItem("bl_offline_queue_v1")!);
+  stored.pending[0].leaseExpiresAt = Date.now() - 1000;
+  inner.setItem("bl_offline_queue_v1", JSON.stringify(stored));
+
+  const second = await session2.flushQueue({ recordActualField: handler });
+  assert.deepEqual(sends, ["12.5", "12.5"], "the new instance re-sends, having no memory of the accepted result");
+  assert.equal(second.flushed, 1, "and the server's answer identifies it as already applied, not a conflict");
+  assert.deepEqual(session2.peekQueue().items, [], "so the item settles");
+  assert.deepEqual(session2.peekRejected().items, [], "and the operator's accepted reading is never dead-lettered as a false conflict");
+});
+
 test("two concurrent flush attempts against the same storage produce no duplicate rejected item and no lost pending item", async () => {
   const storage = memoryStorage();
   const queue = createOfflineQueue(storage, sharedLock());

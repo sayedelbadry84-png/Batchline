@@ -157,6 +157,16 @@ async function deleteMovements(sourceId: string) {
 }
 
 after(async () => {
+  // PL-R14-P1-01, fourteenth production-lifecycle review: completing a
+  // ticket STAGES one PendingAutoRequisition per resolved component
+  // inside completeBatchTicket's own transaction (PL-R10-P2-01). This
+  // suite completes a ticket and never cleaned that row up, so it
+  // survived into the next `npm test` run on the same database — where
+  // batchCompletion.test.ts's own precondition check correctly refused to
+  // run. Cleaned up by this suite's OWN ticket ids: a global sweep would
+  // hide exactly this class of leak instead of surfacing it.
+  if (ticketIds.length > 0) await prisma.pendingAutoRequisition.deleteMany({ where: { batchTicketId: { in: ticketIds } } });
+
   await deleteAuditEventsByActor(adminUserId);
   for (const id of wasteMemoIds) await cleanupDelete(() => prisma.wasteIncidentMemo.delete({ where: { id } }));
   for (const id of drumReturnIds) await cleanupDelete(() => prisma.drumReturn.delete({ where: { id } }));
@@ -200,6 +210,12 @@ after(async () => {
   // this suite must prove, not merely fail loudly if violated.
   const leftoverDelayReports = await prisma.tripDelayReport.count({ where: { tripId: { in: tripIds } } });
   assert.equal(leftoverDelayReports, 0, "productionLifecycle.test.ts left TripDelayReport residue behind");
+
+  // PL-R14-P1-01: the queue rows completing a ticket stages, asserted by
+  // this suite's own ticket ids so a leak surfaces here rather than in
+  // whichever suite happens to run next.
+  const leftoverIntents = ticketIds.length > 0 ? await prisma.pendingAutoRequisition.count({ where: { batchTicketId: { in: ticketIds } } }) : 0;
+  assert.equal(leftoverIntents, 0, "productionLifecycle.test.ts left PendingAutoRequisition residue behind");
 
   await prisma.$disconnect();
   await prisma2.$disconnect();

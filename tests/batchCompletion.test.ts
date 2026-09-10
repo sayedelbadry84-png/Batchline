@@ -81,8 +81,23 @@ before(async () => {
   // what these sweeps do — so the precondition is asserted rather than
   // assumed. Dead-lettered rows are excluded on purpose: they are, by
   // definition, not eligible for any sweep.
-  const foreignEligible = await prisma.pendingAutoRequisition.count({ where: { deadLetteredAt: null } });
-  assert.equal(foreignEligible, 0, "another suite left sweep-eligible PendingAutoRequisition rows behind — the queue-sweep tests below would be measuring someone else's fixtures");
+  // PL-R14-P1-01, fourteenth production-lifecycle review: the check now
+  // matches its own name. It previously counted `deadLetteredAt: null`
+  // and called those rows "sweep-eligible", which is not the sweep's
+  // actual predicate (nextAttemptAt <= now(), and no live lease) — so the
+  // diagnosis it printed was wrong even when the underlying leak was
+  // real. It now reports EVERY foreign row, and prints the identifying
+  // fields of each one so the owning suite is identifiable straight from
+  // the CI log rather than by guesswork.
+  const foreign = await prisma.pendingAutoRequisition.findMany({
+    select: { id: true, batchTicketId: true, materialId: true, siteId: true, nextAttemptAt: true, leaseOwner: true, leaseExpiresAt: true, deadLetteredAt: true },
+    take: 20,
+  });
+  assert.equal(
+    foreign.length,
+    0,
+    `another suite left PendingAutoRequisition rows behind — the queue tests below would be measuring someone else's fixtures. Rows: ${JSON.stringify(foreign, null, 2)}`,
+  );
 
   const site = await prisma.site.create({ data: { code: `TEST-SUITE-BC-${Date.now()}`, name: "TEST-SUITE-BC-SITE", city: "Test", country: "Test" } });
   siteId = site.id;
@@ -240,6 +255,12 @@ after(async () => {
   // queue-on-failure path (or a row a retry never resolved) must not
   // leak past this file's own teardown either.
   if (leftoverMaterialIds.length > 0) await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } }));
+  // PL-R14-P1-01: by ticket id as well as by material. Completing a
+  // ticket stages one intent per resolved component, and a test that
+  // deletes its own ad-hoc Material in its `finally` leaves an intent
+  // this file's materialId-keyed sweep can no longer see — the ticket id
+  // is the key that always still matches.
+  if (ticketIds.length > 0) await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { batchTicketId: { in: ticketIds } } }));
   if (leftoverMaterialIds.length > 0) await deleteMovements({ materialId: { in: leftoverMaterialIds } });
   if (leftoverSiloIds.length > 0) await deleteMovements({ storageId: { in: leftoverSiloIds } });
   if (leftoverMaterialIds.length > 0) await prisma.batchComponentActual.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } });
@@ -279,7 +300,10 @@ after(async () => {
     // Material rows are already gone by this point.
     prisma.materialRequisition.count({ where: { materialId: { in: leftoverMaterialIds } } }),
     // PL-R9-P2-03: same reasoning as the materialRequisition count above.
-    prisma.pendingAutoRequisition.count({ where: { materialId: { in: leftoverMaterialIds } } }),
+    // PL-R14-P1-01: counted by ticket id OR material — the ticket id is
+    // what still matches an intent whose ad-hoc Material a test already
+    // deleted, which is how rows escaped this assertion before.
+    prisma.pendingAutoRequisition.count({ where: { OR: [{ materialId: { in: leftoverMaterialIds } }, { batchTicketId: { in: ticketIds } }] } }),
   ]);
   assert.deepEqual(residue, [0, 0, 0, 0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket, auditEvent, materialRequisition, pendingAutoRequisition] = ${JSON.stringify(residue)}`);
 
@@ -1795,6 +1819,113 @@ test("a crash between claiming delivery and creating the notification loses noth
   }
 });
 
+// PL-R14-P1-02's own required proof #1: worker A stalls inside delivery,
+// its lease expires, worker B takes over, then A resumes. Only ONE of
+// them may commit the stamp/notification and delete the intent — and A,
+// having lost the lease, must commit nothing at all rather than leaving
+// its writes behind and merely reporting BUSY afterwards.
+test("a worker that loses its lease mid-delivery commits nothing — the new owner is the only one that delivers", async () => {
+  const manager = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-LEASE-MANAGER", email: `test-suite-bc-lease-${Date.now()}@example.invalid`, passwordHash: "x", role: "PLANT_MANAGER", status: "ACTIVE", plantId },
+  });
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+
+  let signalInsideA!: () => void;
+  const insideA = new Promise<void>((resolve) => {
+    signalInsideA = resolve;
+  });
+  let releaseA!: () => void;
+  const heldA = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  const notifiedBy: string[] = [];
+
+  try {
+    // Worker A enters delivery and stalls there, still nominally holding
+    // the lease.
+    const workerA = processPendingAutoRequisition(intent.id, async (tx, params) => {
+      notifiedBy.push("A");
+      signalInsideA();
+      await heldA;
+      return notifyRequisitionCreated(tx, params);
+    });
+    await insideA;
+
+    // A's lease expires and worker B takes the intent over for real.
+    await prisma.pendingAutoRequisition.updateMany({ where: { id: intent.id }, data: { leaseExpiresAt: new Date(Date.now() - 60_000) } });
+    const workerB = await processPendingAutoRequisition(intent.id, async (tx, params) => {
+      notifiedBy.push("B");
+      return notifyRequisitionCreated(tx, params);
+    });
+    assert.equal(workerB.status, "RESOLVED", "the new lease owner must be able to finish the work");
+
+    // A resumes and discovers it no longer owns the intent.
+    releaseA();
+    const resultA = await workerA;
+    assert.equal(resultA.status, "BUSY", "the worker that lost its lease must report BUSY, never RESOLVED");
+
+    // The decisive assertion: A committed NOTHING. Exactly one
+    // notification exists, and it is B's.
+    assert.equal(await prisma.notification.count({ where: { userId: manager.id } }), 1, "exactly one notification — the lease loser's writes must have rolled back, not merely been reported after the fact");
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } }), null);
+    const requisitions = await prisma.materialRequisition.findMany({ where: { materialId, siteId } });
+    assert.equal(requisitions.length, 1, "and only one requisition may exist across both workers");
+    assert.ok(requisitions[0].autoRequisitionNotifiedAt);
+    materialRequisitionIds.push(requisitions[0].id);
+  } finally {
+    releaseA();
+    await cleanupDelete(() => prisma.notification.deleteMany({ where: { userId: manager.id } }));
+    await cleanupDelete(() => prisma.user.delete({ where: { id: manager.id } }));
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: intent.id } }));
+  }
+});
+
+// PL-R14-P1-02's own required proof #2: two intents for two DIFFERENT
+// tickets that resolve to the same open MaterialRequisition, processed
+// together. The dedupeKey stops a duplicate Notification row, but only a
+// single delivery winner stops a duplicate Web Push — so the recipient
+// list handed to push must be empty for the loser.
+test("two intents meeting on one requisition notify once and push once — the loser pushes nothing", async () => {
+  const manager = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-DUP-MANAGER", email: `test-suite-bc-dup-${Date.now()}@example.invalid`, passwordHash: "x", role: "PLANT_MANAGER", status: "ACTIVE", plantId },
+  });
+  const first = await stageAutoRequisitionIntent(prisma, "test-suite-bc-dup-ticket-a", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+  const second = await stageAutoRequisitionIntent(prisma, "test-suite-bc-dup-ticket-b", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+
+  // Records how many recipients each worker was handed for push — the
+  // number that actually determines whether a device buzzes twice.
+  const pushedCounts: number[] = [];
+  const countingNotifier = async (tx: Parameters<typeof notifyRequisitionCreated>[0], params: Parameters<typeof notifyRequisitionCreated>[1]) => {
+    const recipients = await notifyRequisitionCreated(tx, params);
+    pushedCounts.push(recipients.length);
+    return recipients;
+  };
+
+  try {
+    const [a, b] = await Promise.all([processPendingAutoRequisition(first.id, countingNotifier), processPendingAutoRequisition(second.id, countingNotifier)]);
+    assert.deepEqual([a.status, b.status].sort(), ["RESOLVED", "RESOLVED"], "both intents are genuinely finished — the second is owed nothing once the first has announced");
+
+    const requisitions = await prisma.materialRequisition.findMany({ where: { materialId, siteId } });
+    assert.equal(requisitions.length, 1, "the partial unique index means both intents meet on ONE requisition");
+    materialRequisitionIds.push(requisitions[0].id);
+
+    assert.equal(await prisma.notification.count({ where: { userId: manager.id } }), 1, "exactly one Notification row for the recipient");
+    assert.equal(
+      pushedCounts.filter((n) => n > 0).length,
+      1,
+      `exactly one worker may be handed recipients to push — the other must push nothing. Got: ${JSON.stringify(pushedCounts)}`,
+    );
+
+    assert.equal(await prisma.pendingAutoRequisition.count({ where: { id: { in: [first.id, second.id] } } }), 0, "both intents must be fully drained");
+  } finally {
+    await cleanupDelete(() => prisma.notification.deleteMany({ where: { userId: manager.id } }));
+    await cleanupDelete(() => prisma.user.delete({ where: { id: manager.id } }));
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: { in: [first.id, second.id] } } }));
+  }
+});
+
 // PL-R12-P1-03's own explicit required proof: "Test a same-site manager,
 // another-site manager, and an admin; only the same-site manager and
 // admin should receive the event." REQUISITION_APPROVAL_ROLES includes
@@ -1933,6 +2064,13 @@ test("a dead letter that moves to another site between the scope read and the wr
     // It moves to another site before the operator's action lands.
     await prisma.pendingAutoRequisition.update({ where: { id: parked.id }, data: { siteId: otherSite.id } });
 
+    // PL-R14-P2-02, fourteenth production-lifecycle review: this used to
+    // prove nothing about the WRITE. requeueDeadLetter began with an
+    // inScope() pre-read, which re-read the row AFTER the move and
+    // refused there — so the site condition inside the UPDATE was never
+    // reached, let alone exercised. That pre-read is gone: the
+    // conditional mutation is now the only authorization decision, so
+    // this call genuinely tests it.
     const requeue = await requeueDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "PLANT_MANAGER" }, siteId);
     assert.equal(requeue.status, "NOT_FOUND", "the write's own site condition must refuse a row that has moved out of scope");
     const afterRequeue = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: parked.id } });
@@ -1948,6 +2086,104 @@ test("a dead letter that moves to another site between the scope read and the wr
   } finally {
     await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: parked.id } }));
     await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+  }
+});
+
+// PL-R14-P2-02's own required proof: the site condition INSIDE the
+// mutation, exercised directly. The action-level test above now reaches
+// the write, but this pins the primitive itself — a scoped updateMany
+// must match zero rows once the row has moved, whatever any earlier read
+// believed.
+test("the scoped mutation itself matches nothing once a dead letter has moved to another site", async () => {
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-BC-WRITE-${Date.now()}`, name: "TEST-SUITE-BC-WRITE-SITE", city: "Test", country: "Test" } });
+  const parked = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: `test-suite-bc-write-scope-${Date.now()}`, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date() },
+  });
+
+  try {
+    // Exactly the predicate requeueDeadLetter writes with, while the row
+    // is still in scope: it matches.
+    const wouldMatch = await prisma.pendingAutoRequisition.count({ where: { id: parked.id, deadLetteredAt: { not: null }, siteId } });
+    assert.equal(wouldMatch, 1);
+
+    await prisma.pendingAutoRequisition.update({ where: { id: parked.id }, data: { siteId: otherSite.id } });
+
+    // The same predicate now matches nothing — this is the property the
+    // action depends on, asserted on the statement rather than inferred.
+    const afterMove = await prisma.pendingAutoRequisition.updateMany({
+      where: { id: parked.id, deadLetteredAt: { not: null }, siteId },
+      data: { deadLetteredAt: null },
+    });
+    assert.equal(afterMove.count, 0, "a scoped write must match zero rows after the row leaves that site");
+    const untouched = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: parked.id } });
+    assert.ok(untouched.deadLetteredAt, "and the row must be completely unchanged");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: parked.id } }));
+    await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+  }
+});
+
+// PL-R14-P2-01's own required proof: an ADMIN sees BOTH queues, so a page
+// must be a single global slice of the union. Taking pageSize from each
+// table and merging gave up to 2 × pageSize rows on one page, a wrong
+// "showing X–Y of Z" range, and a next link to an empty page.
+test("an ADMIN page is one global slice across both queues — 30 + 30 rows page as 50 then 10, with no duplicates and no empty next page", async () => {
+  const stamp = Date.now();
+  const intentPrefix = `test-suite-bc-mixed-${stamp}-`;
+  const blobPrefix = `/api/files/delivery-photos/TEST-SUITE-BC-MIXED-${stamp}-`;
+  const base = Date.now();
+
+  // Interleaved timestamps, so a correct global ordering MUST mix the two
+  // kinds together rather than emit one table then the other.
+  await prisma.pendingAutoRequisition.createMany({
+    data: Array.from({ length: 30 }, (_, i) => ({
+      batchTicketId: "test-suite-bc-mixed-ticket",
+      materialId: `${intentPrefix}${i}`,
+      siteId,
+      newLevel: 2,
+      capacity: 100,
+      minThresholdPct: 50,
+      unit: "TONS",
+      attempts: 14,
+      deadLetteredAt: new Date(base - i * 2000),
+    })),
+  });
+  await prisma.pendingBlobDeletion.createMany({
+    data: Array.from({ length: 30 }, (_, i) => ({
+      url: `${blobPrefix}${i}.jpg`,
+      reason: "DELIVERY_PHOTO_COMPENSATION",
+      attempts: 14,
+      deadLetteredAt: new Date(base - i * 2000 - 1000),
+    })),
+  });
+
+  try {
+    const pageSize = 50;
+    const first = await listDeadLetters(null, 0, pageSize);
+    assert.equal(first.total, 60, "the total must count both queues");
+    assert.equal(first.rows.length, pageSize, "a page must be exactly one global slice — never pageSize from EACH table");
+
+    const second = await listDeadLetters(null, 1, pageSize);
+    assert.equal(second.rows.length, 10, "the remainder must be exactly 10, not another full page");
+
+    // No duplicates and nothing lost across the two pages.
+    const ids = [...first.rows, ...second.rows].map((r) => `${r.kind}:${r.id}`);
+    assert.equal(new Set(ids).size, 60, "every one of the 60 rows must appear exactly once across the two pages");
+    assert.ok(
+      first.rows.some((r) => r.kind === "AUTO_REQUISITION") && first.rows.some((r) => r.kind === "BLOB_DELETION"),
+      "a correctly ordered global page mixes both kinds — emitting one table and then the other would mean the union was not sorted as a whole",
+    );
+
+    // Descending by deadLetteredAt across the union, not within each kind.
+    const ordered = [...first.rows, ...second.rows].map((r) => r.deadLetteredAt.getTime());
+    assert.deepEqual(ordered, [...ordered].sort((a, b) => b - a), "the union must be globally ordered");
+
+    // And there is no third page.
+    const third = await listDeadLetters(null, 2, pageSize);
+    assert.equal(third.rows.length, 0);
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: { startsWith: intentPrefix } } }));
+    await cleanupDelete(() => prisma.pendingBlobDeletion.deleteMany({ where: { url: { startsWith: blobPrefix } } }));
   }
 });
 

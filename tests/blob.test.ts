@@ -39,8 +39,14 @@ const TEST_URL_PREFIX = "/api/files/delivery-photos/TEST-SUITE-BLOB-";
 // that leaked rows would still silently change what these sweeps do — so
 // the precondition is asserted rather than assumed.
 before(async () => {
-  const foreignEligible = await prisma.pendingBlobDeletion.count({ where: { deadLetteredAt: null } });
-  assert.equal(foreignEligible, 0, "another suite left sweep-eligible PendingBlobDeletion rows behind — the sweep tests below would be measuring someone else's fixtures");
+  // PL-R14-P1-01: reports EVERY foreign row (not a mis-named subset) and
+  // prints their identifying fields, so the owning suite is identifiable
+  // straight from the CI log rather than by guesswork.
+  const foreign = await prisma.pendingBlobDeletion.findMany({
+    select: { id: true, url: true, reason: true, nextAttemptAt: true, deadLetteredAt: true },
+    take: 20,
+  });
+  assert.equal(foreign.length, 0, `another suite left PendingBlobDeletion rows behind — the sweep tests below would be measuring someone else's fixtures. Rows: ${JSON.stringify(foreign, null, 2)}`);
 });
 
 after(async () => {

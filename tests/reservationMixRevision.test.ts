@@ -220,6 +220,17 @@ async function makeReservation(overrides: Partial<{ status: string; requestedVol
 }
 
 after(async () => {
+  // PL-R14-P1-01, fourteenth production-lifecycle review: completing a
+  // ticket STAGES one PendingAutoRequisition per resolved component
+  // inside completeBatchTicket's own transaction (PL-R10-P2-01). This
+  // suite completes a two-component ticket and never cleaned those rows
+  // up, so two of them survived into the next `npm test` run on the same
+  // database — where batchCompletion.test.ts's own precondition check
+  // correctly refused to run, taking 75 tests down with it. Cleaned up by
+  // this suite's OWN ticket ids: a global sweep here would hide exactly
+  // this class of leak rather than surface it.
+  if (ticketIds.length > 0) await prisma.pendingAutoRequisition.deleteMany({ where: { batchTicketId: { in: ticketIds } } });
+
   for (const id of ticketIds) {
     await deleteMovements({ sourceType: "BatchTicket", sourceId: id });
     await prisma.shortageOverrideRequest.deleteMany({ where: { batchTicketId: id } });
@@ -263,8 +274,16 @@ after(async () => {
     prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-RMR-" } } }),
     prisma.plant.count({ where: { name: { startsWith: "TEST-SUITE-RMR-" } } }),
     prisma.user.count({ where: { name: { startsWith: "TEST-SUITE-RMR-" } } }),
+    // PL-R14-P1-01: the queue rows completing a ticket stages. Asserted
+    // by this suite's own ticket ids, so a leak shows up HERE rather than
+    // as a mystifying failure in whichever suite happens to run next.
+    ticketIds.length > 0 ? prisma.pendingAutoRequisition.count({ where: { batchTicketId: { in: ticketIds } } }) : Promise.resolve(0),
   ]);
-  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-RMR-* fixtures after teardown: [material, reservation, mix, site, plant, user] = ${JSON.stringify(residue)}`);
+  assert.deepEqual(
+    residue,
+    [0, 0, 0, 0, 0, 0, 0],
+    `leftover TEST-SUITE-RMR-* fixtures after teardown: [material, reservation, mix, site, plant, user, pendingAutoRequisition] = ${JSON.stringify(residue)}`,
+  );
 
   await prisma.$disconnect();
 });

@@ -28,6 +28,21 @@ const HANDLERS: Record<string, (fields: Record<string, string>) => Promise<Repla
     // version". flushQueue now publishes through onSettled below, only
     // once the settlement has actually persisted.
     if (result.status === "OK") return { status: "APPLIED", version: result.version };
+
+    // PL-R14-P2-03, fourteenth production-lifecycle review: a
+    // STALE_READING whose current server value IS the value we just sent
+    // means this exact reading already applied — almost always THIS
+    // client's own earlier attempt, whose local settlement failed to
+    // save. Treating it as a conflict dead-lettered the operator's own
+    // accepted reading and asked them to re-enter a number the database
+    // already held. The in-memory reconciliation in offlineQueue.ts only
+    // covers one session; this covers a reload, another tab, or another
+    // device, because it is decided from the server's own response.
+    // Either way the outcome is the same: the queued value is what the
+    // server holds, so the item is settled at the server's version.
+    if (result.status === "STALE_READING" && result.currentValue !== null && String(result.currentValue) === fields.value) {
+      return { status: "APPLIED", version: result.currentVersion };
+    }
     return { status: "REJECTED", reason: result.status };
   },
 };

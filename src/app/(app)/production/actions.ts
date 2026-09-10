@@ -330,7 +330,13 @@ export type RecordActualFieldResult =
   // "rejected" visual path as every other non-OK status (AutoSaveField
   // never special-cased individual reasons) and the exact same REJECTED
   // dead-letter path on offline replay — no new UI branch needed for it.
-  | { status: "STALE_READING" };
+  //
+  // PL-R14-P2-03, fourteenth production-lifecycle review: carries what the
+  // server actually holds, so an offline replay can tell "this value is
+  // already mine, I just failed to record that locally" from a genuine
+  // conflict — in any tab, after any reload, not only within the session
+  // that originally sent it.
+  | { status: "STALE_READING"; currentVersion: number; currentValue: number | null };
 
 export async function recordActualField(formData: FormData): Promise<RecordActualFieldResult> {
   const user = await getCurrentUser();
@@ -370,7 +376,7 @@ export async function recordActualField(formData: FormData): Promise<RecordActua
   // transaction (PL-R6-P2-01) — no separate logAudit call needed here.
   const result = await claimAndRecordActualField(batchTicketId, componentId, field, value, expectedVersion, { id: user!.id, role: user!.role });
   if (result.status === "TERMINAL") return { status: "TERMINAL" };
-  if (result.status === "STALE_READING") return { status: "STALE_READING" };
+  if (result.status === "STALE_READING") return { status: "STALE_READING", currentVersion: result.currentVersion, currentValue: result.currentValue };
 
   revalidatePath(`/production/${batchTicketId}`);
   revalidatePath(`/operator/ticket/${batchTicketId}`);

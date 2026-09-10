@@ -33,8 +33,12 @@ export default async function QueuesPage({ searchParams }: { searchParams: Promi
     canPerformAction(user!.role, "queues", "requeueDeadLetter"),
     canPerformAction(user!.role, "queues", "dismissDeadLetter"),
   ]);
+  // PL-R14-P2-01: `rows.length === pageSize` is no longer a valid
+  // "there's more" signal now that a page is a genuine global slice —
+  // 25 + 25 rows used to fill a 50-row page exactly and offer a link to
+  // an empty next page. The real total is the only sound basis.
   const shownFrom = total === 0 ? 0 : page * pageSize + 1;
-  const hasNextPage = rows.length === pageSize || (page + 1) * pageSize < total;
+  const hasNextPage = (page + 1) * pageSize < total;
 
   return (
     <div className="flex flex-col gap-6">
