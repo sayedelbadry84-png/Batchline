@@ -17,7 +17,8 @@ When responding to a pasted `BATCHLINE_PRODUCTION_LIFECYCLE_REVIEW_ROUND*.md` re
 
 ## Known environment limitations (this workspace)
 - No `TEST_DATABASE_URL` / database network access locally — integration tests requiring a real Postgres connection can only be verified in CI, never in this session.
-- No `gh` CLI available — GitHub PR description/comment updates need the web UI or the user's own authenticated browser.
+- `gh` CLI IS available and authenticated (scopes: gist, read:org, repo). PR descriptions, CI logs and rulesets can be read and written directly. Classic branch protection returns 404 on this account; use the rulesets API instead.
+- CI only runs on `pull_request` to `main`, so a branch with database-backed tests needs an open (draft is fine) PR before those tests have ever run anywhere.
 - OneDrive syncing this working directory can transiently lock `.next/` mid-build (`EPERM: operation not permitted, unlink ...`) — retry the build, or `rm -rf .next` first, before treating it as a real build failure.
 
 ## Git hygiene

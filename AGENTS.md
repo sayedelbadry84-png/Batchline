@@ -69,12 +69,25 @@ Never write `` `PREFIX-${year}-${count+1}` `` by hand. The helper scopes the cou
 the calendar year and retries on `P2002`. A plain unscoped `count()` breaks silently
 at year rollover. The target column must be `@unique` or the retry never fires.
 
-**2. Site scoping → `isSiteInScope` / `isPlantInScope` (`src/lib/siteScope.ts`)**
+**2. Site scoping → the predicate goes INSIDE the query (`src/lib/siteScope.ts`)**
 
-Every Server Action that accepts an id or a `siteId` from `FormData` must verify it
-against `effectiveSiteId(user)`. The page's own dropdown only lists the caller's site,
-but a crafted POST can name any site. `ADMIN` passes automatically (`effectiveSiteId`
-returns `null`); every other role is pinned to one site.
+Every Server Action that accepts an id or a `siteId` from `FormData`, and every page
+that loads a record by route parameter, must scope it against `effectiveSiteId(user)`.
+The page's own dropdown only lists the caller's site, but a crafted POST or URL can
+name any of them. `ADMIN` passes automatically (`effectiveSiteId` returns `null`);
+every other role is pinned to one site.
+
+Reads use `findFirst` with `plantScopeWhere` / `siteScopeWhere` / `reservationSiteScopeWhere`
+folded into the `where`, never `findUnique` by raw id — so an out-of-scope record is
+indistinguishable from a nonexistent one. Writes put the same predicate in a conditional
+`updateMany` and check `count`, never a read-then-`update`: a separate pre-read is both
+a race and, if it produces a distinguishable refusal, a confirmation that the record
+exists. `isSiteInScope`/`isPlantInScope` remain the right tool for a `siteId` submitted
+in a form, not for authorizing a record id.
+
+The offline queue is partitioned by signed-in identity (`queueFor` in
+`src/lib/offlineQueue.ts`) for the same reason on the client: a shared tablet must never
+replay one operator's unsent readings under the next one's session.
 
 **3. Permissions → two layers, both required**
 
@@ -166,9 +179,13 @@ in the file:
 1. ZATCA chain generation has no transaction or lock — concurrent generation forks the chain
 2. Invoice numbering (`billing/actions.ts`) bypasses `withSequentialNumber`
 3. All money columns are `Float`
-4. `incentives/actions.ts` — all 6 actions lack site-scope checks
-5. `employees/actions.ts` — attendance and leave actions lack site-scope checks
-6. TOTP codes can be replayed within their window (no used-step tracking)
-7. `getClientIp` trusts client-supplied `x-forwarded-for`
-8. `anomaly.ts` outlier detection cannot fire below 9 samples (population σ vs 2.5 threshold)
-9. `parseNetDays` reads "2/10 Net 30" as 2 days
+4. `getClientIp` trusts client-supplied `x-forwarded-for`
+5. `anomaly.ts` outlier detection cannot fire below 9 samples (population σ vs 2.5 threshold)
+6. `parseNetDays` reads "2/10 Net 30" as 2 days
+7. Foreign keys are largely unindexed (~178 relations, 9 `@@index` declarations) — add composite indexes from real query shapes, never 178 single-column ones blindly
+8. The printable delivery note, purchase order and quotation are editable working copies, declared as such on the page and the print-out; they are NOT controlled documents backed by a versioned record
+9. No browser E2E suite, so the shared-tablet sign-in/sign-out scenario is proved only at the unit level
+
+Closed since this list was written (do not re-report): `incentives/actions.ts`
+and `employees/actions.ts` site scoping, and TOTP replay within a window —
+all fixed on `main` by PR #3.
