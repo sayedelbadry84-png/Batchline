@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { safeEqual } from "@/lib/integration-auth";
 import { retryPendingBlobDeletions } from "@/lib/blob";
 import { retryPendingAutoRequisitions } from "@/lib/materialRequisition";
 
@@ -23,7 +24,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Cron endpoint not configured (CRON_SECRET unset)." }, { status: 503 });
   }
   const auth = request.headers.get("authorization") ?? "";
-  if (auth !== `Bearer ${configuredSecret}`) {
+  if (!safeEqual(auth, `Bearer ${configuredSecret}`)) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
@@ -54,15 +55,19 @@ export async function GET(request: NextRequest) {
       where: { totpTempSecret: { not: null }, totpEnabled: false, updatedAt: { lt: abandonedTotpSetupCutoff } },
       data: { totpTempSecret: null },
     }),
-    staleQuotes.length > 0
-      ? prisma.quote.updateMany({ where: { id: { in: staleQuotes.map((q) => q.id) } }, data: { status: "EXPIRED" } })
-      : Promise.resolve({ count: 0 }),
+    prisma.pendingTwoFactor.deleteMany({ where: { expiresAt: { lt: now } } }),
   ]);
 
   // One audit event per quote, same as every other status change in Sales
   // (markQuoteSent, recordQuoteResponse) — logAudit resolves to actor
   // "SYSTEM" on its own here since a cron request carries no user session.
+  let quotesExpired = 0;
   for (const q of staleQuotes) {
+    // A response may have accepted this quote since the scan. Never
+    // overwrite a terminal status or audit an expiration that lost.
+    const claim = await prisma.quote.updateMany({ where: { id: q.id, status: "SENT", validUntil: { lt: now } }, data: { status: "EXPIRED" } });
+    if (claim.count === 0) continue;
+    quotesExpired++;
     await logAudit({ module: "Sales", recordId: q.id, afterValue: "EXPIRED", reasonCode: "QUOTE_AUTO_EXPIRED" });
   }
 
@@ -88,7 +93,11 @@ export async function GET(request: NextRequest) {
     expiredSessionsDeleted: expiredSessions.count,
     staleLoginAttemptsDeleted: staleLoginAttempts.count,
     abandonedTotpSetupsCleared: abandonedTotpSetups.count,
-    quotesExpired: staleQuotes.length,
+    // `quotesExpired` counts the expirations that actually WON their
+    // conditional claim above, not the size of the pre-scan — the same
+    // "count what committed, never what was attempted" rule the two
+    // queue sweeps below report by (see QueueSweepCounts).
+    quotesExpired,
     pendingBlobDeletions: blobDeletions,
     pendingAutoRequisitions: autoRequisitions,
   });

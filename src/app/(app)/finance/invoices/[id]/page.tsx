@@ -1,3 +1,4 @@
+import { BillingForm } from "@/components/BillingForm";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import QRCode from "qrcode";
@@ -187,7 +188,10 @@ export default async function InvoiceDetailPage({
                   <button type="submit" className={`${ui.button} mt-1 w-fit`}>{d.zatcaGenerate}</button>
                 </form>
               )}
-              {invoice.zatcaStatus && invoice.zatcaStatus !== "CLEARED" && (
+              {(invoice.zatcaStatus === "SUBMITTING" || invoice.zatcaStatus === "UNKNOWN") && (
+                <p role="status" className="text-warn">الإرسال قيد التحقق؛ لا تعِد الإرسال قبل المطابقة مع الهيئة. / Submission pending verification; reconcile before resubmitting.</p>
+              )}
+              {(invoice.zatcaStatus === "GENERATED" || invoice.zatcaStatus === "FAILED") && (
                 zatcaReadiness.level === "CLEARANCE_READY" ? (
                   <form action={submitZatcaInvoiceForClearance}>
                     <input type="hidden" name="id" value={invoice.id} />
@@ -262,7 +266,7 @@ export default async function InvoiceDetailPage({
           )}
 
           {canRecordPayment && (
-            <form action={recordPayment} className={`${ui.card} flex flex-col gap-3`}>
+            <BillingForm action={recordPayment} className={`${ui.card} flex flex-col gap-3`}>
               <input type="hidden" name="invoiceId" value={invoice.id} />
               <h2 className="font-display text-lg font-semibold">{d.recordPaymentTitle}</h2>
               <div>
@@ -284,11 +288,11 @@ export default async function InvoiceDetailPage({
               <button type="submit" className={`${ui.button} mt-2`}>
                 {d.recordPayment}
               </button>
-            </form>
+            </BillingForm>
           )}
 
           {canIssueCreditNote && (
-            <form action={issueCreditNote} className={`${ui.card} flex flex-col gap-3`}>
+            <BillingForm action={issueCreditNote} className={`${ui.card} flex flex-col gap-3`}>
               <input type="hidden" name="invoiceId" value={invoice.id} />
               <h2 className="font-display text-lg font-semibold">{d.issueCreditNoteTitle}</h2>
               <div>
@@ -312,7 +316,7 @@ export default async function InvoiceDetailPage({
               <button type="submit" className={`${ui.button} mt-2`}>
                 {d.issueCreditNote}
               </button>
-            </form>
+            </BillingForm>
           )}
         </div>
       </div>
@@ -347,7 +351,8 @@ export default async function InvoiceDetailPage({
                         <span className={`${ui.chip} w-fit text-xs ${c.zatcaStatus === "CLEARED" ? "bg-good-soft text-good" : c.zatcaStatus === "FAILED" ? "bg-critical-soft text-critical" : "bg-warn-soft text-warn"}`}>
                           {d.zatcaStatusLabel[c.zatcaStatus as keyof typeof d.zatcaStatusLabel] ?? c.zatcaStatus}
                         </span>
-                        {c.zatcaStatus !== "CLEARED" && zatcaReadiness.level === "CLEARANCE_READY" && (
+                        {(c.zatcaStatus === "UNKNOWN" || c.zatcaStatus === "SUBMITTING") && <p className="text-warn">يلزم التحقق من حالة الإرسال / Submission needs verification</p>}
+                        {(c.zatcaStatus === "GENERATED" || c.zatcaStatus === "FAILED") && zatcaReadiness.level === "CLEARANCE_READY" && (
                           <form action={submitZatcaCreditNoteForClearanceAction}>
                             <input type="hidden" name="id" value={c.id} />
                             <button type="submit" className="text-xs font-medium text-accent-strong hover:underline">{d.zatcaSubmit}</button>

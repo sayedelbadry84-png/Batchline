@@ -13,17 +13,21 @@ import { verifyIntegrationRequest } from "@/lib/integration-auth";
 // Authorization: Bearer <INTEGRATION_API_KEY>
 // { "siloId": "cmt1...", "levelTons": 11.6 }
 export async function POST(request: NextRequest) {
-  const authError = await verifyIntegrationRequest(request, "SCADA");
-  if (authError) return authError;
+  const principal = await verifyIntegrationRequest(request, "SCADA");
+  if (principal instanceof NextResponse) return principal;
 
   const body = await request.json().catch(() => null);
-  if (!body || typeof body.siloId !== "string" || typeof body.levelTons !== "number") {
+  if (!body || typeof body.siloId !== "string" || !body.siloId.trim() || typeof body.levelTons !== "number" || !Number.isFinite(body.levelTons) || body.levelTons < 0) {
     return NextResponse.json({ error: "Expected { siloId: string, levelTons: number }" }, { status: 400 });
   }
 
-  const silo = await prisma.silo.findUnique({ where: { id: body.siloId } });
+  const silo = await prisma.silo.findFirst({ where: { id: body.siloId, ...(principal.global ? {} : { plant: { siteId: principal.siteId! } }) } });
   if (!silo) {
     return NextResponse.json({ error: `No silo with id "${body.siloId}"` }, { status: 404 });
+  }
+
+  if (body.levelTons > silo.capacityTons) {
+    return NextResponse.json({ error: "Reading exceeds silo capacity." }, { status: 400 });
   }
 
   const updated = await prisma.silo.update({

@@ -1,5 +1,4 @@
 import type { Prisma } from "@prisma/client";
-import { withSequentialNumber } from "@/lib/sequence";
 
 // Every function here takes its Prisma client as the first argument rather
 // than importing the module-level singleton directly — the caller is
@@ -13,6 +12,18 @@ import { withSequentialNumber } from "@/lib/sequence";
 // app posts inside its own transaction; see billing/actions.ts,
 // finance/actions.ts, and employees/payroll/actions.ts for the call sites.
 type Db = Prisma.TransactionClient;
+
+// All JE writers enter here before account work. Allocation and insertion
+// share the global transaction lock; errors escape to the whole-tx caller.
+async function createJournalEntry(db: Db, build: () => Promise<Omit<Prisma.JournalEntryCreateInput, "entryNumber">>) {
+  await db.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(729431, 1)`;
+  const data = await build();
+  const year = new Date().getUTCFullYear();
+  const prefix = `JE-${year}-`;
+  const rows = await db.journalEntry.findMany({ where: { entryNumber: { startsWith: prefix } }, select: { entryNumber: true } });
+  const next = rows.reduce((max, row) => Math.max(max, Number(row.entryNumber.slice(prefix.length)) || 0), 0) + 1;
+  await db.journalEntry.create({ data: { ...data, entryNumber: `${prefix}${String(next).padStart(4, "0")}` } });
+}
 
 type AccountRef = { code: string; name: string; type: "ASSET" | "LIABILITY" | "EQUITY" | "REVENUE" | "EXPENSE" };
 
@@ -81,20 +92,21 @@ export async function postJournalEntry(
 ): Promise<void> {
   const totalDebit = params.lines.reduce((sum, l) => sum + (l.debit ?? 0), 0);
   const totalCredit = params.lines.reduce((sum, l) => sum + (l.credit ?? 0), 0);
+  if (params.lines.some(l => !Number.isFinite(l.debit ?? 0) || !Number.isFinite(l.credit ?? 0) || (l.debit ?? 0) < 0 || (l.credit ?? 0) < 0)) {
+    throw new Error("Journal amounts must be finite and non-negative.");
+  }
   if (Math.abs(totalDebit - totalCredit) > 0.01) {
     throw new Error(`Unbalanced journal entry for ${params.sourceModule}/${params.sourceRecordId}: debit ${totalDebit} != credit ${totalCredit}`);
   }
 
+  // JE numbers are global, including across unrelated sites/accounts.
+  // Serialize allocation before any account upsert. Retrying a unique
+  // violation inside this transaction cannot work: Postgres has already
+  // aborted it, including the caller's financial source record.
+  await createJournalEntry(db, async () => {
   const accountIds = await Promise.all(params.lines.map((l) => ensureAccount(db, l.account)));
-
-  await withSequentialNumber(
-    "JE",
-    (yr) => db.journalEntry.count({ where: { postedAt: yr } }),
-    (entryNumber) =>
-      db.journalEntry.create({
-        data: {
-          entryNumber,
-          siteId: params.siteId,
+  return {
+          site: { connect: { id: params.siteId } },
           currency: params.currency,
           sourceModule: params.sourceModule,
           sourceRecordId: params.sourceRecordId,
@@ -102,9 +114,8 @@ export async function postJournalEntry(
           lines: {
             create: params.lines.map((l, i) => ({ accountId: accountIds[i], debit: l.debit ?? 0, credit: l.credit ?? 0, siteId: params.siteId, currency: params.currency })),
           },
-        },
-      }),
-  );
+        };
+  });
 }
 
 /**
@@ -121,22 +132,14 @@ export async function reverseJournalEntry(db: Db, sourceModule: string, sourceRe
   const original = await db.journalEntry.findFirst({ where: { sourceModule, sourceRecordId }, include: { lines: true } });
   if (!original) return;
 
-  await withSequentialNumber(
-    "JE",
-    (yr) => db.journalEntry.count({ where: { postedAt: yr } }),
-    (entryNumber) =>
-      db.journalEntry.create({
-        data: {
-          entryNumber,
-          siteId: original.siteId,
+  await createJournalEntry(db, async () => ({
+          site: { connect: { id: original.siteId } },
           currency: original.currency,
           sourceModule,
           sourceRecordId,
           memo: memo ?? `Reversal of ${original.entryNumber}`,
           lines: { create: original.lines.map((l) => ({ accountId: l.accountId, debit: l.credit, credit: l.debit, siteId: original.siteId, currency: original.currency })) },
-        },
-      }),
-  );
+        }));
 }
 
 // --- One small poster per real financial event, called right after the

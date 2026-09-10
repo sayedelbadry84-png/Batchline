@@ -1,8 +1,9 @@
 "use server";
 
 import bcrypt from "bcryptjs";
+import { lockEmployeeScope, lockLeaveScope } from "@/lib/hrScope";
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { logAudit, writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
 import { logTransferIfChanged } from "@/lib/transferAudit";
@@ -11,6 +12,12 @@ import { withSequentialNumber } from "@/lib/sequence";
 import { postCashTransaction } from "@/lib/ledger";
 import { calculateEndOfServiceEntitlement, TERMINATION_TYPES, type TerminationType } from "@/lib/endOfService";
 import { revalidatePath } from "next/cache";
+
+// Resolve the employee's actual owner, not a site claimed by the form.
+async function isEmployeeInScope(employeeId: string, siteId: string | null): Promise<boolean> {
+  const employee = await prisma.employee.findUnique({ where: { id: employeeId }, select: { plant: { select: { siteId: true } } } });
+  return !!employee && isSiteInScope(employee.plant.siteId, siteId);
+}
 
 const LOGIN_SALT_ROUNDS = 10;
 // See the same note on billing/actions.ts's own TX_OPTIONS — several
@@ -271,6 +278,8 @@ export async function updatePumpCrewMember(formData: FormData) {
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
   const existingMember = await prisma.pumpCrewMember.findUnique({ where: { id }, select: { plantId: true } });
   if (!existingMember) return;
+  const owningPlant = await prisma.plant.findUnique({ where: { id: existingMember.plantId }, select: { siteId: true } });
+  if (!owningPlant || !isSiteInScope(owningPlant.siteId, effectiveSiteId(user))) return;
   const plantId = await resolvePlantIdForSite(siteId, existingMember.plantId);
   if (!plantId) return;
 
@@ -298,9 +307,12 @@ export async function recordAttendance(formData: FormData) {
   const notes = String(formData.get("notes") ?? "").trim() || null;
 
   if (!employeeId || !dateRaw) return;
+  if (!(await isEmployeeInScope(employeeId, effectiveSiteId(user)))) return;
   const date = new Date(`${dateRaw}T00:00:00`);
 
-  await prisma.attendanceRecord.upsert({
+  await prisma.$transaction(async tx => {
+    if (!(await lockEmployeeScope(tx, employeeId, effectiveSiteId(user)))) return;
+  await tx.attendanceRecord.upsert({
     where: { employeeId_date: { employeeId, date } },
     create: {
       employeeId,
@@ -320,7 +332,8 @@ export async function recordAttendance(formData: FormData) {
     },
   });
 
-  await logAudit({ module: "Employees", recordId: employeeId, afterValue: `${dateRaw} — ${status}`, reasonCode: "ATTENDANCE_RECORDED" });
+  await writeAudit(tx, user, { module: "Employees", recordId: employeeId, afterValue: `${dateRaw} — ${status}`, reasonCode: "ATTENDANCE_RECORDED" });
+  }, { ...TX_OPTIONS, isolationLevel: "ReadCommitted" });
   revalidatePath("/employees");
 }
 
@@ -335,21 +348,21 @@ export async function createLeaveRequest(formData: FormData) {
   const reason = String(formData.get("reason") ?? "").trim() || null;
 
   if (!employeeId || !type || !startDateRaw || !endDateRaw) return;
+  if (!(await isEmployeeInScope(employeeId, effectiveSiteId(user)))) return;
   const startDate = new Date(`${startDateRaw}T00:00:00`);
   const endDate = new Date(`${endDateRaw}T00:00:00`);
   if (endDate < startDate) return;
   const daysCount = Math.round((endDate.getTime() - startDate.getTime()) / 86400000) + 1;
 
-  const leave = await withSequentialNumber(
+  await withSequentialNumber(
     "LV",
     (yr) => prisma.leaveRequest.count({ where: { createdAt: yr } }),
-    (requestNumber) =>
-      prisma.leaveRequest.create({
-        data: { requestNumber, employeeId, type, startDate, endDate, daysCount, reason, requestedById: user!.id },
-      }),
+    (requestNumber) => prisma.$transaction(async tx => {
+      if (!(await lockEmployeeScope(tx, employeeId, effectiveSiteId(user)))) return;
+      const leave = await tx.leaveRequest.create({ data: { requestNumber, employeeId, type, startDate, endDate, daysCount, reason, requestedById: user!.id } });
+      await writeAudit(tx, user, { module: "Employees", recordId: leave.id, afterValue: leave.requestNumber, reasonCode: "LEAVE_REQUESTED" });
+    }, { ...TX_OPTIONS, isolationLevel: "ReadCommitted" }),
   );
-
-  await logAudit({ module: "Employees", recordId: leave.id, afterValue: `${leave.requestNumber} — ${type}, ${daysCount}d`, reasonCode: "LEAVE_REQUESTED" });
   revalidatePath("/employees");
 }
 
@@ -367,20 +380,32 @@ export async function approveLeaveRequest(formData: FormData) {
 
   const leave = await prisma.leaveRequest.findUnique({ where: { id } });
   if (!leave || leave.status !== "PENDING") return;
+  if (!(await isEmployeeInScope(leave.employeeId, effectiveSiteId(user)))) return;
 
-  await prisma.leaveRequest.update({ where: { id }, data: { status: "APPROVED", approvedAt: new Date(), approvedById: user!.id } });
+  const approved = await prisma.$transaction(async (tx) => {
+    const leave = await lockLeaveScope(tx, id, effectiveSiteId(user));
+    if (!leave || leave.status !== "PENDING") return false;
+    // Claim PENDING and write attendance in one transaction: a failure must
+    // not leave an approved request with only part of its days posted.
+    const claim = await tx.leaveRequest.updateMany({ where: { id, status: "PENDING" }, data: { status: "APPROVED", approvedAt: new Date(), approvedById: user!.id } });
+    if (claim.count === 0) return false;
 
-  const days: Date[] = [];
-  for (let d = new Date(leave.startDate); d <= leave.endDate; d.setDate(d.getDate() + 1)) days.push(new Date(d));
-  for (const date of days) {
-    await prisma.attendanceRecord.upsert({
-      where: { employeeId_date: { employeeId: leave.employeeId, date } },
-      create: { employeeId: leave.employeeId, date, status: "ON_LEAVE", recordedById: user!.id },
-      update: { status: "ON_LEAVE", recordedById: user!.id },
-    });
-  }
+    const days: Date[] = [];
+    for (let d = new Date(leave.startDate); d <= leave.endDate; d.setDate(d.getDate() + 1)) days.push(new Date(d));
+    for (const date of days) {
+      await tx.attendanceRecord.upsert({
+        where: { employeeId_date: { employeeId: leave.employeeId, date } },
+        create: { employeeId: leave.employeeId, date, status: "ON_LEAVE", recordedById: user!.id },
+        update: { status: "ON_LEAVE", recordedById: user!.id },
+      });
+    }
 
-  await logAudit({ module: "Employees", recordId: id, afterValue: "APPROVED", reasonCode: "LEAVE_APPROVED" });
+  await writeAudit(tx, user, { module: "Employees", recordId: id, afterValue: "APPROVED", reasonCode: "LEAVE_APPROVED" });
+    return true;
+  }, TX_OPTIONS);
+  if (!approved) return;
+
+
   revalidatePath("/employees");
 }
 
@@ -394,10 +419,16 @@ export async function rejectLeaveRequest(formData: FormData) {
 
   const leave = await prisma.leaveRequest.findUnique({ where: { id } });
   if (!leave || leave.status !== "PENDING") return;
+  if (!(await isEmployeeInScope(leave.employeeId, effectiveSiteId(user)))) return;
 
-  await prisma.leaveRequest.update({ where: { id }, data: { status: "REJECTED", approvedAt: new Date(), approvedById: user!.id, rejectionNote } });
+  await prisma.$transaction(async tx => {
+    const fresh = await lockLeaveScope(tx, id, effectiveSiteId(user));
+    if (!fresh || fresh.status !== "PENDING") return;
+  const claim = await tx.leaveRequest.updateMany({ where: { id, status: "PENDING" }, data: { status: "REJECTED", approvedAt: new Date(), approvedById: user!.id, rejectionNote } });
+  if (claim.count === 0) return;
 
-  await logAudit({ module: "Employees", recordId: id, afterValue: `REJECTED — ${rejectionNote}`, reasonCode: "LEAVE_REJECTED" });
+  await writeAudit(tx, user, { module: "Employees", recordId: id, afterValue: `REJECTED — ${rejectionNote}`, reasonCode: "LEAVE_REJECTED" });
+  }, { ...TX_OPTIONS, isolationLevel: "ReadCommitted" });
   revalidatePath("/employees");
 }
 
@@ -410,10 +441,16 @@ export async function cancelLeaveRequest(formData: FormData) {
 
   const leave = await prisma.leaveRequest.findUnique({ where: { id } });
   if (!leave || leave.status !== "PENDING") return;
+  if (!(await isEmployeeInScope(leave.employeeId, effectiveSiteId(user)))) return;
 
-  await prisma.leaveRequest.update({ where: { id }, data: { status: "CANCELLED" } });
+  await prisma.$transaction(async tx => {
+    const fresh = await lockLeaveScope(tx, id, effectiveSiteId(user));
+    if (!fresh || fresh.status !== "PENDING") return;
+  const claim = await tx.leaveRequest.updateMany({ where: { id, status: "PENDING" }, data: { status: "CANCELLED" } });
+  if (claim.count === 0) return;
 
-  await logAudit({ module: "Employees", recordId: id, afterValue: "CANCELLED", reasonCode: "LEAVE_CANCELLED" });
+  await writeAudit(tx, user, { module: "Employees", recordId: id, afterValue: "CANCELLED", reasonCode: "LEAVE_CANCELLED" });
+  }, { ...TX_OPTIONS, isolationLevel: "ReadCommitted" });
   revalidatePath("/employees");
 }
 

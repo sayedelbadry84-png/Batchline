@@ -82,10 +82,16 @@ function coreDetect<T>(samples: CoreSample<T>[]): CoreFlag<T>[] {
   const sortedRecentFirst = [...samples].sort((a, b) => b.sortKey - a.sortKey);
   const sortedOldFirst = [...sortedRecentFirst].reverse();
 
-  const mean = samples.reduce((sum, s) => sum + s.deviationPct, 0) / samples.length;
-  const variance = samples.reduce((sum, s) => sum + (s.deviationPct - mean) ** 2, 0) / samples.length;
-  const stddev = Math.sqrt(variance);
-  if (stddev <= 0.01) return flags;
+  // Train on history, never on the readings being judged. Including an
+  // extreme reading inflates its own standard deviation; with five total
+  // samples even the largest possible z-score cannot reach 2.5.
+  const baseline = sortedRecentFirst.slice(RECENT_WINDOW_FOR_OUTLIER_CHECK);
+  if (baseline.length < MIN_SAMPLES_FOR_OUTLIER) return flags;
+  const mean = baseline.reduce((sum, s) => sum + s.deviationPct, 0) / baseline.length;
+  const variance = baseline.reduce((sum, s) => sum + (s.deviationPct - mean) ** 2, 0) / baseline.length;
+  // A perfectly flat baseline still needs to detect a later jump; avoid
+  // division by zero without disabling detection entirely.
+  const stddev = Math.max(0.01, Math.sqrt(variance));
 
   // Only surface outliers among recent samples — a one-off outlier from
   // months ago isn't actionable today.

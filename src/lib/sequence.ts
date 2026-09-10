@@ -27,7 +27,7 @@ export async function withSequentialNumber<T>(
   count: (yearRange: { gte: Date; lt: Date }) => Promise<number>,
   attempt: (candidateNumber: string) => Promise<T>,
 ): Promise<T> {
-  const year = new Date().getFullYear();
+  const year = new Date().getUTCFullYear();
   const yearRange = { gte: new Date(Date.UTC(year, 0, 1)), lt: new Date(Date.UTC(year + 1, 0, 1)) };
   for (let attemptIndex = 0; attemptIndex < 5; attemptIndex++) {
     const n = (await count(yearRange)) + 1 + attemptIndex;

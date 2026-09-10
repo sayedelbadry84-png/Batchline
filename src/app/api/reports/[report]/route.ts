@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyIntegrationRequest } from "@/lib/integration-auth";
+import { prisma } from "@/lib/prisma";
 import {
   getProductionReport,
   getIncomingReport,
@@ -36,8 +37,8 @@ function isReportName(value: string): value is ReportName {
 }
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ report: string }> }) {
-  const authError = await verifyIntegrationRequest(request, "REPORTS");
-  if (authError) return authError;
+  const principal = await verifyIntegrationRequest(request, "REPORTS");
+  if (principal instanceof NextResponse) return principal;
 
   const { report } = await params;
   if (!isReportName(report)) {
@@ -63,8 +64,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   // Optional scope — a site rolls up every production line at that site
   // combined, a plant (line) id narrows to just one line's own numbers.
   // Unset means every site, same as the on-screen "All sites" default.
-  const siteId = url.searchParams.get("site") ?? undefined;
+  const requestedSite = url.searchParams.get("site");
+  if (!principal.global && requestedSite && requestedSite !== principal.siteId) return NextResponse.json({ error: "Site not permitted." }, { status: 403 });
+  const siteId = principal.global ? requestedSite ?? undefined : principal.siteId!;
   const plantId = url.searchParams.get("plant") ?? undefined;
+  if (!principal.global && plantId && !(await prisma.plant.findFirst({ where: { id: plantId, siteId: principal.siteId! }, select: { id: true } }))) {
+    return NextResponse.json({ error: "Plant not permitted." }, { status: 403 });
+  }
 
   const data = await REPORTS[report]({ from, to, siteId, plantId });
   return NextResponse.json({ report, from: from.toISOString(), to: to.toISOString(), siteId: siteId ?? null, plantId: plantId ?? null, ...data });
