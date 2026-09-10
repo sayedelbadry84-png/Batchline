@@ -25,6 +25,7 @@ require("next/cache");
 require.cache[require.resolve("next/cache")]!.exports = { revalidatePath: () => {} };
 
 const { prisma } = await import("../src/lib/prisma");
+const { createSessionToken, hashSessionToken } = await import("../src/lib/sessionToken");
 const { generateZatcaDocuments } = await import("../src/lib/zatca/generate");
 const { generateZatcaCreditNoteDocuments } = await import("../src/lib/zatca/creditNote");
 const { zatcaGenesisPreviousHash } = await import("../src/lib/zatca/invoiceXml");
@@ -73,9 +74,13 @@ function form(fields: Record<string, string>) {
   for (const [key, value] of Object.entries(fields)) data.set(key, value);
   return data;
 }
+// BL-CR-P1-05: the cookie now carries a CSPRNG token, and the row stores
+// only its SHA-256 — so a fixture session has to be created the same way
+// the application creates one, not by putting a row id in the cookie.
 async function asUser(userId: string) {
-  const session = await prisma.session.create({ data: { userId, expiresAt: new Date(Date.now() + 60000) } });
-  cookieValues.set("batchline_session", session.id);
+  const token = createSessionToken();
+  await prisma.session.create({ data: { userId, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + 60_000) } });
+  cookieValues.set("batchline_session", token);
 }
 async function invoice(total = 115) {
   const row = await prisma.invoice.create({ data: {

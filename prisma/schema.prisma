@@ -130,6 +130,12 @@ model User {
 
 model Session {
   id        String   @id @default(cuid())
+  // BL-CR-P1-05, external-review validation (2026-09-10): SHA-256 of the
+  // bearer token the browser holds. The token itself is 32 CSPRNG bytes
+  // and is never stored, so a database dump yields no usable cookie; `id`
+  // is once again only an identifier, not a credential. See
+  // src/lib/sessionToken.ts.
+  tokenHash String   @unique
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
@@ -143,6 +149,9 @@ model Session {
 // without ever having their password.
 model PendingTwoFactor {
   id        String   @id @default(cuid())
+  // Same bearer-token treatment as Session above (BL-CR-P1-05): this
+  // cookie also grants a step of authentication, so it is a credential.
+  tokenHash String   @unique
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
@@ -182,7 +191,7 @@ model LoginAttempt {
 // gain; every "site"/"plant" identifier in code still means exactly what
 // it always did, it's only what the screen prints that changed.
 model Site {
-  apiKeys ApiKey[]
+  apiKeys     ApiKey[]
   id          String   @id @default(cuid())
   // Short, human-assigned business code ("S1", "CAI") — distinct from the
   // internal id, which nobody reads or types. What every other model's
@@ -3132,9 +3141,9 @@ model SupportVehicle {
 // var still works as an ALL-scope fallback for compatibility —
 // verifyIntegrationRequest in src/lib/integration-auth.ts checks both.
 model ApiKey {
-  siteId String?
-  site Site? @relation(fields: [siteId], references: [id])
-  global Boolean @default(false)
+  siteId      String?
+  site        Site?     @relation(fields: [siteId], references: [id])
+  global      Boolean   @default(false)
   id          String    @id @default(cuid())
   label       String
   keyHash     String    @unique
@@ -3288,16 +3297,17 @@ model JournalLine {
 }
 
 model ZatcaSubmissionAttempt {
- id String @id
- kind String
- documentId String
- uuid String
- state String
- invoiceHash String?
- signedXml String?
- httpStatus Int?
- response String?
- createdAt DateTime @default(now())
- finishedAt DateTime?
- @@index([documentId, kind])
+  id          String    @id
+  kind        String
+  documentId  String
+  uuid        String
+  state       String
+  invoiceHash String?
+  signedXml   String?
+  httpStatus  Int?
+  response    String?
+  createdAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  @@index([documentId, kind])
 }
