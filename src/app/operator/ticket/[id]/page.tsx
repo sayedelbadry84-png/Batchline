@@ -3,14 +3,16 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { recordActuals, recordActualField, startTrip } from "@/app/(app)/production/actions";
+import { recordActualField } from "@/app/(app)/production/actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
-import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
+import { RecordActualsForm } from "@/components/RecordActualsForm";
 import { OfflineSyncBanner } from "@/components/OfflineSyncBanner";
 import { CompleteBatchForm } from "@/components/CompleteBatchForm";
+import { StartTripForm } from "@/components/StartTripForm";
 import { ShortageOverridePanel, type ShortageSnapshotEntry } from "@/components/ShortageOverridePanel";
 import { canPerformAction } from "@/lib/permissions";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -29,9 +31,15 @@ export default async function OperatorTicketPage({
   const m = dict.modules.production;
   const d = m.detail;
 
-  const ticket = await prisma.batchTicket.findUnique({
-    where: { id },
+  // PL-R5-P1-03, fifth production-lifecycle review: this checked
+  // authentication and role, but never whether THIS ticket belongs to
+  // the operator's own site — same unscoped-read gap as the desktop
+  // production detail page (see that page's own comment).
+  const allowedSiteId = effectiveSiteId(user);
+  const ticket = await prisma.batchTicket.findFirst({
+    where: { id, ...plantScopeWhere(allowedSiteId) },
     include: {
+      plant: { select: { siteId: true } },
       reservation: { include: { project: { include: { customer: true } } } },
       mix: { include: { components: true } },
       components: { include: { material: true } },
@@ -60,12 +68,13 @@ export default async function OperatorTicketPage({
   const toleranceByMaterial = new Map(ticket.mix.components.map((c) => [c.materialId, c.tolerancePct]));
   const isPumpDelivery = ticket.reservation.deliveryMethod === "PUMP";
 
-  // Company-wide, not scoped to this ticket's own plant — see the same
-  // comment in production/[id]/page.tsx.
+  // Truck/pump scoped to this ticket's own SITE (not just its plant);
+  // driver/pump-crew stay company-wide — see the same comment and
+  // PL-R5-P2-05 reasoning in production/[id]/page.tsx.
   const [trucksRaw, drivers, pumps, pumpCrew] = ticket.status === "COMPLETE" && !ticket.trip
     ? await Promise.all([
         prisma.truck.findMany({
-          where: { status: "ACTIVE", trips: { none: { status: { not: "CLOSED" } } } },
+          where: { status: "ACTIVE", plant: { siteId: ticket.plant.siteId }, trips: { none: { status: { not: "CLOSED" } } } },
           orderBy: { code: "asc" },
           // Each truck's own most recent CLOSED trip — see the same badge
           // in production/[id]/page.tsx and getAvailableReclaimForTruck
@@ -79,9 +88,11 @@ export default async function OperatorTicketPage({
             },
           },
         }),
-        prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" } }),
+        // status: "ACTIVE" — see the same PL-R6-P2-03 comment in
+        // production/[id]/page.tsx.
+        prisma.employee.findMany({ where: { role: "DRIVER", status: "ACTIVE" }, orderBy: { name: "asc" } }),
         isPumpDelivery
-          ? prisma.pump.findMany({ where: { status: "ACTIVE" }, orderBy: { code: "asc" } })
+          ? prisma.pump.findMany({ where: { status: "ACTIVE", plant: { siteId: ticket.plant.siteId } }, orderBy: { code: "asc" } })
           : Promise.resolve([]),
         isPumpDelivery
           ? prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } })
@@ -143,10 +154,27 @@ export default async function OperatorTicketPage({
         )}
       </div>
 
-      <OfflineSyncBanner labels={{ offline: o.offlineBanner, pending: o.offlinePending, synced: o.offlineSynced }} />
+      <OfflineSyncBanner
+        labels={{
+          offline: o.offlineBanner,
+          pendingOne: o.offlinePendingOne,
+          pendingOther: o.offlinePendingOther,
+          synced: o.offlineSynced,
+          rejectedOne: o.offlineRejectedOne,
+          rejectedOther: o.offlineRejectedOther,
+          fieldLabels: o.offlineRejectedField,
+          reasonLabels: o.offlineRejectedReasons,
+          dismiss: o.offlineRejectedDismiss,
+          storageError: o.offlineStorageError,
+          corruptionRecovered: o.offlineCorruptionRecovered,
+        }}
+      />
 
-      <form action={recordActuals} className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm">
-        <input type="hidden" name="batchTicketId" value={ticket.id} />
+      <RecordActualsForm
+        ticketId={ticket.id}
+        messages={{ staleConflict: d.recordActualsStaleConflict, terminal: d.recordActualsTerminal, notFound: d.recordActualsNotFound, genericFailure: d.recordActualsGenericFailure }}
+        className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm"
+      >
         <h2 className="font-display text-base font-semibold">{d.targetVsActual}</h2>
         {ticket.components.map((c) => {
           const tolerance = toleranceByMaterial.get(c.materialId) ?? 2;
@@ -160,6 +188,12 @@ export default async function OperatorTicketPage({
                 <span className="font-mono text-xs text-ink-muted" dir="ltr">{c.targetMassKg.toFixed(1)} kg</span>
               </div>
               <div className="mt-2 flex items-center gap-2" dir="ltr">
+                {/* PL-R9-P1-03: field-specific version, not the old shared
+                    c.version — see schema.prisma's actualVersion/
+                    moistureVersion comment. The hidden input carries the
+                    same value for the bulk "Save readings" submit this
+                    component list is wrapped in. */}
+                <input type="hidden" name={`actualVersion_${c.id}`} value={c.actualVersion} />
                 <AutoSaveField
                   action={recordActualField}
                   offlineQueueKind="recordActualField"
@@ -171,20 +205,29 @@ export default async function OperatorTicketPage({
                   defaultValue={c.actualMassKg ?? undefined}
                   disabled={ticket.status === "COMPLETE"}
                   className="w-full rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
+                  rejectedLabel={d.autosaveRejected}
+                  storageErrorLabel={d.autosaveStorageError}
+                  defaultVersion={c.actualVersion}
                 />
                 {AGGREGATE_TYPES.has(c.material.type) && (
-                  <AutoSaveField
-                    action={recordActualField}
-                    offlineQueueKind="recordActualField"
-                    hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
-                    valueField="value"
-                    name={`moisture_${c.id}`}
-                    step="0.1"
-                    placeholder={d.col.moisture}
-                    defaultValue={c.moisturePct ?? undefined}
-                    disabled={ticket.status === "COMPLETE"}
-                    className="w-24 shrink-0 rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
-                  />
+                  <>
+                    <input type="hidden" name={`moistureVersion_${c.id}`} value={c.moistureVersion} />
+                    <AutoSaveField
+                      action={recordActualField}
+                      offlineQueueKind="recordActualField"
+                      hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
+                      valueField="value"
+                      name={`moisture_${c.id}`}
+                      step="0.1"
+                      placeholder={d.col.moisture}
+                      defaultValue={c.moisturePct ?? undefined}
+                      disabled={ticket.status === "COMPLETE"}
+                      className="w-24 shrink-0 rounded-md border border-border bg-bg px-2 py-2 font-mono text-sm disabled:opacity-60"
+                      rejectedLabel={d.autosaveRejected}
+                      storageErrorLabel={d.autosaveStorageError}
+                      defaultVersion={c.moistureVersion}
+                    />
+                  </>
                 )}
               </div>
               {deviationPct != null && (
@@ -201,7 +244,7 @@ export default async function OperatorTicketPage({
             {d.saveReadings}
           </button>
         )}
-      </form>
+      </RecordActualsForm>
 
       {!isTerminal && (
         <CompleteBatchForm
@@ -271,34 +314,39 @@ export default async function OperatorTicketPage({
       )}
 
       {ticket.status === "COMPLETE" && !ticket.trip && (
-        <form action={startTrip} className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm">
-          <input type="hidden" name="batchTicketId" value={ticket.id} />
-          <input type="hidden" name="returnTo" value="/operator" />
-          <h2 className="font-display text-base font-semibold">{d.assignTitle}</h2>
-          <EquipmentAssignPicker
-            equipment={{ name: "truckId", label: d.truck, placeholder: d.selectTruck, required: true, className: mobileSelect, options: truckOptions }}
-            dependents={[{ key: "driverId", name: "driverId", label: d.driver, placeholder: d.selectDriver, required: true, className: mobileSelect, options: driverOptions }]}
-          />
-          {trucks.length === 0 && <p className="text-xs text-warn">{d.noTrucksAvailable}</p>}
-          {isPumpDelivery && (
-            <div className="flex flex-col gap-3 border-t border-border pt-3">
-              <p className="text-xs text-ink-muted">{d.pumpDeliveryNote}</p>
-              <EquipmentAssignPicker
-                equipment={{ name: "pumpId", label: d.pump, placeholder: dict.field.selectPump, required: true, className: mobileSelect, options: pumpOptions }}
-                dependents={[
-                  { key: "pumpOperatorId", name: "pumpOperatorId", label: d.pumpOperator, placeholder: d.selectPumpOperator, required: true, className: mobileSelect, options: operatorOptions },
-                  { key: "pumpAssistantId", name: "pumpAssistantId", label: d.pumpAssistant, placeholder: dict.field.none, className: mobileSelect, options: assistantOptions },
-                ]}
-              />
-              {ticket.reservation.minPumpReachM != null && (
-                <p className="text-xs text-ink-muted">{d.minPumpReachNote(ticket.reservation.minPumpReachM)}</p>
-              )}
-            </div>
-          )}
-          <button type="submit" className="rounded-md bg-accent py-2.5 text-sm font-medium text-white">
-            {d.startTrip}
-          </button>
-        </form>
+        <StartTripForm
+          batchTicketId={ticket.id}
+          returnTarget="operator"
+          isPumpDelivery={isPumpDelivery}
+          trucksAvailable={trucks.length > 0}
+          truckOptions={truckOptions}
+          driverOptions={driverOptions}
+          pumpOptions={pumpOptions}
+          operatorOptions={operatorOptions}
+          assistantOptions={assistantOptions}
+          messages={{
+            assignTitle: d.assignTitle,
+            truck: d.truck,
+            selectTruck: d.selectTruck,
+            driver: d.driver,
+            selectDriver: d.selectDriver,
+            noTrucksAvailable: d.noTrucksAvailable,
+            pumpDeliveryNote: d.pumpDeliveryNote,
+            pump: d.pump,
+            selectPump: dict.field.selectPump,
+            pumpOperator: d.pumpOperator,
+            selectPumpOperator: d.selectPumpOperator,
+            pumpAssistant: d.pumpAssistant,
+            none: dict.field.none,
+            minPumpReachNote: ticket.reservation.minPumpReachM == null ? null : d.minPumpReachNote(ticket.reservation.minPumpReachM),
+            startTripButton: d.startTrip,
+            errors: d.dispatchErrors,
+          }}
+          cardClassName="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm"
+          titleClassName="font-display text-base font-semibold"
+          selectClassName={mobileSelect}
+          buttonClassName="rounded-md bg-accent py-2.5 text-sm font-medium text-white"
+        />
       )}
 
       {ticket.trip && (

@@ -2,13 +2,17 @@
   "name": "batchline",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "npm@10.9.8",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "tsx --test tests/**/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 tests/**/*.test.ts tests/**/*.test.tsx",
     "postinstall": "prisma generate"
   },
   "dependencies": {
@@ -31,6 +35,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
+    "@types/jsdom": "^30.0.0",
     "@types/leaflet": "^1.9.22",
     "@types/node": "^20",
     "@types/qrcode": "^1.5.6",
@@ -39,6 +44,7 @@
     "@types/web-push": "^3.6.4",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
+    "jsdom": "^30.0.1",
     "prisma": "^5.22.0",
     "tailwindcss": "^4",
     "tsx": "^4.23.12",

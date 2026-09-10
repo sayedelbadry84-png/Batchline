@@ -2,6 +2,7 @@ import "server-only";
 import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import type { CurrentUser } from "@/lib/session";
+import type { Prisma } from "@prisma/client";
 
 // UI-terminology note (see the same note on the Site model in
 // schema.prisma): every "site"/"plant" identifier in this file is the
@@ -138,4 +139,30 @@ export async function resolvePlantIdForSite(siteId: string, keepPlantId?: string
 export async function isPlantActive(plantId: string): Promise<boolean> {
   const plant = await prisma.plant.findUnique({ where: { id: plantId }, select: { status: true } });
   return plant?.status === "ACTIVE";
+}
+
+// PL-R2-P1-03, second production-lifecycle review: every lifecycle/
+// dispatch domain function reads a Plant's own siteId to decide
+// authorization (is this actor's allowedSiteId the same site this
+// ticket/trip/resource actually belongs to right now) — but updatePlant
+// (plants/actions.ts) lets an ADMIN move a Plant to a different site at
+// any time, and a plain joined read of Plant.siteId (no lock) can still
+// be overtaken by a concurrent transfer that commits in the gap between
+// that read and this transaction's own commit. Serializable isolation
+// alone does not prevent this: "operator action, then transfer" is a
+// perfectly valid serial order, so both transactions can legitimately
+// commit even though the operator's authorization was decided against a
+// site the Plant no longer belongs to by the time it matters.
+//
+// Taking a real row lock here forces the two to actually serialize
+// against each other — updatePlant's own `prisma.plant.update(...)` already
+// takes an equivalent implicit row lock for the duration of that single
+// UPDATE statement, so whichever of the two (this lock, or that update)
+// reaches the row first makes the other wait until it commits, and the
+// loser then sees the fresh, post-transfer siteId once it resumes. No
+// change to updatePlant itself is needed — only the read side had to
+// start asking for the lock.
+export async function lockPlantSiteId(tx: Prisma.TransactionClient, plantId: string): Promise<string | null> {
+  const rows = await tx.$queryRaw<{ siteId: string }[]>`SELECT "siteId" FROM "Plant" WHERE "id" = ${plantId} FOR UPDATE`;
+  return rows[0]?.siteId ?? null;
 }

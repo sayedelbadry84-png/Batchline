@@ -4,23 +4,22 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { getCurrentUser, requirePageAccess } from "@/lib/session";
 import { canPerformAction } from "@/lib/permissions";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
 import {
-  recordActuals,
   recordActualField,
-  startTrip,
-  updateTripAssignment,
   addTicketComponent,
   deleteTicketComponent,
-  deleteBatchTicket,
 } from "../actions";
 import { rankTrucksForVolume } from "@/lib/dispatch";
 import { AutoSaveField } from "@/components/AutoSaveField";
-import { EquipmentAssignPicker } from "@/components/EquipmentAssignPicker";
+import { RecordActualsForm } from "@/components/RecordActualsForm";
 import { CompleteBatchForm } from "@/components/CompleteBatchForm";
 import { ReverseBatchForm } from "@/components/ReverseBatchForm";
 import { ShortageOverridePanel, type ShortageSnapshotEntry } from "@/components/ShortageOverridePanel";
 import { CancelBatchTicketForm } from "@/components/CancelBatchTicketForm";
+import { StartTripForm } from "@/components/StartTripForm";
+import { UpdateTripAssignmentForm } from "@/components/UpdateTripAssignmentForm";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -43,10 +42,20 @@ export default async function BatchTicketPage({
   const m = dict.modules.production;
   const d = m.detail;
 
+  // PL-R5-P1-03, fifth production-lifecycle review: this loader used to
+  // fetch the ticket by id alone — module access was checked, but not
+  // whether this SPECIFIC ticket belongs to the acting user's own site,
+  // so a plant-scoped user who knew or guessed another site's ticket id
+  // could still read its full detail (customer, project, trip, returns,
+  // shortage overrides). findFirst + plantScopeWhere folds that same
+  // scope check the write actions already re-check into the read itself
+  // — a cross-site id now behaves exactly like a nonexistent one.
+  const allowedSiteId = effectiveSiteId(user);
   const [ticket, materials] = await Promise.all([
-    prisma.batchTicket.findUnique({
-      where: { id },
+    prisma.batchTicket.findFirst({
+      where: { id, ...plantScopeWhere(allowedSiteId) },
       include: {
+        plant: { select: { siteId: true } },
         reservation: { include: { project: { include: { customer: true } } } },
         mix: { include: { components: true } },
         components: { include: { material: true } },
@@ -76,7 +85,6 @@ export default async function BatchTicketPage({
         shortageSnapshot: ticket.shortageOverrideRequests[0].shortageSnapshot as ShortageSnapshotEntry[] | null,
       }
     : null;
-  const hasAnyOverrideRequest = ticket.shortageOverrideRequests.length > 0;
   const canEditComponents = !isTerminal;
   const componentMaterialIds = new Set(ticket.components.map((c) => c.materialId));
   const addableMaterials = materials.filter((mt) => !componentMaterialIds.has(mt.id));
@@ -92,17 +100,23 @@ export default async function BatchTicketPage({
   const [trucksRaw, drivers, pumps, pumpCrew] = showAssignForm || showEditTripForm
     ? await Promise.all([
         prisma.truck.findMany({
-          // Company-wide, not scoped to this ticket's own plant — a truck
-          // (or driver, pump, pump crew member below) commonly works more
-          // than one plant, so whoever is dispatching should be able to
-          // pull any of them in, not just the ones nominally registered
-          // here. A truck already on an open trip elsewhere still can't be
-          // assigned here too — matches the guarantee the Fleet page's own
-          // intro text makes ("can't be double-booked from Production").
-          // When editing an existing trip, that trip's own truck doesn't
-          // count as "busy" against itself.
+          // Scoped to this ticket's own SITE, not its specific plant — a
+          // truck commonly works more than one plant, so whoever is
+          // dispatching can still pull in any truck registered at ANY
+          // plant sharing this ticket's site, not just the one nominally
+          // registered here. But never a truck from a DIFFERENT site:
+          // claimTripResources' own TRUCK_OUT_OF_SCOPE check has always
+          // enforced exactly that boundary — this picker used to offer
+          // company-wide choices the domain guard would then always
+          // refuse for a cross-site pick (PL-R5-P2-05, fifth production-
+          // lifecycle review). A truck already on an open trip elsewhere
+          // still can't be assigned here too — matches the guarantee the
+          // Fleet page's own intro text makes ("can't be double-booked
+          // from Production"). When editing an existing trip, that trip's
+          // own truck doesn't count as "busy" against itself.
           where: {
             status: "ACTIVE",
+            plant: { siteId: ticket.plant.siteId },
             trips: { none: { status: { not: "CLOSED" }, ...(ticket.trip ? { id: { not: ticket.trip.id } } : {}) } },
           },
           orderBy: { code: "asc" },
@@ -120,9 +134,19 @@ export default async function BatchTicketPage({
             },
           },
         }),
-        prisma.employee.findMany({ where: { role: "DRIVER" }, orderBy: { name: "asc" } }),
+        // Drivers and pump crew stay company-wide on purpose — unlike
+        // truck/pump, claimTripResources never checks either against the
+        // ticket's site (PL-R5-P2-05's own finding was specific to truck
+        // and pump; drivers and crew genuinely do work across sites).
+        // status: "ACTIVE" filters the same way trucks/pumps already do
+        // above (PL-R6-P2-03, sixth production-lifecycle review) —
+        // claimTripResources always rejects an inactive driver with
+        // DRIVER_INACTIVE, so offering one here was a guaranteed-to-fail
+        // choice, the same picker/domain mismatch already fixed for
+        // cross-site trucks and pumps.
+        prisma.employee.findMany({ where: { role: "DRIVER", status: "ACTIVE" }, orderBy: { name: "asc" } }),
         isPumpDelivery
-          ? prisma.pump.findMany({ where: { status: "ACTIVE" }, orderBy: { code: "asc" } })
+          ? prisma.pump.findMany({ where: { status: "ACTIVE", plant: { siteId: ticket.plant.siteId } }, orderBy: { code: "asc" } })
           : Promise.resolve([]),
         isPumpDelivery
           ? prisma.pumpCrewMember.findMany({ where: { status: "ACTIVE" }, orderBy: { name: "asc" } })
@@ -198,8 +222,7 @@ export default async function BatchTicketPage({
           </form>
         ))}
 
-      <form action={recordActuals} className={ui.card}>
-        <input type="hidden" name="batchTicketId" value={ticket.id} />
+      <RecordActualsForm ticketId={ticket.id} messages={{ staleConflict: d.recordActualsStaleConflict, terminal: d.recordActualsTerminal, notFound: d.recordActualsNotFound, genericFailure: d.recordActualsGenericFailure }} className={ui.card}>
         <h2 className="mb-3 font-display text-lg font-semibold">{d.targetVsActual}</h2>
         <table className={ui.table}>
           <thead>
@@ -226,6 +249,15 @@ export default async function BatchTicketPage({
                   </td>
                   <td className={`${ui.td} font-mono tabular`}>{c.targetMassKg.toFixed(1)}</td>
                   <td className={ui.td}>
+                    {/* PL-R9-P1-03: field-specific version, not the old
+                        shared c.version — see schema.prisma's
+                        actualVersion/moistureVersion comment for why one
+                        shared token made this and the moisture field
+                        below falsely collide on an ordinary sequential
+                        save. The hidden input carries the same value for
+                        the bulk "Save readings" submit just below, which
+                        now checks/increments the identical column. */}
+                    <input type="hidden" name={`actualVersion_${c.id}`} value={c.actualVersion} />
                     <AutoSaveField
                       action={recordActualField}
                       hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "actual" }}
@@ -235,20 +267,29 @@ export default async function BatchTicketPage({
                       defaultValue={c.actualMassKg ?? undefined}
                       disabled={ticket.status === "COMPLETE"}
                       className="w-24 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs disabled:opacity-60"
+                      rejectedLabel={d.autosaveRejected}
+                      storageErrorLabel={d.autosaveStorageError}
+                      defaultVersion={c.actualVersion}
                     />
                   </td>
                   <td className={ui.td}>
                     {AGGREGATE_TYPES.has(c.material.type) ? (
-                      <AutoSaveField
-                        action={recordActualField}
-                        hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
-                        valueField="value"
-                        name={`moisture_${c.id}`}
-                        step="0.1"
-                        defaultValue={c.moisturePct ?? undefined}
-                        disabled={ticket.status === "COMPLETE"}
-                        className="w-20 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs disabled:opacity-60"
-                      />
+                      <>
+                        <input type="hidden" name={`moistureVersion_${c.id}`} value={c.moistureVersion} />
+                        <AutoSaveField
+                          action={recordActualField}
+                          hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
+                          valueField="value"
+                          name={`moisture_${c.id}`}
+                          step="0.1"
+                          defaultValue={c.moisturePct ?? undefined}
+                          disabled={ticket.status === "COMPLETE"}
+                          className="w-20 rounded-md border border-border bg-surface px-2 py-1 font-mono text-xs disabled:opacity-60"
+                          rejectedLabel={d.autosaveRejected}
+                          storageErrorLabel={d.autosaveStorageError}
+                          defaultVersion={c.moistureVersion}
+                        />
+                      </>
                     ) : (
                       <span className="text-ink-faint">—</span>
                     )}
@@ -283,7 +324,7 @@ export default async function BatchTicketPage({
           </div>
         )}
         <p className="mt-3 text-xs text-ink-muted">{d.moistureHint}</p>
-      </form>
+      </RecordActualsForm>
 
       {canEditComponents && addableMaterials.length > 0 && (
         <form action={addTicketComponent} className={`${ui.card} flex flex-wrap items-end gap-3`}>
@@ -373,37 +414,38 @@ export default async function BatchTicketPage({
       )}
 
       {ticket.status === "COMPLETE" && !ticket.trip && (
-        <form action={startTrip} className={`${ui.card} flex flex-col gap-3`}>
-          <input type="hidden" name="batchTicketId" value={ticket.id} />
-          <h2 className="font-display text-lg font-semibold">{d.assignTitle}</h2>
-          <div className="grid grid-cols-2 gap-3">
-            <EquipmentAssignPicker
-              equipment={{ name: "truckId", label: d.truck, placeholder: d.selectTruck, required: true, className: ui.select, options: truckOptions }}
-              dependents={[{ key: "driverId", name: "driverId", label: d.driver, placeholder: d.selectDriver, required: true, className: ui.select, options: driverOptions }]}
-            />
-          </div>
-          {trucks.length === 0 && <p className="text-xs text-warn">{d.noTrucksAvailable}</p>}
-          {isPumpDelivery && (
-            <div className="border-t border-border pt-3">
-              <p className="mb-2 text-xs text-ink-muted">{d.pumpDeliveryNote}</p>
-              <div className="grid grid-cols-3 gap-3">
-                <EquipmentAssignPicker
-                  equipment={{ name: "pumpId", label: d.pump, placeholder: dict.field.selectPump, required: true, className: ui.select, options: pumpOptions }}
-                  dependents={[
-                    { key: "pumpOperatorId", name: "pumpOperatorId", label: d.pumpOperator, placeholder: d.selectPumpOperator, required: true, className: ui.select, options: operatorOptions },
-                    { key: "pumpAssistantId", name: "pumpAssistantId", label: d.pumpAssistant, placeholder: dict.field.none, className: ui.select, options: assistantOptions },
-                  ]}
-                />
-              </div>
-              {ticket.reservation.minPumpReachM != null && (
-                <p className="mt-1 text-xs text-ink-muted">{d.minPumpReachNote(ticket.reservation.minPumpReachM)}</p>
-              )}
-            </div>
-          )}
-          <button type="submit" className={`${ui.button} self-start`}>
-            {d.startTrip}
-          </button>
-        </form>
+        <StartTripForm
+          batchTicketId={ticket.id}
+          isPumpDelivery={isPumpDelivery}
+          trucksAvailable={trucks.length > 0}
+          truckOptions={truckOptions}
+          driverOptions={driverOptions}
+          pumpOptions={pumpOptions}
+          operatorOptions={operatorOptions}
+          assistantOptions={assistantOptions}
+          messages={{
+            assignTitle: d.assignTitle,
+            truck: d.truck,
+            selectTruck: d.selectTruck,
+            driver: d.driver,
+            selectDriver: d.selectDriver,
+            noTrucksAvailable: d.noTrucksAvailable,
+            pumpDeliveryNote: d.pumpDeliveryNote,
+            pump: d.pump,
+            selectPump: dict.field.selectPump,
+            pumpOperator: d.pumpOperator,
+            selectPumpOperator: d.selectPumpOperator,
+            pumpAssistant: d.pumpAssistant,
+            none: dict.field.none,
+            minPumpReachNote: ticket.reservation.minPumpReachM == null ? null : d.minPumpReachNote(ticket.reservation.minPumpReachM),
+            startTripButton: d.startTrip,
+            errors: d.dispatchErrors,
+          }}
+          cardClassName={`${ui.card} flex flex-col gap-3`}
+          titleClassName="font-display text-lg font-semibold"
+          selectClassName={ui.select}
+          buttonClassName={ui.button}
+        />
       )}
 
       {ticket.trip && !showEditTripForm && (
@@ -489,21 +531,20 @@ export default async function BatchTicketPage({
         </div>
       )}
 
-      {/* deleteBatchTicket now refuses a COMPLETE ticket outright (it has
-          real posted inventory movements — see reverseBatchTicket in
-          production/actions.ts) rather than silently no-op-ing, so the
-          button is hidden for that state the same way it's already hidden
-          once a trip exists. It also can't actually delete a ticket with a
-          ShortageOverrideRequest on file (that request's own FK is ON
-          DELETE RESTRICT, deliberately, so an approval decision's history
-          is never silently erased) — CancelBatchTicketForm replaces it in
-          that case instead of sitting next to a button that would just
-          silently do nothing (P2-01, fourth review). Both use !isTerminal,
-          not a COMPLETE-only check — a CANCELLED ticket (reachable now
-          that cancelBatchTicket exists) was still showing the cancel form,
-          which would just fail with INVALID_STATE on submit (P2-03, sixth
-          review). */}
-      {!ticket.trip && !isTerminal && hasAnyOverrideRequest && (
+      {/* The only way to remove a non-terminal, not-yet-dispatched ticket
+          now (PL-P1-04, first production-lifecycle review) — a separate
+          hard-delete action used to sit here instead whenever the ticket
+          had no ShortageOverrideRequest on file, but its own pre-check
+          ran outside any transaction or row lock, so a concurrent
+          completeBatchTicket claim landing in that gap could post real
+          inventory movements and still have the row hard-deleted out from
+          under them. cancelBatchTicket already claims the row atomically
+          and never posts or reverses inventory, so it now covers this
+          entire scope on its own. !isTerminal, not a COMPLETE-only check
+          — a CANCELLED ticket was still showing this form otherwise,
+          which would just fail with INVALID_STATE on submit (P2-03,
+          sixth review). */}
+      {!ticket.trip && !isTerminal && (
         <CancelBatchTicketForm
           ticketId={ticket.id}
           messages={{
@@ -523,18 +564,6 @@ export default async function BatchTicketPage({
           inputClassName={`${ui.input} w-full`}
           buttonClassName="self-start rounded-md border border-critical px-4 py-2 text-sm font-medium text-critical hover:bg-critical-soft"
         />
-      )}
-      {!ticket.trip && !isTerminal && !hasAnyOverrideRequest && (
-        <form action={deleteBatchTicket} className={`${ui.card} flex items-center justify-between`}>
-          <input type="hidden" name="id" value={ticket.id} />
-          <div>
-            <h2 className="font-display text-lg font-semibold">{d.deleteTicket}</h2>
-            <p className="text-sm text-ink-muted">{d.deleteTicketHint}</p>
-          </div>
-          <button type="submit" className="rounded-md border border-critical px-4 py-2 text-sm font-medium text-critical hover:bg-critical-soft">
-            {d.deleteTicket}
-          </button>
-        </form>
       )}
 
       {/* ADMIN-only (production.reverseBatch in src/lib/permissions.ts) —
@@ -558,35 +587,42 @@ export default async function BatchTicketPage({
       )}
 
       {showEditTripForm && ticket.trip && (
-        <form action={updateTripAssignment} className={`${ui.card} flex flex-col gap-3`}>
-          <input type="hidden" name="tripId" value={ticket.trip.id} />
-          <h2 className="font-display text-lg font-semibold">{d.editAssignTitle}</h2>
-          <div className="grid grid-cols-2 gap-3">
-            <EquipmentAssignPicker
-              equipment={{ name: "truckId", label: d.truck, placeholder: d.selectTruck, required: true, className: ui.select, defaultValue: ticket.trip.truckId, options: truckOptions }}
-              dependents={[{ key: "driverId", name: "driverId", label: d.driver, placeholder: d.selectDriver, required: true, className: ui.select, defaultValue: ticket.trip.driverId, options: driverOptions }]}
-            />
-          </div>
-          {isPumpDelivery && (
-            <div className="border-t border-border pt-3">
-              <div className="grid grid-cols-3 gap-3">
-                <EquipmentAssignPicker
-                  equipment={{ name: "pumpId", label: d.pump, placeholder: dict.field.selectPump, required: true, className: ui.select, defaultValue: ticket.trip.pumpId ?? "", options: pumpOptions }}
-                  dependents={[
-                    { key: "pumpOperatorId", name: "pumpOperatorId", label: d.pumpOperator, placeholder: d.selectPumpOperator, required: true, className: ui.select, defaultValue: ticket.trip.pumpOperatorId ?? "", options: operatorOptions },
-                    { key: "pumpAssistantId", name: "pumpAssistantId", label: d.pumpAssistant, placeholder: dict.field.none, className: ui.select, defaultValue: ticket.trip.pumpAssistantId ?? "", options: assistantOptions },
-                  ]}
-                />
-              </div>
-            </div>
-          )}
-          <div className="flex gap-3">
-            <button type="submit" className={ui.button}>{dict.field.save}</button>
-            <Link href={`/production/${ticket.id}`} className="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt">
-              {dict.field.cancel}
-            </Link>
-          </div>
-        </form>
+        <UpdateTripAssignmentForm
+          tripId={ticket.trip.id}
+          cancelHref={`/production/${ticket.id}`}
+          isPumpDelivery={isPumpDelivery}
+          defaultTruckId={ticket.trip.truckId}
+          defaultDriverId={ticket.trip.driverId}
+          defaultPumpId={ticket.trip.pumpId ?? ""}
+          defaultPumpOperatorId={ticket.trip.pumpOperatorId ?? ""}
+          defaultPumpAssistantId={ticket.trip.pumpAssistantId ?? ""}
+          truckOptions={truckOptions}
+          driverOptions={driverOptions}
+          pumpOptions={pumpOptions}
+          operatorOptions={operatorOptions}
+          assistantOptions={assistantOptions}
+          messages={{
+            editAssignTitle: d.editAssignTitle,
+            truck: d.truck,
+            selectTruck: d.selectTruck,
+            driver: d.driver,
+            selectDriver: d.selectDriver,
+            pump: d.pump,
+            selectPump: dict.field.selectPump,
+            pumpOperator: d.pumpOperator,
+            selectPumpOperator: d.selectPumpOperator,
+            pumpAssistant: d.pumpAssistant,
+            none: dict.field.none,
+            save: dict.field.save,
+            cancel: dict.field.cancel,
+            errors: d.dispatchErrors,
+          }}
+          cardClassName={`${ui.card} flex flex-col gap-3`}
+          titleClassName="font-display text-lg font-semibold"
+          selectClassName={ui.select}
+          buttonClassName={ui.button}
+          cancelClassName="rounded-md border border-border px-4 py-2 text-sm hover:bg-surface-alt"
+        />
       )}
     </div>
   );

@@ -40,6 +40,7 @@ const en: typeof ar = {
     trips: "Trip Board",
     quality: "Quality & Compliance",
     reports: "Reports & KPIs",
+    queues: "Queue Health",
     administration: "Administration",
     permissions: "Permissions",
     roles: "Roles",
@@ -120,8 +121,46 @@ const en: typeof ar = {
     emptyAction: "Nothing needs action right now.",
     backToList: "Back to field view",
     offlineBanner: "No connection — readings you enter now are saved on this device and will sync automatically once you're back online.",
-    offlinePending: (n: number) => `${n} reading${n === 1 ? "" : "s"} waiting to sync…`,
+    // Split into two fixed strings, not a function (PL-R5-P1-02, fifth
+    // production-lifecycle review): OfflineSyncBanner is a Client
+    // Component reading a client-only pending count, and a function prop
+    // crossing the Server→Client boundary is not serializable — the
+    // {n} placeholder is filled in client-side instead (see
+    // OfflineSyncBanner.tsx). offlinePendingOther covers every count
+    // other than exactly 1, same split the old ternary made.
+    offlinePendingOne: "1 reading waiting to sync…",
+    offlinePendingOther: "{n} readings waiting to sync…",
     offlineSynced: "Synced.",
+    // PL-R6-P2-02, sixth production-lifecycle review: a queued reading
+    // that comes back REJECTED on replay (the ticket went COMPLETE/
+    // CANCELLED while offline, a stale component, an out-of-range value)
+    // used to be silently dequeued and counted as flushed — real,
+    // invisible measurement loss. These stay visible instead, with the
+    // actual field/value and why, until a supervisor dismisses them.
+    offlineRejectedOne: "1 reading couldn't be saved — needs review:",
+    offlineRejectedOther: "{n} readings couldn't be saved — needs review:",
+    offlineRejectedField: { actual: "Actual mass", moisture: "Moisture %" },
+    offlineRejectedReasons: {
+      MISSING_FIELDS: "the request was incomplete",
+      INVALID_VALUE: "the value was out of range",
+      NOT_FOUND: "the component no longer exists or is out of scope",
+      TERMINAL: "the ticket was completed or cancelled before this could save",
+      // PL-R8-P1-03, eighth production-lifecycle review: a newer reading
+      // for this exact field was already saved (from any device/tab)
+      // before this queued one could replay.
+      STALE_READING: "a newer reading for this field was already saved elsewhere in the meantime",
+    },
+    offlineRejectedDismiss: "Dismiss",
+    // PL-R7-P1-02, seventh production-lifecycle review: shown whenever
+    // this device's own storage genuinely failed to persist a reading —
+    // never claimed as "queued" or "saved" when this is the real state.
+    offlineStorageError: "This device couldn't save one or more readings locally — write the value down and enter it again once storage is available.",
+    // PL-R8-P1-02, eighth production-lifecycle review: shown when this
+    // device's own locally-saved queue was unreadable and had to be
+    // reset — the unreadable copy is kept on file under a backup key,
+    // never deleted outright, but anything that was queued is no longer
+    // visible here and should be re-checked/re-entered if in doubt.
+    offlineCorruptionRecovered: "This device's saved offline queue was unreadable and had to be reset. Nothing was deleted — the old copy is kept on file — but re-check whether any readings need to be re-entered.",
   },
   driver: {
     brand: "Batchline Driver",
@@ -154,6 +193,7 @@ const en: typeof ar = {
     confirmFullButton: "Full load used — confirm",
     confirmReturnTitle: "Confirm delivery — with return",
     returnedVolume: "Returned volume (m³)",
+    returnReasonPlaceholder: "Reason for return…",
     confirmReturnButton: "Log return & confirm",
     delivered: (m3: string) => `Delivered ${m3} m³`,
     returnedNote: (m3: number, disposition: string) => `${m3} m³ returned — ${disposition}`,
@@ -538,6 +578,24 @@ const en: typeof ar = {
         toleranceNote: (v: number) => `±${v}% tolerance`,
         saveReadings: "Save readings",
         moistureHint: "Moisture % adjusts the batched aggregate mass automatically in a real weighing integration (design formula: batched = design × (1 + moisture%)); here it is recorded alongside the scale reading for the audit trail.",
+        // Tooltip on AutoSaveField's rejection mark (PL-R6-P2-02, sixth
+        // production-lifecycle review) — a genuine business rejection
+        // (ticket went terminal, stale component, out-of-range value),
+        // never shown for a network failure, which queues/retries instead.
+        autosaveRejected: "Not saved — this reading was rejected. Re-check the value or the ticket's status.",
+        autosaveStorageError: "Not saved anywhere — this device's storage failed. Write the value down and re-enter it once storage is available.",
+        // PL-R10-P1-04, tenth production-lifecycle review: the bulk "Save
+        // readings" submit used to roll its ENTIRE write back on a stale
+        // component with no visible signal at all — the operator saw the
+        // page simply reload with no explanation. This is that signal.
+        recordActualsStaleConflict: "Not saved — one or more readings were changed elsewhere since this page loaded. Refresh and re-enter your readings.",
+        // PL-R12-P2-01, twelfth production-lifecycle review: a ticket
+        // going COMPLETE/CANCELLED mid-entry refuses the whole bulk
+        // submit — an ordinary production race that used to leave the
+        // operator with no explanation at all.
+        recordActualsTerminal: "Not saved — this ticket has been completed or cancelled, so readings can no longer be changed.",
+        recordActualsNotFound: "Not saved — this ticket is no longer available to you. Reload the page.",
+        recordActualsGenericFailure: "Not saved — the readings were refused. Reload the page and try again.",
         completeTitle: "Complete batch",
         completeIntro: "Deducts actual (or target, if unweighed) mass from the plant's silo and hopper levels — the same numbers the Silos screen shows.",
         completeButton: "Complete & deduct inventory",
@@ -565,8 +623,6 @@ const en: typeof ar = {
         removeComponent: "Remove",
         addComponentTitle: "Add component",
         addComponentButton: "Add to ticket",
-        deleteTicket: "Delete ticket",
-        deleteTicketHint: "Only available before a trip has been dispatched. If this ticket already deducted inventory, that mass is restored to the silo/hopper it came from.",
         deliveryStagesTitle: "Delivery stages",
         stageLoading: "Loading",
         stageInTransit: "In transit",
@@ -638,6 +694,38 @@ const en: typeof ar = {
           errorStorageNotConfigured: "Couldn't reverse — one of the original storage locations no longer exists",
           errorNotFound: "Ticket not found",
           errorNoPostedMovements: "Couldn't reverse — no inventory movement is recorded for this ticket (it most likely completed before the movement ledger existed); check the balance manually if needed",
+        },
+        // Shared by the start-trip and edit-assignment forms (PL-R4-P2-02,
+        // fourth production-lifecycle review) — both call into the same
+        // resource-claiming validator (claimTripResources) and so can
+        // surface the same set of typed refusal statuses.
+        dispatchErrors: {
+          MISSING_FIELDS: "Fill in every required field.",
+          NOT_FOUND: "This ticket is no longer available, or you don't have access to it.",
+          NOT_DISPATCHABLE: "This ticket isn't in a state that can be dispatched right now.",
+          OUT_OF_SCOPE: "This ticket's plant is no longer within your assigned scope.",
+          NOT_LOADING: "This trip has already left the loading stage and can no longer be reassigned.",
+          TRUCK_NOT_FOUND: "The selected truck could not be found.",
+          TRUCK_OUT_OF_SERVICE: "The selected truck is out of service.",
+          TRUCK_OUT_OF_SCOPE: "The selected truck belongs to a different site.",
+          TRUCK_CAPACITY_EXCEEDED: "The selected truck's drum capacity is smaller than this load.",
+          TRUCK_BUSY: "The selected truck is already on another open trip.",
+          DRIVER_NOT_FOUND: "The selected driver could not be found.",
+          DRIVER_INACTIVE: "The selected driver is not active.",
+          DRIVER_BUSY: "The selected driver is already on another open trip.",
+          PUMP_REQUIRED: "This delivery requires a pump — select one.",
+          PUMP_NOT_FOUND: "The selected pump could not be found.",
+          PUMP_OUT_OF_SERVICE: "The selected pump is out of service.",
+          PUMP_OUT_OF_SCOPE: "The selected pump belongs to a different site.",
+          PUMP_INSUFFICIENT_REACH: "The selected pump's reach is too short for this reservation.",
+          PUMP_REACH_UNKNOWN: "The selected pump has no recorded reach, and this reservation requires a minimum.",
+          PUMP_OPERATOR_REQUIRED: "A pump operator is required for this delivery.",
+          PUMP_BUSY: "The selected pump is already on another open trip.",
+          PUMP_CREW_SAME_PERSON: "The pump operator and assistant can't be the same person.",
+          PUMP_OPERATOR_INVALID: "The selected pump operator is not a valid, active crew member.",
+          PUMP_ASSISTANT_INVALID: "The selected pump assistant is not a valid, active crew member.",
+          CREW_BUSY: "A member of the selected pump crew is already assigned to another open trip.",
+          RECLAIM_CREDIT_FAILED: "Dispatch failed while crediting reclaimed material back to inventory — try again.",
         },
       },
     },
@@ -1029,7 +1117,6 @@ const en: typeof ar = {
           release: "Release a batch ticket",
           manualBooking: "Manual booking (walk-in sale)",
           complete: "Complete a batch (deducts inventory)",
-          deleteTicket: "Delete a batch ticket",
           recordActuals: "Record batch actuals",
           recordActualField: "Auto-save a single actual reading",
           startTrip: "Dispatch a truck (start trip)",
@@ -1198,6 +1285,7 @@ const en: typeof ar = {
           createCertificate: "Issue a compliance certificate",
           updateCertificate: "Edit a compliance certificate",
           approveWasteMemo: "Approve a waste incident memo",
+          rejectWasteMemo: "Deny a waste incident memo",
           recordWasteMemoNote: "Backfill a waste memo's finding",
           createInstrument: "Register a calibrated instrument",
           recordCalibration: "Record a calibration event",
@@ -1215,6 +1303,10 @@ const en: typeof ar = {
           removeTrainingAttendee: "Remove a training attendee",
           createMaterialLabTest: "Record a material lab test",
           setMaterialLabTestStatus: "Change a material lab test's status",
+        },
+        queues: {
+          requeueDeadLetter: "Retry abandoned background work",
+          dismissDeadLetter: "Discard abandoned background work",
         },
       },
     },
@@ -1466,6 +1558,20 @@ const en: typeof ar = {
       colClosed: { truck: "Truck", project: "Project", ticket: "Ticket #", reservation: "Reservation #", mix: "Mix", pourLocation: "Pour location", loadTime: "Load date/time", delivered: "Delivered", returnCol: "Return" },
       fullLoad: "full load",
       emptyClosed: "No closed trips yet.",
+      errors: {
+        NOT_FOUND: "This trip is no longer available, or you don't have access to it.",
+        STALE_STATE: "This trip's stage changed since the page loaded — refresh and try again.",
+        NO_NEXT_STATE: "This trip has no further stage to advance to.",
+        NOT_DISCHARGING: "This trip must be at the discharging stage before it can be closed.",
+        INVALID_VOLUME: "Enter a valid returned volume greater than zero.",
+        RETURN_EXCEEDS_TICKET_VOLUME: "The returned volume can't exceed the ticket's own volume.",
+        INVALID_REASON_CODE: "Choose a valid return reason.",
+        INVALID_FATE: "Choose a valid fate.",
+        NOT_ELIGIBLE: "A full-waste return has nothing left to mark a fate for.",
+        ALREADY_CONSUMED: "This return has already been reused in a later trip and can no longer change.",
+        ALREADY_SET: "This return's fate was already decided.",
+        MISSING_FIELDS: "Fill in every required field.",
+      },
     },
     quality: {
       tabs: { testing: "Testing", certificates: "Certificates", calibration: "Calibration", audits: "Internal Audits", documents: "Documents", training: "Training", materialTests: "Material Tests" },
@@ -1509,13 +1615,19 @@ const en: typeof ar = {
         title: "Waste incident memos pending Quality approval",
         intro: "Auto-created whenever a trip is closed with a quality-rejected return — approve to formally record the incident.",
         col: { ticket: "Ticket", reservation: "Reservation #", project: "Project", mix: "Mix", truck: "Truck", wasted: "Wasted", reason: "Reason", date: "Date" },
-        noteLabel: "Rejection finding (written) — required to approve",
+        noteLabel: "Rejection finding (written) — required either way",
         notePlaceholder: "Write the actual inspection finding — e.g. slump below the required minimum…",
         approve: "Approve",
+        deny: "Deny",
         empty: "No waste incident memos pending approval.",
         backfillTitle: "Approved memos missing a written finding",
         backfillIntro: "Approved before writing a finding was required — fill in the actual finding for each to complete the record.",
         saveNote: "Save finding",
+        errors: {
+          NOT_FOUND: "This memo is no longer available, or you don't have access to it.",
+          ALREADY_DECIDED: "Someone else already decided this memo.",
+          MISSING_FIELDS: "Write the finding before approving or denying.",
+        },
       },
       capa: {
         title: "Corrective & Preventive Actions (CAPA)",
@@ -1687,6 +1799,30 @@ const en: typeof ar = {
           remarks: "Remarks",
         },
       },
+    },
+    queues: {
+      eyebrow: "Operations",
+      title: "Queue health",
+      intro: "Background work that could not be completed after repeated automatic retries. Each row here is a real consequence that was abandoned — a purchasing requisition that was never opened, or a delivery photo that was never cleaned up — and needs a person to either put it back in the queue or deliberately drop it.",
+      deadLetters: "Dead-lettered work",
+      empty: "Nothing has been abandoned — every queued item either completed or is still retrying on schedule.",
+      scopeNote: "Automatic requisitions are shown for your own site only. Storage cleanups have no site of their own and are shown to administrators only.",
+      col: { kind: "Queue", subject: "Item", reason: "What was owed", attempts: "Attempts", lastError: "Last error", deadLetteredAt: "Abandoned at" },
+      kinds: { AUTO_REQUISITION: "Automatic requisition", BLOB_DELETION: "Storage cleanup" },
+      reasons: {
+        REQUISITION_NOT_OPENED: "The requisition was never opened",
+        NOTIFICATION_UNDELIVERED: "Opened, but purchasing was never notified",
+        DELIVERY_PHOTO_COMPENSATION: "An uploaded delivery photo was never removed",
+        DELIVERY_PHOTO_REPLACED: "A replaced delivery photo was never removed",
+      },
+      requeue: "Retry",
+      dismiss: "Discard",
+      showing: (from: number, to: number, total: number) => `Showing ${from}–${to} of ${total}`,
+      previousPage: "← Newer",
+      nextPage: "Older →",
+      errorNotFound: "No longer available.",
+      errorNotDeadLettered: "Already handled by someone else.",
+      errorInvalid: "Could not be processed.",
     },
     reports: {
       eyebrow: "Reports & KPIs",

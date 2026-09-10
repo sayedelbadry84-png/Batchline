@@ -4,8 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { DrumTimer } from "@/components/DrumTimer";
+import { DriverAdvanceTripForm } from "@/components/DriverAdvanceTripForm";
 import {
-  driverAdvanceTrip,
   uploadDeliveryPhoto,
   confirmDeliveryFull,
   confirmDeliveryWithReturn,
@@ -88,12 +88,12 @@ export default async function DriverTripPage({
       )}
 
       {["LOADING", "IN_TRANSIT", "ON_SITE"].includes(trip.status) && (
-        <form action={driverAdvanceTrip}>
-          <input type="hidden" name="tripId" value={trip.id} />
-          <button className="w-full rounded-md bg-accent px-4 py-3 text-base font-medium text-white">
-            {d.nextAction[trip.status as keyof typeof d.nextAction]}
-          </button>
-        </form>
+        <DriverAdvanceTripForm
+          tripId={trip.id}
+          expectedStatus={trip.status}
+          buttonClassName="w-full rounded-md bg-accent px-4 py-3 text-base font-medium text-white"
+          messages={{ buttonLabel: d.nextAction[trip.status as keyof typeof d.nextAction], errors: dict.modules.trips.errors }}
+        />
       )}
 
       {trip.status !== "CLOSED" && (
@@ -182,6 +182,12 @@ export default async function DriverTripPage({
               placeholder={d.returnedVolume}
               className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
             />
+            <select name="reasonCode" required defaultValue="" className="rounded-md border border-border bg-surface px-3 py-2 text-sm">
+              <option value="" disabled>{d.returnReasonPlaceholder}</option>
+              {Object.entries(dict.returnReasons).map(([k, label]) => (
+                <option key={k} value={k}>{label}</option>
+              ))}
+            </select>
             <button className="rounded-md bg-warn-soft px-4 py-2.5 text-sm font-medium text-warn">
               {d.confirmReturnButton}
             </button>
