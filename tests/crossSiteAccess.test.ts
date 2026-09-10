@@ -696,6 +696,12 @@ test("a quote line from another site cannot be converted into a reservation", as
 test("a failed audit insert rolls back the payment, the bill status and the journal", async () => {
   const bill = await makeSupplierBill(siteA, 100);
   await asUser(accountantId);
+  // Snapshotted, not asserted at zero: earlier tests in this file post
+  // real payments at site A and their journal entries are legitimately
+  // still on file. What this test is about is whether THIS transaction
+  // left anything behind — a per-run delta, not a global count. (Asserting
+  // a global zero here is what made the first CI run of this test red.)
+  const journalEntriesBefore = await prisma.journalEntry.count({ where: { siteId: siteA } });
 
   // Failure injection at the database, not in application code: a
   // temporary trigger that rejects exactly this suite's audit row. If the
@@ -722,7 +728,7 @@ test("a failed audit insert rolls back the payment, the bill status and the jour
     );
     assert.equal(await prisma.supplierPayment.count({ where: { supplierBillId: bill.id } }), 0, "no payment may survive an audit failure");
     assert.equal((await prisma.supplierBill.findUniqueOrThrow({ where: { id: bill.id } })).status, "UNPAID", "and the derived status must not have moved");
-    assert.equal(await prisma.journalEntry.count({ where: { siteId: siteA } }), 0, "and no journal entry may be left behind");
+    assert.equal(await prisma.journalEntry.count({ where: { siteId: siteA } }), journalEntriesBefore, "and no journal entry may be left behind");
   } finally {
     await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_reject_audit_trigger ON "AuditEvent";`);
     await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_reject_audit();`);
