@@ -4,6 +4,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hashApiKey } from "@/lib/apiKeys";
 
+export type IntegrationPrincipal = Readonly<{ keyId: string; scope: string; siteId: string | null; global: boolean }>;
+
 export type IntegrationScope = "TELEMATICS" | "SCADA" | "REPORTS";
 
 // Constant-time string compare — a plain === leaks how many leading bytes
@@ -31,7 +33,7 @@ export function safeEqual(a: string, b: string): boolean {
 // already gives an attacker nothing to time against), but the legacy env
 // var is still compared with safeEqual since that's a direct string
 // compare, not a hash lookup.
-export async function verifyIntegrationRequest(request: NextRequest, requiredScope: IntegrationScope): Promise<NextResponse | null> {
+export async function verifyIntegrationRequest(request: NextRequest, requiredScope: IntegrationScope): Promise<NextResponse | IntegrationPrincipal> {
   const auth = request.headers.get("authorization") ?? "";
   const presentedKey = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (!presentedKey) {
@@ -39,16 +41,20 @@ export async function verifyIntegrationRequest(request: NextRequest, requiredSco
   }
 
   const legacyKey = process.env.INTEGRATION_API_KEY;
-  if (legacyKey && safeEqual(presentedKey, legacyKey)) return null;
+  if (process.env.ALLOW_LEGACY_GLOBAL_INTEGRATION_KEY === "true" && legacyKey && safeEqual(presentedKey, legacyKey)) {
+    console.warn("Legacy global integration key used", { scope: requiredScope });
+    return { keyId: "legacy-environment", scope: "ALL", siteId: null, global: true };
+  }
 
   const key = await prisma.apiKey.findUnique({ where: { keyHash: hashApiKey(presentedKey) } });
   if (!key || key.revokedAt) {
     return NextResponse.json({ error: "Missing or invalid Authorization bearer token." }, { status: 401 });
   }
+  if (!key.global && !key.siteId) return NextResponse.json({ error: "Key has no assigned site." }, { status: 403 });
   if (key.scope !== "ALL" && key.scope !== requiredScope) {
     return NextResponse.json({ error: `This key is not scoped for ${requiredScope}.` }, { status: 403 });
   }
 
   await prisma.apiKey.update({ where: { id: key.id }, data: { lastUsedAt: new Date() } });
-  return null;
+  return { keyId: key.id, scope: key.scope, siteId: key.siteId, global: key.global };
 }

@@ -37,6 +37,8 @@ const { NextRequest } = await import("next/server");
 const scada = await import("../src/app/api/scada/silo-reading/route");
 const gps = await import("../src/app/api/telematics/ping/route");
 const { hashApiKey } = await import("../src/lib/apiKeys");
+const { submitDocument } = await import("../src/lib/zatca/submission");
+const { reverseJournalEntry } = await import("../src/lib/ledger");
 
 const prefix = `REVIEW-${randomUUID()}`;
 let siteId: string, otherSiteId: string, plantId: string, otherPlantId: string;
@@ -91,13 +93,16 @@ before(async () => {
   otherEmployeeId = (await prisma.employee.create({ data: { name: prefix, role: "DRIVER", plantId: otherPlantId } })).id;
   siloId = (await prisma.silo.create({ data: { name: prefix, plantId, materialType: "CEMENT", capacityTons: 50, currentLevelTons: 10 } })).id;
   await prisma.zatcaSettings.create({ data: { siteId, sellerLegalName: "Review Seller", vatNumber: "300000000000003" } });
-  await prisma.apiKey.create({ data: { label: prefix, keyHash: hashApiKey(apiKey), keyPrefix: "test", scope: "ALL", createdById: adminId } });
+  await prisma.apiKey.create({ data: { siteId, label: prefix, keyHash: hashApiKey(apiKey), keyPrefix: "test", scope: "ALL", createdById: adminId } });
 });
 
 after(async () => {
   const users = [adminId, operatorId, hrId].filter(Boolean);
   const sites = [siteId, otherSiteId].filter(Boolean);
   const accounts = await prisma.journalLine.findMany({ where: { siteId: { in: sites } }, select: { accountId: true } });
+  const credits = await prisma.creditNote.findMany({ where: { invoiceId: { in: invoiceIds } }, select: { id: true } });
+  await prisma.auditEvent.deleteMany({ where: { recordId: { in: [...invoiceIds, ...credits.map(c => c.id)] } } });
+  await prisma.zatcaSubmissionAttempt.deleteMany({ where: { documentId: { in: [...invoiceIds, ...credits.map(c => c.id)] } } });
   await prisma.auditEvent.deleteMany({ where: { actorId: { in: users } } });
   await prisma.session.deleteMany({ where: { userId: { in: users } } });
   await prisma.pendingTwoFactor.deleteMany({ where: { userId: { in: users } } });
@@ -228,14 +233,14 @@ test("same-site leave approval posts all days exactly once", async () => {
 });
 test("incentive policy writers and bracket deletion reject another site", async () => {
   await asUser(operatorId);
-  const data = form({ siteId: otherSiteId, role: "DRIVER", ratePerM3Sar: "5" });
+  const data = form({ siteId: otherSiteId, role: "MIXER_DRIVER", ratePerM3Sar: "5" });
   await incentives.updateIncentivePolicy(data);
   await incentives.updatePumpIncentivePolicy(data);
   await incentives.setFlatVolumeRate(data);
   await incentives.addPumpRateBracket(data);
   assert.equal(await prisma.driverIncentivePolicy.count({ where: { siteId: otherSiteId } }), 0);
   assert.equal(await prisma.pumpIncentivePolicy.count({ where: { siteId: otherSiteId } }), 0);
-  const policy = await prisma.pumpIncentivePolicy.create({ data: { siteId: otherSiteId, role: "DRIVER", freeVolumeM3: 0 } });
+  const policy = await prisma.pumpIncentivePolicy.create({ data: { siteId: otherSiteId, role: "MIXER_DRIVER", freeVolumeM3: 0 } });
   const bracket = await prisma.pumpReachRateBracket.create({ data: { policyId: policy.id, minReachM: 0, ratePerM3Sar: 5 } });
   await incentives.deletePumpRateBracket(form({ id: bracket.id }));
   assert.ok(await prisma.pumpReachRateBracket.findUnique({ where: { id: bracket.id } }));
@@ -268,3 +273,235 @@ test("authenticated sensor endpoints reject nonfinite and impossible measurement
   assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: siloId } })).currentLevelTons, 10);
   for (const coords of ['"lat":91,"lng":0', '"lat":0,"lng":181', '"lat":1e309,"lng":0']) assert.equal((await gps.POST(request("/api/telematics/ping", `{"deviceId":"test",${coords}}`))).status, 400);
 });
+
+function latch() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(r => { resolve = r; });
+  return { promise, resolve };
+}
+async function blockedBy(pid: number) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    const rows = await prisma.$queryRaw<{ pid: number }[]>`SELECT pid FROM pg_stat_activity WHERE ${pid} = ANY(pg_blocking_pids(pid))`;
+    if (rows.length) return;
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  throw new Error("No database-observed waiter for holder " + pid);
+}
+
+for (const kind of ["INVOICE", "CREDIT_NOTE"] as const) {
+  // The two delegates share these fields, but their call signatures are not
+  // mutually assignable, so branch per call instead of holding a union.
+  function patch(id: string, data: { zatcaStatus?: string; zatcaUuid?: string; zatcaSubmittedAt?: Date }) {
+    return kind === "INVOICE"
+      ? prisma.invoice.updateMany({ where: { id }, data })
+      : prisma.creditNote.updateMany({ where: { id }, data });
+  }
+  async function statusOf(id: string) {
+    return kind === "INVOICE"
+      ? (await prisma.invoice.findFirstOrThrow({ where: { id } })).zatcaStatus
+      : (await prisma.creditNote.findFirstOrThrow({ where: { id } })).zatcaStatus;
+  }
+  async function document() {
+    const parent = await invoice();
+    const row = kind === "INVOICE" ? parent : await prisma.creditNote.create({ data: { invoiceId: parent.id, creditNoteNumber: randomUUID(), amount: 10, reason: "OTHER", issuedById: adminId } });
+    const uuid = randomUUID();
+    await patch(row.id, { zatcaStatus: "GENERATED", zatcaUuid: uuid });
+    return { id: row.id, uuid };
+  }
+  const prepare = async () => ({ signedXml: "<Invoice/>", invoiceHash: "test-hash", qrCode: "test-qr", url: "https://example.invalid/clearance", authorization: "test-only" });
+
+  test(`${kind}: atomic claim sends once; cleared cannot be changed by a competing call`, async () => {
+    const d = await document(), entered = latch(), release = latch();
+    let calls = 0;
+    const transport: typeof fetch = async () => { calls++; entered.resolve(); await release.promise; return Response.json({ clearanceStatus: "CLEARED" }); };
+    const input = { kind, id: d.id, uuid: d.uuid, actor: { id: adminId, role: "ADMIN" }, prepare };
+    const first = submitDocument(input, transport);
+    try {
+      await entered.promise;
+      assert.equal((await submitDocument(input, async () => { calls++; throw new Error("late failure"); })).ok, false);
+    } finally { release.resolve(); }
+    assert.deepEqual(await first, { ok: true });
+    assert.equal(calls, 1);
+    await submitDocument(input, async () => { calls++; throw new Error("late failure"); });
+    assert.equal(await statusOf(d.id), "CLEARED");
+    assert.equal(calls, 1);
+    assert.equal(await prisma.zatcaSubmissionAttempt.count({ where: { documentId: d.id } }), 1);
+  });
+
+  test(`${kind}: pre-transport failure permits a safe retry, timeout after acceptance does not`, async () => {
+    const d = await document(); let calls = 0;
+    const input = { kind, id: d.id, uuid: d.uuid, actor: null, prepare };
+    const transport: typeof fetch = async () => { calls++; throw new Error("accepted remotely, response lost"); };
+    assert.deepEqual(await submitDocument({ ...input, prepare: async () => { throw new Error("signing failed"); } }, transport), { ok: false, reason: "PREPARATION_FAILED" });
+    assert.equal(calls, 0);
+    await submitDocument(input, transport);
+    assert.equal(await statusOf(d.id), "UNKNOWN");
+    await submitDocument(input, transport);
+    assert.equal(calls, 1);
+    const attempts = await prisma.zatcaSubmissionAttempt.findMany({ where: { documentId: d.id }, orderBy: { createdAt: "asc" } });
+    assert.deepEqual(attempts.map(a => a.state), ["FAILED", "UNKNOWN"]);
+    assert.equal(attempts[1].uuid, d.uuid);
+    assert.equal(attempts[1].signedXml, "<Invoice/>");
+  });
+
+  test(`${kind}: stale submission and late response require reconciliation without resending`, async () => {
+    const d = await document(), entered = latch(), release = latch(); let calls = 0;
+    const input = { kind, id: d.id, uuid: d.uuid, actor: null, prepare };
+    const first = submitDocument(input, async () => { calls++; entered.resolve(); await release.promise; return Response.json({ clearanceStatus: "CLEARED" }); });
+    try {
+      await entered.promise;
+      await patch(d.id, { zatcaSubmittedAt: new Date(Date.now() - 600000) });
+      await submitDocument(input, async () => { calls++; return Response.json({}); });
+    } finally { release.resolve(); }
+    assert.equal((await first).ok, false);
+    assert.equal(calls, 1);
+    assert.equal(await statusOf(d.id), "UNKNOWN");
+  });
+}
+
+test("integration keys enforce site, capability, revocation and deliberate global access", async () => {
+  const otherSilo = await prisma.silo.create({ data: { name: prefix, plantId: otherPlantId, materialType: "CEMENT", capacityTons: 50, currentLevelTons: 10 } });
+  const trucks = await Promise.all([plantId, otherPlantId].map((p, i) => prisma.truck.create({ data: { plantId: p, code: `${prefix}-${i}`, gpsDeviceId: `${prefix}-${i}`, drumCapacityM3: 10 } })));
+  const key = await prisma.apiKey.findUniqueOrThrow({ where: { keyHash: hashApiKey(apiKey) } });
+  const request = (data: object) => new NextRequest("http://localhost/api/test", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify(data) });
+  try {
+    assert.equal((await scada.POST(request({ siloId, levelTons: 12 }))).status, 200);
+    assert.equal((await scada.POST(request({ siloId: otherSilo.id, levelTons: 12 }))).status, 404);
+    assert.equal((await gps.POST(request({ deviceId: trucks[0].gpsDeviceId, lat: 1, lng: 1 }))).status, 200);
+    assert.equal((await gps.POST(request({ deviceId: trucks[1].gpsDeviceId, lat: 1, lng: 1 }))).status, 404);
+    await prisma.apiKey.update({ where: { id: key.id }, data: { scope: "SCADA" } });
+    assert.equal((await gps.POST(request({ deviceId: trucks[0].gpsDeviceId, lat: 1, lng: 1 }))).status, 403);
+    await prisma.apiKey.update({ where: { id: key.id }, data: { scope: "ALL", global: true, siteId: null } });
+    assert.equal((await scada.POST(request({ siloId: otherSilo.id, levelTons: 12 }))).status, 200);
+    assert.equal((await gps.POST(request({ deviceId: trucks[1].gpsDeviceId, lat: 1, lng: 1 }))).status, 200);
+    await prisma.apiKey.update({ where: { id: key.id }, data: { revokedAt: new Date() } });
+    assert.equal((await scada.POST(request({ siloId, levelTons: 12 }))).status, 401);
+    await prisma.apiKey.update({ where: { id: key.id }, data: { revokedAt: null, global: false } });
+    assert.equal((await scada.POST(request({ siloId, levelTons: 12 }))).status, 403);
+  } finally {
+    await prisma.apiKey.update({ where: { id: key.id }, data: { scope: "ALL", siteId, global: false, revokedAt: null } });
+    await prisma.auditEvent.deleteMany({ where: { recordId: { in: [siloId, otherSilo.id, ...trucks.map(t => t.id)] } } });
+    await prisma.truck.deleteMany({ where: { id: { in: trucks.map(t => t.id) } } });
+    await prisma.silo.delete({ where: { id: otherSilo.id } });
+  }
+});
+
+test("incentive actions reject malformed values and DB rejects bypasses", async () => {
+  await asUser(adminId);
+  const base = { siteId, role: "MIXER_DRIVER", freeTripsThreshold: "10", tier2Threshold: "15", tier3Threshold: "20", tier2RateSar: "1", tier3RateSar: "2", beyondRateSar: "3" };
+  await incentives.updateIncentivePolicy(form(base));
+  const before = await prisma.driverIncentivePolicy.findUniqueOrThrow({ where: { siteId_role: { siteId, role: base.role } } });
+  for (const bad of [{ freeTripsThreshold: "-1" }, { tier2Threshold: "1.5" }, { tier2Threshold: "9" }, { tier3Threshold: "12" }, { tier2RateSar: "NaN" }, { tier3RateSar: "Infinity" }, { beyondRateSar: "-2" }, { role: "UNSUPPORTED" }]) {
+    await assert.rejects(incentives.updateIncentivePolicy(form({ ...base, ...bad })));
+  }
+  assert.deepEqual(await prisma.driverIncentivePolicy.findUnique({ where: { id: before.id } }), before);
+  for (const value of ["-1", "NaN", "Infinity"]) {
+    await assert.rejects(incentives.updatePumpIncentivePolicy(form({ siteId, role: "PUMP_OPERATOR", freeVolumeM3: value })));
+    await assert.rejects(incentives.setFlatVolumeRate(form({ siteId, role: "MIXER_DRIVER", ratePerM3Sar: value })));
+  }
+  await assert.rejects(incentives.addPumpRateBracket(form({ siteId, role: "PUMP_OPERATOR", minReachM: "40", maxReachM: "20", ratePerM3Sar: "1" })));
+  await assert.rejects(prisma.driverIncentivePolicy.update({ where: { id: before.id }, data: { tier2Threshold: 1 } }));
+  await assert.rejects(prisma.$executeRaw`UPDATE "DriverIncentivePolicy" SET "tier2RateSar" = 'NaN'::float8 WHERE "id" = ${before.id}`);
+});
+
+test("flat replacement has one deterministic last lock holder; concurrent overlaps cannot commit", async () => {
+  await asUser(adminId);
+  const role = "MIXER_DRIVER";
+  await incentives.setFlatVolumeRate(form({ siteId, role, ratePerM3Sar: "1" }));
+  const policy = await prisma.pumpIncentivePolicy.findUniqueOrThrow({ where: { siteId_role: { siteId, role } } });
+  const held = latch(), release = latch(); let pid = 0;
+  const holder = prisma.$transaction(async tx => {
+    pid = (await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`)[0].pid;
+    await tx.$queryRaw`SELECT "id" FROM "PumpIncentivePolicy" WHERE "id" = ${policy.id} FOR UPDATE`;
+    held.resolve(); await release.promise;
+  }, { timeout: 15000 });
+  await held.promise;
+  const first = incentives.setFlatVolumeRate(form({ siteId, role, ratePerM3Sar: "2" }));
+  let second: Promise<void> | undefined;
+  try { await blockedBy(pid); second = incentives.setFlatVolumeRate(form({ siteId, role, ratePerM3Sar: "3" })); }
+  finally { release.resolve(); }
+  await Promise.all([holder, first, second]);
+  const brackets = await prisma.pumpReachRateBracket.findMany({ where: { policyId: policy.id } });
+  assert.equal(brackets.length, 1); assert.equal(brackets[0].ratePerM3Sar, 3);
+  await prisma.pumpIncentivePolicy.deleteMany({ where: { siteId, role: "PUMP_OPERATOR" } });
+  const results = await Promise.allSettled(["1", "2"].map(rate => incentives.addPumpRateBracket(form({ siteId, role: "PUMP_OPERATOR", minReachM: "10", maxReachM: "20", ratePerM3Sar: rate }))));
+  assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
+});
+
+for (const operation of ["recordPayment", "issueCreditNote", "markInvoiceSent", "cancelInvoice"] as const) {
+  test(`${operation}: audit failure rolls back business record, status and journal; retry commits once`, async () => {
+    await asUser(adminId);
+    const d = await invoice(100);
+    if (operation === "markInvoiceSent") await prisma.invoice.update({ where: { id: d.id }, data: { status: "DRAFT" } });
+    if (operation === "cancelInvoice") await prisma.$transaction(tx => postInvoice(tx, { invoiceId: d.id, siteId, currency: "SAR", subtotal: d.subtotal, taxAmount: d.taxAmount, total: d.total }));
+    const reason = { recordPayment: "PAYMENT_RECORDED", issueCreditNote: "CREDIT_NOTE_ISSUED", markInvoiceSent: "INVOICE_SENT", cancelInvoice: "INVOICE_CANCELLED" }[operation];
+    const name = `audit_fail_${randomUUID().replaceAll("-", "")}`;
+    const run = () => billing[operation](form({ id: d.id, invoiceId: d.id, amount: "20", reason: "OTHER" }));
+    const snapshot = () => prisma.invoice.findUnique({ where: { id: d.id }, include: { payments: true, creditNotes: true, lines: true } });
+    const before = await snapshot(), journals = await prisma.journalEntry.count({ where: { siteId } });
+    await prisma.$executeRawUnsafe(`CREATE FUNCTION "${name}"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW."recordId" = '${d.id}' AND NEW."reasonCode" = '${reason}' THEN RAISE EXCEPTION 'Injected audit failure'; END IF; RETURN NEW; END $$`);
+    try {
+      await prisma.$executeRawUnsafe(`CREATE TRIGGER "${name}" BEFORE INSERT ON "AuditEvent" FOR EACH ROW EXECUTE FUNCTION "${name}"()`);
+      await assert.rejects(run());
+      assert.deepEqual(await snapshot(), before);
+      assert.equal(await prisma.journalEntry.count({ where: { siteId } }), journals);
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${name}" ON "AuditEvent"`);
+      await prisma.$executeRawUnsafe(`DROP FUNCTION "${name}"()`);
+    }
+    await run();
+    assert.equal(await prisma.auditEvent.count({ where: { recordId: d.id, reasonCode: reason } }), 1);
+    const saved = (await snapshot())!;
+    if (operation === "recordPayment") assert.equal(saved.payments.length, 1);
+    if (operation === "issueCreditNote") assert.equal(saved.creditNotes.length, 1);
+    const entries = await prisma.journalEntry.findMany({ where: { siteId }, include: { lines: true } });
+    for (const e of entries) assert.ok(Math.abs(e.lines.reduce((n, l) => n + l.debit - l.credit, 0)) < 0.01);
+  });
+}
+
+test("reversal waits for uncommitted global JE allocation", async () => {
+  const original = await invoice();
+  await prisma.$transaction(tx => postInvoice(tx, { siteId, currency: "SAR", invoiceId: original.id, subtotal: 100, taxAmount: 15, total: 115 }));
+  const held = latch(), release = latch(); let pid = 0;
+  const normal = await invoice();
+  const holder = prisma.$transaction(async tx => {
+    pid = (await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`)[0].pid;
+    await postInvoice(tx, { siteId, currency: "SAR", invoiceId: normal.id, subtotal: 100, taxAmount: 15, total: 115 });
+    held.resolve(); await release.promise;
+  }, { timeout: 15000 });
+  await held.promise;
+  const reversal = prisma.$transaction(tx => reverseJournalEntry(tx, "Billing", original.id), { timeout: 15000 });
+  try { await blockedBy(pid); } finally { release.resolve(); }
+  await Promise.all([holder, reversal]);
+  const entries = await prisma.journalEntry.findMany({ where: { sourceRecordId: { in: [normal.id, original.id] } } });
+  assert.equal(entries.length, 3);
+  assert.equal(new Set(entries.map(e => e.entryNumber)).size, 3);
+});
+
+for (const operation of ["approveLeaveRequest", "rejectLeaveRequest", "cancelLeaveRequest", "recordAttendance", "createLeaveRequest"] as const) {
+  test(`${operation}: old site rejected after waiting on employee transfer`, async () => {
+    await asUser(hrId);
+    await prisma.employee.update({ where: { id: employeeId }, data: { plantId } });
+    const leave = await prisma.leaveRequest.create({ data: { requestNumber: randomUUID(), employeeId, type: "ANNUAL", startDate: new Date("2026-10-01"), endDate: new Date("2026-10-01"), daysCount: 1, requestedById: hrId } });
+    const attendance = await prisma.attendanceRecord.count({ where: { employeeId } });
+    const audit = await prisma.auditEvent.count({ where: { actorId: hrId } });
+    const leaves = await prisma.leaveRequest.count({ where: { employeeId } });
+    const held = latch(), release = latch(); let pid = 0;
+    const transfer = prisma.$transaction(async tx => {
+      pid = (await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`)[0].pid;
+      await tx.employee.update({ where: { id: employeeId }, data: { plantId: otherPlantId } });
+      held.resolve(); await release.promise;
+    }, { timeout: 15000 });
+    await held.promise;
+    const action = hr[operation](form({ id: leave.id, employeeId, rejectionNote: "test", date: "2026-10-01", startDate: "2026-10-01", endDate: "2026-10-01", type: "ANNUAL" }));
+    try { await blockedBy(pid); } finally { release.resolve(); }
+    try {
+      await Promise.all([transfer, action]);
+      assert.equal((await prisma.leaveRequest.findUniqueOrThrow({ where: { id: leave.id } })).status, "PENDING");
+      assert.equal(await prisma.attendanceRecord.count({ where: { employeeId } }), attendance);
+      assert.equal(await prisma.auditEvent.count({ where: { actorId: hrId } }), audit);
+      assert.equal(await prisma.leaveRequest.count({ where: { employeeId } }), leaves);
+    } finally { await prisma.employee.update({ where: { id: employeeId }, data: { plantId } }); }
+  });
+}

@@ -182,6 +182,7 @@ model LoginAttempt {
 // gain; every "site"/"plant" identifier in code still means exactly what
 // it always did, it's only what the screen prints that changed.
 model Site {
+  apiKeys ApiKey[]
   id          String   @id @default(cuid())
   // Short, human-assigned business code ("S1", "CAI") — distinct from the
   // internal id, which nobody reads or types. What every other model's
@@ -1951,6 +1952,7 @@ model Invoice {
   // real CSID exists to compute the signature/certificate tags.
   zatcaQrCode       String?
   zatcaXml          String?
+  zatcaAttemptId    String?
   zatcaStatus       String?
   zatcaGeneratedAt  DateTime?
   zatcaSubmittedAt  DateTime?
@@ -2026,6 +2028,7 @@ model CreditNote {
   zatcaPreviousHash String?
   zatcaQrCode       String?
   zatcaXml          String?
+  zatcaAttemptId    String?
   zatcaStatus       String?
   zatcaGeneratedAt  DateTime?
   zatcaSubmittedAt  DateTime?
@@ -2983,6 +2986,9 @@ model SupportVehicle {
 // var still works as an ALL-scope fallback for compatibility —
 // verifyIntegrationRequest in src/lib/integration-auth.ts checks both.
 model ApiKey {
+  siteId String?
+  site Site? @relation(fields: [siteId], references: [id])
+  global Boolean @default(false)
   id          String    @id @default(cuid())
   label       String
   keyHash     String    @unique
@@ -3119,4 +3125,19 @@ model JournalLine {
   currency       String
 
   @@index([siteId, currency, accountId])
+}
+
+model ZatcaSubmissionAttempt {
+ id String @id
+ kind String
+ documentId String
+ uuid String
+ state String
+ invoiceHash String?
+ signedXml String?
+ httpStatus Int?
+ response String?
+ createdAt DateTime @default(now())
+ finishedAt DateTime?
+ @@index([documentId, kind])
 }

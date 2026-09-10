@@ -1,5 +1,17 @@
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
+import type { Prisma } from "@prisma/client";
+
+export type AuditActor = Readonly<{ id: string; role: string }> | null;
+export type AuditEventInput = {
+  module: string; recordId: string; field?: string; beforeValue?: string;
+  afterValue?: string; reasonCode?: string; role?: string;
+};
+
+// No session reads here: callers capture the actor before opening the tx.
+export async function writeAudit(tx: Prisma.TransactionClient, actor: AuditActor, event: AuditEventInput) {
+  await tx.auditEvent.create({ data: { ...event, actorId: actor?.id, role: event.role ?? actor?.role ?? "SYSTEM" } });
+}
 
 /**
  * Records an immutable audit event. Per the Batchline design spec, every

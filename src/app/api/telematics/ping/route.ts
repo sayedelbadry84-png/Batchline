@@ -12,8 +12,8 @@ import { verifyIntegrationRequest } from "@/lib/integration-auth";
 // Authorization: Bearer <INTEGRATION_API_KEY>
 // { "deviceId": "GPS-114", "lat": 29.9765, "lng": 30.9188 }
 export async function POST(request: NextRequest) {
-  const authError = await verifyIntegrationRequest(request, "TELEMATICS");
-  if (authError) return authError;
+  const principal = await verifyIntegrationRequest(request, "TELEMATICS");
+  if (principal instanceof NextResponse) return principal;
 
   const body = await request.json().catch(() => null);
   if (!body || typeof body.deviceId !== "string" || !body.deviceId.trim() ||
@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const truck = await prisma.truck.findFirst({ where: { gpsDeviceId: body.deviceId } });
+  const truck = await prisma.truck.findFirst({ where: { gpsDeviceId: body.deviceId, ...(principal.global ? {} : { plant: { siteId: principal.siteId! } }) } });
   if (!truck) {
     return NextResponse.json({ error: `No truck registered with gpsDeviceId "${body.deviceId}"` }, { status: 404 });
   }
