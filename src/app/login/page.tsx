@@ -1,6 +1,7 @@
 import { login } from "./actions";
 import { setLocale } from "@/app/locale-actions";
 import { getDictionary } from "@/lib/i18n";
+import { SignedOutCacheReset } from "@/components/SignedOutCacheReset";
 
 export default async function LoginPage({
   searchParams,
@@ -12,6 +13,7 @@ export default async function LoginPage({
 
   return (
     <div className="mx-auto flex min-h-screen max-w-sm flex-col justify-center gap-6 bg-bg px-6 py-10">
+      <SignedOutCacheReset />
       <div className="flex items-start justify-between">
         <div>
           <span className="font-display text-2xl font-semibold tracking-tight">{dict.login.title}</span>

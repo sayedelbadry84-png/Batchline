@@ -66,6 +66,12 @@ const en: typeof ar = {
       verify: "Verify",
     },
   },
+  offline: {
+    title: "You are offline",
+    body: "Batchline could not reach the server. This page carries no records — reconnect to load your screen.",
+    queuedWorkSafe: "Readings you saved while offline are stored on this device and will be sent automatically once you are back online.",
+    retry: "Try again",
+  },
   dashboard: {
     eyebrow: "Overview",
     title: "Plant command center",
