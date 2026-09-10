@@ -48,6 +48,26 @@ const invoiceIds: string[] = [];
 let initialAccountIds: string[] = [];
 const apiKey = randomUUID(); // disposable test credential only
 
+// AuditEvent rows are immutable in the database: the
+// audit_event_no_update / audit_event_no_delete triggers added by
+// prisma/migrations/20260906010000_harden_production_lifecycle_invariants
+// reject every UPDATE and DELETE outright, so a plain
+// `auditEvent.deleteMany` in teardown fails the whole hook with
+// "AuditEvent rows are immutable". That trigger predates this suite on
+// another branch and is a deliberate production invariant — a correction
+// is a new event, never an edit of one already on file — so fixture
+// cleanup goes through the trigger's own documented escape hatch instead
+// of around the invariant. `SET LOCAL` scopes the bypass to this one
+// transaction, and no application code path ever sets it. The three
+// other DB-backed suites (batchCompletion, productionLifecycle,
+// reservationMixRevision) clean up the same way.
+async function deleteAuditEvents(where: { recordId?: { in: string[] }; actorId?: { in: string[] } }) {
+  await prisma.$transaction([
+    prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`,
+    prisma.auditEvent.deleteMany({ where }),
+  ]);
+}
+
 function form(fields: Record<string, string>) {
   const data = new FormData();
   for (const [key, value] of Object.entries(fields)) data.set(key, value);
@@ -101,9 +121,9 @@ after(async () => {
   const sites = [siteId, otherSiteId].filter(Boolean);
   const accounts = await prisma.journalLine.findMany({ where: { siteId: { in: sites } }, select: { accountId: true } });
   const credits = await prisma.creditNote.findMany({ where: { invoiceId: { in: invoiceIds } }, select: { id: true } });
-  await prisma.auditEvent.deleteMany({ where: { recordId: { in: [...invoiceIds, ...credits.map(c => c.id)] } } });
+  await deleteAuditEvents({ recordId: { in: [...invoiceIds, ...credits.map(c => c.id)] } });
   await prisma.zatcaSubmissionAttempt.deleteMany({ where: { documentId: { in: [...invoiceIds, ...credits.map(c => c.id)] } } });
-  await prisma.auditEvent.deleteMany({ where: { actorId: { in: users } } });
+  await deleteAuditEvents({ actorId: { in: users } });
   await prisma.session.deleteMany({ where: { userId: { in: users } } });
   await prisma.pendingTwoFactor.deleteMany({ where: { userId: { in: users } } });
   await prisma.apiKey.deleteMany({ where: { label: prefix } });
@@ -381,7 +401,7 @@ test("integration keys enforce site, capability, revocation and deliberate globa
     assert.equal((await scada.POST(request({ siloId, levelTons: 12 }))).status, 403);
   } finally {
     await prisma.apiKey.update({ where: { id: key.id }, data: { scope: "ALL", siteId, global: false, revokedAt: null } });
-    await prisma.auditEvent.deleteMany({ where: { recordId: { in: [siloId, otherSilo.id, ...trucks.map(t => t.id)] } } });
+    await deleteAuditEvents({ recordId: { in: [siloId, otherSilo.id, ...trucks.map(t => t.id)] } });
     await prisma.truck.deleteMany({ where: { id: { in: trucks.map(t => t.id) } } });
     await prisma.silo.delete({ where: { id: otherSilo.id } });
   }
