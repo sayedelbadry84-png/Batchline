@@ -20,6 +20,7 @@ export default async function IntegrationsPage() {
   const { dict } = await getDictionary();
   const m = dict.modules.integrations;
 
+  const sites = await prisma.site.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } });
   const keys = await prisma.apiKey.findMany({ orderBy: { createdAt: "desc" }, include: { createdBy: true } });
   const store = await cookies();
   const revealedKey = store.get(NEW_KEY_REVEAL_COOKIE)?.value ?? null;
@@ -58,7 +59,7 @@ export default async function IntegrationsPage() {
             <tbody>
               {keys.map((k) => (
                 <tr key={k.id}>
-                  <td className={`${ui.td} font-medium`}>{k.label}</td>
+                  <td className={`${ui.td} font-medium`}>{k.label}<div className="text-xs">{k.global ? "All sites" : sites.find(s => s.id === k.siteId)?.name ?? "Unassigned — disabled"}</div></td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{k.keyPrefix}…</td>
                   <td className={ui.td}>{m.scopeLabel[k.scope as keyof typeof m.scopeLabel] ?? k.scope}</td>
                   <td className={ui.td}>{k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : m.neverUsed}</td>
@@ -90,6 +91,12 @@ export default async function IntegrationsPage() {
 
         <form action={createApiKey} className={`${ui.card} flex flex-col gap-3`}>
           <h2 className="font-display text-lg font-semibold">{m.newTitle}</h2>
+          <label className={ui.label}>Site / الموقع</label>
+          <select name="siteId" className={ui.select} defaultValue="">
+            <option value="">Select site / اختر الموقع</option>
+            {sites.map(site => <option key={site.id} value={site.id}>{site.name}</option>)}
+          </select>
+          <label><input type="checkbox" name="global" /> All sites (leave site empty) / جميع المواقع</label>
           <div>
             <label className={ui.label}>{m.f.label}</label>
             <input name="label" required placeholder={m.f.labelPlaceholder} className={ui.input} />

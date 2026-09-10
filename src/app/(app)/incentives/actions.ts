@@ -1,7 +1,8 @@
 "use server";
 
+import { assertIncentiveRole, nonNegativeNumber, assertTripThresholds, assertReachRange } from "@/lib/incentiveValidation";
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { revalidatePath } from "next/cache";
@@ -12,24 +13,28 @@ export async function updateIncentivePolicy(formData: FormData) {
 
   const siteId = String(formData.get("siteId") ?? "");
   const role = String(formData.get("role") ?? "").trim();
-  const freeTripsThreshold = Number(formData.get("freeTripsThreshold") ?? 10);
-  const tier2Threshold = Number(formData.get("tier2Threshold") ?? 15);
-  const tier2RateSar = Number(formData.get("tier2RateSar") ?? 0);
-  const tier3Threshold = Number(formData.get("tier3Threshold") ?? 20);
-  const tier3RateSar = Number(formData.get("tier3RateSar") ?? 0);
-  const beyondRateSar = Number(formData.get("beyondRateSar") ?? 0);
+  const freeTripsThreshold = nonNegativeNumber(formData, "freeTripsThreshold", 10);
+  const tier2Threshold = nonNegativeNumber(formData, "tier2Threshold", 15);
+  const tier2RateSar = nonNegativeNumber(formData, "tier2RateSar", 0);
+  const tier3Threshold = nonNegativeNumber(formData, "tier3Threshold", 20);
+  const tier3RateSar = nonNegativeNumber(formData, "tier3RateSar", 0);
+  const beyondRateSar = nonNegativeNumber(formData, "beyondRateSar", 0);
+  assertIncentiveRole(role);
   if (!siteId || !role) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
-  const before = await prisma.driverIncentivePolicy.findUnique({ where: { siteId_role: { siteId, role } } });
+  assertTripThresholds(freeTripsThreshold, tier2Threshold, tier3Threshold);
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(729432, hashtext(${siteId + ":" + role}))`;
+  const before = await tx.driverIncentivePolicy.findUnique({ where: { siteId_role: { siteId, role } } });
 
-  await prisma.driverIncentivePolicy.upsert({
+  await tx.driverIncentivePolicy.upsert({
     where: { siteId_role: { siteId, role } },
     create: { siteId, role, freeTripsThreshold, tier2Threshold, tier2RateSar, tier3Threshold, tier3RateSar, beyondRateSar },
     update: { freeTripsThreshold, tier2Threshold, tier2RateSar, tier3Threshold, tier3RateSar, beyondRateSar },
   });
 
-  await logAudit({
+  await writeAudit(tx, user, {
     module: "Fleet",
     recordId: `${siteId}:${role}`,
     field: "driverIncentivePolicy",
@@ -38,6 +43,7 @@ export async function updateIncentivePolicy(formData: FormData) {
     reasonCode: "INCENTIVE_POLICY_UPDATED",
   });
 
+  }, { timeout: 15000, isolationLevel: "ReadCommitted" });
   revalidatePath("/incentives");
   revalidatePath("/reports");
 }
@@ -52,17 +58,20 @@ export async function updatePumpIncentivePolicy(formData: FormData) {
 
   const siteId = String(formData.get("siteId") ?? "");
   const role = String(formData.get("role") ?? "").trim();
-  const freeVolumeM3 = Number(formData.get("freeVolumeM3") ?? 0) || 0;
+  const freeVolumeM3 = nonNegativeNumber(formData, "freeVolumeM3", 0);
+  assertIncentiveRole(role);
   if (!siteId || !role) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
-  await prisma.pumpIncentivePolicy.upsert({
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(729432, hashtext(${siteId + ":" + role}))`;
+  await tx.pumpIncentivePolicy.upsert({
     where: { siteId_role: { siteId, role } },
     create: { siteId, role, freeVolumeM3 },
     update: { freeVolumeM3 },
   });
 
-  await logAudit({
+  await writeAudit(tx, user, {
     module: "Fleet",
     recordId: `${siteId}:${role}`,
     field: "pumpIncentivePolicy",
@@ -70,6 +79,7 @@ export async function updatePumpIncentivePolicy(formData: FormData) {
     reasonCode: "PUMP_INCENTIVE_POLICY_UPDATED",
   });
 
+  }, { timeout: 15000, isolationLevel: "ReadCommitted" });
   revalidatePath("/incentives");
   revalidatePath("/reports");
 }
@@ -80,29 +90,37 @@ export async function addPumpRateBracket(formData: FormData) {
 
   const siteId = String(formData.get("siteId") ?? "");
   const role = String(formData.get("role") ?? "").trim();
-  const minReachM = Number(formData.get("minReachM") ?? 0);
-  const maxReachM = Number(formData.get("maxReachM") ?? 0) || null;
-  const ratePerM3Sar = Number(formData.get("ratePerM3Sar") ?? 0);
-  if (!siteId || !role || !ratePerM3Sar) return;
+  const minReachM = nonNegativeNumber(formData, "minReachM", 0);
+  const maxReachM = (formData.get("maxReachM") === "" || formData.get("maxReachM") === null ? null : nonNegativeNumber(formData, "maxReachM"));
+  const ratePerM3Sar = nonNegativeNumber(formData, "ratePerM3Sar", 0);
+  assertIncentiveRole(role);
+  assertReachRange(minReachM, maxReachM);
+  if (!siteId || !role) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
-  const policy = await prisma.pumpIncentivePolicy.upsert({
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(729432, hashtext(${siteId + ":" + role}))`;
+  const policy = await tx.pumpIncentivePolicy.upsert({
     where: { siteId_role: { siteId, role } },
     create: { siteId, role, freeVolumeM3: 0 },
     update: {},
   });
 
-  const bracket = await prisma.pumpReachRateBracket.create({
+  await tx.$queryRaw`SELECT "id" FROM "PumpIncentivePolicy" WHERE "id" = ${policy.id} FOR UPDATE`;
+  const overlap = await tx.pumpReachRateBracket.findFirst({ where: { policyId: policy.id, ...(maxReachM === null ? {} : { minReachM: { lte: maxReachM } }), OR: [{ maxReachM: null }, { maxReachM: { gte: minReachM } }] } });
+  if (overlap) throw new Error("OVERLAPPING_REACH_BRACKET");
+  const bracket = await tx.pumpReachRateBracket.create({
     data: { policyId: policy.id, minReachM, maxReachM, ratePerM3Sar },
   });
 
-  await logAudit({
+  await writeAudit(tx, user, {
     module: "Fleet",
     recordId: bracket.id,
     afterValue: `${minReachM}-${maxReachM ?? "∞"}m @ ${ratePerM3Sar}`,
     reasonCode: "PUMP_RATE_BRACKET_ADDED",
   });
 
+  }, { timeout: 15000, isolationLevel: "ReadCommitted" });
   revalidatePath("/incentives");
   revalidatePath("/reports");
 }
@@ -114,13 +132,16 @@ export async function deletePumpRateBracket(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  const bracket = await prisma.pumpReachRateBracket.findUnique({
-    where: { id }, select: { policy: { select: { siteId: true } } },
+  await prisma.$transaction(async (tx) => {
+  const bracket = await tx.pumpReachRateBracket.findUnique({
+    where: { id }, select: { policyId: true, policy: { select: { siteId: true } } },
   });
   if (!bracket || !isSiteInScope(bracket.policy.siteId, effectiveSiteId(user))) return;
-  await prisma.pumpReachRateBracket.delete({ where: { id } });
+  await tx.$queryRaw`SELECT "id" FROM "PumpIncentivePolicy" WHERE "id" = ${bracket.policyId} FOR UPDATE`;
+  await tx.pumpReachRateBracket.delete({ where: { id } });
 
-  await logAudit({ module: "Fleet", recordId: id, reasonCode: "PUMP_RATE_BRACKET_REMOVED" });
+  await writeAudit(tx, user, { module: "Fleet", recordId: id, reasonCode: "PUMP_RATE_BRACKET_REMOVED" });
+  }, { timeout: 15000, isolationLevel: "ReadCommitted" });
   revalidatePath("/incentives");
   revalidatePath("/reports");
 }
@@ -137,22 +158,24 @@ export async function setFlatVolumeRate(formData: FormData) {
 
   const siteId = String(formData.get("siteId") ?? "");
   const role = String(formData.get("role") ?? "").trim();
-  const ratePerM3Sar = Number(formData.get("ratePerM3Sar") ?? 0);
+  const ratePerM3Sar = nonNegativeNumber(formData, "ratePerM3Sar", 0);
+  assertIncentiveRole(role);
   if (!siteId || !role) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
-  const policy = await prisma.pumpIncentivePolicy.upsert({
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(729432, hashtext(${siteId + ":" + role}))`;
+  const policy = await tx.pumpIncentivePolicy.upsert({
     where: { siteId_role: { siteId, role } },
     create: { siteId, role, freeVolumeM3: 0 },
     update: {},
   });
 
-  await prisma.$transaction([
-    prisma.pumpReachRateBracket.deleteMany({ where: { policyId: policy.id } }),
-    prisma.pumpReachRateBracket.create({ data: { policyId: policy.id, minReachM: 0, maxReachM: null, ratePerM3Sar } }),
-  ]);
+  await tx.$queryRaw`SELECT "id" FROM "PumpIncentivePolicy" WHERE "id" = ${policy.id} FOR UPDATE`;
+  await tx.pumpReachRateBracket.deleteMany({ where: { policyId: policy.id } });
+  await tx.pumpReachRateBracket.create({ data: { policyId: policy.id, minReachM: 0, maxReachM: null, ratePerM3Sar } });
 
-  await logAudit({
+  await writeAudit(tx, user, {
     module: "Fleet",
     recordId: `${siteId}:${role}`,
     field: "flatVolumeRate",
@@ -160,6 +183,7 @@ export async function setFlatVolumeRate(formData: FormData) {
     reasonCode: "FLAT_VOLUME_RATE_SET",
   });
 
+  }, { timeout: 15000, isolationLevel: "ReadCommitted" });
   revalidatePath("/incentives");
   revalidatePath("/reports");
 }
@@ -173,16 +197,19 @@ export async function setIncentiveMethod(formData: FormData) {
   const siteId = String(formData.get("siteId") ?? "");
   const role = String(formData.get("role") ?? "").trim();
   const method = String(formData.get("method") ?? "").trim();
+  assertIncentiveRole(role);
   if (!siteId || !role || (method !== "TRIP_COUNT" && method !== "VOLUME_M3")) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
-  await prisma.incentiveMethod.upsert({
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(729432, hashtext(${siteId + ":" + role}))`;
+  await tx.incentiveMethod.upsert({
     where: { siteId_role: { siteId, role } },
     create: { siteId, role, method },
     update: { method },
   });
 
-  await logAudit({
+  await writeAudit(tx, user, {
     module: "Fleet",
     recordId: `${siteId}:${role}`,
     field: "incentiveMethod",
@@ -190,6 +217,7 @@ export async function setIncentiveMethod(formData: FormData) {
     reasonCode: "INCENTIVE_METHOD_SET",
   });
 
+  }, { timeout: 15000, isolationLevel: "ReadCommitted" });
   revalidatePath("/incentives");
   revalidatePath("/reports");
 }

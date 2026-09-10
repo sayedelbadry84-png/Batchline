@@ -1,4 +1,8 @@
+import { writeAudit, type AuditActor as GenerationActor } from "@/lib/audit";
+import { submitDocument, type SubmissionResult } from "./submission";
+import type { AuditActor } from "@/lib/audit";
 import { randomUUID } from "crypto";
+import { withRetry } from "@/lib/inventoryLedger";
 import { prisma } from "@/lib/prisma";
 import { getZatcaReadiness } from "./settings";
 import { buildZatcaQrPayload, zatcaTimestamp } from "./qr";
@@ -16,7 +20,7 @@ import { getNextZatcaChainPosition, lockSiteChain } from "./chain";
 
 export type ZatcaCreditNoteGenerateResult = { ok: true } | { ok: false; reason: "NOT_CONFIGURED" | "NO_PLANT" | "ALREADY_GENERATED" | "NOT_FOUND" };
 
-export async function generateZatcaCreditNoteDocuments(creditNoteId: string): Promise<ZatcaCreditNoteGenerateResult> {
+export async function generateZatcaCreditNoteDocuments(creditNoteId: string, actor: GenerationActor = null): Promise<ZatcaCreditNoteGenerateResult> {
   const creditNote = await prisma.creditNote.findUnique({
     where: { id: creditNoteId },
     include: { invoice: { include: { customer: true, plant: true } } },
@@ -29,7 +33,7 @@ export async function generateZatcaCreditNoteDocuments(creditNoteId: string): Pr
   if (readiness.level === "NOT_CONFIGURED") return { ok: false, reason: "NOT_CONFIGURED" };
 
   const siteId = creditNote.invoice.plant.siteId;
-  return prisma.$transaction(async (tx): Promise<ZatcaCreditNoteGenerateResult> => {
+  return withRetry(() => prisma.$transaction(async (tx): Promise<ZatcaCreditNoteGenerateResult> => {
     await lockSiteChain(tx, siteId);
     // The preflight above is only an optimization. Re-read under the shared
     // site lock so concurrent calls cannot regenerate the same document.
@@ -74,8 +78,10 @@ export async function generateZatcaCreditNoteDocuments(creditNoteId: string): Pr
       billingReferenceInvoiceNumber: creditNote.invoice.invoiceNumber,
     });
 
-    await tx.creditNote.update({
-      where: { id: creditNoteId },
+    // The shared site lock serializes the normal path; this conditional claim
+    // also makes the write itself idempotent if a future caller misses it.
+    const claim = await tx.creditNote.updateMany({
+      where: { id: creditNoteId, zatcaStatus: null },
       data: {
         zatcaUuid: uuid,
         zatcaInvoiceHash: hashInvoiceXml(xml),
@@ -86,20 +92,19 @@ export async function generateZatcaCreditNoteDocuments(creditNoteId: string): Pr
         zatcaGeneratedAt: generatedAt,
       },
     });
+    if (claim.count === 0) return { ok: false, reason: "ALREADY_GENERATED" };
 
+    await writeAudit(tx, actor, { module: "Billing", recordId: creditNoteId, reasonCode: "ZATCA_CREDIT_NOTE_GENERATED" });
     return { ok: true };
-  }, { timeout: 15000, isolationLevel: "ReadCommitted" });
+  }, { timeout: 15000, isolationLevel: "Serializable" }));
 }
 
 const DEFAULT_SANDBOX_URL = "https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal/invoices/clearance/single";
 const DEFAULT_PRODUCTION_URL = "https://gw-fatoora.zatca.gov.sa/e-invoicing/core/invoices/clearance/single";
 
-export type ZatcaCreditNoteSubmitResult =
-  | { ok: true }
-  | { ok: false; reason: "NOT_CONFIGURED" | "NOT_GENERATED" | "ALREADY_CLEARED" | "NOT_FOUND" }
-  | { ok: false; reason: "API_ERROR"; status: number; body: string };
+export type ZatcaCreditNoteSubmitResult = SubmissionResult;
 
-export async function submitCreditNoteForClearance(creditNoteId: string): Promise<ZatcaCreditNoteSubmitResult> {
+export async function submitCreditNoteForClearance(creditNoteId: string, actor: AuditActor = null): Promise<ZatcaCreditNoteSubmitResult> {
   const creditNote = await prisma.creditNote.findUnique({
     where: { id: creditNoteId },
     include: { invoice: { include: { plant: true } } },
@@ -112,8 +117,9 @@ export async function submitCreditNoteForClearance(creditNoteId: string): Promis
   const readiness = await getZatcaReadiness(creditNote.invoice.plant.siteId);
   if (readiness.level !== "CLEARANCE_READY") return { ok: false, reason: "NOT_CONFIGURED" };
 
+  return submitDocument({ kind: "CREDIT_NOTE", id: creditNoteId, uuid: creditNote.zatcaUuid, actor, prepare: async () => {
   const { signedXml, invoiceHash, qrCode } = signInvoiceXml({
-    xml: creditNote.zatcaXml,
+    xml: creditNote.zatcaXml!,
     certificatePem: readiness.csidCert,
     privateKeyPem: readiness.csidPrivateKey,
     qrFields: {
@@ -132,58 +138,6 @@ export async function submitCreditNoteForClearance(creditNoteId: string): Promis
 
   const auth = Buffer.from(`${readiness.csidCert}:${readiness.csidSecret}`).toString("base64");
 
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "Accept-Language": "en",
-        "Accept-Version": "V2",
-        Authorization: `Basic ${auth}`,
-      },
-      body: JSON.stringify({
-        invoiceHash,
-        uuid: creditNote.zatcaUuid,
-        invoice: Buffer.from(signedXml, "utf8").toString("base64"),
-      }),
-    });
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      await prisma.creditNote.update({
-        where: { id: creditNoteId },
-        data: {
-          zatcaXml: signedXml,
-          zatcaQrCode: qrCode,
-          zatcaInvoiceHash: invoiceHash,
-          zatcaStatus: "FAILED",
-          zatcaErrorMessage: `HTTP ${res.status}: ${body.slice(0, 500)}`,
-          zatcaSubmittedAt: new Date(),
-        },
-      });
-      return { ok: false, reason: "API_ERROR", status: res.status, body };
-    }
-
-    await prisma.creditNote.update({
-      where: { id: creditNoteId },
-      data: {
-        zatcaXml: signedXml,
-        zatcaQrCode: qrCode,
-        zatcaInvoiceHash: invoiceHash,
-        zatcaStatus: "CLEARED",
-        zatcaSubmittedAt: new Date(),
-        zatcaClearedAt: new Date(),
-        zatcaErrorMessage: null,
-      },
-    });
-    return { ok: true };
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    await prisma.creditNote.update({
-      where: { id: creditNoteId },
-      data: { zatcaXml: signedXml, zatcaQrCode: qrCode, zatcaInvoiceHash: invoiceHash, zatcaStatus: "FAILED", zatcaErrorMessage: message, zatcaSubmittedAt: new Date() },
-    });
-    return { ok: false, reason: "API_ERROR", status: 0, body: message };
-  }
+  return { signedXml, invoiceHash, qrCode, url, authorization: `Basic ${auth}` };
+  } });
 }

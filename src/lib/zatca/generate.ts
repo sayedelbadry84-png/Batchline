@@ -1,3 +1,5 @@
+import { writeAudit, type AuditActor as GenerationActor } from "@/lib/audit";
+import { withRetry } from "@/lib/inventoryLedger";
 import { randomUUID } from "crypto";
 import { prisma } from "@/lib/prisma";
 import { getZatcaReadiness } from "./settings";
@@ -14,7 +16,7 @@ export type ZatcaGenerateResult = { ok: true } | { ok: false; reason: "NOT_CONFI
 // invoice, same as every other document-numbering action in this app) —
 // re-generating would silently break the hash chain for whatever was
 // generated after it.
-export async function generateZatcaDocuments(invoiceId: string): Promise<ZatcaGenerateResult> {
+export async function generateZatcaDocuments(invoiceId: string, actor: GenerationActor = null): Promise<ZatcaGenerateResult> {
   const invoice = await prisma.invoice.findUnique({
     where: { id: invoiceId },
     include: { customer: true, plant: true, lines: true },
@@ -29,7 +31,7 @@ export async function generateZatcaDocuments(invoiceId: string): Promise<ZatcaGe
   // Hash chain: shared across invoices AND credit notes at this site — see
   // chain.ts for why this can't just look at the Invoice table alone.
   const siteId = invoice.plant.siteId;
-  return prisma.$transaction(async (tx): Promise<ZatcaGenerateResult> => {
+  return withRetry(() => prisma.$transaction(async (tx): Promise<ZatcaGenerateResult> => {
     await lockSiteChain(tx, siteId);
     // Cancellation uses this same invoice mutex. Lock order is always
     // site first, then invoice, never the reverse.
@@ -71,8 +73,11 @@ export async function generateZatcaDocuments(invoiceId: string): Promise<ZatcaGe
       qrCode,
     });
 
-    await tx.invoice.update({
-      where: { id: invoiceId },
+    // Keep the final write as an atomic claim as well as holding the site and
+    // invoice locks. This preserves idempotency if another generation path is
+    // ever introduced without taking the same locks.
+    const claim = await tx.invoice.updateMany({
+      where: { id: invoiceId, zatcaStatus: null },
       data: {
         zatcaUuid: uuid,
         zatcaInvoiceHash: hashInvoiceXml(xml),
@@ -83,7 +88,9 @@ export async function generateZatcaDocuments(invoiceId: string): Promise<ZatcaGe
         zatcaGeneratedAt: generatedAt,
       },
     });
+    if (claim.count === 0) return { ok: false, reason: "ALREADY_GENERATED" };
 
+    await writeAudit(tx, actor, { module: "Billing", recordId: invoiceId, reasonCode: "ZATCA_GENERATED" });
     return { ok: true };
-  }, { timeout: 15000, isolationLevel: "ReadCommitted" });
+  }, { timeout: 15000, isolationLevel: "Serializable" }));
 }

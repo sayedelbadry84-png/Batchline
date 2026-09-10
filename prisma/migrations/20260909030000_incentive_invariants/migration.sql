@@ -1,0 +1,9 @@
+-- Fail on invalid historical configuration; operator must explicitly repair it.
+ALTER TABLE "DriverIncentivePolicy" ADD CONSTRAINT "DriverIncentivePolicy_role_check" CHECK ("role" IN ('MIXER_DRIVER','PUMP_OPERATOR','PUMP_ASSISTANT','BULKER_DRIVER','WATER_TANKER_DRIVER'));
+ALTER TABLE "PumpIncentivePolicy" ADD CONSTRAINT "PumpIncentivePolicy_role_check" CHECK ("role" IN ('MIXER_DRIVER','PUMP_OPERATOR','PUMP_ASSISTANT','BULKER_DRIVER','WATER_TANKER_DRIVER'));
+ALTER TABLE "IncentiveMethod" ADD CONSTRAINT "IncentiveMethod_role_check" CHECK ("role" IN ('MIXER_DRIVER','PUMP_OPERATOR','PUMP_ASSISTANT','BULKER_DRIVER','WATER_TANKER_DRIVER'));
+ALTER TABLE "DriverIncentivePolicy" ADD CONSTRAINT "DriverIncentivePolicy_values_check" CHECK ("freeTripsThreshold" >= 0 AND "freeTripsThreshold" <= "tier2Threshold" AND "tier2Threshold" <= "tier3Threshold" AND ("tier2RateSar" >= 0 AND "tier2RateSar" < 'Infinity'::float8) AND ("tier3RateSar" >= 0 AND "tier3RateSar" < 'Infinity'::float8) AND ("beyondRateSar" >= 0 AND "beyondRateSar" < 'Infinity'::float8));
+ALTER TABLE "PumpIncentivePolicy" ADD CONSTRAINT "PumpIncentivePolicy_volume_check" CHECK (("freeVolumeM3" >= 0 AND "freeVolumeM3" < 'Infinity'::float8));
+ALTER TABLE "PumpReachRateBracket" ADD CONSTRAINT "PumpReachRateBracket_values_check" CHECK (("minReachM" >= 0 AND "minReachM" < 'Infinity'::float8) AND ("ratePerM3Sar" >= 0 AND "ratePerM3Sar" < 'Infinity'::float8) AND ("maxReachM" IS NULL OR (("maxReachM" >= 0 AND "maxReachM" < 'Infinity'::float8) AND "maxReachM" > "minReachM")));
+ALTER TABLE "IncentiveMethod" ADD CONSTRAINT "IncentiveMethod_method_check" CHECK ("method" IN ('TRIP_COUNT','VOLUME_M3'));
+CREATE UNIQUE INDEX "PumpReachRateBracket_one_catch_all" ON "PumpReachRateBracket"("policyId") WHERE "minReachM"=0 AND "maxReachM" IS NULL;

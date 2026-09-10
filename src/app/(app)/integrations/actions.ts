@@ -22,9 +22,14 @@ export async function createApiKey(formData: FormData) {
   const scope = String(formData.get("scope") ?? "ALL");
   if (!label || !["ALL", "TELEMATICS", "SCADA", "REPORTS"].includes(scope)) return;
 
+  const global = formData.get("global") === "on";
+  const siteId = String(formData.get("siteId") ?? "").trim() || null;
+  if (global ? siteId !== null : !siteId) return;
+  if (siteId && !(await prisma.site.findUnique({ where: { id: siteId } }))) return;
+
   const { raw, hash, prefix } = generateApiKey();
   await prisma.apiKey.create({
-    data: { label, keyHash: hash, keyPrefix: prefix, scope, createdById: user!.id },
+    data: { siteId, global, label, keyHash: hash, keyPrefix: prefix, scope, createdById: user!.id },
   });
 
   await logAudit({ module: "Integrations", recordId: prefix, afterValue: `${label} (${scope})`, reasonCode: "API_KEY_CREATED" });
