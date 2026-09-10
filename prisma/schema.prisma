@@ -140,6 +140,14 @@ model Session {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   createdAt DateTime @default(now())
+
+  // Security/health audit (2026-09-10): every immediate access revocation
+  // — password reset, role change, account disable — runs
+  // `deleteMany({ where: { userId } })`, and the daily cron sweeps by
+  // expiresAt. Neither had an index, so revoking one person's access
+  // scanned every live session in the system.
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 // The password step has passed but TOTP hasn't yet — the cookie only ever
@@ -2978,6 +2986,22 @@ model AuditEvent {
   afterValue  String?
   reasonCode  String?
   createdAt   DateTime @default(now())
+
+  // Security/health audit (2026-09-10): this table had no index at all,
+  // while receiving a row for every SCADA reading and every telematics
+  // ping as well as every business mutation. The audit-log screen orders
+  // by createdAt desc and filters by module, so both were sequential
+  // scans over a table that only ever grows.
+  //
+  // Two indexes, not one per column: the unfiltered screen is served by
+  // (createdAt), and a module filter — always combined with that same
+  // ordering — is served end to end by (module, createdAt) with no sort.
+  // The `contains` searches on recordId/reasonCode/field are deliberately
+  // NOT indexed: a leading-wildcard LIKE cannot use a b-tree, and trigram
+  // indexes for a rarely-used free-text box are not worth the write cost
+  // on this table.
+  @@index([createdAt])
+  @@index([module, createdAt])
 }
 
 // The account-role roster itself — User.role stays a plain, unenforced

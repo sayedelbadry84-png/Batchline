@@ -2,9 +2,10 @@
 
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { resolvePlantBillingDefaults } from "@/lib/plantBilling";
 import { logAudit, writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
-import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
+import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
 
@@ -363,11 +364,7 @@ export async function createQuote(formData: FormData) {
   const allowedSiteId = effectiveSiteId(actor);
   if (!isSiteInScope(siteId, allowedSiteId)) return;
 
-  const plantId = await resolvePlantIdForSite(siteId);
-  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId } }) : null;
-  const currency = plant?.currency ?? "EGP";
-  const taxRatePct = plant?.taxRatePct ?? 0;
-  const taxLabel = plant?.taxLabel ?? "VAT";
+  const { currency, taxRatePct, taxLabel } = await resolvePlantBillingDefaults(siteId);
 
   const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0);
   const taxAmount = subtotal * (taxRatePct / 100);

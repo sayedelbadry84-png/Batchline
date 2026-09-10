@@ -1,0 +1,46 @@
+-- Security/health audit (2026-09-10): four indexes that were missing on
+-- the two tables the application reads hottest and writes most.
+--
+-- AuditEvent had NO index at all, while taking a row for every SCADA
+-- reading, every telematics ping and every business mutation. Session had
+-- none either, so immediate access revocation (password reset, role
+-- change, account disable) scanned every live session in the system.
+--
+-- Index names match Prisma's own convention exactly (<Model>_<cols>_idx),
+-- so `prisma migrate status` and `migrate diff` see no drift against the
+-- @@index declarations added to schema.prisma alongside this file.
+--
+-- ---------------------------------------------------------------------
+-- PRODUCTION NOTE — read before running this on a large database.
+--
+-- Prisma applies each migration inside a transaction, and Postgres
+-- forbids CREATE INDEX CONCURRENTLY there, so the statements below are
+-- plain CREATE INDEX. That takes a SHARE lock: reads continue, WRITES to
+-- the table BLOCK for the duration of the build. On an AuditEvent table
+-- with millions of rows that is a real write stall, and every audited
+-- action in the app stalls with it.
+--
+-- So on a production-sized database, build them CONCURRENTLY yourself
+-- first, outside any transaction and outside this migration:
+--
+--   CREATE INDEX CONCURRENTLY "AuditEvent_createdAt_idx"
+--     ON "AuditEvent"("createdAt");
+--   CREATE INDEX CONCURRENTLY "AuditEvent_module_createdAt_idx"
+--     ON "AuditEvent"("module", "createdAt");
+--   CREATE INDEX CONCURRENTLY "Session_userId_idx" ON "Session"("userId");
+--   CREATE INDEX CONCURRENTLY "Session_expiresAt_idx"
+--     ON "Session"("expiresAt");
+--
+-- then run `prisma migrate deploy`: IF NOT EXISTS makes every statement
+-- below a no-op and the migration is simply recorded as applied.
+--
+-- (If a CONCURRENTLY build fails it leaves an INVALID index behind — drop
+-- it and retry rather than letting this migration find it "existing".)
+--
+-- A fresh or small database needs none of that: run the migration
+-- normally and the builds are instant.
+-- ---------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS "AuditEvent_createdAt_idx" ON "AuditEvent"("createdAt");
+CREATE INDEX IF NOT EXISTS "AuditEvent_module_createdAt_idx" ON "AuditEvent"("module", "createdAt");
+CREATE INDEX IF NOT EXISTS "Session_userId_idx" ON "Session"("userId");
+CREATE INDEX IF NOT EXISTS "Session_expiresAt_idx" ON "Session"("expiresAt");

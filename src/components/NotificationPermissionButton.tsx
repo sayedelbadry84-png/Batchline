@@ -66,16 +66,37 @@ export function NotificationPermissionButton({
       return;
     }
 
+    // Health audit (2026-09-10): the browser subscription and the server
+    // registration used to be treated as one step — the fetch was neither
+    // awaited for success nor guarded, and "enabled" was shown
+    // unconditionally. A network failure surfaced as an unhandled
+    // rejection with the button frozen mid-click, and a 500 from the
+    // server showed a green tick for a subscription the server had never
+    // recorded, so the driver was told they would get notifications they
+    // would never receive.
+    //
+    // The browser subscription is rolled back on a server failure, so the
+    // button stays honest: pressing it again re-subscribes cleanly rather
+    // than finding an existing local subscription the server does not
+    // know about (which the mount effect above would then report as
+    // "enabled").
     const reg = await navigator.serviceWorker.ready;
     const subscription = await reg.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
     });
-    await fetch("/api/push/subscribe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(subscription.toJSON()),
-    });
+    try {
+      const res = await fetch("/api/push/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(subscription.toJSON()),
+      });
+      if (!res.ok) throw new Error(`push subscribe failed: ${res.status}`);
+    } catch {
+      await subscription.unsubscribe().catch(() => {});
+      setStatus("idle");
+      return;
+    }
     setStatus("enabled");
   }
 

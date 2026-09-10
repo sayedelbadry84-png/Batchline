@@ -46,7 +46,14 @@ export default async function AuditLogPage({
       orderBy: { createdAt: "desc" },
       take: ROW_LIMIT,
     }),
-    prisma.auditEvent.findMany({ distinct: ["module"], select: { module: true }, orderBy: { module: "asc" } }),
+    // Health audit (2026-09-10): this was
+    // `findMany({ distinct: ["module"] })`, which pulls the `module`
+    // column of EVERY audit row — a table that takes a row per SCADA
+    // reading and per telematics ping — back into the application just to
+    // fill a dropdown with a dozen values. SELECT DISTINCT does the same
+    // work in the database and returns only the distinct rows. Same
+    // values, same order, same shape.
+    prisma.$queryRaw<{ module: string }[]>`SELECT DISTINCT "module" FROM "AuditEvent" ORDER BY "module" ASC`,
   ]);
 
   return (

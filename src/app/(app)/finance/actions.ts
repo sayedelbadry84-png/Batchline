@@ -2,9 +2,10 @@
 
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { resolvePlantBillingDefaults } from "@/lib/plantBilling";
 import { logAudit, writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
-import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
+import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { postSupplierBill, postSupplierPayment, postCashTransaction, reverseJournalEntry } from "@/lib/ledger";
 import { parseBankStatementCsv, matchBankStatementLines, type ReconciliationCandidate } from "@/lib/bankReconciliation";
@@ -32,9 +33,7 @@ export async function createSupplierBill(formData: FormData) {
   if (!supplierId || !siteId || !dueDateRaw || !subtotal) return;
   if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
 
-  const plantId = await resolvePlantIdForSite(siteId);
-  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId } }) : null;
-  const currency = plant?.currency ?? "EGP";
+  const { currency } = await resolvePlantBillingDefaults(siteId);
   const total = subtotal + taxAmount;
 
   // The bill and its journal entry commit as one unit — see the same
@@ -230,9 +229,7 @@ export async function createCashTransaction(formData: FormData) {
   if (!siteId || !["IN", "OUT"].includes(direction) || !category || amount === null || amount <= 0 || !description) return;
   if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
 
-  const plantId = await resolvePlantIdForSite(siteId);
-  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId } }) : null;
-  const currency = plant?.currency ?? "EGP";
+  const { currency } = await resolvePlantBillingDefaults(siteId);
 
   // The transaction and its journal entry commit as one unit — see the
   // same rationale on generateInvoiceForProject in billing/actions.ts.
