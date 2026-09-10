@@ -1,5 +1,6 @@
 const ar = {
   common: {
+    unofficialDocument: "نسخة عمل — ليست وثيقة رسمية. يمكن تعديل حقول هذه الورقة قبل الطباعة ولا تُحفظ في النظام؛ السجل المعتمد هو Batchline نفسه.",
     tagline: "منصة عمليات مصنع الخرسانة",
     switchLocale: "English",
     toggleTheme: "تبديل المظهر الفاتح/الداكن",

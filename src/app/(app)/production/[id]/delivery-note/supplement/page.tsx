@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { requirePageAccess } from "@/lib/session";
 import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
+import { UnofficialDocumentNotice } from "@/components/UnofficialDocumentNotice";
 import { PrintButton } from "@/components/PrintButton";
 
 // A corrected/amended delivery document (ملحق تذكرة توريد) — issued only
@@ -107,6 +108,7 @@ export default async function DeliveryNoteSupplementPage({ params }: { params: P
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      <UnofficialDocumentNotice label={dict.common.unofficialDocument} />
       <div className="no-print flex items-center justify-between gap-3">
         <p className="text-xs text-ink-muted">{dict.modules.production.detail.deliveryNoteEditableHint}</p>
         <PrintButton label={dict.modules.production.detail.printSupplement} />

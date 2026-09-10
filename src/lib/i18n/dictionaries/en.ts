@@ -2,6 +2,7 @@ import type ar from "./ar";
 
 const en: typeof ar = {
   common: {
+    unofficialDocument: "Working copy — not a controlled document. Fields on this sheet can be edited before printing and are not saved back; the system of record is Batchline itself.",
     tagline: "Ready-mix concrete plant operations platform",
     switchLocale: "العربية",
     toggleTheme: "Toggle light/dark theme",

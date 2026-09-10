@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { requirePageAccess } from "@/lib/session";
 import { effectiveSiteId, siteScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
+import { UnofficialDocumentNotice } from "@/components/UnofficialDocumentNotice";
 import { PrintButton } from "@/components/PrintButton";
 
 const cellBorder = { border: "1px solid #000" };
@@ -58,6 +59,7 @@ export default async function PurchaseOrderDetailPage({ params }: { params: Prom
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      <UnofficialDocumentNotice label={dict.common.unofficialDocument} />
       <div className="no-print flex items-center justify-between gap-3">
         <Link href="/purchasing?tab=orders" className="text-sm font-medium text-accent-strong hover:underline">
           ← {dict.field.cancel}
