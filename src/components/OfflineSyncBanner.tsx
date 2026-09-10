@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { offlineQueue, logicalKey, emitReplaySuccess, type RejectedAction, type ReplayOutcome, type ReadStatus } from "@/lib/offlineQueue";
+import { queueFor, listForeignQueues, getStorageAdapterForForeignScan, logicalKey, emitReplaySuccess, type RejectedAction, type ReplayOutcome, type ReadStatus } from "@/lib/offlineQueue";
 import { recordActualField } from "@/app/(app)/production/actions";
 import { toReplayOutcome } from "@/lib/recordActualFieldReplay";
 
@@ -27,7 +27,13 @@ const HANDLERS: Record<string, (fields: Record<string, string>) => Promise<Repla
 
 export function OfflineSyncBanner({
   labels,
+  queueIdentity,
 }: {
+  // BL-CR-P1-04, external-review validation (2026-09-10): the signed-in
+  // user and site, from the server-rendered page. It selects the local
+  // queue partition, so this banner never drains — or even displays —
+  // readings that belong to somebody else's session on this device.
+  queueIdentity: string;
   // pendingOther/rejectedOther carry a literal "{n}" placeholder, filled
   // in below — not functions (PL-R5-P1-02, fifth production-lifecycle
   // review): a function crossing the Server→Client boundary from the
@@ -46,8 +52,15 @@ export function OfflineSyncBanner({
     dismiss: string;
     storageError: string;
     corruptionRecovered: string;
+    // "{n} readings on this device were saved by a different sign-in."
+    foreignPending: string;
+    foreignAdopt: string;
+    foreignAdoptFailed: string;
   };
 }) {
+  // Memoized per identity inside the module, so this and every
+  // AutoSaveField on the page share one partition.
+  const offlineQueue = queueFor(queueIdentity);
   // Lazy initializers (not a synchronous setState in the effect body) —
   // guarded for SSR, where navigator/localStorage don't exist.
   const [pendingCount, setPendingCount] = useState(() => (typeof window === "undefined" ? 0 : offlineQueue.peekQueue().items.length));
@@ -62,6 +75,12 @@ export function OfflineSyncBanner({
   // reviewed finding: a peekQueue()/peekRejected() that returns an empty
   // array on a READ failure looks identical to a genuinely empty queue).
   const [readStatus, setReadStatus] = useState<ReadStatus>("OK");
+  // Pending readings sitting in another partition on this device —
+  // another account's, or the unattributed pre-partition queue. They are
+  // never replayed automatically; this is only how an operator finds out
+  // they are stranded here at all.
+  const [foreign, setForeign] = useState<{ key: string; pending: number }[]>([]);
+  const [adoptFailed, setAdoptFailed] = useState(false);
 
   const trySync = useCallback(async () => {
     const { flushed, remaining, readStatus: flushReadStatus } = await offlineQueue.flushQueue(HANDLERS, {
@@ -88,7 +107,8 @@ export function OfflineSyncBanner({
       setJustSynced(true);
       setTimeout(() => setJustSynced(false), 2500);
     }
-  }, []);
+    setForeign(listForeignQueues(getStorageAdapterForForeignScan(), queueIdentity));
+  }, [offlineQueue, queueIdentity]);
 
   useEffect(() => {
     const initialSync = window.setTimeout(trySync, 0);
@@ -111,7 +131,23 @@ export function OfflineSyncBanner({
       window.removeEventListener("offline", onOffline);
       window.clearInterval(poll);
     };
-  }, [trySync]);
+    // offlineQueue is memoized per identity in offlineQueue.ts, so this
+    // effect re-subscribes only if the signed-in identity itself changes.
+  }, [trySync, offlineQueue]);
+
+  // The deliberate hand-back. Nothing here happens without this click:
+  // the whole point of partitioning is that another sign-in's work is not
+  // silently replayed under the current one's name.
+  async function handleAdopt(key: string) {
+    setAdoptFailed(false);
+    const result = await offlineQueue.adoptForeignQueue(key);
+    if (result.status === "STORAGE_UNAVAILABLE") {
+      setAdoptFailed(true);
+      return;
+    }
+    setForeign(listForeignQueues(getStorageAdapterForForeignScan(), queueIdentity));
+    await trySync();
+  }
 
   async function handleDismiss(id: string) {
     // PL-R7-P1-02: only reflect the dismissal in the UI once persistence
@@ -124,7 +160,7 @@ export function OfflineSyncBanner({
   }
 
   const showStatusLine = isOnline === false || pendingCount > 0 || justSynced;
-  if (!showStatusLine && rejected.length === 0 && readStatus === "OK") return null;
+  if (!showStatusLine && rejected.length === 0 && readStatus === "OK" && foreign.length === 0) return null;
 
   return (
     <div className="flex flex-col gap-2">
@@ -149,6 +185,19 @@ export function OfflineSyncBanner({
       {readStatus === "RECOVERED_FROM_CORRUPT" && (
         <div role="alert" className="rounded-lg border border-warn/30 bg-warn-soft px-3 py-2 text-xs text-warn">
           {labels.corruptionRecovered}
+        </div>
+      )}
+      {foreign.length > 0 && (
+        <div role="alert" className="flex flex-col gap-1.5 rounded-lg border border-warn/30 bg-warn-soft px-3 py-2 text-xs text-warn">
+          {foreign.map((q) => (
+            <div key={q.key} className="flex items-center justify-between gap-2">
+              <span>{labels.foreignPending.replace("{n}", String(q.pending))}</span>
+              <button type="button" onClick={() => handleAdopt(q.key)} className="shrink-0 underline">
+                {labels.foreignAdopt}
+              </button>
+            </div>
+          ))}
+          {adoptFailed && <div>{labels.foreignAdoptFailed}</div>}
         </div>
       )}
       {rejected.length > 0 && (

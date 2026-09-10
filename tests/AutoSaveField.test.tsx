@@ -63,7 +63,11 @@ setGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 const React = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { AutoSaveField } = await import("../src/components/AutoSaveField");
-const { offlineQueue, logicalKey, emitReplaySuccess } = await import("../src/lib/offlineQueue");
+const { queueFor, logicalKey, emitReplaySuccess } = await import("../src/lib/offlineQueue");
+// BL-CR-P1-04: the local queue is partitioned per signed-in identity, so
+// the component and the test must be looking at the same partition.
+const QUEUE_IDENTITY = "test-user:test-site";
+const offlineQueue = queueFor(QUEUE_IDENTITY);
 
 function mountInput(props: Parameters<typeof AutoSaveField>[0]) {
   const container = dom.window.document.createElement("div");
@@ -220,6 +224,7 @@ test("AutoSaveField: two offline edits to the same field coalesce — exactly on
     defaultValue: "1",
     defaultVersion: 0,
     offlineQueueKind: "recordActualField",
+    queueIdentity: QUEUE_IDENTITY,
   });
 
   // Two offline blurs to the SAME field — neither may reach `action` at
@@ -281,4 +286,37 @@ test("AutoSaveField: two offline edits to the same field coalesce — exactly on
   assert.equal(sentVersions[1], "42", "the next save must use the version the offline replay returned, not the stale version this field started offline with");
 
   await unmount();
+});
+
+// BL-CR-P1-04, external-review validation (2026-09-10): a queueable field
+// rendered WITHOUT an identity has no partition it can safely file a
+// reading under, and an unattributed queue is exactly what partitioning
+// exists to end. It must fail into the visible error path rather than
+// showing a reassuring "queued" for something that could later replay
+// under somebody else's name.
+test("AutoSaveField: offline with no queue identity never claims a reading is queued", async () => {
+  dom.window.localStorage.clear();
+  Object.defineProperty(dom.window.navigator, "onLine", { value: false, configurable: true });
+
+  const action = async () => {
+    throw new Error("offline");
+  };
+  const { input, container, unmount } = mountInput({
+    action,
+    hiddenFields: { batchTicketId: "t", componentId: "c", field: "actual" },
+    valueField: "value",
+    name: "no-identity-field",
+    defaultValue: "1",
+    defaultVersion: 0,
+    offlineQueueKind: "recordActualField",
+  });
+
+  await React.act(async () => {
+    setValueAndBlur(input, "10");
+    await new Promise((r) => setTimeout(r, 0));
+  });
+
+  assert.equal(dom.window.localStorage.length, 0, "nothing may be written to an unattributed queue partition");
+  assert.ok(!container.textContent?.includes("✓"), "and the operator must not be shown a saved/queued mark for a reading that went nowhere");
+  unmount();
 });

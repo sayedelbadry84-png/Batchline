@@ -36,6 +36,13 @@ export default async function OperatorTicketPage({
   // the operator's own site — same unscoped-read gap as the desktop
   // production detail page (see that page's own comment).
   const allowedSiteId = effectiveSiteId(user);
+  // BL-CR-P1-04, external-review validation (2026-09-10): the local
+  // offline queue is partitioned by this string, so a reading saved on a
+  // shared plant tablet can never be replayed later under a different
+  // person's session (and therefore never audited under the wrong name).
+  // Derived on the server from the real session, never from anything the
+  // browser could set.
+  const queueIdentity = `${user.id}:${allowedSiteId ?? "all-sites"}`;
   const ticket = await prisma.batchTicket.findFirst({
     where: { id, ...plantScopeWhere(allowedSiteId) },
     include: {
@@ -167,7 +174,11 @@ export default async function OperatorTicketPage({
           dismiss: o.offlineRejectedDismiss,
           storageError: o.offlineStorageError,
           corruptionRecovered: o.offlineCorruptionRecovered,
+          foreignPending: o.offlineForeignPending,
+          foreignAdopt: o.offlineForeignAdopt,
+          foreignAdoptFailed: o.offlineForeignAdoptFailed,
         }}
+        queueIdentity={queueIdentity}
       />
 
       <RecordActualsForm
@@ -197,6 +208,7 @@ export default async function OperatorTicketPage({
                 <AutoSaveField
                   action={recordActualField}
                   offlineQueueKind="recordActualField"
+                  queueIdentity={queueIdentity}
                   hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "actual" }}
                   valueField="value"
                   name={`actual_${c.id}`}
@@ -215,6 +227,7 @@ export default async function OperatorTicketPage({
                     <AutoSaveField
                       action={recordActualField}
                       offlineQueueKind="recordActualField"
+                      queueIdentity={queueIdentity}
                       hiddenFields={{ batchTicketId: ticket.id, componentId: c.id, field: "moisture" }}
                       valueField="value"
                       name={`moisture_${c.id}`}

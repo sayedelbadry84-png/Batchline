@@ -167,6 +167,9 @@ const en: typeof ar = {
     // never deleted outright, but anything that was queued is no longer
     // visible here and should be re-checked/re-entered if in doubt.
     offlineCorruptionRecovered: "This device's saved offline queue was unreadable and had to be reset. Nothing was deleted — the old copy is kept on file — but re-check whether any readings need to be re-entered.",
+    offlineForeignPending: "{n} reading(s) on this device were saved during a different sign-in and were not sent. They are not sent automatically under your account.",
+    offlineForeignAdopt: "These are mine — send them",
+    offlineForeignAdoptFailed: "This device couldn't move those readings. Write them down and enter them again.",
   },
   driver: {
     brand: "Batchline Driver",

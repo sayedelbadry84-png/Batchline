@@ -14,7 +14,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createOfflineQueue, logicalKey, onReplaySuccess, emitReplaySuccess, type StorageAdapter, type ReplayOutcome, type LockAdapter } from "../src/lib/offlineQueue";
+import { createOfflineQueue, listForeignQueues, queueKeyForIdentity, logicalKey, onReplaySuccess, emitReplaySuccess, type StorageAdapter, type ReplayOutcome, type LockAdapter } from "../src/lib/offlineQueue";
 // PL-R15-P2-01: the production result-to-outcome mapping itself, so the
 // replay tests below drive the real decision logic instead of a copy of
 // it written into a fake handler.
@@ -27,10 +27,11 @@ import type { RecordActualFieldResult } from "../src/app/(app)/production/action
 // localStorage has no equivalent) — used below to prove a corrupt
 // payload gets backed up under a genuinely separate key, not just
 // silently dropped.
-function memoryStorage(): StorageAdapter & { store: Map<string, string> } {
+function memoryStorage(): StorageAdapter & { store: Map<string, string>; keys: () => string[] } {
   const store = new Map<string, string>();
   return {
     store,
+    keys: () => [...store.keys()],
     getItem: (key) => store.get(key) ?? null,
     setItem: (key, value) => {
       store.set(key, value);
@@ -872,4 +873,117 @@ test("two-instance enqueue during a slow concurrent flush: the new reading is ne
   const remaining = flushingTab.peekQueue().items;
   assert.equal(remaining.length, 1, "the newly enqueued item must survive flushQueue's own re-read-freshest-state write, not be silently dropped by it");
   assert.equal(remaining[0].fields.field, "actual");
+});
+
+// ===================================================================
+// BL-CR-P1-04, external-review validation (2026-09-10): the queue is
+// partitioned by signed-in identity.
+//
+// One origin-wide key meant one queue for every person who ever used the
+// device. Queued items carry an action kind and fields, not an actor, so
+// on a shared plant tablet the next operator to sign in replayed the
+// previous one's unsent readings automatically — and they landed in the
+// audit log under the wrong name.
+// ===================================================================
+
+test("two identities over the same device storage never see each other's pending readings", async () => {
+  const storage = memoryStorage();
+  const lock = sharedLock();
+  const alice = createOfflineQueue(storage, lock, "user-alice:site-1");
+  const bob = createOfflineQueue(storage, lock, "user-bob:site-1");
+
+  await alice.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "12.5", expectedVersion: "0" });
+
+  assert.equal(alice.peekQueue().items.length, 1);
+  assert.deepEqual(bob.peekQueue().items, [], "the next person to sign in on this tablet must not inherit the previous one's unsent work");
+
+  // And Bob replaying finds nothing to send — the automatic-replay path
+  // is what used to attribute Alice's reading to Bob.
+  const sends: string[] = [];
+  const result = await bob.flushQueue({ recordActualField: async (f) => { sends.push(f.value); return { status: "APPLIED", version: 1 }; } });
+  assert.deepEqual(sends, [], "no reading may be sent under an identity that did not record it");
+  assert.equal(result.flushed, 0);
+  assert.equal(alice.peekQueue().items.length, 1, "and Alice's reading is still safely queued where she left it");
+});
+
+test("another identity's stranded readings are reported, never replayed", async () => {
+  const storage = memoryStorage();
+  const lock = sharedLock();
+  const alice = createOfflineQueue(storage, lock, "user-alice:site-1");
+  await alice.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "12.5", expectedVersion: "0" });
+
+  // The pre-partition queue: real readings whose owner was never recorded.
+  const legacy = createOfflineQueue(storage, lock);
+  await legacy.enqueue("recordActualField", { batchTicketId: "t2", componentId: "c2", field: "actual", value: "7", expectedVersion: "0" });
+
+  const foreign = listForeignQueues(storage, "user-bob:site-1");
+  assert.equal(foreign.length, 2, "both the other account's queue and the unattributed one must be visible to the signed-in operator");
+  const byKey = new Map(foreign.map((f) => [f.key, f]));
+  assert.equal(byKey.get(queueKeyForIdentity("user-alice:site-1"))!.pending, 1);
+  assert.equal(byKey.get("bl_offline_queue_v1")!.unattributed, true);
+
+  // Alice's own scan sees only the unattributed queue — not her own.
+  assert.deepEqual(
+    listForeignQueues(storage, "user-alice:site-1").map((f) => f.key),
+    ["bl_offline_queue_v1"],
+  );
+});
+
+test("adopting stranded readings moves them into the signed-in partition and clears the source", async () => {
+  const storage = memoryStorage();
+  const lock = sharedLock();
+  const legacy = createOfflineQueue(storage, lock);
+  await legacy.enqueue("recordActualField", { batchTicketId: "t2", componentId: "c2", field: "actual", value: "7", expectedVersion: "3" });
+
+  const bob = createOfflineQueue(storage, lock, "user-bob:site-1");
+  const adopted = await bob.adoptForeignQueue("bl_offline_queue_v1");
+  assert.deepEqual(adopted, { status: "OK", adopted: 1 });
+
+  const mine = bob.peekQueue().items;
+  assert.equal(mine.length, 1, "the reading is now this identity's own work to send");
+  assert.equal(mine[0].fields.value, "7", "its value is untouched — the reading IS the work");
+  assert.equal(mine[0].fields.expectedVersion, "3");
+  assert.equal(mine[0].leaseOwner, null, "and it carries no stale claim from the session that stranded it");
+  assert.deepEqual(legacy.peekQueue().items, [], "the source partition is emptied, so it is never offered twice");
+  assert.deepEqual(listForeignQueues(storage, "user-bob:site-1"), []);
+
+  const sends: string[] = [];
+  await bob.flushQueue({ recordActualField: async (f) => { sends.push(f.value); return { status: "APPLIED", version: 4 }; } });
+  assert.deepEqual(sends, ["7"], "and only now — after a person claimed it — is it sent");
+});
+
+test("a failed adoption leaves the stranded readings exactly where they were", async () => {
+  const inner = memoryStorage();
+  let failNextWrite = false;
+  const storage: StorageAdapter = {
+    keys: () => inner.keys(),
+    getItem: (key) => inner.getItem(key),
+    setItem: (key, value) => {
+      if (failNextWrite) throw new Error("simulated quota failure");
+      inner.setItem(key, value);
+    },
+  };
+  const lock = sharedLock();
+  const legacy = createOfflineQueue(storage, lock);
+  await legacy.enqueue("recordActualField", { batchTicketId: "t2", componentId: "c2", field: "actual", value: "7", expectedVersion: "0" });
+
+  const bob = createOfflineQueue(storage, lock, "user-bob:site-1");
+  failNextWrite = true;
+  const adopted = await bob.adoptForeignQueue("bl_offline_queue_v1");
+  failNextWrite = false;
+
+  assert.deepEqual(adopted, { status: "STORAGE_UNAVAILABLE" });
+  assert.equal(legacy.peekQueue().items.length, 1, "work that could not be moved must still be where it was — never dropped between two partitions");
+  assert.deepEqual(bob.peekQueue().items, []);
+});
+
+test("adopting an empty or already-owned partition is a no-op, not a duplicate", async () => {
+  const storage = memoryStorage();
+  const lock = sharedLock();
+  const bob = createOfflineQueue(storage, lock, "user-bob:site-1");
+  await bob.enqueue("recordActualField", { batchTicketId: "t1", componentId: "c1", field: "actual", value: "5", expectedVersion: "0" });
+
+  assert.deepEqual(await bob.adoptForeignQueue(bob.storageKey), { status: "NOTHING_TO_ADOPT" });
+  assert.deepEqual(await bob.adoptForeignQueue("bl_offline_queue_v1"), { status: "NOTHING_TO_ADOPT" });
+  assert.equal(bob.peekQueue().items.length, 1, "its own single queued reading is neither duplicated nor lost");
 });

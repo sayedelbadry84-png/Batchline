@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { offlineQueue, logicalKey, onReplaySuccess } from "@/lib/offlineQueue";
+import { queueFor, logicalKey, onReplaySuccess } from "@/lib/offlineQueue";
 
 type Status = "idle" | "saving" | "saved" | "error" | "queued" | "rejected" | "storageError";
 
@@ -26,6 +26,13 @@ type ActionResult = { status: string; version?: number };
 // that's genuinely safe to replay blindly on reconnect (an idempotent
 // field overwrite, like a scale reading) — see src/lib/offlineQueue.ts
 // for why actions that create a row or transition state never queue.
+//
+// BL-CR-P1-04, external-review validation (2026-09-10): queueIdentity is
+// the signed-in user and site, supplied by the server-rendered page. It
+// selects which local partition a queued reading is written into, so an
+// unsent reading can never be replayed later under a DIFFERENT person's
+// session — and therefore never lands in the audit log under the wrong
+// name. It is required whenever offlineQueueKind is used.
 export function AutoSaveField({
   action,
   hiddenFields,
@@ -38,6 +45,7 @@ export function AutoSaveField({
   disabled,
   className,
   offlineQueueKind,
+  queueIdentity,
   rejectedLabel,
   storageErrorLabel,
   defaultVersion,
@@ -53,6 +61,7 @@ export function AutoSaveField({
   disabled?: boolean;
   className?: string;
   offlineQueueKind?: string;
+  queueIdentity?: string;
   // Plain strings, not per-status functions — the same Server→Client
   // serialization rule PL-R5-P1-02 already fixed elsewhere applies here
   // too. Shown as a title/tooltip on the respective mark; a generic
@@ -139,8 +148,15 @@ export function AutoSaveField({
         setStatus("rejected");
       }
     } catch {
-      if (offlineQueueKind) {
-        const enqueued = await offlineQueue.enqueue(offlineQueueKind, fields, valueField);
+      // BL-CR-P1-04: with no identity there is no partition this reading
+      // can be safely filed under, and an unattributed queue is exactly
+      // what the partitioning exists to end. Fail into the same
+      // "storage unavailable" path a quota failure uses — the operator is
+      // told to write the reading down, rather than being shown a
+      // reassuring "queued" for something that could later replay under
+      // somebody else's name.
+      if (offlineQueueKind && queueIdentity) {
+        const enqueued = await queueFor(queueIdentity).enqueue(offlineQueueKind, fields, valueField);
         if (enqueued.status === "OK") {
           lastSaved.current = value;
           setStatus("queued");
@@ -171,9 +187,9 @@ export function AutoSaveField({
     const value = e.target.value;
     if (value === "" || value === lastSaved.current) return;
 
-    if (offlineQueueKind && typeof navigator !== "undefined" && !navigator.onLine) {
+    if (offlineQueueKind && queueIdentity && typeof navigator !== "undefined" && !navigator.onLine) {
       const fields = { ...hiddenFields, [valueField]: value, expectedVersion: String(currentVersion.current) };
-      const enqueued = await offlineQueue.enqueue(offlineQueueKind, fields, valueField);
+      const enqueued = await queueFor(queueIdentity).enqueue(offlineQueueKind, fields, valueField);
       if (enqueued.status === "OK") {
         lastSaved.current = value;
         setStatus("queued");

@@ -64,6 +64,12 @@ export type PersistResult = { status: "OK" } | { status: "STORAGE_UNAVAILABLE"; 
 export type StorageAdapter = {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+  // BL-CR-P1-04, external-review validation (2026-09-10): enumerating the
+  // keys is what lets this device notice that pending readings belong to
+  // a DIFFERENT account than the one signed in now. Optional, because a
+  // storage backend that cannot enumerate is still a usable queue — it
+  // just cannot offer the hand-back flow.
+  keys?(): string[];
 };
 
 function getDefaultStorage(): StorageAdapter | null {
@@ -73,7 +79,11 @@ function getDefaultStorage(): StorageAdapter | null {
     // this touches it before deciding it's usable.
     const ls = window.localStorage;
     if (!ls) return null;
-    return ls;
+    return {
+      getItem: (key) => ls.getItem(key),
+      setItem: (key, value) => ls.setItem(key, value),
+      keys: () => Object.keys(ls),
+    };
   } catch {
     return null;
   }
@@ -119,7 +129,30 @@ function getDefaultLock(): LockAdapter | null {
   };
 }
 
-const STORAGE_KEY = "bl_offline_queue_v1";
+// BL-CR-P1-04, external-review validation (2026-09-10): one origin-wide
+// key meant one queue for every person who ever used the device. Queued
+// items carry an action kind and fields, not an actor — so on a shared
+// plant tablet, the next operator to sign in replayed the previous one's
+// unsent readings automatically, and they landed in the audit log under
+// the WRONG name; a user from another site saw the rejected ones' fields
+// in the banner. localStorage is per-origin, not per-identity, and
+// nothing about signing out clears it (nor should it: those readings are
+// real work that has not reached the server yet).
+//
+// Each identity now gets its own partition. Another account's pending
+// work is simply not loaded — there is no automatic replay to refuse —
+// and is instead surfaced through listForeignQueues/adoptForeignQueue
+// below, so a human decides whose it is.
+const QUEUE_KEY_PREFIX = "bl_offline_queue_v2:";
+
+// The pre-partition key. Its contents have no recorded owner at all, so
+// they are never adopted automatically: they show up in the same
+// "readings from another session" notice, where a person can claim them.
+const LEGACY_STORAGE_KEY = "bl_offline_queue_v1";
+
+export function queueKeyForIdentity(identityKey: string): string {
+  return `${QUEUE_KEY_PREFIX}${encodeURIComponent(identityKey)}`;
+}
 
 type OfflineStateV1 = { version: 1; pending: QueuedAction[]; rejected: RejectedAction[] };
 
@@ -191,10 +224,10 @@ type ReadStateResult =
   | { status: "STORAGE_UNAVAILABLE"; error?: unknown }
   | { status: "CORRUPT"; raw: string };
 
-function readState(storage: StorageAdapter): ReadStateResult {
+function readState(storage: StorageAdapter, storageKey: string): ReadStateResult {
   let raw: string | null;
   try {
-    raw = storage.getItem(STORAGE_KEY);
+    raw = storage.getItem(storageKey);
   } catch (error) {
     return { status: "STORAGE_UNAVAILABLE", error };
   }
@@ -217,9 +250,9 @@ function readState(storage: StorageAdapter): ReadStateResult {
   return { status: "CORRUPT", raw };
 }
 
-function persistState(storage: StorageAdapter, next: OfflineStateV1): PersistResult {
+function persistState(storage: StorageAdapter, storageKey: string, next: OfflineStateV1): PersistResult {
   try {
-    storage.setItem(STORAGE_KEY, JSON.stringify(next));
+    storage.setItem(storageKey, JSON.stringify(next));
     return { status: "OK" };
   } catch (error) {
     // Quota exceeded, storage disabled/blocked, or any other reason
@@ -231,25 +264,25 @@ function persistState(storage: StorageAdapter, next: OfflineStateV1): PersistRes
 
 // Recovery for a CORRUPT read: back the raw payload up under a distinct
 // key FIRST, and only if that backup genuinely persists does this
-// replace STORAGE_KEY with a fresh empty state — never the other way
+// replace the primary key with a fresh empty state — never the other way
 // around (PL-R8-P1-02's own "corrupt-backup failure must not still
 // destroy the primary" finding). If the backup itself can't be written
 // (the same failing storage that made the payload unreadable in the
 // first place, most likely), the original raw string is left completely
-// untouched under STORAGE_KEY and this reports BACKUP_FAILED — callers
+// untouched under the primary key and this reports BACKUP_FAILED — callers
 // must treat that exactly like STORAGE_UNAVAILABLE: no further write.
-function recoverFromCorrupt(storage: StorageAdapter, raw: string): { status: "RECOVERED"; state: OfflineStateV1 } | { status: "BACKUP_FAILED" } {
-  const backupKey = `${STORAGE_KEY}_corrupt_backup_${Date.now()}`;
+function recoverFromCorrupt(storage: StorageAdapter, storageKey: string, raw: string): { status: "RECOVERED"; state: OfflineStateV1 } | { status: "BACKUP_FAILED" } {
+  const backupKey = `${storageKey}_corrupt_backup_${Date.now()}`;
   try {
     storage.setItem(backupKey, raw);
   } catch {
     return { status: "BACKUP_FAILED" };
   }
   const fresh = emptyState();
-  const replaced = persistState(storage, fresh);
+  const replaced = persistState(storage, storageKey, fresh);
   warnCorrupt(raw, replaced.status === "OK");
   // Even if replacing the primary key failed, the backup is safely on
-  // file and the ORIGINAL raw string is still sitting under STORAGE_KEY
+  // file and the ORIGINAL raw string is still sitting under the primary key
   // untouched (this function never got far enough to fail a write to
   // it before the backup succeeded) — either way it's safe to hand the
   // caller a fresh in-memory state to build this one write on, since
@@ -356,7 +389,11 @@ export function emitReplaySuccess(key: string, version: number): void {
 // mid-flight cannot strand an operator's reading for a whole shift.
 const LEASE_MS = 60_000;
 
-export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAdapter | null = getDefaultLock()) {
+export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAdapter | null = getDefaultLock(), identityKey?: string) {
+  // BL-CR-P1-04: the partition this instance owns. Omitting the identity
+  // keeps the pre-partition key, which is what the unattributed legacy
+  // queue lives under — see LEGACY_STORAGE_KEY.
+  const storageKey = identityKey ? queueKeyForIdentity(identityKey) : LEGACY_STORAGE_KEY;
   // Identifies THIS queue instance (one per tab in practice) as a lease
   // holder. Not persisted anywhere but inside the claims it takes.
   const ownerId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -410,10 +447,10 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
   // next successful setItem overwrote and destroyed real data).
   function readForMutation(): { status: "OK" | "RECOVERED_FROM_CORRUPT"; state: OfflineStateV1 } | { status: "STORAGE_UNAVAILABLE"; error?: unknown } {
     if (!storage) return { status: "STORAGE_UNAVAILABLE" };
-    const read = readState(storage);
+    const read = readState(storage, storageKey);
     if (read.status === "OK") return { status: "OK", state: read.state };
     if (read.status === "STORAGE_UNAVAILABLE") return read;
-    const recovered = recoverFromCorrupt(storage, read.raw);
+    const recovered = recoverFromCorrupt(storage, storageKey, read.raw);
     if (recovered.status === "BACKUP_FAILED") return { status: "STORAGE_UNAVAILABLE" };
     return { status: "RECOVERED_FROM_CORRUPT", state: recovered.state };
   }
@@ -460,7 +497,7 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
         };
         const nextPending = [...read.state.pending];
         nextPending[existingIndex] = merged;
-        const result = persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
+        const result = persistState(storage!, storageKey, { version: 1, pending: nextPending, rejected: read.state.rejected });
         return result.status === "OK" ? { status: "OK", item: merged } : { status: "STORAGE_UNAVAILABLE" };
       }
 
@@ -473,7 +510,7 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
         leaseOwner: null,
         leaseExpiresAt: null,
       };
-      const result = persistState(storage!, { version: 1, pending: [...read.state.pending, item], rejected: read.state.rejected });
+      const result = persistState(storage!, storageKey, { version: 1, pending: [...read.state.pending, item], rejected: read.state.rejected });
       return result.status === "OK" ? { status: "OK", item } : { status: "STORAGE_UNAVAILABLE" };
     });
   }
@@ -484,7 +521,7 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
     return withLock(() => {
       const read = readForMutation();
       if (read.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" };
-      return persistState(storage!, { version: 1, pending: read.state.pending, rejected: read.state.rejected.filter((item) => item.id !== id) });
+      return persistState(storage!, storageKey, { version: 1, pending: read.state.pending, rejected: read.state.rejected.filter((item) => item.id !== id) });
     });
   }
 
@@ -506,7 +543,7 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
 
     const claimed: QueuedAction = { ...current, leaseOwner: ownerId, leaseExpiresAt: Date.now() + LEASE_MS };
     const nextPending = read.state.pending.map((i) => (i.id === itemId ? claimed : i));
-    const persisted = persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
+    const persisted = persistState(storage!, storageKey, { version: 1, pending: nextPending, rejected: read.state.rejected });
     if (persisted.status !== "OK") return { status: "STORAGE_UNAVAILABLE" };
     return { status: "CLAIMED", item: claimed };
   }
@@ -528,7 +565,7 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
 
     const rebased: QueuedAction = { ...current, fields: { ...current.fields, [versionField]: String(version) } };
     const nextPending = read.state.pending.map((i) => (i.id === snapshot.id ? rebased : i));
-    const persisted = persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
+    const persisted = persistState(storage!, storageKey, { version: 1, pending: nextPending, rejected: read.state.rejected });
     return persisted.status === "OK" ? { status: "REBASED", item: rebased } : { status: "STORAGE_UNAVAILABLE" };
   }
 
@@ -542,7 +579,7 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
     const current = read.state.pending.find((i) => i.id === snapshot.id);
     if (!current || current.leaseOwner !== ownerId || current.generation !== snapshot.generation) return;
     const nextPending = read.state.pending.map((i) => (i.id === snapshot.id ? { ...i, leaseOwner: null, leaseExpiresAt: null } : i));
-    persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
+    persistState(storage!, storageKey, { version: 1, pending: nextPending, rejected: read.state.rejected });
   }
 
   type Settlement =
@@ -576,14 +613,14 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
       const nextFields =
         outcome.status === "APPLIED" && typeof outcome.version === "number" ? { ...current.fields, [versionField]: String(outcome.version) } : current.fields;
       const nextPending = read.state.pending.map((i) => (i.id === snapshot.id ? { ...i, fields: nextFields, leaseOwner: null, leaseExpiresAt: null } : i));
-      const persisted = persistState(storage!, { version: 1, pending: nextPending, rejected: read.state.rejected });
+      const persisted = persistState(storage!, storageKey, { version: 1, pending: nextPending, rejected: read.state.rejected });
       return persisted.status === "OK" ? { status: "SUPERSEDED" } : { status: "STORAGE_UNAVAILABLE" };
     }
 
     const nextPending = read.state.pending.filter((i) => i.id !== snapshot.id);
     const nextRejected =
       outcome.status === "REJECTED" ? [...read.state.rejected, { ...snapshot, reason: outcome.reason, rejectedAt: Date.now() }] : read.state.rejected;
-    const persisted = persistState(storage!, { version: 1, pending: nextPending, rejected: nextRejected });
+    const persisted = persistState(storage!, storageKey, { version: 1, pending: nextPending, rejected: nextRejected });
     return persisted.status === "OK" ? { status: "SETTLED" } : { status: "STORAGE_UNAVAILABLE" };
   }
 
@@ -685,10 +722,120 @@ export function createOfflineQueue(storage: StorageAdapter | null, lock: LockAda
     return { flushed, remaining: final.state.pending.length, rejected: final.state.rejected.length, readStatus };
   }
 
-  return { peekQueue, peekRejected, enqueue, dismissRejected, flushQueue };
+  // BL-CR-P1-04: the hand-back flow. Pending readings found under another
+  // identity's partition (or under the pre-partition key, whose owner was
+  // never recorded) are NEVER replayed automatically — that is the whole
+  // point of partitioning. This is the deliberate, human-initiated move
+  // of that work into the signed-in identity's own queue, for the real
+  // case it exists to serve: the same operator, signed in again after a
+  // password reset or on a re-provisioned account, whose unsent readings
+  // are sitting under an id the device no longer uses.
+  //
+  // Adopted items are re-stamped as this queue's own: a fresh generation,
+  // no lease, no claim. Their VALUES are untouched — the reading is the
+  // work, and rewriting it here would defeat the purpose. Whoever adopts
+  // becomes the audit actor for the replay, which is exactly why this
+  // cannot happen without someone choosing it.
+  //
+  // The source partition is only cleared once the merge has durably
+  // persisted, so a failure leaves the work exactly where it was.
+  async function adoptForeignQueue(sourceKey: string): Promise<{ status: "OK"; adopted: number } | { status: "STORAGE_UNAVAILABLE" } | { status: "NOTHING_TO_ADOPT" }> {
+    if (!storage || !lock) return { status: "STORAGE_UNAVAILABLE" };
+    if (sourceKey === storageKey) return { status: "NOTHING_TO_ADOPT" };
+    return withLock(async () => {
+      const source = readState(storage, sourceKey);
+      if (source.status !== "OK") return { status: "STORAGE_UNAVAILABLE" as const };
+      if (source.state.pending.length === 0) return { status: "NOTHING_TO_ADOPT" as const };
+
+      const mine = readForMutation();
+      if (mine.status === "STORAGE_UNAVAILABLE") return { status: "STORAGE_UNAVAILABLE" as const };
+
+      const adopted = source.state.pending.map((item) => ({
+        ...item,
+        generation: item.generation + 1,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      }));
+      const merged = persistState(storage, storageKey, {
+        version: 1,
+        pending: [...mine.state.pending, ...adopted],
+        rejected: mine.state.rejected,
+      });
+      if (merged.status !== "OK") return { status: "STORAGE_UNAVAILABLE" as const };
+
+      // Only now: the work exists in two places for an instant, never in
+      // none. A failure here leaves a harmless duplicate that the next
+      // adoption attempt will re-offer, rather than losing the readings.
+      const cleared = persistState(storage, sourceKey, emptyState());
+      if (cleared.status !== "OK") return { status: "STORAGE_UNAVAILABLE" as const };
+      return { status: "OK" as const, adopted: adopted.length };
+    });
+  }
+
+  return { peekQueue, peekRejected, enqueue, dismissRejected, flushQueue, adoptForeignQueue, storageKey };
+}
+
+// BL-CR-P1-04: every partition on this device OTHER than the signed-in
+// one that still holds unsent readings — including the unattributed
+// pre-partition queue. Used to tell the operator that work is stranded
+// here rather than letting it sit invisible forever, and to offer the
+// deliberate hand-back above.
+//
+// Returns nothing at all when the storage backend cannot enumerate keys:
+// a queue that works but cannot offer the hand-back flow is the correct
+// degradation, and is why StorageAdapter.keys is optional.
+export function listForeignQueues(
+  storage: StorageAdapter | null,
+  currentIdentityKey: string | undefined,
+): { key: string; pending: number; unattributed: boolean }[] {
+  if (!storage || typeof storage.keys !== "function") return [];
+  const mine = currentIdentityKey ? queueKeyForIdentity(currentIdentityKey) : LEGACY_STORAGE_KEY;
+  let allKeys: string[];
+  try {
+    allKeys = storage.keys();
+  } catch {
+    return [];
+  }
+  const found: { key: string; pending: number; unattributed: boolean }[] = [];
+  for (const key of allKeys) {
+    if (key === mine) continue;
+    // The corrupt-payload backups this module writes are not queues.
+    if (key.includes("_corrupt_backup_")) continue;
+    if (key !== LEGACY_STORAGE_KEY && !key.startsWith(QUEUE_KEY_PREFIX)) continue;
+    const read = readState(storage, key);
+    if (read.status !== "OK" || read.state.pending.length === 0) continue;
+    found.push({ key, pending: read.state.pending.length, unattributed: key === LEGACY_STORAGE_KEY });
+  }
+  return found;
 }
 
 export type OfflineQueue = ReturnType<typeof createOfflineQueue>;
+
+// BL-CR-P1-04: one queue instance per identity, memoized so every client
+// component on a page shares the same partition (AutoSaveField enqueues
+// into it, OfflineSyncBanner drains it — they must not disagree about
+// which key they are talking to). Keyed by identity rather than held in a
+// module-level "current user" variable on purpose: a client component is
+// also rendered on the SERVER, where a mutable module global would be
+// shared across requests and could leak one request's identity into the
+// next.
+const queuesByIdentity = new Map<string, OfflineQueue>();
+
+// The browser's own storage, for listForeignQueues' scan. Exported
+// rather than folded into listForeignQueues so tests can hand it an
+// in-memory adapter instead — the same injectable-adapter reasoning the
+// rest of this module already follows.
+export function getStorageAdapterForForeignScan(): StorageAdapter | null {
+  return getDefaultStorage();
+}
+
+export function queueFor(identityKey: string): OfflineQueue {
+  const existing = queuesByIdentity.get(identityKey);
+  if (existing) return existing;
+  const created = createOfflineQueue(getDefaultStorage(), getDefaultLock(), identityKey);
+  queuesByIdentity.set(identityKey, created);
+  return created;
+}
 
 // Test-only introspection — the most recent corrupt payload this
 // process observed, if any (used by tests to confirm a recovery warning
