@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { queueFor, listForeignQueues, getStorageAdapterForForeignScan, logicalKey, emitReplaySuccess, type RejectedAction, type ReplayOutcome, type ReadStatus } from "@/lib/offlineQueue";
-import { recordActualField } from "@/app/(app)/production/actions";
+import { recordActualField, authorizeOfflineQueueAdoption } from "@/app/(app)/production/actions";
 import { toReplayOutcome } from "@/lib/recordActualFieldReplay";
 
 // Registry of queueable action kinds this banner knows how to replay —
@@ -56,6 +56,7 @@ export function OfflineSyncBanner({
     foreignPending: string;
     foreignAdopt: string;
     foreignAdoptFailed: string;
+    foreignAdoptForbidden: string;
   };
 }) {
   // Memoized per identity inside the module, so this and every
@@ -81,6 +82,7 @@ export function OfflineSyncBanner({
   // they are stranded here at all.
   const [foreign, setForeign] = useState<{ key: string; pending: number }[]>([]);
   const [adoptFailed, setAdoptFailed] = useState(false);
+  const [adoptForbidden, setAdoptForbidden] = useState(false);
 
   const trySync = useCallback(async () => {
     const { flushed, remaining, readStatus: flushReadStatus } = await offlineQueue.flushQueue(HANDLERS, {
@@ -138,8 +140,19 @@ export function OfflineSyncBanner({
   // The deliberate hand-back. Nothing here happens without this click:
   // the whole point of partitioning is that another sign-in's work is not
   // silently replayed under the current one's name.
-  async function handleAdopt(key: string) {
+  async function handleAdopt(key: string, pending: number) {
     setAdoptFailed(false);
+    setAdoptForbidden(false);
+    // PR4-R1: ask the server FIRST. Replaying these readings will file
+    // them under the current account, so the decision needs the
+    // permission for it and is recorded before anything moves.
+    const fd = new FormData();
+    fd.set("pending", String(pending));
+    const authorized = await authorizeOfflineQueueAdoption(fd);
+    if (authorized.status !== "OK") {
+      setAdoptForbidden(true);
+      return;
+    }
     const result = await offlineQueue.adoptForeignQueue(key);
     if (result.status === "STORAGE_UNAVAILABLE") {
       setAdoptFailed(true);
@@ -192,12 +205,13 @@ export function OfflineSyncBanner({
           {foreign.map((q) => (
             <div key={q.key} className="flex items-center justify-between gap-2">
               <span>{labels.foreignPending.replace("{n}", String(q.pending))}</span>
-              <button type="button" onClick={() => handleAdopt(q.key)} className="shrink-0 underline">
+              <button type="button" onClick={() => handleAdopt(q.key, q.pending)} className="shrink-0 underline">
                 {labels.foreignAdopt}
               </button>
             </div>
           ))}
           {adoptFailed && <div>{labels.foreignAdoptFailed}</div>}
+          {adoptForbidden && <div>{labels.foreignAdoptForbidden}</div>}
         </div>
       )}
       {rejected.length > 0 && (

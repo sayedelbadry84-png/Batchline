@@ -171,6 +171,7 @@ const en: typeof ar = {
     offlineForeignPending: "{n} reading(s) on this device were saved during a different sign-in and were not sent. They are not sent automatically under your account.",
     offlineForeignAdopt: "These are mine — send them",
     offlineForeignAdoptFailed: "This device couldn't move those readings. Write them down and enter them again.",
+    offlineForeignAdoptForbidden: "Only a supervisor can take over readings saved under another sign-in — they will be recorded under whoever sends them.",
   },
   driver: {
     brand: "Batchline Driver",

@@ -211,6 +211,14 @@ export const ACTION_ROLES = {
     approveFinal: ["ADMIN"],
   },
   production: {
+    // PR4-R1 (second external-review validation round): taking over the
+    // unsent offline readings another sign-in left on this device
+    // re-attributes them, in the audit log, to whoever replays them —
+    // there is no way to preserve the original actor, because the replay
+    // is a fresh authenticated request. So it is deliberately NOT an
+    // everyday operator action: it needs the same sign-off level as a
+    // shortage override, and it is audited at the moment it is granted.
+    adoptOfflineQueue: SHORTAGE_OVERRIDE_DECISION_ROLES,
     release: ["PLANT_OPERATOR", "ADMIN"],
     manualBooking: ["PLANT_OPERATOR", "ADMIN"],
     complete: ["PLANT_OPERATOR", "ADMIN"],

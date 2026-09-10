@@ -55,6 +55,7 @@ const sales = await import("../src/app/(app)/sales/actions");
 const finance = await import("../src/app/(app)/finance/actions");
 const plants = await import("../src/app/(app)/plants/actions");
 const reservations = await import("../src/app/(app)/reservations/actions");
+const production = await import("../src/app/(app)/production/actions");
 
 const prefix = `TEST-SUITE-XS-${randomUUID().slice(0, 8)}`;
 
@@ -65,6 +66,7 @@ const prefix = `TEST-SUITE-XS-${randomUUID().slice(0, 8)}`;
 let siteA: string, siteB: string, plantA: string, plantB: string;
 let operatorId: string, salesId: string, accountantId: string, adminId: string;
 let salesManagerId: string, salesSupervisorId: string;
+let supervisorId = "";
 let initialAccountIds: string[] = [];
 const supplierBillIds: string[] = [];
 const fieldVisitIds: string[] = [];
@@ -764,8 +766,37 @@ test("a payment above the outstanding balance is refused to the halala, with no 
   assert.equal((await prisma.supplierBill.findUniqueOrThrow({ where: { id: awkward.id } })).status, "PAID");
 });
 
+// PR4-R1 — taking over another sign-in's stranded offline readings
+// re-attributes them, in the audit log, to whoever replays them. The
+// decision is therefore gated and recorded on the server, not left to the
+// browser that is doing the re-attributing.
+test("adopting another sign-in's stranded readings needs supervisor permission and is audited", async () => {
+  const fd = new FormData();
+  fd.set("pending", "3");
+
+  await asUser(operatorId);
+  assert.deepEqual(
+    await production.authorizeOfflineQueueAdoption(fd),
+    { status: "FORBIDDEN" },
+    "an ordinary operator must not be able to file another person's readings under their own name",
+  );
+  assert.equal(await prisma.auditEvent.count({ where: { reasonCode: "OFFLINE_QUEUE_ADOPTED", actorId: operatorId } }), 0, "and a refusal leaves no record of a grant");
+
+  // PLANT_ADMIN holds the same sign-off level as a shortage override.
+  const supervisor = await prisma.user.create({
+    data: { passwordHash: "test-only", name: prefix, plantId: plantA, email: `${prefix}-sup@example.invalid`, role: "PLANT_ADMIN" },
+  });
+  supervisorId = supervisor.id;
+  await asUser(supervisorId);
+  assert.deepEqual(await production.authorizeOfflineQueueAdoption(fd), { status: "OK" });
+
+  const granted = await prisma.auditEvent.findFirst({ where: { reasonCode: "OFFLINE_QUEUE_ADOPTED", actorId: supervisorId } });
+  assert.ok(granted, "every granted adoption must name who decided it");
+  assert.ok(granted.afterValue?.includes("3"), "and how many readings they took over");
+});
+
 after(async () => {
-  const users = [operatorId, salesId, accountantId, adminId, salesManagerId, salesSupervisorId].filter(Boolean);
+  const users = [operatorId, salesId, accountantId, adminId, salesManagerId, salesSupervisorId, supervisorId].filter(Boolean);
   await prisma.session.deleteMany({ where: { userId: { in: users } } });
   // Ledger rows first: journal lines reference accounts, and the accounts
   // created by this suite's own postings must go with them.
@@ -801,6 +832,7 @@ after(async () => {
   await prisma.reservation.deleteMany({ where: { id: { in: reservationIds } } });
   await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
   await prisma.user.deleteMany({ where: { id: { in: users } } });
+  await prisma.user.deleteMany({ where: { name: prefix } });
   await prisma.customer.deleteMany({ where: { id: customerId } });
   await prisma.mixDesign.deleteMany({ where: { id: mixId } });
   await prisma.supplier.deleteMany({ where: { id: supplierId } });

@@ -177,6 +177,7 @@ export default async function OperatorTicketPage({
           foreignPending: o.offlineForeignPending,
           foreignAdopt: o.offlineForeignAdopt,
           foreignAdoptFailed: o.offlineForeignAdoptFailed,
+          foreignAdoptForbidden: o.offlineForeignAdoptForbidden,
         }}
         queueIdentity={queueIdentity}
       />

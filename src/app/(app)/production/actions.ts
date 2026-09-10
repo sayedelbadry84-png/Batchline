@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { processPendingAutoRequisition } from "@/lib/materialRequisition";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
+import { canPerformAction } from "@/lib/permissions";
 import { isReservationApproved } from "@/lib/reservations";
 import { effectiveSiteId, isPlantActive, isPlantInScope, isSiteInScope } from "@/lib/siteScope";
 import { AGGREGATE_TYPES } from "@/lib/storageMatching";
@@ -859,4 +860,40 @@ export async function reverseBatchTicket(_prevState: ReverseBatchActionState, fo
   revalidatePath("/warehouses");
   revalidatePath("/");
   return { status: "SUCCESS" };
+}
+
+// PR4-R1, second external-review validation round: the server half of the
+// offline queue's hand-back (BL-CR-P1-04).
+//
+// Adopting the unsent readings another sign-in left on this device is a
+// purely local move between localStorage partitions — but replaying them
+// afterwards files them, in the audit log, under whoever is signed in
+// now. The original actor cannot be preserved: the replay is a fresh
+// authenticated request, and impersonating the previous user would be a
+// far worse answer than re-attributing the work openly.
+//
+// So the decision is gated and recorded here rather than left to the
+// browser: the client asks BEFORE moving anything, an operator without
+// the permission is refused, and every granted adoption leaves an audit
+// event naming the actor and how many readings they took over. A client
+// that skipped this call would only be rearranging its own local storage
+// — every replayed reading still goes through recordActualField's own
+// ticket/site authorization — but it would lose the record of who
+// decided, which is the whole point.
+export type AdoptOfflineQueueResult = { status: "OK" } | { status: "FORBIDDEN" };
+
+export async function authorizeOfflineQueueAdoption(formData: FormData): Promise<AdoptOfflineQueueResult> {
+  const user = await getCurrentUser();
+  if (!user) return { status: "FORBIDDEN" };
+  if (!(await canPerformAction(user.role, "production", "adoptOfflineQueue"))) return { status: "FORBIDDEN" };
+
+  const pending = Number(formData.get("pending") ?? 0);
+  await logAudit({
+    module: "Production",
+    recordId: user.id,
+    field: "offlineQueue",
+    afterValue: `adopted ${Number.isFinite(pending) && pending > 0 ? pending : "?"} stranded reading(s) from another sign-in on this device`,
+    reasonCode: "OFFLINE_QUEUE_ADOPTED",
+  });
+  return { status: "OK" };
 }
