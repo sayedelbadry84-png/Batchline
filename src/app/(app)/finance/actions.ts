@@ -1,6 +1,7 @@
 "use server";
 
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import { createHash } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { resolvePlantBillingDefaults } from "@/lib/plantBilling";
 import { writeAudit } from "@/lib/audit";
@@ -427,44 +428,90 @@ export async function importBankStatement(formData: FormData) {
   const matched = matchBankStatementLines(lines, candidates);
   const now = new Date();
 
-  await prisma.$transaction(async (tx) => {
-    for (const { line, match } of matched) {
-      await tx.bankStatementLine.create({
-        data: {
-          siteId,
-          statementDate: line.date,
-          direction: line.amount >= 0 ? "IN" : "OUT",
-          amount: Math.abs(line.amount),
-          description: line.description,
-          reference: line.reference || null,
-          importedById: actor!.id,
-          ...(match
-            ? { matchedKind: match.kind, matchedId: match.id, matchedAt: now }
-            : {}),
-        },
+  // PR4-R6-P1-01: the import gets a durable identity, and every match is
+  // CLAIMED rather than assumed.
+  //
+  // Two defects shared one cause — decisions made from a snapshot taken
+  // before the transaction, then applied by primary key alone:
+  //
+  //  1. Two concurrent imports could each read the same still-unreconciled
+  //     payment, each pick it as their unique match, and both commit a
+  //     line claiming it. The update said `where: { id }` — nothing about
+  //     "and it is still unreconciled", nothing about site ownership.
+  //  2. The same file could be uploaded twice, or uploaded once with the
+  //     HTTP response lost and then retried, and every line was inserted
+  //     again. The audit row recorded each import faithfully; nothing ever
+  //     read it back to notice the repeat.
+  //
+  // The digest is computed here from the file's own bytes rather than
+  // taken from the request, so the identity cannot be omitted or forged,
+  // and its uniqueness is per site — the same statement legitimately
+  // belongs to one factory. A second attempt hits that unique index and
+  // this returns silently, which is what makes a retry safe.
+  //
+  // A movement whose claim is lost still produces a statement line, filed
+  // as UNMATCHED. That is deliberate: the line is real bank data and must
+  // appear for a human to reconcile, but it must not assert a claim the
+  // database already gave to someone else.
+  const fileDigest = createHash("sha256").update(text, "utf8").digest("hex");
+
+  const imported = await prisma
+    .$transaction(async (tx) => {
+      const batch = await tx.bankStatementImport.create({
+        data: { siteId, fileDigest, lineCount: lines.length, matchedCount: 0, importedById: actor!.id },
       });
 
-      if (match) {
-        if (match.kind === "payment") await tx.payment.update({ where: { id: match.id }, data: { reconciled: true, reconciledAt: now } });
-        else if (match.kind === "supplierPayment") await tx.supplierPayment.update({ where: { id: match.id }, data: { reconciled: true, reconciledAt: now } });
-        else await tx.cashTransaction.update({ where: { id: match.id }, data: { reconciled: true, reconciledAt: now } });
-      }
-    }
+      let claimedCount = 0;
+      for (const { line, match } of matched) {
+        let claimed = false;
+        if (match) {
+          const data = { reconciled: true, reconciledAt: now };
+          const claim =
+            match.kind === "payment"
+              ? await tx.payment.updateMany({ where: { id: match.id, reconciled: false, invoice: { plant: { siteId } } }, data })
+              : match.kind === "supplierPayment"
+                ? await tx.supplierPayment.updateMany({ where: { id: match.id, reconciled: false, supplierBill: { siteId } }, data })
+                : await tx.cashTransaction.updateMany({ where: { id: match.id, reconciled: false, siteId }, data });
+          claimed = claim.count === 1;
+          if (claimed) claimedCount += 1;
+        }
 
-    // PR4-R5-P1-02: audited inside the same transaction as the import.
-    // Post-commit, a failed audit left every statement line and every
-    // auto-reconciliation committed while the caller saw an error — and a
-    // retry re-imports the same file, because nothing about this import is
-    // idempotent. The audit row is the only record of what was already
-    // brought in, so it must not be the part that can go missing.
-    const matchedCount = matched.filter((m) => m.match).length;
-    await writeAudit(tx, { id: actor!.id, role: actor!.role }, {
-      module: "Finance",
-      recordId: siteId,
-      afterValue: `Imported ${lines.length} bank statement lines, ${matchedCount} auto-matched, ${lines.length - matchedCount} unmatched, ${errors.length} rows skipped`,
-      reasonCode: "BANK_STATEMENT_IMPORTED",
+        await tx.bankStatementLine.create({
+          data: {
+            siteId,
+            statementDate: line.date,
+            direction: line.amount >= 0 ? "IN" : "OUT",
+            amount: Math.abs(line.amount),
+            description: line.description,
+            reference: line.reference || null,
+            importedById: actor!.id,
+            importId: batch.id,
+            ...(match && claimed ? { matchedKind: match.kind, matchedId: match.id, matchedAt: now } : {}),
+          },
+        });
+      }
+
+      await tx.bankStatementImport.update({ where: { id: batch.id }, data: { matchedCount: claimedCount } });
+
+      // PR4-R5-P1-02: audited inside the same transaction as the import.
+      // Post-commit, a failed audit left every statement line and every
+      // auto-reconciliation committed while the caller saw an error.
+      await writeAudit(tx, { id: actor!.id, role: actor!.role }, {
+        module: "Finance",
+        recordId: batch.id,
+        afterValue: `Imported ${lines.length} bank statement lines, ${claimedCount} auto-matched, ${lines.length - claimedCount} unmatched, ${errors.length} rows skipped`,
+        reasonCode: "BANK_STATEMENT_IMPORTED",
+      });
+      return true;
+    }, TX_OPTIONS)
+    .catch((e) => {
+      // A repeat of a file this site has already imported. Silent by
+      // design, like every other refusal here — and nothing was written,
+      // because the unique index rejected the very first statement.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") return false;
+      throw e;
     });
-  }, TX_OPTIONS);
+  if (!imported) return;
 
   revalidatePath("/finance");
 }

@@ -1111,6 +1111,120 @@ test("a failed audit insert rolls back the reconciliation flag itself", async ()
   assert.equal(await prisma.auditEvent.count({ where: { reasonCode: "BANK_RECONCILED", recordId: payment.id } }), 1);
 });
 
+// PR4-R6-P1-01 — bank-statement import: durable identity and an atomic
+// claim on each movement.
+//
+// The import decides its matches from a snapshot read BEFORE the
+// transaction. Two imports could therefore each pick the same
+// still-unreconciled payment and both commit a line claiming it, because
+// the update said `where: { id }` and nothing else. And with no identity
+// of any kind, the same file re-uploaded — or retried after a lost HTTP
+// response — inserted every line again.
+// Column order is the parser's own: date, description, reference, amount
+// (see parseBankStatementCsv). The header row is skipped.
+function statementForm(siteId: string, rows: { date: string; description: string; amount: string; reference?: string }[]) {
+  const body = ["date,description,reference,amount", ...rows.map((r) => `${r.date},${r.description},${r.reference ?? ""},${r.amount}`)].join(String.fromCharCode(10));
+  const data = new FormData();
+  data.set("siteId", siteId);
+  data.set("file", new File([body], "statement.csv", { type: "text/csv" }));
+  return data;
+}
+
+test("the same statement file cannot be imported twice", async () => {
+  const bill = await makeSupplierBill(siteA, 500);
+  await asUser(accountantId);
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "500" }));
+  const payment = await prisma.supplierPayment.findFirstOrThrow({ where: { supplierBillId: bill.id } });
+  const day = payment.paidAt.toISOString().slice(0, 10);
+
+  const rows = [{ date: day, amount: "-500", description: `${prefix}-STMT-1` }];
+  await finance.importBankStatement(statementForm(siteA, rows));
+
+  const afterFirst = await prisma.bankStatementLine.count({ where: { siteId: siteA } });
+  assert.ok(afterFirst >= 1, "the first import brings the line in");
+  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), 1);
+
+  // The identical file again — the ordinary "did that go through?" retry.
+  await finance.importBankStatement(statementForm(siteA, rows));
+  assert.equal(await prisma.bankStatementLine.count({ where: { siteId: siteA } }), afterFirst, "a repeat of the same file must add nothing");
+  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), 1, "and must not record a second import");
+
+  // A genuinely different statement still imports.
+  await finance.importBankStatement(statementForm(siteA, [{ date: day, amount: "-12.34", description: `${prefix}-STMT-2` }]));
+  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), 2, "a different file is not blocked by the first one's digest");
+});
+
+test("two concurrent imports cannot both claim the same payment", async () => {
+  const bill = await makeSupplierBill(siteA, 321);
+  await asUser(accountantId);
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "321" }));
+  const payment = await prisma.supplierPayment.findFirstOrThrow({ where: { supplierBillId: bill.id } });
+  const day = payment.paidAt.toISOString().slice(0, 10);
+
+  // Two DIFFERENT files (different digests, so neither is refused as a
+  // repeat) that describe the same bank movement — exactly the race: both
+  // read the payment as unreconciled and both pick it.
+  await Promise.all([
+    finance.importBankStatement(statementForm(siteA, [{ date: day, amount: "-321", description: `${prefix}-RACE-A` }])),
+    finance.importBankStatement(statementForm(siteA, [{ date: day, amount: "-321", description: `${prefix}-RACE-B` }])),
+  ]);
+
+  const claiming = await prisma.bankStatementLine.findMany({ where: { matchedKind: "supplierPayment", matchedId: payment.id } });
+  assert.equal(claiming.length, 1, "exactly one statement line may claim a financial movement");
+  // Both lines are still filed — the loser as UNMATCHED, because it is
+  // real bank data a human still has to reconcile.
+  const both = await prisma.bankStatementLine.findMany({ where: { description: { startsWith: `${prefix}-RACE-` } } });
+  assert.equal(both.length, 2, "the losing import still records its line, unmatched, rather than dropping real bank data");
+  assert.equal(both.filter((l) => l.matchedId === null).length, 1);
+  assert.equal((await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled, true);
+});
+
+test("a failed audit insert rolls back the whole statement import", async () => {
+  const bill = await makeSupplierBill(siteA, 77);
+  await asUser(accountantId);
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "77" }));
+  const payment = await prisma.supplierPayment.findFirstOrThrow({ where: { supplierBillId: bill.id } });
+  const day = payment.paidAt.toISOString().slice(0, 10);
+  const linesBefore = await prisma.bankStatementLine.count({ where: { siteId: siteA } });
+  const importsBefore = await prisma.bankStatementImport.count({ where: { siteId: siteA } });
+
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_xs_reject_import_audit() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."reasonCode" = 'BANK_STATEMENT_IMPORTED' THEN
+        RAISE EXCEPTION 'injected audit failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER test_xs_reject_import_audit_trigger BEFORE INSERT ON "AuditEvent"
+    FOR EACH ROW EXECUTE FUNCTION test_xs_reject_import_audit();
+  `);
+  const rows = [{ date: day, amount: "-77", description: `${prefix}-ROLLBACK` }];
+  try {
+    const failing = statementForm(siteA, rows);
+    await assert.rejects(() => finance.importBankStatement(failing));
+    assert.equal(await prisma.bankStatementLine.count({ where: { siteId: siteA } }), linesBefore, "no statement line may survive");
+    assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore, "and no import identity either");
+    assert.equal(
+      (await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled,
+      false,
+      "and the movement must not be left reconciled by an import that did not commit",
+    );
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_reject_import_audit_trigger ON "AuditEvent";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_reject_import_audit();`);
+  }
+
+  // The rolled-back digest was never recorded, so the clean retry of the
+  // very same file is accepted — which is the whole point of rolling back.
+  await finance.importBankStatement(statementForm(siteA, rows));
+  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore + 1);
+  assert.equal((await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled, true);
+});
+
 after(async () => {
   const users = [operatorId, salesId, accountantId, adminId, salesManagerId, salesSupervisorId, supervisorId].filter(Boolean);
   await prisma.session.deleteMany({ where: { userId: { in: users } } });
@@ -1120,6 +1234,8 @@ after(async () => {
   const touchedAccounts = (await prisma.journalLine.findMany({ where: { siteId: { in: sites } }, select: { accountId: true } })).map((l) => l.accountId);
   await prisma.journalEntry.deleteMany({ where: { siteId: { in: sites } } });
   await prisma.account.deleteMany({ where: { id: { in: touchedAccounts.filter((id) => !initialAccountIds.includes(id)) }, journalLines: { none: {} } } });
+  await prisma.bankStatementLine.deleteMany({ where: { siteId: { in: [siteA, siteB].filter(Boolean) } } });
+  await prisma.bankStatementImport.deleteMany({ where: { siteId: { in: [siteA, siteB].filter(Boolean) } } });
   await prisma.cashTransaction.deleteMany({ where: { description: { startsWith: prefix } } });
   await prisma.supplierBill.deleteMany({ where: { billNumber: { startsWith: prefix } } });
   await prisma.supplierPayment.deleteMany({ where: { supplierBillId: { in: supplierBillIds } } });
@@ -1165,6 +1281,7 @@ after(async () => {
   assert.equal(await prisma.supplierBill.count({ where: { billNumber: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.cashTransaction.count({ where: { description: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.supplier.count({ where: { name: { startsWith: prefix } } }), 0);
+  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: { in: [siteA, siteB].filter(Boolean) } } }), 0);
   assert.equal(await prisma.opportunity.count({ where: { opportunityNumber: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.fieldVisit.count({ where: { visitNumber: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.quote.count({ where: { quoteNumber: { startsWith: prefix } } }), 0);

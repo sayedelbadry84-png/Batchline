@@ -83,6 +83,7 @@ model User {
   maintenanceTicketsAssigned        MaintenanceTicket[]       @relation("MaintenanceAssignedTo")
   cashTransactionsCreated           CashTransaction[]         @relation("CashTransactionCreatedBy")
   bankStatementLinesImported        BankStatementLine[]       @relation("BankStatementLineImportedBy")
+  bankStatementImportsCreated       BankStatementImport[]     @relation("BankStatementImportImportedBy")
   calibrationRecords                CalibrationRecord[]
   internalAuditsAsAuditor           InternalAudit[]           @relation("InternalAuditAuditor")
   internalAuditsCreated             InternalAudit[]           @relation("InternalAuditCreatedBy")
@@ -243,6 +244,7 @@ model Site {
   zatcaSettings            ZatcaSettings?
   wpsSettings              WpsSettings?
   bankStatementLines       BankStatementLine[]
+  bankStatementImports     BankStatementImport[]
   sparePartIssuances       SparePartIssuance[]
   calibratedInstruments    CalibratedInstrument[]
 }
@@ -2871,10 +2873,38 @@ model CashTransaction {
 // matchedKind/matchedId point at whichever of Payment/SupplierPayment/
 // CashTransaction the auto-matcher (or a human) linked it to — same
 // three-kind shape reconcileMovement's own `kind` param already uses.
+// PR4-R6-P1-01, external-review validation round 6 (2026-09-11): one row
+// per bank-statement file actually imported.
+//
+// Before this, importBankStatement had no identity of any kind. The same
+// file could be uploaded twice — or once, with the HTTP response lost, and
+// retried — and every line was inserted again. The audit row recorded each
+// import faithfully; nothing ever read it back to notice the repeat.
+//
+// The digest is computed server-side from the file's own bytes, so the
+// identity cannot be spoofed or omitted by the caller, and it is unique
+// per site: the same statement legitimately belongs to only one factory.
+model BankStatementImport {
+  id           String   @id @default(cuid())
+  siteId       String
+  site         Site     @relation(fields: [siteId], references: [id])
+  // SHA-256 of the uploaded file's exact contents.
+  fileDigest   String
+  lineCount    Int
+  matchedCount Int
+  importedById String
+  importedBy   User     @relation("BankStatementImportImportedBy", fields: [importedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  lines BankStatementLine[]
+
+  @@unique([siteId, fileDigest])
+}
+
 model BankStatementLine {
-  id            String    @id @default(cuid())
+  id            String               @id @default(cuid())
   siteId        String
-  site          Site      @relation(fields: [siteId], references: [id])
+  site          Site                 @relation(fields: [siteId], references: [id])
   statementDate DateTime
   direction     String // IN, OUT
   amount        Float
@@ -2884,8 +2914,18 @@ model BankStatementLine {
   matchedId     String?
   matchedAt     DateTime?
   importedById  String
-  importedBy    User      @relation("BankStatementLineImportedBy", fields: [importedById], references: [id])
-  importedAt    DateTime  @default(now())
+  importedBy    User                 @relation("BankStatementLineImportedBy", fields: [importedById], references: [id])
+  importedAt    DateTime             @default(now())
+  // PR4-R6-P1-01: which import brought this line in. Nullable because
+  // rows imported before this existed have no batch to point at.
+  importId      String?
+  import        BankStatementImport? @relation(fields: [importId], references: [id])
+
+  // A statement line claims at most one financial movement, and a movement
+  // may be claimed by at most one line. Enforced as a PARTIAL unique index
+  // in the migration (Prisma cannot express `WHERE ... IS NOT NULL`), so
+  // unmatched lines — which all share NULL, NULL — are unconstrained.
+  @@index([siteId, statementDate])
 }
 
 // ---------------------------------------------------------------------------
