@@ -122,14 +122,18 @@ const PREFIX = `IDXCOV-${Date.now()}`;
 // be measuring the fixture rather than the index.
 const ROWS = 20000;
 const SCOPES = 5;
+// Trips are spread over this many trucks and drivers, which is also the
+// ceiling on how many may be open at once (see the partial unique indexes
+// noted below).
+const FLEET = 50;
 const WINDOW_FROM = "2025-06-01";
 const WINDOW_TO = "2025-06-30";
 
 const siteIds: string[] = [];
 const plantIds: string[] = [];
 let userId = "";
-let truckId = "";
-let driverId = "";
+const truckIds: string[] = [];
+const driverIds: string[] = [];
 let reservationId = "";
 let mixId = "";
 
@@ -146,10 +150,18 @@ before(async () => {
   });
   userId = user.id;
 
-  const truck = await prisma.truck.create({ data: { plantId: plantIds[0], code: `${PREFIX}-TRK`, drumCapacityM3: 10 } });
-  truckId = truck.id;
-  const driver = await prisma.employee.create({ data: { plantId: plantIds[0], name: `${PREFIX}-DRIVER`, role: "DRIVER" } });
-  driverId = driver.id;
+  // A fleet, not one truck. Two partial unique indexes from the
+  // production-lifecycle hardening — Trip_one_open_per_truck and
+  // Trip_one_open_per_driver — allow only ONE non-CLOSED trip per truck
+  // and per driver, so the first version of this fixture (20k IN_TRANSIT
+  // trips on a single truck) was rejected outright. That is the invariant
+  // doing its job; the fixture had to become realistic instead.
+  for (let i = 0; i < FLEET; i += 1) {
+    const truck = await prisma.truck.create({ data: { plantId: plantIds[0], code: `${PREFIX}-TRK-${i}`, drumCapacityM3: 10 } });
+    truckIds.push(truck.id);
+    const driver = await prisma.employee.create({ data: { plantId: plantIds[0], name: `${PREFIX}-DRIVER-${i}`, role: "DRIVER" } });
+    driverIds.push(driver.id);
+  }
 
   const customer = await prisma.customer.create({ data: { legalName: `${PREFIX}-CUSTOMER`, creditLimit: 1 } });
   const project = await prisma.project.create({ data: { name: `${PREFIX}-PROJECT`, customerId: customer.id, siteAddress: "Test" } });
@@ -199,16 +211,22 @@ before(async () => {
     mixId,
   );
 
+  // Only the first FLEET-1 rows are left open, and each of those lands on
+  // its own truck and driver (g % FLEET === g while g < FLEET), so the
+  // one-open-per-truck and one-open-per-driver indexes are satisfied. The
+  // rest are CLOSED, which those partial indexes do not constrain at all.
   await prisma.$executeRawUnsafe(
     `INSERT INTO "Trip"
        (id, "batchTicketId", "truckId", "driverId", status, "batchTime", "dischargeEnd", "createdAt", "updatedAt")
-     SELECT $1 || '-TP-' || g, $1 || '-BT-' || g, $2, $3,
-            CASE WHEN g % 2 = 0 THEN 'CLOSED' ELSE 'IN_TRANSIT' END,
+     SELECT $1 || '-TP-' || g, $1 || '-BT-' || g,
+            (ARRAY[${truckIds.map((_, i) => `$${i + 2}`).join(",")}])[1 + (g % ${FLEET})],
+            (ARRAY[${driverIds.map((_, i) => `$${i + FLEET + 2}`).join(",")}])[1 + (g % ${FLEET})],
+            CASE WHEN g < ${FLEET} THEN 'IN_TRANSIT' ELSE 'CLOSED' END,
             ${spread}, ${spread}, now(), now()
      FROM generate_series(1, ${ROWS}) g`,
     PREFIX,
-    truckId,
-    driverId,
+    ...truckIds,
+    ...driverIds,
   );
 
   // Without fresh statistics the planner costs these tables from whatever
@@ -307,7 +325,7 @@ test("the driver's own trip list uses Trip(driverId, status)", async () => {
     "driver trips",
     "Trip_driverId_status_idx",
     `SELECT id FROM "Trip" WHERE "driverId" = $1 AND status = 'CLOSED' ORDER BY "batchTime" DESC LIMIT 20`,
-    [driverId],
+    [driverIds[0]],
   );
 });
 
