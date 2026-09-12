@@ -6,6 +6,7 @@ import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
 import { UnofficialDocumentNotice } from "@/components/UnofficialDocumentNotice";
 import { PrintButton } from "@/components/PrintButton";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 // A corrected/amended delivery document (ملحق تذكرة توريد) — issued only
 // when a load was closed with a QUALITY_REJECTED return, showing the
@@ -76,6 +77,7 @@ const REASON_LABEL: Record<string, string> = {
 
 export default async function DeliveryNoteSupplementPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requirePageAccess("production");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { dict } = await getDictionary();
 
@@ -122,7 +124,7 @@ export default async function DeliveryNoteSupplementPage({ params }: { params: P
             <div className="mt-1 text-xs">
               {plant.name} — {plant.site.name}
               <span className="ms-2 font-mono">{plant.site.code}</span>
-              <span className="ms-2">{new Date(trip.dischargeEnd ?? trip.batchTime).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" })}</span>
+              <span className="ms-2">{dt.date(trip.dischargeEnd ?? trip.batchTime)}</span>
             </div>
             <div className="mt-1 text-xs font-semibold">{L.supplementStamp}</div>
             <div className="text-xs">{L.supplementStampEn}</div>
@@ -156,7 +158,7 @@ export default async function DeliveryNoteSupplementPage({ params }: { params: P
             label={L.qualitySignoff}
             value={
               wasteMemo?.status === "APPROVED" && wasteMemo.approvedBy
-                ? `${wasteMemo.approvedBy.name} — ${new Date(wasteMemo.approvedAt!).toLocaleDateString("en-GB")}`
+                ? `${wasteMemo.approvedBy.name} — ${dt.date(wasteMemo.approvedAt!)}`
                 : L.pending
             }
             className={wasteMemo?.status === "APPROVED" ? "text-end" : "text-end text-critical"}

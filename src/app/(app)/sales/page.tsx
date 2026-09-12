@@ -6,6 +6,7 @@ import { getDictionary } from "@/lib/i18n";
 import { getActiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { Modal } from "@/components/Modal";
 import { QuoteLineRows } from "@/components/QuoteLineRows";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 import {
   createOpportunity,
   updateOpportunity,
@@ -44,10 +45,6 @@ const quoteStatusChip: Record<string, string> = {
   EXPIRED: "bg-critical-soft text-critical",
 };
 
-function fmtDate(d: Date | null): string {
-  if (!d) return "—";
-  return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
-}
 
 // Shared two-stage approval cell — role pair depends on record type (see
 // APPROVAL_CONFIG in sales/actions.ts): Sales Supervisor -> Sales Manager
@@ -213,6 +210,7 @@ async function DashboardTab({
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["sales"];
   siteScope: Record<string, unknown>;
 }) {
+  const dt = await getDateFormatters();
   const [opportunities, quotes, dueVisits] = await Promise.all([
     prisma.opportunity.findMany({ where: siteScope, include: { owner: true, customer: true } }),
     prisma.quote.findMany({ where: siteScope }),
@@ -316,7 +314,7 @@ async function DashboardTab({
               {dueVisits.map((v) => (
                 <li key={v.id} className="rounded-md border border-border p-2 text-sm">
                   <div className="font-medium">{v.opportunity?.opportunityNumber ?? v.customer?.legalName ?? m.visits.none}</div>
-                  <div className="text-xs text-ink-muted">{fmtDate(v.followUpDate)}</div>
+                  <div className="text-xs text-ink-muted">{dt.date(v.followUpDate)}</div>
                 </li>
               ))}
             </ul>
@@ -447,6 +445,7 @@ async function OpportunitiesTab({
   newFlag?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const opportunities = await prisma.opportunity.findMany({
     where: siteScope,
     orderBy: { createdAt: "desc" },
@@ -568,7 +567,7 @@ async function OpportunitiesTab({
                     <span className={`${ui.chip} ${oppStatusChip[o.status] ?? ""}`}>{m.statusLabel[o.status as keyof typeof m.statusLabel] ?? o.status}</span>
                   </td>
                   <td className={ui.td}>{o.owner?.name ?? "—"}</td>
-                  <td className={ui.td}>{fmtDate(o.expectedCloseDate)}</td>
+                  <td className={ui.td}>{dt.date(o.expectedCloseDate)}</td>
                   <td className={ui.td}>
                     <ApprovalStatus recordType="opportunity" record={o} userRole={userRole} m={m} />
                   </td>
@@ -704,6 +703,7 @@ async function VisitsTab({
   newVisitFlag?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const [visits, opportunities, customers] = await Promise.all([
     prisma.fieldVisit.findMany({
       orderBy: { visitDate: "desc" },
@@ -741,7 +741,7 @@ async function VisitsTab({
               return (
                 <tr key={v.id}>
                   <td className={`${ui.td} font-mono text-xs`}>{v.visitNumber}</td>
-                  <td className={ui.td}>{fmtDate(v.visitDate)}</td>
+                  <td className={ui.td}>{dt.date(v.visitDate)}</td>
                   <td className={ui.td}>{v.opportunity?.opportunityNumber ?? v.customer?.legalName ?? m.visits.none}</td>
                   <td className={ui.td}>{v.visitedBy.name}</td>
                   <td className={ui.td}>{v.purpose ? m.visits.purposeLabel[v.purpose as keyof typeof m.visits.purposeLabel] ?? v.purpose : "—"}</td>
@@ -751,7 +751,7 @@ async function VisitsTab({
                   <td className={ui.td}>
                     {v.followUpDate ? (
                       <span className={overdue ? "font-medium text-critical" : ""}>
-                        {fmtDate(v.followUpDate)}
+                        {dt.date(v.followUpDate)}
                         {overdue && <span className={`${ui.chip} ms-2 bg-critical-soft text-critical`}>{m.visits.overdueBadge}</span>}
                       </span>
                     ) : "—"}
@@ -856,6 +856,7 @@ async function QuotesTab({
   newQuoteFlag?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const [quotes, quotableOpportunities] = await Promise.all([
     prisma.quote.findMany({
       where: siteScope,
@@ -905,7 +906,7 @@ async function QuotesTab({
                   <span className={`${ui.chip} ${quoteStatusChip[q.status] ?? ""}`}>{m.quotes.statusLabel[q.status as keyof typeof m.quotes.statusLabel] ?? q.status}</span>
                 </td>
                 <td className={`${ui.td} font-mono`}>{q.total.toFixed(2)} {q.currency}</td>
-                <td className={ui.td}>{fmtDate(q.validUntil)}</td>
+                <td className={ui.td}>{dt.date(q.validUntil)}</td>
                 <td className={ui.td}>
                   <ApprovalStatus recordType="quote" record={q} userRole={userRole} m={m} />
                 </td>

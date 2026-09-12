@@ -19,6 +19,7 @@ import {
   importBankStatement,
 } from "./actions";
 import { generateInvoiceForProject } from "../billing/actions";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation", "ledger", "vat"] as const;
 type FinanceTab = (typeof FINANCE_TABS)[number];
@@ -38,10 +39,6 @@ const invoiceStatusChip: Record<string, string> = {
   CANCELLED: "bg-critical-soft text-critical",
 };
 
-function fmtDate(d: Date | null): string {
-  if (!d) return "—";
-  return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
-}
 
 export default async function FinancePage({
   searchParams,
@@ -180,6 +177,7 @@ async function PayableTab({
   payId?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const [bills, purchaseOrders] = await Promise.all([
     prisma.supplierBill.findMany({
       where: siteScope,
@@ -257,7 +255,7 @@ async function PayableTab({
                   </td>
                   <td className={`${ui.td} font-mono`}>{b.total.toFixed(2)} {b.currency}</td>
                   <td className={`${ui.td} font-mono`}>{paid.toFixed(2)}</td>
-                  <td className={ui.td}>{fmtDate(b.dueDate)}</td>
+                  <td className={ui.td}>{dt.date(b.dueDate)}</td>
                   <td className={ui.td}>
                     <div className="flex flex-col gap-1">
                       {["UNPAID", "PARTIALLY_PAID"].includes(b.status) && (
@@ -378,6 +376,7 @@ async function CashTab({
   newCashFlag?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const transactions = await prisma.cashTransaction.findMany({
     where: siteScope,
     orderBy: { occurredAt: "desc" },
@@ -408,7 +407,7 @@ async function CashTab({
             {transactions.map((t) => (
               <tr key={t.id}>
                 <td className={`${ui.td} font-mono text-xs`}>{t.txnNumber}</td>
-                <td className={ui.td}>{fmtDate(t.occurredAt)}</td>
+                <td className={ui.td}>{dt.date(t.occurredAt)}</td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${t.direction === "IN" ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}>
                     {t.direction === "IN" ? m.cash.in : m.cash.out}
@@ -721,6 +720,7 @@ async function ReconciliationTab({
   siteId: string | null;
   sites: { id: string; code: string; name: string }[];
 }) {
+  const dt = await getDateFormatters();
   const [payments, supplierPayments, cashTransactions, unmatchedLines] = await Promise.all([
     // Payment/SupplierPayment carry no siteId of their own — scoped via
     // invoice.plant.siteId / supplierBill.siteId, same nested pattern
@@ -762,7 +762,7 @@ async function ReconciliationTab({
           <tbody>
             {rows.map((r) => (
               <tr key={`${r.kind}-${r.id}`}>
-                <td className={ui.td}>{fmtDate(r.date)}</td>
+                <td className={ui.td}>{dt.date(r.date)}</td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${r.direction === "IN" ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}>
                     {r.direction === "IN" ? m.cash.in : m.cash.out}
@@ -822,7 +822,7 @@ async function ReconciliationTab({
           <tbody>
             {unmatchedLines.map((l) => (
               <tr key={l.id}>
-                <td className={ui.td}>{fmtDate(l.statementDate)}</td>
+                <td className={ui.td}>{dt.date(l.statementDate)}</td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${l.direction === "IN" ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}>
                     {l.direction === "IN" ? m.cash.in : m.cash.out}
@@ -856,6 +856,7 @@ async function BillingTab({
   dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
   siteId: string | null;
 }) {
+  const dt = await getDateFormatters();
   const bm = dict.modules.billing;
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
@@ -1003,7 +1004,7 @@ async function BillingTab({
                       <div className="text-xs text-ink-muted">{t.mixGrade}</div>
                     </td>
                     <td className={`${ui.td} text-xs`}>{t.siteLocation ?? "—"}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{t.loadedAt ? new Date(t.loadedAt).toLocaleString() : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{t.loadedAt ? dt.dateTime(t.loadedAt) : "—"}</td>
                     <td className={ui.td}></td>
                     <td className={`${ui.td} font-mono tabular`}>{t.volumeM3} m³</td>
                     <td className={ui.td}></td>
@@ -1046,8 +1047,8 @@ async function BillingTab({
                 </td>
                 <td className={ui.td}>{inv.customer.legalName}</td>
                 <td className={ui.td}>{inv.project?.name ?? "—"}</td>
-                <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(inv.issueDate).toLocaleDateString()}</td>
-                <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(inv.dueDate).toLocaleDateString()}</td>
+                <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(inv.issueDate)}</td>
+                <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(inv.dueDate)}</td>
                 <td className={`${ui.td} font-mono tabular`} dir="ltr">{inv.total.toLocaleString()} {inv.currency}</td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${invoiceStatusChip[inv.status] ?? ""}`}>{dict.status[inv.status as keyof typeof dict.status] ?? inv.status}</span>

@@ -7,6 +7,7 @@ import { AdvanceTripForm } from "@/components/AdvanceTripForm";
 import { CloseTripFullForm } from "@/components/CloseTripFullForm";
 import { CloseTripWithReturnForm } from "@/components/CloseTripWithReturnForm";
 import { getActiveSiteId, tripPlantScopeWhere } from "@/lib/siteScope";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const statusChip: Record<string, string> = {
   LOADING: "bg-surface-alt text-ink-muted",
@@ -25,6 +26,7 @@ const dispositionChip: Record<string, string> = {
 
 export default async function TripsPage() {
   const user = await requirePageAccess("trips");
+  const dt = await getDateFormatters();
   const { dict } = await getDictionary();
   const m = dict.modules.trips;
   const siteId = await getActiveSiteId(user);
@@ -98,7 +100,7 @@ export default async function TripsPage() {
                 </td>
                 <td className={`${ui.td} text-xs`}>{t.batchTicket.reservation.siteLocation ?? "—"}</td>
                 <td className={`${ui.td} font-mono text-xs tabular`}>
-                  {t.batchTicket.batchCompletedAt ? new Date(t.batchTicket.batchCompletedAt).toLocaleString() : "—"}
+                  {t.batchTicket.batchCompletedAt ? dt.dateTime(t.batchTicket.batchCompletedAt) : "—"}
                 </td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${statusChip[t.status] ?? ""}`}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</span>
@@ -191,7 +193,7 @@ export default async function TripsPage() {
                 </td>
                 <td className={`${ui.td} text-xs`}>{t.batchTicket.reservation.siteLocation ?? "—"}</td>
                 <td className={`${ui.td} font-mono text-xs tabular`}>
-                  {t.batchTicket.batchCompletedAt ? new Date(t.batchTicket.batchCompletedAt).toLocaleString() : "—"}
+                  {t.batchTicket.batchCompletedAt ? dt.dateTime(t.batchTicket.batchCompletedAt) : "—"}
                 </td>
                 <td className={`${ui.td} font-mono tabular`}>{t.volumeDeliveredM3?.toFixed(1) ?? "—"} m³</td>
                 <td className={ui.td}>

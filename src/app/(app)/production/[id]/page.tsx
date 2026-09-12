@@ -20,6 +20,7 @@ import { ShortageOverridePanel, type ShortageSnapshotEntry } from "@/components/
 import { CancelBatchTicketForm } from "@/components/CancelBatchTicketForm";
 import { StartTripForm } from "@/components/StartTripForm";
 import { UpdateTripAssignmentForm } from "@/components/UpdateTripAssignmentForm";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -32,6 +33,7 @@ export default async function BatchTicketPage({
 }) {
   await requirePageAccess("production");
   const user = await getCurrentUser();
+  const dt = await getDateFormatters();
   const canReverseBatch = !!user && (await canPerformAction(user.role, "production", "reverseBatch"));
   const canRequestShortageOverride = !!user && (await canPerformAction(user.role, "production", "requestShortageOverride"));
   const canApproveShortageOverride = !!user && (await canPerformAction(user.role, "production", "approveShortageOverrideRequest"));
@@ -474,7 +476,7 @@ export default async function BatchTicketPage({
                   <span className={`${ui.chip} bg-critical-soft text-critical inline-block`}>{d.wasteNote(ticket.trip.drumReturn.returnedVolumeM3)}</span>
                   <span className={`${ui.chip} ${ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" ? "bg-good-soft text-good" : "bg-warn-soft text-warn"} inline-block`}>
                     {ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" && ticket.trip.drumReturn.wasteMemo.approvedBy
-                      ? d.wasteMemoApproved(ticket.trip.drumReturn.wasteMemo.approvedBy.name, new Date(ticket.trip.drumReturn.wasteMemo.approvedAt!).toLocaleDateString())
+                      ? d.wasteMemoApproved(ticket.trip.drumReturn.wasteMemo.approvedBy.name, dt.date(ticket.trip.drumReturn.wasteMemo.approvedAt!))
                       : d.wasteMemoPending}
                   </span>
                 </div>
@@ -522,7 +524,7 @@ export default async function BatchTicketPage({
                   <span className={`h-2 w-2 shrink-0 rounded-full ${reached ? "bg-good" : "bg-border"}`} />
                   <span className={reached ? "font-medium" : "text-ink-muted"}>{stage.label}</span>
                   {reached && (
-                    <span className="font-mono text-xs text-ink-muted" dir="ltr">{new Date(stage.at!).toLocaleString()}</span>
+                    <span className="font-mono text-xs text-ink-muted" dir="ltr">{dt.dateTime(stage.at!)}</span>
                   )}
                 </li>
               );

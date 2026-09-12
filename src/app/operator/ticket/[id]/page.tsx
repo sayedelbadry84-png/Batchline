@@ -13,6 +13,7 @@ import { StartTripForm } from "@/components/StartTripForm";
 import { ShortageOverridePanel, type ShortageSnapshotEntry } from "@/components/ShortageOverridePanel";
 import { canPerformAction } from "@/lib/permissions";
 import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const AGGREGATE_TYPES = new Set(["SAND", "COARSE_AGGREGATE"]);
 
@@ -22,6 +23,7 @@ export default async function OperatorTicketPage({
   params: Promise<{ id: string }>;
 }) {
   const user = await getCurrentUser();
+  const dt = await getDateFormatters();
   if (!user) redirect("/login");
   if (user.role !== "PLANT_OPERATOR" && user.role !== "ADMIN") redirect("/");
 
@@ -388,7 +390,7 @@ export default async function OperatorTicketPage({
               </span>
               <span className={`inline-block rounded-full px-2.5 py-0.5 font-mono text-xs ${ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" ? "bg-good-soft text-good" : "bg-warn-soft text-warn"}`}>
                 {ticket.trip.drumReturn.wasteMemo?.status === "APPROVED" && ticket.trip.drumReturn.wasteMemo.approvedBy
-                  ? d.wasteMemoApproved(ticket.trip.drumReturn.wasteMemo.approvedBy.name, new Date(ticket.trip.drumReturn.wasteMemo.approvedAt!).toLocaleDateString())
+                  ? d.wasteMemoApproved(ticket.trip.drumReturn.wasteMemo.approvedBy.name, dt.date(ticket.trip.drumReturn.wasteMemo.approvedAt!))
                   : d.wasteMemoPending}
               </span>
             </div>

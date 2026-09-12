@@ -6,6 +6,7 @@ import { createSilo, updateSilo, updateSiloLevel, setSiloSharing, createHopper, 
 import { approveMaterialRequisition, rejectMaterialRequisition } from "./actions";
 import { plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { SitePlantSelect } from "@/components/SitePlantSelect";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 function levelColor(pct: number, minPct: number) {
   if (pct <= minPct) return "bg-critical";
@@ -36,6 +37,7 @@ export async function RawMaterialsSilosTab({
   editId?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const m = dict.modules.silos;
 
   const [silos, sitesForPicker, hoppers, chemicalTanks, admixtureMaterials, siloMaterials, hopperMaterials, materialRequisitions] = await Promise.all([
@@ -227,7 +229,7 @@ export async function RawMaterialsSilosTab({
                 <div className="w-40 shrink-0 font-mono text-xs text-ink-muted tabular" dir="ltr">
                   {s.currentLevelTons.toFixed(1)} / {s.capacityTons.toFixed(1)} t ({pct.toFixed(0)}%)
                   <div className="text-ink-faint">
-                    {s.lastSensorReadingAt ? m.sensorAt(new Date(s.lastSensorReadingAt).toLocaleTimeString()) : m.noSensorFeed}
+                    {s.lastSensorReadingAt ? m.sensorAt(dt.time(s.lastSensorReadingAt)) : m.noSensorFeed}
                   </div>
                 </div>
                 <form action={updateSiloLevel} className="flex shrink-0 items-center gap-1">

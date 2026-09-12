@@ -6,6 +6,7 @@ import { effectiveSiteId, siteScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
 import { UnofficialDocumentNotice } from "@/components/UnofficialDocumentNotice";
 import { PrintButton } from "@/components/PrintButton";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const cellBorder = { border: "1px solid #000" };
 
@@ -31,6 +32,7 @@ function Cell({ label, value, className = "" }: { label: string; value: string |
 
 export default async function PurchaseOrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requirePageAccess("purchasing");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { dict } = await getDictionary();
   const m = dict.modules.purchasing;
@@ -79,8 +81,8 @@ export default async function PurchaseOrderDetailPage({ params }: { params: Prom
 
         <div className="grid grid-cols-3">
           <Cell label={d.poNumber} value={po.poNumber} />
-          <Cell label={d.date} value={new Date(po.orderDate).toLocaleDateString("en-GB")} className="text-center" />
-          <Cell label={d.expectedDate} value={po.expectedDate ? new Date(po.expectedDate).toLocaleDateString("en-GB") : null} className="text-end" />
+          <Cell label={d.date} value={dt.date(po.orderDate)} className="text-center" />
+          <Cell label={d.expectedDate} value={po.expectedDate ? dt.date(po.expectedDate) : null} className="text-end" />
         </div>
 
         <div className="grid grid-cols-1">

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 import {
   startInternalAudit,
   completeInternalAudit,
@@ -31,6 +32,7 @@ export default async function InternalAuditDetailPage({
   params: Promise<{ id: string }>;
 }) {
   await requirePageAccess("quality");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { dict } = await getDictionary();
   const m = dict.modules.quality;
@@ -69,7 +71,7 @@ export default async function InternalAuditDetailPage({
           </div>
           <div>
             <div className="text-xs text-ink-muted">{d.col.scheduledDate}</div>
-            <div className="font-mono tabular">{new Date(audit.scheduledDate).toLocaleDateString()}</div>
+            <div className="font-mono tabular">{dt.date(audit.scheduledDate)}</div>
           </div>
           <div>
             <div className="text-xs text-ink-muted">{d.isoClauseScope}</div>
@@ -77,7 +79,7 @@ export default async function InternalAuditDetailPage({
           </div>
           <div>
             <div className="text-xs text-ink-muted">{d.startedAt}</div>
-            <div className="font-mono tabular">{audit.startedAt ? new Date(audit.startedAt).toLocaleDateString() : "—"}</div>
+            <div className="font-mono tabular">{audit.startedAt ? dt.date(audit.startedAt) : "—"}</div>
           </div>
         </div>
 

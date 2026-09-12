@@ -6,6 +6,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
 import { PrintButton } from "@/components/PrintButton";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 type LedgerEntry = {
   date: Date;
@@ -15,9 +16,6 @@ type LedgerEntry = {
   credit: number;
 };
 
-function fmtDate(d: Date): string {
-  return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
-}
 
 // A statement is meant to be handed straight to the customer (or used for
 // collections) — it has to be the complete, real picture of what they owe
@@ -32,6 +30,7 @@ export default async function CustomerStatementPage({
   searchParams: Promise<{ from?: string; to?: string }>;
 }) {
   const user = await requirePageAccess("finance");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { from: fromRaw, to: toRaw } = await searchParams;
   const { dict } = await getDictionary();
@@ -177,7 +176,7 @@ export default async function CustomerStatementPage({
             )}
             {rows.map((r, i) => (
               <tr key={i}>
-                <td className={`${ui.td} font-mono text-xs tabular`}>{fmtDate(r.date)}</td>
+                <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(r.date)}</td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${typeChip[r.type]}`}>{s.typeLabel[r.type]}</span>
                 </td>

@@ -51,6 +51,7 @@ import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantS
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { invoiceAmountDue } from "@/lib/billing";
 import { AGING_BUCKETS } from "@/lib/aging";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const OUTLOOK_DAYS = 7;
@@ -124,6 +125,7 @@ export default async function ReportsPage({
   searchParams: Promise<{ tab?: string; from?: string; to?: string; site?: string; plant?: string; role?: string }>;
 }) {
   const user = await requirePageAccess("reports");
+  const dt = await getDateFormatters();
   const { dict } = await getDictionary();
   const m = dict.modules.reports;
   const { tab: tabRaw, from: fromRaw, to: toRaw, site: siteIdRaw, plant: plantIdRaw, role: roleRaw } = await searchParams;
@@ -770,9 +772,9 @@ export default async function ReportsPage({
                     <td className={`${ui.td} text-xs`}>{t.reservation.siteLocation ?? "—"}</td>
                     <td className={`${ui.td} font-mono tabular`}>{t.volumeM3} m³</td>
                     <td className={ui.td}>{dict.status[t.status as keyof typeof dict.status] ?? t.status}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(t.releasedAt).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(t.releasedAt)}</td>
                     <td className={`${ui.td} font-mono text-xs tabular`}>
-                      {t.batchCompletedAt ? new Date(t.batchCompletedAt).toLocaleString() : "—"}
+                      {t.batchCompletedAt ? dt.dateTime(t.batchCompletedAt) : "—"}
                     </td>
                   </tr>
                 ))}
@@ -817,7 +819,7 @@ export default async function ReportsPage({
               <tbody>
                 {incoming.rows.map((r) => (
                   <tr key={r.id}>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.receivedAt).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(r.receivedAt)}</td>
                     <td className={ui.td}>{r.supplier.name}</td>
                     <td className={ui.td}>{r.material.name}</td>
                     <td className={`${ui.td} font-mono tabular`}>{r.netWeightKg.toFixed(0)} kg</td>
@@ -1046,7 +1048,7 @@ export default async function ReportsPage({
                   const marginPct = ((r.breakStrengthMpa - r.targetStrengthMpa) / r.targetStrengthMpa) * 100;
                   return (
                     <tr key={r.id}>
-                      <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.testedOn).toLocaleDateString()}</td>
+                      <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(r.testedOn)}</td>
                       <td className={`${ui.td} font-mono text-xs`} dir="ltr">{ticket.ticketNumber}</td>
                       <td className={ui.td}>
                         {ticket.reservation.project.name}
@@ -1149,7 +1151,7 @@ export default async function ReportsPage({
                         {dict.modules.maintenance.statusLabel[t.status as keyof typeof dict.modules.maintenance.statusLabel] ?? t.status}
                       </span>
                     </td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(t.createdAt).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(t.createdAt)}</td>
                     <td className={ui.td}>{t.assignedTo?.name ?? "—"}</td>
                     <td className={`${ui.td} font-mono tabular`}>{fmt(t.downtimeHours, 1)}</td>
                     <td className={`${ui.td} font-mono tabular`}>{fmt((t.laborCost ?? 0) + (t.partsCost ?? 0), 0)}</td>
@@ -1219,7 +1221,7 @@ export default async function ReportsPage({
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{inv.invoiceNumber}</td>
                     <td className={ui.td}>{inv.customer.legalName}</td>
                     <td className={ui.td}>{inv.project?.name ?? "—"}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(inv.dueDate).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(inv.dueDate)}</td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${inv.bucket === "current" ? "bg-surface-alt text-ink-muted" : "bg-critical-soft text-critical"}`}>
                         {dict.modules.finance.aging.bucketLabel[inv.bucket]}
@@ -1292,7 +1294,7 @@ export default async function ReportsPage({
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{bill.billNumber}</td>
                     <td className={ui.td}>{bill.supplier.name}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{bill.purchaseOrder?.poNumber ?? "—"}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(bill.dueDate).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(bill.dueDate)}</td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${bill.bucket === "current" ? "bg-surface-alt text-ink-muted" : "bg-critical-soft text-critical"}`}>
                         {dict.modules.finance.aging.bucketLabel[bill.bucket]}
@@ -1384,7 +1386,7 @@ export default async function ReportsPage({
               <tbody>
                 {cashLedgerData.rows.map((t) => (
                   <tr key={t.id}>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(t.occurredAt).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(t.occurredAt)}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.txnNumber}</td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${t.direction === "IN" ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}>
@@ -1472,7 +1474,7 @@ export default async function ReportsPage({
                       </span>
                     </td>
                     <td className={ui.td}>{o.owner?.name ?? "—"}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{o.expectedCloseDate ? new Date(o.expectedCloseDate).toLocaleDateString() : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{o.expectedCloseDate ? dt.date(o.expectedCloseDate) : "—"}</td>
                   </tr>
                 ))}
                 {salesPipelineData.rows.length === 0 && (
@@ -1548,7 +1550,7 @@ export default async function ReportsPage({
                       </span>
                     </td>
                     <td className={`${ui.td} font-mono tabular`}>{q.total.toFixed(2)} {q.currency}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{q.validUntil ? new Date(q.validUntil).toLocaleDateString() : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{q.validUntil ? dt.date(q.validUntil) : "—"}</td>
                   </tr>
                 ))}
                 {quotesData.rows.length === 0 && (
@@ -1644,8 +1646,8 @@ export default async function ReportsPage({
                       </span>
                     </td>
                     <td className={`${ui.td} font-mono tabular`}>{o.total.toFixed(2)} {o.currency}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(o.orderDate).toLocaleDateString()}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{o.expectedDate ? new Date(o.expectedDate).toLocaleDateString() : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(o.orderDate)}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{o.expectedDate ? dt.date(o.expectedDate) : "—"}</td>
                   </tr>
                 ))}
                 {purchaseOrdersData.rows.length === 0 && (
@@ -1770,14 +1772,14 @@ export default async function ReportsPage({
                       {r.employee.code && <div className="text-xs text-ink-muted" dir="ltr">{r.employee.code}</div>}
                     </td>
                     <td className={ui.td}>{r.employee.role}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.date).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(r.date)}</td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${r.status === "PRESENT" ? "bg-good-soft text-good" : r.status === "ABSENT" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
                         {dict.modules.employees.attendance.statusLabel[r.status as keyof typeof dict.modules.employees.attendance.statusLabel] ?? r.status}
                       </span>
                     </td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{r.checkInAt ? new Date(r.checkInAt).toLocaleTimeString() : "—"}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{r.checkOutAt ? new Date(r.checkOutAt).toLocaleTimeString() : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{r.checkInAt ? dt.time(r.checkInAt) : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{r.checkOutAt ? dt.time(r.checkOutAt) : "—"}</td>
                   </tr>
                 ))}
                 {attendanceData.rows.length === 0 && (
@@ -1846,8 +1848,8 @@ export default async function ReportsPage({
                   <tr key={r.id}>
                     <td className={ui.td}>{r.employee.name}</td>
                     <td className={ui.td}>{dict.modules.employees.leave.typeLabel[r.type as keyof typeof dict.modules.employees.leave.typeLabel] ?? r.type}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.startDate).toLocaleDateString()}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.endDate).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(r.startDate)}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(r.endDate)}</td>
                     <td className={`${ui.td} font-mono tabular`}>{r.daysCount}</td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${r.status === "APPROVED" ? "bg-good-soft text-good" : r.status === "REJECTED" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
@@ -2081,7 +2083,7 @@ export default async function ReportsPage({
               <tbody>
                 {finishedGoodsData.rows.map((mv) => (
                   <tr key={mv.id}>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(mv.occurredAt).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(mv.occurredAt)}</td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${mv.direction === "IN" ? "bg-good-soft text-good" : "bg-surface-alt text-ink-muted"}`}>
                         {dict.modules.warehouses.finishedGoods.directionLabel[mv.direction as keyof typeof dict.modules.warehouses.finishedGoods.directionLabel] ?? mv.direction}
@@ -2244,7 +2246,7 @@ export default async function ReportsPage({
               <tbody>
                 {returnsData.rows.map((r) => (
                   <tr key={r.id}>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{r.trip.dischargeEnd ? new Date(r.trip.dischargeEnd).toLocaleDateString() : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{r.trip.dischargeEnd ? dt.date(r.trip.dischargeEnd) : "—"}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{r.trip.truck.code}</td>
                     <td className={ui.td}>{r.trip.driver.name}</td>
                     <td className={ui.td}>
@@ -2269,7 +2271,7 @@ export default async function ReportsPage({
                         <>
                           <span className={`${ui.chip} ${r.wasteMemo?.status === "APPROVED" ? "bg-good-soft text-good" : "bg-warn-soft text-warn"}`}>
                             {r.wasteMemo?.status === "APPROVED" && r.wasteMemo.approvedBy
-                              ? dict.modules.production.detail.wasteMemoApproved(r.wasteMemo.approvedBy.name, new Date(r.wasteMemo.approvedAt!).toLocaleDateString())
+                              ? dict.modules.production.detail.wasteMemoApproved(r.wasteMemo.approvedBy.name, dt.date(r.wasteMemo.approvedAt!))
                               : dict.modules.production.detail.wasteMemoPending}
                           </span>
                           {r.wasteMemo?.approvalNote && (
@@ -2386,7 +2388,7 @@ export default async function ReportsPage({
               <tbody>
                 {tripsData.rows.map((t) => (
                   <tr key={t.id}>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{t.dischargeEnd ? new Date(t.dischargeEnd).toLocaleString() : "—"}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{t.dischargeEnd ? dt.dateTime(t.dischargeEnd) : "—"}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.truck.code}</td>
                     <td className={ui.td}>{t.driver.name}</td>
                     <td className={ui.td}>
@@ -2404,7 +2406,7 @@ export default async function ReportsPage({
                     </td>
                     <td className={`${ui.td} text-xs`}>{t.batchTicket.reservation.siteLocation ?? "—"}</td>
                     <td className={`${ui.td} font-mono text-xs tabular`}>
-                      {t.batchTicket.batchCompletedAt ? new Date(t.batchTicket.batchCompletedAt).toLocaleString() : "—"}
+                      {t.batchTicket.batchCompletedAt ? dt.dateTime(t.batchTicket.batchCompletedAt) : "—"}
                     </td>
                     <td className={`${ui.td} font-mono tabular`}>{fmt(t.volumeDeliveredM3, 1, " m³")}</td>
                   </tr>

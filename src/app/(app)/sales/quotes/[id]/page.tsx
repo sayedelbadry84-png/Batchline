@@ -7,6 +7,7 @@ import { getDictionary } from "@/lib/i18n";
 import { UnofficialDocumentNotice } from "@/components/UnofficialDocumentNotice";
 import { PrintButton } from "@/components/PrintButton";
 import { convertQuoteLineToReservation } from "../../actions";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const cellBorder = { border: "1px solid #000" };
 
@@ -31,6 +32,7 @@ function Cell({ label, value, className = "" }: { label: string; value: string |
 
 export default async function QuoteDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requirePageAccess("sales");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { dict } = await getDictionary();
   const m = dict.modules.sales;
@@ -80,8 +82,8 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
 
         <div className="grid grid-cols-3">
           <Cell label={d.quoteNumber} value={quote.quoteNumber} />
-          <Cell label={d.date} value={new Date(quote.createdAt).toLocaleDateString("en-GB")} className="text-center" />
-          <Cell label={d.validUntil} value={quote.validUntil ? new Date(quote.validUntil).toLocaleDateString("en-GB") : null} className="text-end" />
+          <Cell label={d.date} value={dt.date(quote.createdAt)} className="text-center" />
+          <Cell label={d.validUntil} value={quote.validUntil ? dt.date(quote.validUntil) : null} className="text-end" />
         </div>
 
         <div className="grid grid-cols-2">

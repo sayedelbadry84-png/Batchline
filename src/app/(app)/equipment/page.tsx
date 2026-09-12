@@ -19,6 +19,7 @@ import {
   updateSupportVehicle,
 } from "./actions";
 import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const TAB_KEYS = ["pumps", "mixers", "bulkers", "water", "loaders"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
@@ -143,6 +144,7 @@ async function MixersTab({
   statusOptions: readonly string[];
   siteId: string | null;
 }) {
+  const dt = await getDateFormatters();
   const [trucksRaw, drivers] = await Promise.all([
     prisma.truck.findMany({
       where: { ...plantScopeWhere(siteId) },
@@ -171,7 +173,7 @@ async function MixersTab({
       code: t.code,
       lastLat: t.lastLat!,
       lastLng: t.lastLng!,
-      pingLabel: t.lastPingAt ? `${m.mixers.lastPing} ${t.lastPingAt.toLocaleString()}` : m.mixers.noPing,
+      pingLabel: t.lastPingAt ? `${m.mixers.lastPing} ${dt.dateTime(t.lastPingAt)}` : m.mixers.noPing,
       driverName: t.defaultDriver?.name ?? null,
       status: t.status,
     }));
@@ -315,7 +317,7 @@ async function MixersTab({
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.plateNumber || "—"}</td>
                   <td className={ui.td}>
                     <div className="font-mono text-xs text-ink-muted" dir="ltr">
-                      {t.lastMaintenanceAt ? new Date(t.lastMaintenanceAt).toLocaleDateString() : m.neverServiced}
+                      {t.lastMaintenanceAt ? dt.date(t.lastMaintenanceAt) : m.neverServiced}
                     </div>
                     <div className="text-xs text-ink-faint">{m.tripsSince(t.maintenance.tripsSinceLastMaintenance)}</div>
                     {t.maintenance.dueForInspection && (
@@ -327,21 +329,21 @@ async function MixersTab({
                     </form>
                   </td>
                   <td className={ui.td}>
-                    {t.periodicInspectionDueAt ? new Date(t.periodicInspectionDueAt).toLocaleDateString() : "—"}
+                    {t.periodicInspectionDueAt ? dt.date(t.periodicInspectionDueAt) : "—"}
                     {(() => {
                       const flag = expiryFlag(t.periodicInspectionDueAt, nowMs, m.shared);
                       return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
                     })()}
                   </td>
                   <td className={ui.td}>
-                    {t.operatingCardExpiry ? new Date(t.operatingCardExpiry).toLocaleDateString() : "—"}
+                    {t.operatingCardExpiry ? dt.date(t.operatingCardExpiry) : "—"}
                     {(() => {
                       const flag = expiryFlag(t.operatingCardExpiry, nowMs, m.shared);
                       return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
                     })()}
                   </td>
                   <td className={ui.td}>
-                    {t.insurancePolicyExpiry ? new Date(t.insurancePolicyExpiry).toLocaleDateString() : "—"}
+                    {t.insurancePolicyExpiry ? dt.date(t.insurancePolicyExpiry) : "—"}
                     {(() => {
                       const flag = expiryFlag(t.insurancePolicyExpiry, nowMs, m.shared);
                       return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
@@ -451,6 +453,7 @@ async function PumpsTab({
   statusOptions: readonly string[];
   siteId: string | null;
 }) {
+  const dt = await getDateFormatters();
   const [pumpsRaw, assignments, unassignedReservations, pumpCrew] = await Promise.all([
     prisma.pump.findMany({
       where: { ...plantScopeWhere(siteId) },
@@ -636,7 +639,7 @@ async function PumpsTab({
                     </td>
                     <td className={ui.td}>
                       <div className="font-mono text-xs text-ink-muted" dir="ltr">
-                        {p.lastMaintenanceAt ? new Date(p.lastMaintenanceAt).toLocaleDateString() : m.neverServiced}
+                        {p.lastMaintenanceAt ? dt.date(p.lastMaintenanceAt) : m.neverServiced}
                       </div>
                       <div className="text-xs text-ink-faint">{m.tripsSince(p.maintenance.tripsSinceLastMaintenance)}</div>
                       {p.maintenance.dueForInspection && (
@@ -648,21 +651,21 @@ async function PumpsTab({
                       </form>
                     </td>
                     <td className={ui.td}>
-                      {p.periodicInspectionDueAt ? new Date(p.periodicInspectionDueAt).toLocaleDateString() : "—"}
+                      {p.periodicInspectionDueAt ? dt.date(p.periodicInspectionDueAt) : "—"}
                       {(() => {
                         const flag = expiryFlag(p.periodicInspectionDueAt, nowMs, m.shared);
                         return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
                       })()}
                     </td>
                     <td className={ui.td}>
-                      {p.operatingCardExpiry ? new Date(p.operatingCardExpiry).toLocaleDateString() : "—"}
+                      {p.operatingCardExpiry ? dt.date(p.operatingCardExpiry) : "—"}
                       {(() => {
                         const flag = expiryFlag(p.operatingCardExpiry, nowMs, m.shared);
                         return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
                       })()}
                     </td>
                     <td className={ui.td}>
-                      {p.insurancePolicyExpiry ? new Date(p.insurancePolicyExpiry).toLocaleDateString() : "—"}
+                      {p.insurancePolicyExpiry ? dt.date(p.insurancePolicyExpiry) : "—"}
                       {(() => {
                         const flag = expiryFlag(p.insurancePolicyExpiry, nowMs, m.shared);
                         return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
@@ -783,7 +786,7 @@ async function PumpsTab({
             <tbody>
               {assignments.map((a) => (
                 <tr key={a.id}>
-                  <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(a.scheduledStart).toLocaleString()}</td>
+                  <td className={`${ui.td} font-mono text-xs tabular`}>{dt.dateTime(a.scheduledStart)}</td>
                   <td className={`${ui.td} font-medium`} dir="ltr">{a.pump.code}</td>
                   <td className={ui.td}>
                     {a.reservation.project.name}
@@ -875,6 +878,7 @@ async function SupportVehicleTab({
   tab: TabKey;
   siteId: string | null;
 }) {
+  const dt = await getDateFormatters();
   const type = SUPPORT_TYPE[tab]!;
   const driverRole = SUPPORT_DRIVER_ROLE[tab]!;
 
@@ -1006,21 +1010,21 @@ async function SupportVehicleTab({
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{v.chassisNumber || "—"}</td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{v.plateNumber || "—"}</td>
                   <td className={ui.td}>
-                    {v.periodicInspectionDueAt ? new Date(v.periodicInspectionDueAt).toLocaleDateString() : "—"}
+                    {v.periodicInspectionDueAt ? dt.date(v.periodicInspectionDueAt) : "—"}
                     {(() => {
                       const flag = expiryFlag(v.periodicInspectionDueAt, nowMs, m.shared);
                       return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
                     })()}
                   </td>
                   <td className={ui.td}>
-                    {v.operatingCardExpiry ? new Date(v.operatingCardExpiry).toLocaleDateString() : "—"}
+                    {v.operatingCardExpiry ? dt.date(v.operatingCardExpiry) : "—"}
                     {(() => {
                       const flag = expiryFlag(v.operatingCardExpiry, nowMs, m.shared);
                       return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
                     })()}
                   </td>
                   <td className={ui.td}>
-                    {v.insurancePolicyExpiry ? new Date(v.insurancePolicyExpiry).toLocaleDateString() : "—"}
+                    {v.insurancePolicyExpiry ? dt.date(v.insurancePolicyExpiry) : "—"}
                     {(() => {
                       const flag = expiryFlag(v.insurancePolicyExpiry, nowMs, m.shared);
                       return flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>;
