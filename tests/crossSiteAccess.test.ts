@@ -1257,8 +1257,16 @@ test("an out-of-order silo reading is refused, and the newer level stands", asyn
     );
 
   try {
-    const newer = "2026-09-12T10:00:00.000Z";
-    const older = "2026-09-12T09:00:00.000Z";
+    // Relative to the real clock, never absolute: the route validates
+    // observedAt against Date.now() and refuses anything beyond a
+    // five-minute skew, so a hardcoded timestamp is a future date on any
+    // run before it and a stale one long after. (The first version of this
+    // test used fixed dates and CI refused them — the production guard
+    // working exactly as designed.)
+    const t = Date.now();
+    const older = new Date(t - 2 * 60 * 60 * 1000).toISOString();
+    const newer = new Date(t - 30 * 1000).toISOString();
+    const newest = new Date(t - 5 * 1000).toISOString();
 
     const first = await post({ siloId: silo.id, levelTons: 40, observedAt: newer });
     assert.equal(first.status, 200);
@@ -1289,13 +1297,13 @@ test("an out-of-order silo reading is refused, and the newer level stands", asyn
     assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: silo.id } })).currentLevelTons, 40);
 
     // A genuinely newer reading still applies.
-    const advanced = await post({ siloId: silo.id, levelTons: 55, observedAt: "2026-09-12T11:00:00.000Z" });
+    const advanced = await post({ siloId: silo.id, levelTons: 55, observedAt: newest });
     assert.equal((await advanced.json()).applied, true);
     assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: silo.id } })).currentLevelTons, 55);
 
     // A device clock far in the future is refused rather than stored —
     // storing it would pin the row and block every real reading after it.
-    const future = await post({ siloId: silo.id, levelTons: 5, observedAt: "2030-01-01T00:00:00.000Z" });
+    const future = await post({ siloId: silo.id, levelTons: 5, observedAt: new Date(t + 365 * 24 * 60 * 60 * 1000).toISOString() });
     assert.equal(future.status, 400);
     assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: silo.id } })).currentLevelTons, 55);
   } finally {
