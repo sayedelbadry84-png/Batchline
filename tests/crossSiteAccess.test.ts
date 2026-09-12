@@ -56,6 +56,10 @@ const finance = await import("../src/app/(app)/finance/actions");
 const plants = await import("../src/app/(app)/plants/actions");
 const reservations = await import("../src/app/(app)/reservations/actions");
 const production = await import("../src/app/(app)/production/actions");
+const { NextRequest } = await import("next/server");
+const scada = await import("../src/app/api/scada/silo-reading/route");
+const { hashApiKey } = await import("../src/lib/apiKeys");
+const { __resetTelemetryBurstForTesting } = await import("../src/lib/telemetry");
 
 const prefix = `TEST-SUITE-XS-${randomUUID().slice(0, 8)}`;
 
@@ -1225,6 +1229,85 @@ test("a failed audit insert rolls back the whole statement import", async () => 
   assert.equal((await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled, true);
 });
 
+// Integration audit (2026-09-12): a SCADA reading delayed in transit must
+// not overwrite a newer one that already landed.
+//
+// The route used to stamp the SERVER's receipt time and write
+// unconditionally by primary key, so the late reading won — and got a
+// fresh timestamp, leaving nothing in the row to show it was stale. The
+// silo level decides whether an auto-requisition fires, so this is an
+// operational error, not a cosmetic one.
+test("an out-of-order silo reading is refused, and the newer level stands", async () => {
+  __resetTelemetryBurstForTesting();
+  const silo = await prisma.silo.create({
+    data: { plantId: plantA, name: `${prefix}-SILO`, materialType: "CEMENT", capacityTons: 100, currentLevelTons: 10 },
+  });
+  const rawKey = randomUUID();
+  const key = await prisma.apiKey.create({
+    data: { siteId: siteA, label: prefix, keyHash: hashApiKey(rawKey), keyPrefix: "test", scope: "SCADA", createdById: adminId },
+  });
+
+  const post = (body: object) =>
+    scada.POST(
+      new NextRequest("http://localhost/api/scada/silo-reading", {
+        method: "POST",
+        headers: { authorization: `Bearer ${rawKey}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+
+  try {
+    const newer = "2026-09-12T10:00:00.000Z";
+    const older = "2026-09-12T09:00:00.000Z";
+
+    const first = await post({ siloId: silo.id, levelTons: 40, observedAt: newer });
+    assert.equal(first.status, 200);
+    assert.equal((await first.json()).applied, true);
+    assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: silo.id } })).currentLevelTons, 40);
+
+    // The delayed one. A 200 with applied:false, NOT a 4xx — a gateway
+    // redelivering a reading has done nothing wrong, and an error would
+    // put it in a retry loop over a message that can never be accepted.
+    const late = await post({ siloId: silo.id, levelTons: 95, observedAt: older });
+    assert.equal(late.status, 200);
+    assert.equal((await late.json()).applied, false, "a superseded reading reports that it was not applied");
+    const after = await prisma.silo.findUniqueOrThrow({ where: { id: silo.id } });
+    assert.equal(after.currentLevelTons, 40, "the newer level stands");
+    assert.equal(after.lastSensorReadingAt?.toISOString(), newer, "and the stored observation time is not pushed backwards");
+
+    // Nor does the superseded reading leave an audit row behind — which is
+    // also what stops duplicate telemetry filling that table.
+    assert.equal(
+      await prisma.auditEvent.count({ where: { recordId: silo.id, reasonCode: "SCADA_SENSOR_READING" } }),
+      1,
+      "only the applied reading is audited",
+    );
+
+    // Re-sending the exact same observation is idempotent: equal is not
+    // newer, so it changes nothing.
+    assert.equal((await (await post({ siloId: silo.id, levelTons: 77, observedAt: newer })).json()).applied, false);
+    assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: silo.id } })).currentLevelTons, 40);
+
+    // A genuinely newer reading still applies.
+    const advanced = await post({ siloId: silo.id, levelTons: 55, observedAt: "2026-09-12T11:00:00.000Z" });
+    assert.equal((await advanced.json()).applied, true);
+    assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: silo.id } })).currentLevelTons, 55);
+
+    // A device clock far in the future is refused rather than stored —
+    // storing it would pin the row and block every real reading after it.
+    const future = await post({ siloId: silo.id, levelTons: 5, observedAt: "2030-01-01T00:00:00.000Z" });
+    assert.equal(future.status, 400);
+    assert.equal((await prisma.silo.findUniqueOrThrow({ where: { id: silo.id } })).currentLevelTons, 55);
+  } finally {
+    await prisma.$transaction([
+      prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`,
+      prisma.auditEvent.deleteMany({ where: { recordId: silo.id } }),
+    ]);
+    await prisma.apiKey.delete({ where: { id: key.id } });
+    await prisma.silo.delete({ where: { id: silo.id } });
+  }
+});
+
 after(async () => {
   const users = [operatorId, salesId, accountantId, adminId, salesManagerId, salesSupervisorId, supervisorId].filter(Boolean);
   await prisma.session.deleteMany({ where: { userId: { in: users } } });
@@ -1282,6 +1365,8 @@ after(async () => {
   assert.equal(await prisma.cashTransaction.count({ where: { description: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.supplier.count({ where: { name: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.bankStatementImport.count({ where: { siteId: { in: [siteA, siteB].filter(Boolean) } } }), 0);
+  assert.equal(await prisma.silo.count({ where: { name: { startsWith: prefix } } }), 0);
+  assert.equal(await prisma.apiKey.count({ where: { label: prefix } }), 0);
   assert.equal(await prisma.opportunity.count({ where: { opportunityNumber: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.fieldVisit.count({ where: { visitNumber: { startsWith: prefix } } }), 0);
   assert.equal(await prisma.quote.count({ where: { quoteNumber: { startsWith: prefix } } }), 0);
