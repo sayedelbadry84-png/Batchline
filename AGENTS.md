@@ -173,19 +173,38 @@ established style. Hand-write the migration when you need `CHECK` or
 
 ## Known open defects
 
-Documented in the code review; don't reintroduce, and prefer fixing when you're already
-in the file:
+Verified against the code on 2026-09-12. **Re-verify before acting on any
+entry** — four of the nine previously listed here had already been fixed
+by other branches, and an agent that trusts this list instead of the code
+will re-investigate closed work or "re-fix" something that is already
+right.
 
-1. ZATCA chain generation has no transaction or lock — concurrent generation forks the chain
-2. Invoice numbering (`billing/actions.ts`) bypasses `withSequentialNumber`
-3. All money columns are `Float`
-4. `getClientIp` trusts client-supplied `x-forwarded-for`
-5. `anomaly.ts` outlier detection cannot fire below 9 samples (population σ vs 2.5 threshold)
-6. `parseNetDays` reads "2/10 Net 30" as 2 days
-7. Foreign keys are largely unindexed (~178 relations, 9 `@@index` declarations) — add composite indexes from real query shapes, never 178 single-column ones blindly
-8. The printable delivery note, purchase order and quotation are editable working copies, declared as such on the page and the print-out; they are NOT controlled documents backed by a versioned record
-9. No browser E2E suite, so the shared-tablet sign-in/sign-out scenario is proved only at the unit level
+1. All money columns are `Float` (see the money rule above). `parseMoneyInput`
+   in `src/lib/money.ts` bounds what can enter the ledger; the `Decimal`
+   migration is still the durable fix.
+2. Foreign keys are largely unindexed (~178 relations). Four targeted
+   indexes exist (AuditEvent, Session); add composite ones from real query
+   shapes with `EXPLAIN` evidence, never 178 single-column ones blindly.
+3. SCADA/telematics payloads carry no device timestamp, sequence or
+   idempotency key, so a delayed old reading can overwrite a newer one,
+   and neither route is rate limited. `lastUsedAt` is no longer written
+   per request.
+4. No `script-src`/`style-src` CSP — it needs a per-request nonce and
+   there is no middleware; the root layout's inline accent `<style>` is
+   the specific blocker. See the comment in `next.config.ts`.
+5. `reports/page.tsx` is one ~2,600-line page function.
+6. The printable delivery note, purchase order and quotation are editable
+   working copies, declared as such on the page and the print-out; they
+   are NOT controlled documents backed by a versioned record.
+7. No browser E2E suite, so the shared-tablet sign-in/sign-out scenario is
+   proved only at the unit level. A `playwright-testing` skill is installed.
+8. The push-subscription button reconciles a failed server registration,
+   but on mount a pre-existing local subscription still reports "enabled"
+   without asking the server whether it is registered.
 
-Closed since this list was written (do not re-report): `incentives/actions.ts`
-and `employees/actions.ts` site scoping, and TOTP replay within a window —
-all fixed on `main` by PR #3.
+Fixed since earlier revisions of this list — **do not re-report**: ZATCA
+chain generation (now Serializable with a site row lock), invoice
+numbering (now uses `withSequentialNumber`), `getClientIp` (see
+`src/lib/clientIp.ts`), `parseNetDays`, `anomaly.ts` detection,
+`incentives/actions.ts` and `employees/actions.ts` site scoping, and TOTP
+replay within a window.
