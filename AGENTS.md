@@ -132,6 +132,33 @@ break ZATCA XML validation, and residual float dust keeps fully-paid invoices ou
 Physical quantities (`volumeM3`, `currentLevelTons`, `actualMassKg`) stay `Float` —
 `inventoryLedger.ts` depends on epsilon comparisons. **Money → Decimal, physics → Float.**
 
+**7. Dates are formatted through `src/lib/datetime.ts` — never `toLocale*`**
+
+`new Date(x).toLocaleString()` formats in the *runtime's* zone: UTC in a Server
+Component on Vercel, the operator's device in a Client Component. Cairo and Riyadh
+are UTC+2/+3, so every server-rendered timestamp read two or three hours early, and
+a night-shift load was dated to the wrong day.
+
+The right zone is the **plant's**, not the viewer's — a load discharged at 14:30
+plant time is 14:30 on the delivery note wherever it is read. `Plant.timezone`
+already existed and was already audited; nothing rendered it until now.
+
+- Server Component: `const dt = await getDateFormatters();` (`@/lib/displayTimeZone`,
+  memoized per request), then `dt.date` / `dt.dateTime` / `dt.time` / `dt.dayTime`,
+  or `dt.with(value, options)` for a one-off shape.
+- Client Component: take `timeZone: string` as a prop and call
+  `createDateFormatters(timeZone)`. Never pass the `dt` bundle across the boundary —
+  its fields are functions, which are not serializable (see commit 5776765).
+- Nullish and unparseable values already render as `—`; don't re-add a guard.
+
+Locale is pinned to `en-GB` (day-first, 24h) rather than the UI language: these
+values sit in `font-mono tabular` cells marked `dir="ltr"`, which the Arabic
+locale's Arabic-Indic digits break. `tests/datetime.test.ts` fails the build if any
+`src/` file formats a date with `toLocale*` directly.
+
+`Number.prototype.toLocaleString` is a different method that shares the name — it
+formats money and is deliberately out of scope here (see the `Float` rule above).
+
 ## Financial paths need transactions
 
 Anything touching invoices, payments, journal entries, payroll, or ZATCA must run in
