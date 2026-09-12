@@ -140,6 +140,21 @@ async function deleteMovements(where: NonNullable<Parameters<typeof prisma.inven
   await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_movement_immutability = 'on'`, prisma.inventoryMovement.deleteMany({ where })]);
 }
 
+// Same shape as deleteMovements above, for the AuditEvent immutability
+// trigger added this round (PL-P2-03, first production-lifecycle
+// review) — this file's own teardown is the one legitimate reason to
+// bypass it, under its own distinct setting name. By actor, not by
+// recordId: this file's domain calls write AuditEvent rows against a mix
+// of recordIds (reservationId from closeReservationForId/
+// saveReservationMixRevision, but ALSO ticketId from
+// releaseTicketForReservation's own atomic audit) — a per-reservationId
+// sweep alone misses the ticket-keyed rows and leaves adminUserId still
+// referenced when the User delete below tries to null that FK, which the
+// trigger then blocks as an UPDATE outside the bypass.
+async function deleteAuditEventsByActor(actorId: string) {
+  await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`, prisma.auditEvent.deleteMany({ where: { actorId } })]);
+}
+
 // The DB-level immutability triggers added for this feature (RMR-P1-02)
 // block a plain delete/update of ReservationMixRevision(Component) rows —
 // this file's own teardown is the one legitimate reason to bypass that,
@@ -205,6 +220,17 @@ async function makeReservation(overrides: Partial<{ status: string; requestedVol
 }
 
 after(async () => {
+  // PL-R14-P1-01, fourteenth production-lifecycle review: completing a
+  // ticket STAGES one PendingAutoRequisition per resolved component
+  // inside completeBatchTicket's own transaction (PL-R10-P2-01). This
+  // suite completes a two-component ticket and never cleaned those rows
+  // up, so two of them survived into the next `npm test` run on the same
+  // database — where batchCompletion.test.ts's own precondition check
+  // correctly refused to run, taking 75 tests down with it. Cleaned up by
+  // this suite's OWN ticket ids: a global sweep here would hide exactly
+  // this class of leak rather than surface it.
+  if (ticketIds.length > 0) await prisma.pendingAutoRequisition.deleteMany({ where: { batchTicketId: { in: ticketIds } } });
+
   for (const id of ticketIds) {
     await deleteMovements({ sourceType: "BatchTicket", sourceId: id });
     await prisma.shortageOverrideRequest.deleteMany({ where: { batchTicketId: id } });
@@ -212,7 +238,6 @@ after(async () => {
     await cleanupDelete(() => prisma.batchTicket.delete({ where: { id } }));
   }
   for (const id of reservationIds) {
-    await prisma.auditEvent.deleteMany({ where: { recordId: id } });
     await deleteRevisionRows(id);
     await cleanupDelete(() => prisma.reservation.delete({ where: { id } }));
   }
@@ -237,6 +262,7 @@ after(async () => {
   await cleanupDelete(() => prisma.customer.delete({ where: { id: customerId } }));
   await cleanupDelete(() => prisma.plant.delete({ where: { id: plantId } }));
   await cleanupDelete(() => prisma.site.delete({ where: { id: siteId } }));
+  await deleteAuditEventsByActor(adminUserId);
   await cleanupDelete(() => prisma.user.delete({ where: { id: adminUserId } }));
 
   // Only THIS file's own unique prefix — never the bare "TEST-SUITE-"
@@ -248,8 +274,16 @@ after(async () => {
     prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-RMR-" } } }),
     prisma.plant.count({ where: { name: { startsWith: "TEST-SUITE-RMR-" } } }),
     prisma.user.count({ where: { name: { startsWith: "TEST-SUITE-RMR-" } } }),
+    // PL-R14-P1-01: the queue rows completing a ticket stages. Asserted
+    // by this suite's own ticket ids, so a leak shows up HERE rather than
+    // as a mystifying failure in whichever suite happens to run next.
+    ticketIds.length > 0 ? prisma.pendingAutoRequisition.count({ where: { batchTicketId: { in: ticketIds } } }) : Promise.resolve(0),
   ]);
-  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-RMR-* fixtures after teardown: [material, reservation, mix, site, plant, user] = ${JSON.stringify(residue)}`);
+  assert.deepEqual(
+    residue,
+    [0, 0, 0, 0, 0, 0, 0],
+    `leftover TEST-SUITE-RMR-* fixtures after teardown: [material, reservation, mix, site, plant, user, pendingAutoRequisition] = ${JSON.stringify(residue)}`,
+  );
 
   await prisma.$disconnect();
 });
@@ -380,7 +414,7 @@ test("completion deducts the revised quantities, and reversal credits back exact
   assert.ok(Math.abs(cementAfterComplete - (cementBefore - expectedCementDeductionTons)) < 1e-6);
   assert.ok(Math.abs(waterAfterComplete - (waterBefore - expectedWaterDeductionTons)) < 1e-6);
 
-  const reversal = await reverseBatchTicket(ticket.id, { actorId: adminUserId, reason: "TEST-SUITE-RMR-REVERSAL" });
+  const reversal = await reverseBatchTicket(ticket.id, { actorId: adminUserId, actorRole: "ADMIN", reason: "TEST-SUITE-RMR-REVERSAL" });
   assert.equal(reversal.status, "SUCCESS");
 
   const cementAfterReversal = (await prisma.silo.findUniqueOrThrow({ where: { id: cementSiloId } })).currentLevelTons;

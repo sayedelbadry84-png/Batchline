@@ -43,8 +43,19 @@ export async function updateSite(formData: FormData) {
   const accentColor = accentColorRaw && isValidHexColor(accentColorRaw) ? accentColorRaw.toLowerCase() : null;
   if (!id || !code || !name || !city) return;
 
-  const before = await prisma.site.findUnique({ where: { id } });
-  await prisma.site.update({ where: { id }, data: { code, name, city, country, accentColor } });
+  // BL-CR-P1-02, external-review validation: the default matrix lets
+  // PLANT_OPERATOR call this, and nothing checked WHICH site was being
+  // renamed — a crafted id could rewrite any factory's code, name, city
+  // and brand colour. The scope now sits in the write's own WHERE clause
+  // (a plain `update` cannot express it), so an out-of-scope id changes
+  // nothing and is indistinguishable from one that does not exist.
+  const allowedSiteId = effectiveSiteId(user);
+  const before = await prisma.site.findFirst({ where: { id, ...(allowedSiteId ? { id: allowedSiteId } : {}) } });
+  const updated = await prisma.site.updateMany({
+    where: { id, ...(allowedSiteId ? { id: allowedSiteId } : {}) },
+    data: { code, name, city, country, accentColor },
+  });
+  if (updated.count !== 1) return;
 
   await logAudit({
     module: "PlantManagement",

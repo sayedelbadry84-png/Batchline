@@ -1,6 +1,7 @@
 import "server-only";
 import { headers } from "next/headers";
 import { prisma } from "@/lib/prisma";
+import { resolveClientIp } from "@/lib/clientIp";
 
 const WINDOW_MINUTES = 15;
 // Deliberately higher than User.failedLoginAttempts' per-account threshold
@@ -12,10 +13,10 @@ const MAX_ATTEMPTS_PER_IP = 20;
 
 export async function getClientIp(): Promise<string> {
   const h = await headers();
-  // Vercel (and most proxies) set x-forwarded-for as "client, proxy1, proxy2...".
-  const forwarded = h.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0].trim();
-  return h.get("x-real-ip") ?? "unknown";
+  // The trust decision lives in src/lib/clientIp.ts, away from the
+  // request plumbing, so it can be tested against crafted headers
+  // without a server.
+  return resolveClientIp((name) => h.get(name));
 }
 
 export async function isIpRateLimited(ip: string): Promise<boolean> {

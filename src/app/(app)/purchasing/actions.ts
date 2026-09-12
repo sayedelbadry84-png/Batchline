@@ -1,6 +1,7 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
+import { resolvePlantBillingDefaults } from "@/lib/plantBilling";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope, resolvePlantIdForSite } from "@/lib/siteScope";
@@ -41,10 +42,7 @@ export async function createPurchaseOrder(formData: FormData) {
   if (!supplierId || !siteId || lines.length === 0) return;
   if (!isSiteInScope(siteId, effectiveSiteId(actor))) return;
 
-  const plantId = await resolvePlantIdForSite(siteId);
-  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId } }) : null;
-  const currency = plant?.currency ?? "EGP";
-  const taxRatePct = plant?.taxRatePct ?? 0;
+  const { currency, taxRatePct } = await resolvePlantBillingDefaults(siteId);
 
   const subtotal = lines.reduce((sum, l) => sum + l.lineTotal, 0);
   const taxAmount = subtotal * (taxRatePct / 100);
@@ -301,10 +299,7 @@ export async function createPurchaseOrderFromRequisitions(formData: FormData) {
   });
   if (requisitions.length === 0) return;
 
-  const plantId = await resolvePlantIdForSite(siteId);
-  const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId } }) : null;
-  const currency = plant?.currency ?? "EGP";
-  const taxRatePct = plant?.taxRatePct ?? 0;
+  const { currency, taxRatePct } = await resolvePlantBillingDefaults(siteId);
 
   const lines = requisitions.map((r) => {
     const unitPrice = picks.find((p) => p.id === r.id)!.unitPrice;

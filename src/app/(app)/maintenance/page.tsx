@@ -7,6 +7,7 @@ import { getActiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { getEquipmentOptions } from "@/lib/equipmentRegistry";
 import { Modal } from "@/components/Modal";
 import { EquipmentPicker } from "@/components/EquipmentPicker";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 import {
   createMaintenanceTicket,
   startMaintenanceTicket,
@@ -36,10 +37,6 @@ const priorityChip: Record<string, string> = {
   CRITICAL: "bg-critical-soft text-critical",
 };
 
-function fmtDate(d: Date | null): string {
-  if (!d) return "—";
-  return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
-}
 
 export default async function MaintenancePage({
   searchParams,
@@ -128,6 +125,7 @@ async function TicketsTab({
   completeId?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const tickets = await prisma.maintenanceTicket.findMany({
     where: siteScope,
     orderBy: [{ priority: "desc" }, { createdAt: "desc" }],
@@ -185,7 +183,7 @@ async function TicketsTab({
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${statusChip[t.status] ?? ""}`}>{m.statusLabel[t.status as keyof typeof m.statusLabel] ?? t.status}</span>
                 </td>
-                <td className={ui.td}>{fmtDate(t.scheduledFor)}</td>
+                <td className={ui.td}>{dt.date(t.scheduledFor)}</td>
                 <td className={ui.td}>{t.assignedTo?.name ?? "—"}</td>
                 <td className={ui.td}>
                   <div className="flex flex-col gap-1">
@@ -326,6 +324,7 @@ async function OrdersTab({
   dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
   siteScope: Record<string, unknown>;
 }) {
+  const dt = await getDateFormatters();
   const orders = await prisma.maintenanceOrder.findMany({
     where: { ticket: siteScope },
     orderBy: { createdAt: "desc" },
@@ -359,7 +358,7 @@ async function OrdersTab({
                   </td>
                   <td className={`${ui.td} font-mono tabular`}>{o.technicians.length}</td>
                   <td className={`${ui.td} font-mono tabular`}>{partsCost.toFixed(2)}</td>
-                  <td className={ui.td}>{fmtDate(o.createdAt)}</td>
+                  <td className={ui.td}>{dt.date(o.createdAt)}</td>
                   <td className={ui.td}>
                     <Link href={`/maintenance/orders/${o.id}`} className="text-xs font-medium text-accent-strong hover:underline">{m.orders.view}</Link>
                   </td>
@@ -393,6 +392,7 @@ async function PlansTab({
   newPlanFlag?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const plans = await prisma.maintenancePlan.findMany({
     where: { ...siteScope, active: true },
     orderBy: [{ nextDueAt: "asc" }],
@@ -427,10 +427,10 @@ async function PlansTab({
                     {p.intervalDays && p.intervalTrips ? " / " : ""}
                     {p.intervalTrips ? m.plans.everyTrips(p.intervalTrips) : ""}
                   </td>
-                  <td className={ui.td}>{fmtDate(p.lastCompletedAt)}</td>
+                  <td className={ui.td}>{dt.date(p.lastCompletedAt)}</td>
                   <td className={ui.td}>
                     <span className={overdue ? "font-medium text-critical" : ""}>
-                      {fmtDate(p.nextDueAt)}
+                      {dt.date(p.nextDueAt)}
                       {overdue && <span className={`${ui.chip} ms-2 bg-critical-soft text-critical`}>{m.plans.overdueBadge}</span>}
                     </span>
                   </td>

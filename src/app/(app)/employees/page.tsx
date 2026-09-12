@@ -22,6 +22,7 @@ import { generatePayrollRun } from "./payroll/actions";
 import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { RoleSelect } from "@/components/RoleSelect";
 import { TERMINATION_TYPES } from "@/lib/endOfService";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const ADMIN_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DISPATCHER", "ADMIN"] as const;
 const EMPLOYEE_STATUSES = ["ACTIVE", "FROZEN", "REMOVED"] as const;
@@ -73,6 +74,7 @@ export default async function EmployeesPage({
   searchParams: Promise<{ tab?: string; edit?: string; date?: string; reject?: string }>;
 }) {
   const user = await requirePageAccess("employees");
+  const dt = await getDateFormatters();
   const { dict } = await getDictionary();
   const m = dict.modules.employees;
   const { tab: tabRaw, edit: editId, date: dateRaw, reject: rejectId } = await searchParams;
@@ -477,7 +479,7 @@ export default async function EmployeesPage({
                       <td className={`${ui.td} font-mono text-xs`}>{l.requestNumber}</td>
                       <td className={ui.td}>{l.employee.name}</td>
                       <td className={ui.td}>{m.leave.typeLabel[l.type as keyof typeof m.leave.typeLabel] ?? l.type}</td>
-                      <td className={ui.td}>{new Date(l.startDate).toLocaleDateString("en-GB")} — {new Date(l.endDate).toLocaleDateString("en-GB")}</td>
+                      <td className={ui.td}>{dt.date(l.startDate)} — {dt.date(l.endDate)}</td>
                       <td className={`${ui.td} font-mono`}>{l.daysCount}</td>
                       <td className={ui.td}>
                         <span className={`${ui.chip} ${l.status === "APPROVED" ? "bg-good-soft text-good" : l.status === "REJECTED" || l.status === "CANCELLED" ? "bg-critical-soft text-critical" : "bg-warn-soft text-warn"}`}>
@@ -584,7 +586,7 @@ export default async function EmployeesPage({
                       <tr key={r.id}>
                         <td className={`${ui.td} font-mono text-xs`}>{r.runNumber}</td>
                         <td className={ui.td}>
-                          {new Date(r.periodStart).toLocaleDateString("en-GB")} — {new Date(r.periodEnd).toLocaleDateString("en-GB")}
+                          {dt.date(r.periodStart)} — {dt.date(r.periodEnd)}
                         </td>
                         <td className={ui.td}>
                           <span className={`${ui.chip} ${r.status === "PAID" ? "bg-good-soft text-good" : r.status === "APPROVED" ? "bg-accent-soft text-accent-strong" : r.status === "CANCELLED" ? "bg-critical-soft text-critical" : "bg-surface-alt text-ink-muted"}`}>
@@ -644,7 +646,7 @@ export default async function EmployeesPage({
                     <tr key={s.id}>
                       <td className={`${ui.td} font-mono text-xs`}>{s.settlementNumber}</td>
                       <td className={`${ui.td} font-medium`}>{s.employee.name}</td>
-                      <td className={ui.td}>{new Date(s.terminationDate).toLocaleDateString("en-GB")}</td>
+                      <td className={ui.td}>{dt.date(s.terminationDate)}</td>
                       <td className={ui.td}>{m.eos.typeLabel[s.terminationType as keyof typeof m.eos.typeLabel] ?? s.terminationType}</td>
                       <td className={`${ui.td} font-mono tabular`}>{s.yearsOfService.toFixed(1)}</td>
                       <td className={`${ui.td} font-mono tabular`} dir="ltr">{s.payableAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
@@ -850,7 +852,7 @@ export default async function EmployeesPage({
                       <td className={`${ui.td} font-mono text-xs`} dir="ltr">{e.plant.site.code}</td>
                       <td className={ui.td}>{e.shiftPattern || "—"}</td>
                       <td className={ui.td}>
-                        {e.licenseExpiry ? new Date(e.licenseExpiry).toLocaleDateString() : "—"}
+                        {e.licenseExpiry ? dt.date(e.licenseExpiry) : "—"}
                         {flag && <span className={`${ui.chip} ${flag.cls} ms-2`}>{flag.label}</span>}
                       </td>
                       <td className={ui.td}>

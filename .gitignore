@@ -43,3 +43,16 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# agent skills
+# Third-party skill content, installed with `npx skills add`. Deliberately
+# NOT committed: ~666KB of markdown this repo does not own or review,
+# which would otherwise land in Batchline's history and its diffs. Only
+# .claude/skills/ is ignored — .claude/launch.json IS tracked and must
+# stay that way.
+#
+# skills-lock.json IS committed: it pins each skill's source and content
+# hash, so `npx skills experimental_install` restores exactly these
+# versions on another machine.
+/.claude/skills/
+/.commandcode/

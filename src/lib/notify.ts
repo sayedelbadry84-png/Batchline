@@ -1,5 +1,57 @@
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { sendPushToUser } from "@/lib/push";
+
+// PL-R13-P1-03, thirteenth production-lifecycle review: the transactional
+// half of this module, for callers that must not record "notified"
+// separately from actually creating the notification.
+//
+// notify()/notifyRoles() below are the ordinary fire-and-forget entry
+// points: they own their own write and then push. A RETRYABLE background
+// job cannot use them, because the durable Notification rows and whatever
+// marks the job complete have to commit together or not at all —
+// otherwise a crash between the two leaves work that everything downstream
+// believes was delivered. These two run inside the CALLER's transaction
+// instead, and leave push to the caller after commit (push is best-effort
+// by design and must never hold a transaction open).
+
+// The same recipient resolution notifyRoles does, but on the caller's tx.
+export async function resolveRoleRecipients(
+  tx: Prisma.TransactionClient,
+  roles: readonly string[],
+  opts?: { siteId?: string | null },
+): Promise<string[]> {
+  const where =
+    opts?.siteId != null
+      ? { role: { in: [...roles] }, status: "ACTIVE" as const, OR: [{ role: "ADMIN" }, { plant: { siteId: opts.siteId } }] }
+      : { role: { in: [...roles] }, status: "ACTIVE" as const };
+  const users = await tx.user.findMany({ where, select: { id: true } });
+  return users.map((u) => u.id);
+}
+
+// dedupeKey + skipDuplicates is what makes re-running the enclosing
+// transaction safe: a retry after a rolled-back or crashed attempt
+// re-creates only the rows that are genuinely missing, never a second
+// copy for a user who already has this exact notification.
+export async function createNotificationsInTx(
+  tx: Prisma.TransactionClient,
+  userIds: string[],
+  params: { title: string; body?: string; link?: string; module: string },
+  dedupeKey: string,
+): Promise<void> {
+  if (userIds.length === 0) return;
+  await tx.notification.createMany({
+    data: userIds.map((userId) => ({ userId, ...params, dedupeKey })),
+    skipDuplicates: true,
+  });
+}
+
+// Fire-and-forget push for recipients whose in-app rows already committed.
+// Never throws (sendPushToUser swallows its own failures) — a push hiccup
+// must never turn an already-committed delivery into a failure.
+export async function pushToRecipients(userIds: string[], params: { title: string; body?: string; link?: string }): Promise<void> {
+  await Promise.all(userIds.map((userId) => sendPushToUser(userId, params)));
+}
 
 /**
  * The one entry point any server action calls to raise a notification —

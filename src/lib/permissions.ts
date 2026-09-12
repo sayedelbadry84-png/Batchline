@@ -58,6 +58,14 @@ export const MODULE_ROLES = {
   // reconciliation — kept tight, financial data rather than an
   // operational screen.
   finance: ["ACCOUNTANT", "ADMIN"],
+  // PL-R12-P2-03, twelfth production-lifecycle review: the dead-letter
+  // view for the two database-backed retry queues. A row parked here
+  // means a real consequence was abandoned (a purchasing requisition
+  // never opened, an orphaned delivery photo never cleaned up) — until
+  // this screen existed, the only evidence was a console line. Kept to
+  // the operations/management roster: this is remediation work, not
+  // day-to-day plant operation.
+  queues: ["ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER"],
 } as const satisfies Record<string, readonly string[] | null>;
 
 export type ModuleKey = keyof typeof MODULE_ROLES;
@@ -110,6 +118,7 @@ export const VIEW_NAV: { key: ModuleKey; href: string; labelKey: keyof Dictionar
   { key: "trips", href: "/trips", labelKey: "trips" },
   { key: "quality", href: "/quality", labelKey: "quality" },
   { key: "reports", href: "/reports", labelKey: "reports" },
+  { key: "queues", href: "/queues", labelKey: "queues" },
 ];
 
 export const MODULE_KEYS = Object.keys(MODULE_ROLES) as ModuleKey[];
@@ -153,10 +162,10 @@ export async function getAccessibleModules(role: string): Promise<ModuleKey[]> {
 // mirroring RhinoMaster's own example of splitting "create/edit a
 // booking" from "assign pumps" and "approve" within one module.
 // Shared by both requisition flows (spare parts in warehouses/actions.ts,
-// raw materials in production/actions.ts's maybeAutoRequisitionMaterial)
-// for who may approve one, and by the notification engine to know who to
-// notify when one auto-opens — centralized here so the two never drift
-// out of sync with each other.
+// raw materials via processPendingAutoRequisition/notifyRequisitionCreated
+// in materialRequisition.ts) for who may approve one, and by the
+// notification engine to know who to notify when one auto-opens —
+// centralized here so the two never drift out of sync with each other.
 export const REQUISITION_APPROVAL_ROLES = ["ADMIN", "PLANT_MANAGER", "PLANTS_MANAGER", "OPERATIONS_MANAGER"];
 
 // Who may approve/reject a ShortageOverrideRequest (P1-04) — also used by
@@ -202,6 +211,14 @@ export const ACTION_ROLES = {
     approveFinal: ["ADMIN"],
   },
   production: {
+    // PR4-R1 (second external-review validation round): taking over the
+    // unsent offline readings another sign-in left on this device
+    // re-attributes them, in the audit log, to whoever replays them —
+    // there is no way to preserve the original actor, because the replay
+    // is a fresh authenticated request. So it is deliberately NOT an
+    // everyday operator action: it needs the same sign-off level as a
+    // shortage override, and it is audited at the moment it is granted.
+    adoptOfflineQueue: SHORTAGE_OVERRIDE_DECISION_ROLES,
     release: ["PLANT_OPERATOR", "ADMIN"],
     manualBooking: ["PLANT_OPERATOR", "ADMIN"],
     complete: ["PLANT_OPERATOR", "ADMIN"],
@@ -215,13 +232,19 @@ export const ACTION_ROLES = {
     requestShortageOverride: ["PLANT_OPERATOR", "ADMIN"],
     approveShortageOverrideRequest: SHORTAGE_OVERRIDE_DECISION_ROLES,
     rejectShortageOverrideRequest: SHORTAGE_OVERRIDE_DECISION_ROLES,
-    deleteTicket: ["PLANT_OPERATOR", "ADMIN"],
-    // Soft-cancel (P2-01, fourth review) — the path for a non-terminal
-    // ticket that has a ShortageOverrideRequest on file, which deleteTicket
-    // can no longer actually delete (that request's own FK is ON DELETE
-    // RESTRICT, deliberately, so an approval decision's history is never
-    // silently erased). Same roster as deleteTicket — this replaces that
-    // action for those tickets, not a bigger or smaller authority.
+    // Soft-cancel — the only way to remove a non-terminal, not-yet-
+    // dispatched ticket now (PL-P1-04, first production-lifecycle
+    // review): a real hard-delete Server Action used to exist alongside
+    // this one for a ticket with no ShortageOverrideRequest on file, but
+    // its own pre-check (trip/status) ran outside any transaction or row
+    // lock, so a concurrent completeBatchTicket claim landing in that gap
+    // could post real inventory movements and THEN still have the row
+    // hard-deleted out from under them — orphaning ledger/audit
+    // references with no ticket left to explain them. cancelBatchTicket
+    // already claims the row atomically (the same updateMany-where-not-
+    // terminal pattern completeBatchTicket itself uses) and never posts
+    // or reverses inventory, so retiring the separate hard-delete path
+    // entirely closes the race rather than just tightening its timing.
     cancelTicket: ["PLANT_OPERATOR", "ADMIN"],
     // Reversing a completed ticket undoes real posted inventory movements
     // — a materially bigger, rarer action than completing or deleting one,
@@ -429,6 +452,10 @@ export const ACTION_ROLES = {
     createCertificate: ["QUALITY_SUPERVISOR", "ADMIN"],
     updateCertificate: ["QUALITY_SUPERVISOR", "ADMIN"],
     approveWasteMemo: ["QUALITY_SUPERVISOR", "ADMIN"],
+    // The denial half of the same decision (PL-R2-P1-02, second
+    // production-lifecycle review) — same authority as approving, since
+    // both are Quality's own call on a suspected rejection.
+    rejectWasteMemo: ["QUALITY_SUPERVISOR", "ADMIN"],
     recordWasteMemoNote: ["QUALITY_SUPERVISOR", "ADMIN"],
     createInstrument: ["QUALITY_SUPERVISOR", "ADMIN"],
     recordCalibration: ["QUALITY_SUPERVISOR", "ADMIN"],
@@ -446,6 +473,14 @@ export const ACTION_ROLES = {
     removeTrainingAttendee: ["QUALITY_SUPERVISOR", "ADMIN"],
     createMaterialLabTest: ["QUALITY_SUPERVISOR", "ADMIN"],
     setMaterialLabTestStatus: ["QUALITY_SUPERVISOR", "ADMIN"],
+  },
+  // PL-R12-P2-03: remediating an abandoned queue row is a deliberate
+  // operations decision, so it is narrower than merely VIEWING the
+  // dead-letter list — a plant manager can see what was dropped at their
+  // own site without being able to requeue or discard it.
+  queues: {
+    requeueDeadLetter: ["ADMIN", "OPERATIONS_MANAGER", "PLANTS_MANAGER"],
+    dismissDeadLetter: ["ADMIN", "OPERATIONS_MANAGER", "PLANTS_MANAGER"],
   },
 } as const satisfies Record<string, Record<string, readonly string[]>>;
 

@@ -7,6 +7,7 @@ import { getEquipmentOptions } from "@/lib/equipmentRegistry";
 import { MaintenanceOrderAndEquipmentFields } from "./MaintenanceOrderAndEquipmentFields";
 import type { CurrentUser } from "@/lib/session";
 import { createSparePart, receiveSparePart, issueSparePart, approveSparePartsRequisition, rejectSparePartsRequisition } from "./actions";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const requisitionStatusChip: Record<string, string> = {
   PENDING_APPROVAL: "bg-warn-soft text-warn",
@@ -17,10 +18,6 @@ const requisitionStatusChip: Record<string, string> = {
   CANCELLED: "bg-critical-soft text-critical",
 };
 
-function fmtDate(d: Date | null): string {
-  if (!d) return "—";
-  return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
-}
 
 // New — the Maintenance module's own inventory, distinct from raw
 // materials. See prisma/schema.prisma's SparePart/SparePartReceipt/
@@ -32,6 +29,7 @@ export async function SparePartsTab({
   dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
   user: CurrentUser | null;
 }) {
+  const dt = await getDateFormatters();
   const m = dict.modules.warehouses.spareParts;
   const siteId = await getActiveSiteId(user);
 
@@ -248,7 +246,7 @@ export async function SparePartsTab({
                   <td className={`${ui.td} font-mono tabular`}>{r.quantity}</td>
                   <td className={`${ui.td} font-mono tabular`}>{r.unitCost.toFixed(2)}</td>
                   <td className={ui.td}>{r.receivedBy.name}</td>
-                  <td className={ui.td}>{fmtDate(r.receivedAt)}</td>
+                  <td className={ui.td}>{dt.date(r.receivedAt)}</td>
                 </tr>
               ))}
               {receipts.length === 0 && (
@@ -344,7 +342,7 @@ export async function SparePartsTab({
                   </td>
                   <td className={ui.td}>{i.equipmentLabel ? `${dict.modules.maintenance.equipmentTypeLabel[i.equipmentType as keyof typeof dict.modules.maintenance.equipmentTypeLabel] ?? i.equipmentType} — ${i.equipmentLabel}` : "—"}</td>
                   <td className={ui.td}>{i.issuedBy.name}</td>
-                  <td className={ui.td}>{fmtDate(i.issuedAt)}</td>
+                  <td className={ui.td}>{dt.date(i.issuedAt)}</td>
                 </tr>
               ))}
               {directIssuances.length === 0 && (

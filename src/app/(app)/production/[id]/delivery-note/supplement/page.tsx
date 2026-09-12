@@ -2,8 +2,11 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { requirePageAccess } from "@/lib/session";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
+import { UnofficialDocumentNotice } from "@/components/UnofficialDocumentNotice";
 import { PrintButton } from "@/components/PrintButton";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 // A corrected/amended delivery document (ملحق تذكرة توريد) — issued only
 // when a load was closed with a QUALITY_REJECTED return, showing the
@@ -73,12 +76,23 @@ const REASON_LABEL: Record<string, string> = {
 };
 
 export default async function DeliveryNoteSupplementPage({ params }: { params: Promise<{ id: string }> }) {
-  await requirePageAccess("production");
+  const user = await requirePageAccess("production");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { dict } = await getDictionary();
 
-  const ticket = await prisma.batchTicket.findUnique({
-    where: { id },
+  // BL-CR-P1-01, external-review validation: the route parameter is not
+  // an authorization boundary. requirePageAccess above proves the caller
+  // may use this MODULE; it says nothing about whether this particular
+  // record belongs to their site. Folding the scope into the database
+  // predicate (findFirst, not findUnique-by-id) is what makes a
+  // cross-site id behave exactly like a nonexistent one — including for
+  // ADMIN, whose effectiveSiteId is null and whose predicate is
+  // therefore unrestricted, unchanged. Deliberately NOT a fetch-then-
+  // compare: a distinguishable "forbidden" answer still confirms the
+  // record exists.
+  const ticket = await prisma.batchTicket.findFirst({
+    where: { id, ...plantScopeWhere(effectiveSiteId(user)) },
     include: {
       reservation: { include: { project: { include: { customer: true } } } },
       mix: true,
@@ -96,6 +110,7 @@ export default async function DeliveryNoteSupplementPage({ params }: { params: P
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      <UnofficialDocumentNotice label={dict.common.unofficialDocument} />
       <div className="no-print flex items-center justify-between gap-3">
         <p className="text-xs text-ink-muted">{dict.modules.production.detail.deliveryNoteEditableHint}</p>
         <PrintButton label={dict.modules.production.detail.printSupplement} />
@@ -109,7 +124,7 @@ export default async function DeliveryNoteSupplementPage({ params }: { params: P
             <div className="mt-1 text-xs">
               {plant.name} — {plant.site.name}
               <span className="ms-2 font-mono">{plant.site.code}</span>
-              <span className="ms-2">{new Date(trip.dischargeEnd ?? trip.batchTime).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" })}</span>
+              <span className="ms-2">{dt.date(trip.dischargeEnd ?? trip.batchTime)}</span>
             </div>
             <div className="mt-1 text-xs font-semibold">{L.supplementStamp}</div>
             <div className="text-xs">{L.supplementStampEn}</div>
@@ -143,7 +158,7 @@ export default async function DeliveryNoteSupplementPage({ params }: { params: P
             label={L.qualitySignoff}
             value={
               wasteMemo?.status === "APPROVED" && wasteMemo.approvedBy
-                ? `${wasteMemo.approvedBy.name} — ${new Date(wasteMemo.approvedAt!).toLocaleDateString("en-GB")}`
+                ? `${wasteMemo.approvedBy.name} — ${dt.date(wasteMemo.approvedAt!)}`
                 : L.pending
             }
             className={wasteMemo?.status === "APPROVED" ? "text-end" : "text-end text-critical"}

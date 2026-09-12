@@ -83,6 +83,7 @@ model User {
   maintenanceTicketsAssigned        MaintenanceTicket[]       @relation("MaintenanceAssignedTo")
   cashTransactionsCreated           CashTransaction[]         @relation("CashTransactionCreatedBy")
   bankStatementLinesImported        BankStatementLine[]       @relation("BankStatementLineImportedBy")
+  bankStatementImportsCreated       BankStatementImport[]     @relation("BankStatementImportImportedBy")
   calibrationRecords                CalibrationRecord[]
   internalAuditsAsAuditor           InternalAudit[]           @relation("InternalAuditAuditor")
   internalAuditsCreated             InternalAudit[]           @relation("InternalAuditCreatedBy")
@@ -130,10 +131,24 @@ model User {
 
 model Session {
   id        String   @id @default(cuid())
+  // BL-CR-P1-05, external-review validation (2026-09-10): SHA-256 of the
+  // bearer token the browser holds. The token itself is 32 CSPRNG bytes
+  // and is never stored, so a database dump yields no usable cookie; `id`
+  // is once again only an identifier, not a credential. See
+  // src/lib/sessionToken.ts.
+  tokenHash String   @unique
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   createdAt DateTime @default(now())
+
+  // Security/health audit (2026-09-10): every immediate access revocation
+  // — password reset, role change, account disable — runs
+  // `deleteMany({ where: { userId } })`, and the daily cron sweeps by
+  // expiresAt. Neither had an index, so revoking one person's access
+  // scanned every live session in the system.
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 // The password step has passed but TOTP hasn't yet — the cookie only ever
@@ -143,6 +158,9 @@ model Session {
 // without ever having their password.
 model PendingTwoFactor {
   id        String   @id @default(cuid())
+  // Same bearer-token treatment as Session above (BL-CR-P1-05): this
+  // cookie also grants a step of authentication, so it is a credential.
+  tokenHash String   @unique
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
@@ -182,7 +200,7 @@ model LoginAttempt {
 // gain; every "site"/"plant" identifier in code still means exactly what
 // it always did, it's only what the screen prints that changed.
 model Site {
-  apiKeys ApiKey[]
+  apiKeys     ApiKey[]
   id          String   @id @default(cuid())
   // Short, human-assigned business code ("S1", "CAI") — distinct from the
   // internal id, which nobody reads or types. What every other model's
@@ -226,6 +244,7 @@ model Site {
   zatcaSettings            ZatcaSettings?
   wpsSettings              WpsSettings?
   bankStatementLines       BankStatementLine[]
+  bankStatementImports     BankStatementImport[]
   sparePartIssuances       SparePartIssuance[]
   calibratedInstruments    CalibratedInstrument[]
 }
@@ -836,6 +855,11 @@ model Reservation {
   batchTickets    BatchTicket[]
   pumpAssignments PumpAssignment[]
   mixRevisions    ReservationMixRevision[]
+
+  // Index audit (2026-09-12): the reservations board and the demand
+  // outlook both ask for one site's bookings in a pour window, filtered by
+  // status. Same scope-then-range ordering as the report models above.
+  @@index([siteId, status, pourWindowStart])
 }
 
 model Employee {
@@ -1135,6 +1159,13 @@ model MaterialReceipt {
   updatedAt           DateTime           @updatedAt
 
   materialLabTests MaterialLabTest[]
+
+  // Index audit (2026-09-12): consumption, cement intensity and the
+  // material-cost report all read plant scope + receivedAt range
+  // (reportQueries.ts:46, 355, 455). The `material: { type }` filter those
+  // last two add is a join against a table of a few dozen rows, so it
+  // belongs in the join, not in this index.
+  @@index([plantId, receivedAt])
 }
 
 // Digitizes the QC lab's own paper test forms for received raw materials
@@ -1287,6 +1318,24 @@ model BatchTicket {
   trip                     Trip?
   wasteMemos               WasteIncidentMemo[]
   shortageOverrideRequests ShortageOverrideRequest[]
+
+  // Index audit (2026-09-12): the two shapes reportQueries.ts actually
+  // runs against this table, and nothing else.
+  //
+  //   productionVolume  -> plant scope + releasedAt range, ordered by
+  //                        releasedAt (reportQueries.ts:35)
+  //   mixYield / cost   -> plant scope + status COMPLETE +
+  //                        batchCompletedAt range (reportQueries.ts:56, 81)
+  //
+  // plantId leads both because the site-scoped variant resolves to
+  // `plant: { siteId }` — a join that hands the planner a small set of
+  // plant ids and then probes this index once per id. Putting the date
+  // first would force a scan of every plant's tickets in the window.
+  //
+  // Deliberately not a third index on [status, batchCompletedAt]: no
+  // query asks for completed tickets across all plants at once.
+  @@index([plantId, releasedAt])
+  @@index([plantId, status, batchCompletedAt])
 }
 
 model BatchComponentActual {
@@ -1306,6 +1355,20 @@ model BatchComponentActual {
   // BEFORE batching (rather than crediting it back after, as today) is a
   // deeper sequencing fix left for a later phase.
   reclaimCreditMassKg Float       @default(0)
+  // Optimistic-concurrency tokens for actualMassKg/moisturePct — one per
+  // field, not one shared column (PL-R9-P1-03, ninth production-lifecycle
+  // review, replacing round 8's single `version`). A single shared column
+  // checked/incremented by two independent AutoSaveField instances made a
+  // normal sequential save of both fields on one page load falsely
+  // collide: saving actual bumped the shared version, so moisture's own
+  // still-0 ref then read back STALE_READING with no competing user or
+  // device anywhere. Splitting the token per field means an actual-field
+  // save can never be made to look stale by a moisture-field save, or
+  // vice versa, while a write still reaching the database with a stale
+  // expectedVersion for ITS OWN field — another tab, another device, a
+  // queued offline replay — is rejected outright exactly as before.
+  actualVersion       Int         @default(0)
+  moistureVersion     Int         @default(0)
 
   @@unique([batchTicketId, materialId])
 }
@@ -1471,6 +1534,23 @@ model Trip {
   testBatches        TestBatch[]
   invoiceLine        InvoiceLine?
   delayReports       TripDelayReport[]
+
+  // Index audit (2026-09-12): [status, dischargeEnd] serves EIGHT distinct
+  // report queries — delivery performance, reclaim, CO2e, crew incentives,
+  // pump utilisation and the cement/water intensity pair — every one of
+  // them `status: "CLOSED"` plus a dischargeEnd range
+  // (reportQueries.ts:203, 241, 300, 343, 347, 351, 430, 437).
+  //
+  // Site scope for a Trip is a join (`batchTicket.plant.siteId`, see
+  // tripPlantScopeWhere) rather than a column here, so the scope cannot
+  // lead this index — the planner filters on status+date first and joins
+  // afterwards, which is why the date is in the index and the scope is not.
+  //
+  // [driverId, status] is the driver's own phone screen: their open trip
+  // and their recent closed ones (src/app/driver/page.tsx:31, 36). It also
+  // covers a bare driverId join, so no separate FK index is needed.
+  @@index([status, dischargeEnd])
+  @@index([driverId, status])
 }
 
 // A driver-reported delay (traffic, breakdown, weather, accident) while a
@@ -1480,6 +1560,122 @@ model Trip {
 // so this exists to give dispatch/customer service a real, timestamped
 // reason for why a load is running long instead of them finding out only
 // once it's already a problem.
+// PL-R9-P2-02, ninth production-lifecycle review: uploadDeliveryPhoto
+// (driver/actions.ts) has to compensate for a blob it already uploaded
+// whenever the DB half of the attach is refused or throws — but the
+// compensating deleteFile call is itself a network request to object
+// storage that can fail too. The old code just swallowed that failure
+// (blob.ts's own deleteFile catches and discards), leaving an orphaned
+// blob with no record anywhere that cleanup is still owed. A row here is
+// written whenever that compensating delete itself fails; the existing
+// daily cron sweep (api/cron/cleanup) retries every row still on file
+// and removes it once the delete actually succeeds — reusing the one
+// scheduled-job mechanism this app already has rather than standing up
+// new job infrastructure for one narrow cleanup case.
+// PL-R9-P2-03, ninth production-lifecycle review: completeBatch's own
+// auto-requisition follow-up (maybeAutoRequisitionMaterial, called once
+// per shortage candidate after the batch itself has already committed)
+// is deliberately best-effort — the batch's own completion must never
+// be undone by a purchasing-side failure. The old version's failure
+// handling stopped at `console.error`: a genuine failure (a transient DB
+// error mid-create, or inside its own notifyRoles call after the
+// requisition row itself already committed) left nothing on file that
+// any human or process would ever see again — the shortage that
+// triggered it just silently never got a requisition opened, with no
+// record it was ever supposed to. A full transactional outbox (every
+// side effect of every domain command staged and drained generically)
+// is a genuinely larger architectural decision this fix does not make on
+// its own; this is the narrow, concrete gap the review actually named —
+// see retryPendingAutoRequisitions (materialRequisition.ts) and the
+// daily cron sweep (api/cron/cleanup) that drains it, the same reused-
+// infrastructure shape PendingBlobDeletion above already established.
+// PL-R10-P2-01, tenth production-lifecycle review: this table is now a
+// real staged intent, not a row created only after a caught failure —
+// completeBatchTicket (batchCompletion.ts) inserts one row per shortage
+// candidate INSIDE its own completion transaction, before the batch even
+// commits, so a process crash between commit and the best-effort
+// follow-up (or a failure of the row insert itself, the Round 9 gap)
+// no longer loses the intent entirely: it was already durable before the
+// transaction that made it necessary ever returned. requisitionId/
+// requisitionNumber/materialName are filled in once creation succeeds —
+// a row that persists with those set still needs only its NOTIFICATION
+// retried (see processPendingAutoRequisition, materialRequisition.ts),
+// never a duplicate create; that's what keeps requisition creation and
+// approval-notification delivery as separately tracked progress within
+// one row, per PL-R10-P2-01's own "record separate progress" requirement.
+model PendingAutoRequisition {
+  id                      String    @id @default(cuid())
+  batchTicketId           String
+  materialId              String
+  siteId                  String
+  newLevel                Float
+  capacity                Float
+  minThresholdPct         Float
+  unit                    String // TONS, LITERS — mirrors RequisitionCandidate.unit
+  specificGravity         Float?
+  requisitionId           String?
+  requisitionNumber       String?
+  materialName            String?
+  // PL-R12-P1-02, twelfth production-lifecycle review: the cron sweep's
+  // FOR UPDATE SKIP LOCKED claim protected cron workers from each other,
+  // but completeBatch's own immediate post-commit processor did not enter
+  // through it at all — so both could read requisitionId = null for the
+  // SAME intent, one create the requisition, the other see ALREADY_OPEN
+  // and delete the intent out from under the creator, losing the
+  // notification work entirely. Every entry point now takes this owner
+  // lease first (claimAutoRequisitionIntent in materialRequisition.ts);
+  // a second processor gets BUSY instead of a concurrent read. The lease
+  // expires so a crashed process can never strand an intent.
+  leaseOwner              String?
+  leaseExpiresAt          DateTime?
+  // Set only after the approval notification has actually been
+  // delivered, and always BEFORE the intent row is cleaned up — so
+  // "requisition created" and "purchasing was told about it" are two
+  // separately durable facts, and a crash between them retries only the
+  // half that is genuinely still owed.
+  notificationDeliveredAt DateTime?
+  attempts                Int       @default(0)
+  lastError               String?
+  createdAt               DateTime  @default(now())
+  lastTriedAt             DateTime?
+  // PL-R10-P2-03, tenth production-lifecycle review: both retry tables
+  // used a blind `orderBy: createdAt, take: 200` — once the OLDEST 200
+  // rows are permanent failures, every sweep re-selects the same 200
+  // forever and a genuinely resolvable newer row can never be attempted.
+  // nextAttemptAt implements real (capped exponential) backoff — a
+  // repeatedly failing row's own next-eligible time keeps moving later,
+  // naturally falling behind newer rows in `WHERE nextAttemptAt <= now()
+  // ORDER BY nextAttemptAt ASC` — and doubles as the claim lease a
+  // concurrent sweep bumps forward before doing any real work, so two
+  // overlapping cron invocations can never process the same row (see the
+  // FOR UPDATE SKIP LOCKED claim query in materialRequisition.ts).
+  // deadLetteredAt stops automatic retries past a defined attempt
+  // threshold while leaving the row on file (excluded from claims, not
+  // deleted) for a human to inspect or manually clear.
+  nextAttemptAt           DateTime  @default(now())
+  deadLetteredAt          DateTime?
+
+  @@unique([batchTicketId, materialId, siteId])
+  @@index([nextAttemptAt])
+}
+
+model PendingBlobDeletion {
+  id             String    @id @default(cuid())
+  url            String // the app-relative /api/files/... url deleteFile expects
+  reason         String // DELIVERY_PHOTO_COMPENSATION, DELIVERY_PHOTO_REPLACED — why this delete was ever attempted
+  attempts       Int       @default(0)
+  lastError      String?
+  createdAt      DateTime  @default(now())
+  lastTriedAt    DateTime?
+  // Same fair-scheduling/claim-safety/dead-letter mechanism as
+  // PendingAutoRequisition's own nextAttemptAt/deadLetteredAt above —
+  // see that model's comment (PL-R10-P2-03).
+  nextAttemptAt  DateTime  @default(now())
+  deadLetteredAt DateTime?
+
+  @@index([nextAttemptAt])
+}
+
 model TripDelayReport {
   id         String   @id @default(cuid())
   tripId     String
@@ -1538,7 +1734,7 @@ model WasteIncidentMemo {
   batchTicket    BatchTicket @relation(fields: [batchTicketId], references: [id])
   wastedVolumeM3 Float
   reasonCode     String
-  status         String      @default("PENDING") // PENDING, APPROVED
+  status         String      @default("PENDING") // PENDING, APPROVED, REJECTED
   // The written explanation of what was actually found wrong with the
   // load — required at approval time (see approveWasteMemo in
   // quality/actions.ts), since reasonCode alone is just the coarse
@@ -1962,6 +2158,12 @@ model Invoice {
   lines       InvoiceLine[]
   payments    Payment[]
   creditNotes CreditNote[]
+
+  // Index audit (2026-09-12): revenue (status + issueDate range) and AR
+  // aging (status SENT + issueDate <= asOf), both plant-scoped
+  // (reportQueries.ts:104, 538). plantId is nullable, which a b-tree
+  // indexes fine — a NULL-plant invoice simply sorts together.
+  @@index([plantId, status, issueDate])
 }
 
 // One line per delivered trip — the delivery ticket is the natural billing
@@ -2107,6 +2309,12 @@ model Opportunity {
 
   visits FieldVisit[]
   quotes Quote[]
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  @@index([siteId, createdAt])
 }
 
 model FieldVisit {
@@ -2196,6 +2404,12 @@ model Quote {
   updatedAt           DateTime    @updatedAt
 
   lines QuoteLine[]
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  @@index([siteId, createdAt])
 }
 
 model QuoteLine {
@@ -2259,6 +2473,14 @@ model PurchaseOrder {
 
   lines PurchaseOrderLine[]
   bills SupplierBill[]
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  // Two reports read this exact shape — the PO register and supplier spend
+  // (reportQueries.ts:659, 699).
+  @@index([siteId, orderDate])
 }
 
 // A line is EITHER a raw-material line (materialId + orderedMassKg/
@@ -2381,6 +2603,12 @@ model MaintenanceTicket {
   updatedAt        DateTime         @updatedAt
 
   order MaintenanceOrder?
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  @@index([siteId, createdAt])
 }
 
 // A ticket ("the request") converts into an order when the fault needs real
@@ -2499,6 +2727,12 @@ model SparePartReceipt {
   receivedById        String
   receivedBy          User               @relation(fields: [receivedById], references: [id])
   receivedAt          DateTime           @default(now())
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  @@index([siteId, receivedAt])
 }
 
 // A direct issuance of stock straight from the warehouse — general use,
@@ -2583,24 +2817,33 @@ model SparePartsRequisition {
 // one before creating another, so a run of many low batches doesn't flood
 // Purchasing with duplicates for the same shortage.
 model MaterialRequisition {
-  id                  String             @id @default(cuid())
-  requisitionNumber   String             @unique // MTR-YYYY-NNNN
-  materialId          String
-  material            Material           @relation(fields: [materialId], references: [id])
-  siteId              String
-  site                Site               @relation(fields: [siteId], references: [id])
-  quantityNeededKg    Float
-  status              String             @default("PENDING_APPROVAL") // PENDING_APPROVAL, APPROVED, REJECTED, ORDERED, FULFILLED, CANCELLED
-  requestedById       String?
-  requestedBy         User?              @relation("MTRRequestedBy", fields: [requestedById], references: [id])
-  approvedById        String?
-  approvedBy          User?              @relation("MTRApprovedBy", fields: [approvedById], references: [id])
-  approvedAt          DateTime?
-  purchaseOrderLineId String?            @unique
-  purchaseOrderLine   PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id])
-  notes               String?
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
+  id                        String             @id @default(cuid())
+  requisitionNumber         String             @unique // MTR-YYYY-NNNN
+  materialId                String
+  material                  Material           @relation(fields: [materialId], references: [id])
+  siteId                    String
+  site                      Site               @relation(fields: [siteId], references: [id])
+  quantityNeededKg          Float
+  status                    String             @default("PENDING_APPROVAL") // PENDING_APPROVAL, APPROVED, REJECTED, ORDERED, FULFILLED, CANCELLED
+  requestedById             String?
+  requestedBy               User?              @relation("MTRRequestedBy", fields: [requestedById], references: [id])
+  approvedById              String?
+  approvedBy                User?              @relation("MTRApprovedBy", fields: [approvedById], references: [id])
+  approvedAt                DateTime?
+  purchaseOrderLineId       String?            @unique
+  purchaseOrderLine         PurchaseOrderLine? @relation(fields: [purchaseOrderLineId], references: [id])
+  notes                     String?
+  // PL-R12-P1-02: the cross-intent idempotency key for the automatic
+  // approval notification. Two DIFFERENT PendingAutoRequisition intents
+  // (two tickets that both ran the same material at the same site) can
+  // legitimately resolve to this one requisition — the second gets
+  // ALREADY_OPEN. Stamping delivery here, on the thing actually being
+  // announced, is what stops that second intent from sending purchasing a
+  // duplicate notification, without ever letting it merely ASSUME the
+  // first one delivered.
+  autoRequisitionNotifiedAt DateTime?
+  createdAt                 DateTime           @default(now())
+  updatedAt                 DateTime           @updatedAt
 }
 
 // ---------------------------------------------------------------------------
@@ -2672,6 +2915,12 @@ model SupplierBill {
   updatedAt       DateTime       @updatedAt
 
   payments SupplierPayment[]
+
+  // Index audit (2026-09-12): AP aging asks for the unpaid ones as of a
+  // date — `status IN (UNPAID, PARTIALLY_PAID)` + `billDate <= asOf`,
+  // site-scoped (reportQueries.ts:559). `IN` is an equality-family qual,
+  // so it can lead the range column here.
+  @@index([siteId, status, billDate])
 }
 
 model SupplierPayment {
@@ -2704,6 +2953,17 @@ model CashTransaction {
   createdById  String
   createdBy    User      @relation("CashTransactionCreatedBy", fields: [createdById], references: [id])
   createdAt    DateTime  @default(now())
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  // Six of the P&L's expense buckets are six separate queries over this
+  // one shape (reportQueries.ts:129-134), plus the cash-flow report
+  // (reportQueries.ts:583). Category is NOT in the index: six buckets over
+  // one site-month is a small enough set to filter after the index has
+  // already narrowed to it.
+  @@index([siteId, occurredAt])
 }
 
 // One row per line in an uploaded bank statement CSV (see
@@ -2715,10 +2975,38 @@ model CashTransaction {
 // matchedKind/matchedId point at whichever of Payment/SupplierPayment/
 // CashTransaction the auto-matcher (or a human) linked it to — same
 // three-kind shape reconcileMovement's own `kind` param already uses.
+// PR4-R6-P1-01, external-review validation round 6 (2026-09-11): one row
+// per bank-statement file actually imported.
+//
+// Before this, importBankStatement had no identity of any kind. The same
+// file could be uploaded twice — or once, with the HTTP response lost, and
+// retried — and every line was inserted again. The audit row recorded each
+// import faithfully; nothing ever read it back to notice the repeat.
+//
+// The digest is computed server-side from the file's own bytes, so the
+// identity cannot be spoofed or omitted by the caller, and it is unique
+// per site: the same statement legitimately belongs to only one factory.
+model BankStatementImport {
+  id           String   @id @default(cuid())
+  siteId       String
+  site         Site     @relation(fields: [siteId], references: [id])
+  // SHA-256 of the uploaded file's exact contents.
+  fileDigest   String
+  lineCount    Int
+  matchedCount Int
+  importedById String
+  importedBy   User     @relation("BankStatementImportImportedBy", fields: [importedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  lines BankStatementLine[]
+
+  @@unique([siteId, fileDigest])
+}
+
 model BankStatementLine {
-  id            String    @id @default(cuid())
+  id            String               @id @default(cuid())
   siteId        String
-  site          Site      @relation(fields: [siteId], references: [id])
+  site          Site                 @relation(fields: [siteId], references: [id])
   statementDate DateTime
   direction     String // IN, OUT
   amount        Float
@@ -2728,8 +3016,18 @@ model BankStatementLine {
   matchedId     String?
   matchedAt     DateTime?
   importedById  String
-  importedBy    User      @relation("BankStatementLineImportedBy", fields: [importedById], references: [id])
-  importedAt    DateTime  @default(now())
+  importedBy    User                 @relation("BankStatementLineImportedBy", fields: [importedById], references: [id])
+  importedAt    DateTime             @default(now())
+  // PR4-R6-P1-01: which import brought this line in. Nullable because
+  // rows imported before this existed have no batch to point at.
+  importId      String?
+  import        BankStatementImport? @relation(fields: [importId], references: [id])
+
+  // A statement line claims at most one financial movement, and a movement
+  // may be claimed by at most one line. Enforced as a PARTIAL unique index
+  // in the migration (Prisma cannot express `WHERE ... IS NOT NULL`), so
+  // unmatched lines — which all share NULL, NULL — are unconstrained.
+  @@index([siteId, statementDate])
 }
 
 // ---------------------------------------------------------------------------
@@ -2814,7 +3112,14 @@ model DriverIncentivePolicy {
 model AuditEvent {
   id          String   @id @default(cuid())
   actorId     String?
-  actor       User?    @relation(fields: [actorId], references: [id])
+  // onDelete: Restrict, explicit (PL-R7-P1-01, seventh production-
+  // lifecycle review) — the default for an optional relation is SET
+  // NULL, which is itself an UPDATE the audit-immutability trigger
+  // correctly rejects. No application code hard-deletes a User (see
+  // User.status ACTIVE/DISABLED for the real deactivation path); this
+  // just makes an attempted hard delete of an audited user fail with a
+  // direct FK violation instead of a confusing trigger error.
+  actor       User?    @relation(fields: [actorId], references: [id], onDelete: Restrict)
   role        String
   module      String
   recordId    String
@@ -2823,6 +3128,22 @@ model AuditEvent {
   afterValue  String?
   reasonCode  String?
   createdAt   DateTime @default(now())
+
+  // Security/health audit (2026-09-10): this table had no index at all,
+  // while receiving a row for every SCADA reading and every telematics
+  // ping as well as every business mutation. The audit-log screen orders
+  // by createdAt desc and filters by module, so both were sequential
+  // scans over a table that only ever grows.
+  //
+  // Two indexes, not one per column: the unfiltered screen is served by
+  // (createdAt), and a module filter — always combined with that same
+  // ordering — is served end to end by (module, createdAt) with no sort.
+  // The `contains` searches on recordId/reasonCode/field are deliberately
+  // NOT indexed: a leading-wildcard LIKE cannot use a b-tree, and trigram
+  // indexes for a rarely-used free-text box are not worth the write cost
+  // on this table.
+  @@index([createdAt])
+  @@index([module, createdAt])
 }
 
 // The account-role roster itself — User.role stays a plain, unenforced
@@ -2986,9 +3307,9 @@ model SupportVehicle {
 // var still works as an ALL-scope fallback for compatibility —
 // verifyIntegrationRequest in src/lib/integration-auth.ts checks both.
 model ApiKey {
-  siteId String?
-  site Site? @relation(fields: [siteId], references: [id])
-  global Boolean @default(false)
+  siteId      String?
+  site        Site?     @relation(fields: [siteId], references: [id])
+  global      Boolean   @default(false)
   id          String    @id @default(cuid())
   label       String
   keyHash     String    @unique
@@ -3030,7 +3351,21 @@ model Notification {
   module    String
   readAt    DateTime?
   createdAt DateTime  @default(now())
+  // PL-R13-P1-03, thirteenth production-lifecycle review: an idempotency
+  // key for notifications raised by a RETRYABLE background job. The
+  // automatic-requisition processor previously stamped
+  // MaterialRequisition.autoRequisitionNotifiedAt BEFORE calling notify —
+  // so a crash in between left a requisition marked "announced" with no
+  // Notification row anywhere and no intent left to retry. Creating the
+  // rows and stamping delivery now happen in ONE transaction; this key
+  // (with skipDuplicates) is what makes a re-run of that transaction
+  // safe, so retrying can never fan out a second copy to the same user.
+  // Null for every ordinary, non-retried notification — Postgres treats
+  // NULLs as distinct, so the unique index below constrains only keyed
+  // ones.
+  dedupeKey String?
 
+  @@unique([userId, dedupeKey])
   @@index([userId, readAt])
 }
 
@@ -3128,16 +3463,17 @@ model JournalLine {
 }
 
 model ZatcaSubmissionAttempt {
- id String @id
- kind String
- documentId String
- uuid String
- state String
- invoiceHash String?
- signedXml String?
- httpStatus Int?
- response String?
- createdAt DateTime @default(now())
- finishedAt DateTime?
- @@index([documentId, kind])
+  id          String    @id
+  kind        String
+  documentId  String
+  uuid        String
+  state       String
+  invoiceHash String?
+  signedXml   String?
+  httpStatus  Int?
+  response    String?
+  createdAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  @@index([documentId, kind])
 }

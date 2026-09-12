@@ -2,8 +2,11 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { requirePageAccess } from "@/lib/session";
+import { effectiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
+import { UnofficialDocumentNotice } from "@/components/UnofficialDocumentNotice";
 import { PrintButton } from "@/components/PrintButton";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 // A fixed bilingual printed form (SASO/ASTM-style RMC delivery note, per
 // the sample the plant already uses) — deliberately NOT run through the
@@ -80,18 +83,31 @@ function Cell({ label, value, className = "" }: { label: string; value: string |
   );
 }
 
-function fmtTime(d: Date | null | undefined) {
-  if (!d) return null;
-  return new Date(d).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
-}
+// The printed note is the one place that keeps 12-hour time with seconds:
+// it is what a driver and a site engineer sign against, and the existing
+// pads are laid out for that format. A blank stays blank rather than
+// becoming an em dash — an unfilled field on a delivery note means the
+// step has not happened yet.
+const DELIVERY_NOTE_TIME: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true };
 
 export default async function DeliveryNotePage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requirePageAccess("production");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { dict } = await getDictionary();
 
-  const ticket = await prisma.batchTicket.findUnique({
-    where: { id },
+  // BL-CR-P1-01, external-review validation: the route parameter is not
+  // an authorization boundary. requirePageAccess above proves the caller
+  // may use this MODULE; it says nothing about whether this particular
+  // record belongs to their site. Folding the scope into the database
+  // predicate (findFirst, not findUnique-by-id) is what makes a
+  // cross-site id behave exactly like a nonexistent one — including for
+  // ADMIN, whose effectiveSiteId is null and whose predicate is
+  // therefore unrestricted, unchanged. Deliberately NOT a fetch-then-
+  // compare: a distinguishable "forbidden" answer still confirms the
+  // record exists.
+  const ticket = await prisma.batchTicket.findFirst({
+    where: { id, ...plantScopeWhere(effectiveSiteId(user)) },
     include: {
       reservation: { include: { project: { include: { customer: true } } } },
       mix: true,
@@ -145,6 +161,7 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      <UnofficialDocumentNotice label={dict.common.unofficialDocument} />
       <div className="no-print flex items-center justify-between gap-3">
         <p className="text-xs text-ink-muted">{dict.modules.production.detail.deliveryNoteEditableHint}</p>
         <PrintButton label={dict.modules.production.detail.printTicket} />
@@ -173,7 +190,7 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
             <div className="p-2 text-end">
               <input
                 type="text"
-                defaultValue={new Date(trip.batchTime).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" })}
+                defaultValue={dt.date(trip.batchTime)}
                 dir="ltr"
                 style={{ color: "#000" }}
                 className="w-full border-0 bg-transparent p-0 text-end text-sm font-semibold outline-none focus:bg-yellow-50"
@@ -218,10 +235,10 @@ export default async function DeliveryNotePage({ params }: { params: Promise<{ i
         </div>
 
         <div className="grid grid-cols-4">
-          <Cell label={L.leaveTime} value={fmtTime(trip.departTime)} />
+          <Cell label={L.leaveTime} value={trip.departTime ? dt.with(trip.departTime, DELIVERY_NOTE_TIME) : null} />
           <Cell label={L.returnTime} value={null} />
-          <Cell label={L.pouringStart} value={fmtTime(trip.dischargeStart)} />
-          <Cell label={L.pouringEnd} value={fmtTime(trip.dischargeEnd)} />
+          <Cell label={L.pouringStart} value={trip.dischargeStart ? dt.with(trip.dischargeStart, DELIVERY_NOTE_TIME) : null} />
+          <Cell label={L.pouringEnd} value={trip.dischargeEnd ? dt.with(trip.dischargeEnd, DELIVERY_NOTE_TIME) : null} />
         </div>
 
         <div className="grid grid-cols-3">
