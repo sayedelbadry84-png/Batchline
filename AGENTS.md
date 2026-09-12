@@ -229,7 +229,12 @@ right.
 4. No `script-src`/`style-src` CSP — it needs a per-request nonce and
    there is no middleware; the root layout's inline accent `<style>` is
    the specific blocker. See the comment in `next.config.ts`.
-5. `reports/page.tsx` is one ~2,600-line page function.
+5. ~~`reports/page.tsx` is one ~2,600-line page function.~~ Split
+   2026-09-12: the page is now 315 lines that parse the filters, fetch
+   the open tab's data and dispatch to `./tabs/<Name>Tab.tsx` (one file
+   per tab, twenty-five of them). Data layers went to `./overviewReport.ts`
+   and `./incentivesReport.ts`, shared vocabulary to `./reportUi.tsx`.
+   Add a tab by adding a file there, not by growing the page.
 6. The printable delivery note, purchase order and quotation are editable
    working copies, declared as such on the page and the print-out; they
    are NOT controlled documents backed by a versioned record.
