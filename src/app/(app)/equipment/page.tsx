@@ -171,7 +171,7 @@ async function MixersTab({
       code: t.code,
       lastLat: t.lastLat!,
       lastLng: t.lastLng!,
-      lastPingAt: t.lastPingAt ? t.lastPingAt.toISOString() : null,
+      pingLabel: t.lastPingAt ? `${m.mixers.lastPing} ${t.lastPingAt.toLocaleString()}` : m.mixers.noPing,
       driverName: t.defaultDriver?.name ?? null,
       status: t.status,
     }));
@@ -179,7 +179,7 @@ async function MixersTab({
   return (
     <div className="flex flex-col gap-6">
       {mapTrucks.length > 0 && (
-        <FleetMap trucks={mapTrucks} neverPingedLabel={m.mixers.noPing} lastPingLabel={(when) => `${m.mixers.lastPing} ${when}`} />
+        <FleetMap trucks={mapTrucks} />
       )}
       <div className="grid grid-cols-[1fr_320px] gap-6">
       <div className={ui.card}>
