@@ -303,19 +303,37 @@ test("the eight closed-trip reports use Trip(status, dischargeEnd)", async () =>
   );
 });
 
-test("the site-scoped closed-trip report still uses the index across the plant join", async () => {
-  // The shape tripPlantScopeWhere actually produces. Worth its own case:
-  // an index that wins on the bare table can still be passed over once a
-  // join changes the row estimates.
-  await assertUsesIndex(
-    "closed trips, site-scoped",
-    "Trip_status_dischargeEnd_idx",
+test("the site-scoped closed-trip report never sequentially scans Trip", async () => {
+  // The other shape tripPlantScopeWhere produces, when a site IS in
+  // scope. This case asserts something weaker than the ones above, on
+  // purpose, and the first version of it was simply wrong.
+  //
+  // It originally demanded Trip_status_dischargeEnd_idx here too, and the
+  // planner refused — correctly. Given a site filter it drives from the
+  // scoped side instead: narrow Plant to the site, join BatchTicket, then
+  // reach each Trip through Trip_batchTicketId_key and apply status and
+  // the date window as a filter. That is a better plan than the one the
+  // assertion was asking for, so the assertion was the thing at fault.
+  //
+  // What is still worth defending is that Trip itself is never read
+  // end to end. The composite index earns its place on the UNSCOPED
+  // variant — reportQueries.ts:300 passes no scope at all, and
+  // tripPlantScopeWhere returns {} for an ADMIN who has picked no site —
+  // which the case above covers.
+  const plan = await planFor(
     `SELECT t.id FROM "Trip" t
      JOIN "BatchTicket" bt ON bt.id = t."batchTicketId"
      JOIN "Plant" p ON p.id = bt."plantId"
      WHERE t.status = 'CLOSED' AND t."dischargeEnd" >= $1::timestamp AND t."dischargeEnd" <= $2::timestamp
        AND p."siteId" = $3`,
     [WINDOW_FROM, WINDOW_TO, siteIds[0]],
+  );
+  assert.ok(
+    !/Seq Scan on "Trip"/.test(plan),
+    `the site-scoped report reads the whole Trip table.
+
+Plan:
+${plan}`,
   );
 });
 
