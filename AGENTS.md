@@ -173,8 +173,14 @@ same ICV — that forks the chain and ZATCA rejects everything after it.
 
 PostgreSQL does **not** auto-index foreign keys, and Prisma only indexes `@id` and
 `@unique`. Any column you filter, join, or sort on needs an explicit `@@index`.
-The schema currently has 8 indexes for 96 models — when you touch a model whose rows
-are queried by date range plus scope, add the composite index.
+When you touch a model whose rows are queried by date range plus scope, add the
+composite index — and put the equality columns first and the range column last, or
+the range stops the columns after it being usable as index quals.
+
+Every `@@index` is asserted to exist with the declared columns, in order, by
+`tests/indexCoverage.test.ts`. That test also EXPLAINs the report layer's real query
+shapes against seeded volume and fails if the planner does not choose the intended
+index — add a case there when you add an index, rather than assuming one helps.
 
 Prefer real database constraints (`CHECK`, `ON DELETE RESTRICT`, `@@unique`) over
 application-level validation — see `InventoryMovement` in the migrations for the
@@ -209,9 +215,13 @@ right.
 1. All money columns are `Float` (see the money rule above). `parseMoneyInput`
    in `src/lib/money.ts` bounds what can enter the ledger; the `Decimal`
    migration is still the durable fix.
-2. Foreign keys are largely unindexed (~178 relations). Four targeted
-   indexes exist (AuditEvent, Session); add composite ones from real query
-   shapes with `EXPLAIN` evidence, never 178 single-column ones blindly.
+2. Foreign keys are still largely unindexed (~178 relations), by choice.
+   The reporting layer's own shapes are now covered: fourteen composite
+   indexes added 2026-09-12 from the queries in `src/lib/reportQueries.ts`
+   and the driver screen, each with a planner assertion in
+   `tests/indexCoverage.test.ts`. What remains uncovered is the long tail
+   of FKs no measured query filters on — add those the same way, from a
+   real shape with `EXPLAIN` evidence, never 178 single-column ones blindly.
 3. SCADA/telematics payloads carry no device timestamp, sequence or
    idempotency key, so a delayed old reading can overwrite a newer one,
    and neither route is rate limited. `lastUsedAt` is no longer written

@@ -855,6 +855,11 @@ model Reservation {
   batchTickets    BatchTicket[]
   pumpAssignments PumpAssignment[]
   mixRevisions    ReservationMixRevision[]
+
+  // Index audit (2026-09-12): the reservations board and the demand
+  // outlook both ask for one site's bookings in a pour window, filtered by
+  // status. Same scope-then-range ordering as the report models above.
+  @@index([siteId, status, pourWindowStart])
 }
 
 model Employee {
@@ -1154,6 +1159,13 @@ model MaterialReceipt {
   updatedAt           DateTime           @updatedAt
 
   materialLabTests MaterialLabTest[]
+
+  // Index audit (2026-09-12): consumption, cement intensity and the
+  // material-cost report all read plant scope + receivedAt range
+  // (reportQueries.ts:46, 355, 455). The `material: { type }` filter those
+  // last two add is a join against a table of a few dozen rows, so it
+  // belongs in the join, not in this index.
+  @@index([plantId, receivedAt])
 }
 
 // Digitizes the QC lab's own paper test forms for received raw materials
@@ -1306,6 +1318,24 @@ model BatchTicket {
   trip                     Trip?
   wasteMemos               WasteIncidentMemo[]
   shortageOverrideRequests ShortageOverrideRequest[]
+
+  // Index audit (2026-09-12): the two shapes reportQueries.ts actually
+  // runs against this table, and nothing else.
+  //
+  //   productionVolume  -> plant scope + releasedAt range, ordered by
+  //                        releasedAt (reportQueries.ts:35)
+  //   mixYield / cost   -> plant scope + status COMPLETE +
+  //                        batchCompletedAt range (reportQueries.ts:56, 81)
+  //
+  // plantId leads both because the site-scoped variant resolves to
+  // `plant: { siteId }` — a join that hands the planner a small set of
+  // plant ids and then probes this index once per id. Putting the date
+  // first would force a scan of every plant's tickets in the window.
+  //
+  // Deliberately not a third index on [status, batchCompletedAt]: no
+  // query asks for completed tickets across all plants at once.
+  @@index([plantId, releasedAt])
+  @@index([plantId, status, batchCompletedAt])
 }
 
 model BatchComponentActual {
@@ -1504,6 +1534,23 @@ model Trip {
   testBatches        TestBatch[]
   invoiceLine        InvoiceLine?
   delayReports       TripDelayReport[]
+
+  // Index audit (2026-09-12): [status, dischargeEnd] serves EIGHT distinct
+  // report queries — delivery performance, reclaim, CO2e, crew incentives,
+  // pump utilisation and the cement/water intensity pair — every one of
+  // them `status: "CLOSED"` plus a dischargeEnd range
+  // (reportQueries.ts:203, 241, 300, 343, 347, 351, 430, 437).
+  //
+  // Site scope for a Trip is a join (`batchTicket.plant.siteId`, see
+  // tripPlantScopeWhere) rather than a column here, so the scope cannot
+  // lead this index — the planner filters on status+date first and joins
+  // afterwards, which is why the date is in the index and the scope is not.
+  //
+  // [driverId, status] is the driver's own phone screen: their open trip
+  // and their recent closed ones (src/app/driver/page.tsx:31, 36). It also
+  // covers a bare driverId join, so no separate FK index is needed.
+  @@index([status, dischargeEnd])
+  @@index([driverId, status])
 }
 
 // A driver-reported delay (traffic, breakdown, weather, accident) while a
@@ -2111,6 +2158,12 @@ model Invoice {
   lines       InvoiceLine[]
   payments    Payment[]
   creditNotes CreditNote[]
+
+  // Index audit (2026-09-12): revenue (status + issueDate range) and AR
+  // aging (status SENT + issueDate <= asOf), both plant-scoped
+  // (reportQueries.ts:104, 538). plantId is nullable, which a b-tree
+  // indexes fine — a NULL-plant invoice simply sorts together.
+  @@index([plantId, status, issueDate])
 }
 
 // One line per delivered trip — the delivery ticket is the natural billing
@@ -2256,6 +2309,12 @@ model Opportunity {
 
   visits FieldVisit[]
   quotes Quote[]
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  @@index([siteId, createdAt])
 }
 
 model FieldVisit {
@@ -2345,6 +2404,12 @@ model Quote {
   updatedAt           DateTime    @updatedAt
 
   lines QuoteLine[]
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  @@index([siteId, createdAt])
 }
 
 model QuoteLine {
@@ -2408,6 +2473,14 @@ model PurchaseOrder {
 
   lines PurchaseOrderLine[]
   bills SupplierBill[]
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  // Two reports read this exact shape — the PO register and supplier spend
+  // (reportQueries.ts:659, 699).
+  @@index([siteId, orderDate])
 }
 
 // A line is EITHER a raw-material line (materialId + orderedMassKg/
@@ -2530,6 +2603,12 @@ model MaintenanceTicket {
   updatedAt        DateTime         @updatedAt
 
   order MaintenanceOrder?
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  @@index([siteId, createdAt])
 }
 
 // A ticket ("the request") converts into an order when the fault needs real
@@ -2648,6 +2727,12 @@ model SparePartReceipt {
   receivedById        String
   receivedBy          User               @relation(fields: [receivedById], references: [id])
   receivedAt          DateTime           @default(now())
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  @@index([siteId, receivedAt])
 }
 
 // A direct issuance of stock straight from the warehouse — general use,
@@ -2830,6 +2915,12 @@ model SupplierBill {
   updatedAt       DateTime       @updatedAt
 
   payments SupplierPayment[]
+
+  // Index audit (2026-09-12): AP aging asks for the unpaid ones as of a
+  // date — `status IN (UNPAID, PARTIALLY_PAID)` + `billDate <= asOf`,
+  // site-scoped (reportQueries.ts:559). `IN` is an equality-family qual,
+  // so it can lead the range column here.
+  @@index([siteId, status, billDate])
 }
 
 model SupplierPayment {
@@ -2862,6 +2953,17 @@ model CashTransaction {
   createdById  String
   createdBy    User      @relation("CashTransactionCreatedBy", fields: [createdById], references: [id])
   createdAt    DateTime  @default(now())
+
+  // Index audit (2026-09-12): every report on this model filters the same
+  // way — scope first, then a date range — and `src/lib/reportQueries.ts`
+  // runs one such query per report tab. Without a composite index each was
+  // a sequential scan of a table that only grows.
+  // Six of the P&L's expense buckets are six separate queries over this
+  // one shape (reportQueries.ts:129-134), plus the cash-flow report
+  // (reportQueries.ts:583). Category is NOT in the index: six buckets over
+  // one site-month is a small enough set to filter after the index has
+  // already narrowed to it.
+  @@index([siteId, occurredAt])
 }
 
 // One row per line in an uploaded bank statement CSV (see
