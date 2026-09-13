@@ -3,12 +3,12 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
+import { DecideWasteMemoForm } from "@/components/DecideWasteMemoForm";
 import {
   createTestBatch,
   addLabResult,
   createCertificate,
   updateCertificate,
-  approveWasteMemo,
   recordWasteMemoNote,
   saveCapaRecord,
   closeCapaRecord,
@@ -25,6 +25,7 @@ import {
 import { fitRegressionsByAge, predictFinalStrength, type HistoricalPair } from "@/lib/strength-prediction";
 import { getActiveSiteId, plantScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { MATERIAL_LAB_TEST_TYPE_KEYS } from "@/lib/materialLabTests";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 function daysUntil(date: Date) {
   return Math.ceil((date.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
@@ -72,6 +73,7 @@ export default async function QualityPage({
   searchParams: Promise<{ tab?: string; editCert?: string; editDoc?: string }>;
 }) {
   const user = await requirePageAccess("quality");
+  const dt = await getDateFormatters();
   const { dict } = await getDictionary();
   const m = dict.modules.quality;
   const { tab: tabRaw, editCert: editCertId, editDoc: editDocId } = await searchParams;
@@ -247,7 +249,7 @@ export default async function QualityPage({
                   <div className="text-xs text-ink-muted">
                     <span dir="ltr">
                       {tb.trip.batchTicket.mix.code} ({tb.trip.batchTicket.mix.grade}) · {tb.trip.batchTicket.ticketNumber} · {tb.trip.batchTicket.reservation.reservationNumber}
-                    </span> · {m.sampledAt(new Date(tb.sampleTime).toLocaleString())}{" "}
+                    </span> · {m.sampledAt(dt.dateTime(tb.sampleTime))}{" "}
                     {tb.sampledBy ? m.by(tb.sampledBy.name) : ""}
                   </div>
                   {tb.trip.batchTicket.reservation.siteLocation && (
@@ -412,8 +414,7 @@ export default async function QualityPage({
         <p className="mb-3 text-sm text-ink-muted">{m.wasteMemos.intro}</p>
         <div className="flex flex-col gap-3">
           {pendingWasteMemos.map((memo) => (
-            <form key={memo.id} action={approveWasteMemo} className="flex flex-col gap-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
-              <input type="hidden" name="id" value={memo.id} />
+            <div key={memo.id} className="flex flex-col gap-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
                 <Link href={`/production/${memo.batchTicketId}`} className="font-mono text-xs font-medium text-accent-strong hover:underline" dir="ltr">
                   {memo.batchTicket.ticketNumber}
@@ -424,24 +425,17 @@ export default async function QualityPage({
                 <span className="font-mono text-xs" dir="ltr">{memo.drumReturn.trip.truck.code}</span>
                 <span className="font-mono tabular">{memo.wastedVolumeM3} m³</span>
                 <span>{dict.returnReasons[memo.reasonCode as keyof typeof dict.returnReasons] ?? memo.reasonCode}</span>
-                <span className="font-mono text-xs tabular text-ink-muted">{new Date(memo.createdAt).toLocaleDateString()}</span>
+                <span className="font-mono text-xs tabular text-ink-muted">{dt.date(memo.createdAt)}</span>
               </div>
-              <div className="flex items-end gap-2">
-                <div className="flex-1">
-                  <label className={ui.label}>{m.wasteMemos.noteLabel}</label>
-                  <textarea
-                    name="approvalNote"
-                    required
-                    rows={2}
-                    placeholder={m.wasteMemos.notePlaceholder}
-                    className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
-                  />
-                </div>
-                <button className="rounded-md border border-good bg-good-soft px-3 py-1.5 text-xs font-medium text-good hover:opacity-80">
-                  {m.wasteMemos.approve}
-                </button>
-              </div>
-            </form>
+              <DecideWasteMemoForm
+                memoId={memo.id}
+                labelClassName={ui.label}
+                textareaClassName="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+                denyButtonClassName="rounded-md border border-critical bg-critical-soft px-3 py-1.5 text-xs font-medium text-critical hover:opacity-80"
+                approveButtonClassName="rounded-md border border-good bg-good-soft px-3 py-1.5 text-xs font-medium text-good hover:opacity-80"
+                messages={{ noteLabel: m.wasteMemos.noteLabel, notePlaceholder: m.wasteMemos.notePlaceholder, approveLabel: m.wasteMemos.approve, denyLabel: m.wasteMemos.deny, errors: m.wasteMemos.errors }}
+              />
+            </div>
           ))}
           {pendingWasteMemos.length === 0 && <p className="text-sm text-ink-muted">{m.wasteMemos.empty}</p>}
         </div>
@@ -463,7 +457,7 @@ export default async function QualityPage({
                   <span>{memo.batchTicket.reservation.project.name}</span>
                   <span className="font-mono tabular">{memo.wastedVolumeM3} m³</span>
                   <span className="text-xs text-ink-muted">
-                    {memo.approvedBy ? dict.modules.production.detail.wasteMemoApproved(memo.approvedBy.name, new Date(memo.approvedAt!).toLocaleDateString()) : ""}
+                    {memo.approvedBy ? dict.modules.production.detail.wasteMemoApproved(memo.approvedBy.name, dt.date(memo.approvedAt!)) : ""}
                   </span>
                 </div>
                 <div className="flex items-end gap-2">
@@ -621,7 +615,7 @@ export default async function QualityPage({
                     <td className={ui.td}>{c.standardRef}</td>
                     <td className={ui.td}>{c.issuingBody}</td>
                     <td className={ui.td}>
-                      {new Date(c.expiryDate).toLocaleDateString()}
+                      {dt.date(c.expiryDate)}
                       {remaining < 0 && <span className={`${ui.chip} bg-critical-soft text-critical ms-2`}>{m.expired}</span>}
                       {remaining >= 0 && remaining <= 60 && (
                         <span className={`${ui.chip} bg-warn-soft text-warn ms-2`}>{m.daysLeft(remaining)}</span>
@@ -717,7 +711,7 @@ export default async function QualityPage({
                       </td>
                       <td className={ui.td}>
                         {lastCal ? (
-                          <span className={overdue ? "font-semibold text-critical" : ""}>{new Date(lastCal.nextDueAt).toLocaleDateString()}</span>
+                          <span className={overdue ? "font-semibold text-critical" : ""}>{dt.date(lastCal.nextDueAt)}</span>
                         ) : (
                           <span className="text-ink-muted">{m.calibration.neverCalibrated}</span>
                         )}
@@ -792,8 +786,8 @@ export default async function QualityPage({
                   <tr key={c.id}>
                     <td className={`${ui.td} font-mono text-xs`}>{c.recordNumber}</td>
                     <td className={ui.td}>{inst.name}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(c.calibratedAt).toLocaleDateString()}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(c.nextDueAt).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(c.calibratedAt)}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(c.nextDueAt)}</td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${c.result === "PASSED" ? "bg-good-soft text-good" : "bg-critical-soft text-critical"}`}>
                         {m.calibration.resultLabel[c.result as keyof typeof m.calibration.resultLabel] ?? c.result}
@@ -885,7 +879,7 @@ export default async function QualityPage({
                     </td>
                     <td className={ui.td}>{a.department}</td>
                     <td className={ui.td}>{a.auditor.name}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(a.scheduledDate).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(a.scheduledDate)}</td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${a.status === "COMPLETED" ? "bg-good-soft text-good" : a.status === "CANCELLED" ? "bg-critical-soft text-critical" : a.status === "IN_PROGRESS" ? "bg-warn-soft text-warn" : "bg-surface-alt text-ink-muted"}`}>
                         {m.audits.statusLabel[a.status as keyof typeof m.audits.statusLabel] ?? a.status}
@@ -1003,7 +997,7 @@ export default async function QualityPage({
                     <td className={ui.td}>{m.documents.categoryLabel[doc.category as keyof typeof m.documents.categoryLabel] ?? doc.category}</td>
                     <td className={ui.td}>{doc.owningDepartment ?? "—"}</td>
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{doc.revisionNumber}</td>
-                    <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(doc.releaseDate).toLocaleDateString()}</td>
+                    <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(doc.releaseDate)}</td>
                     <td className={ui.td}>
                       <span className={`${ui.chip} ${doc.status === "ACTIVE" ? "bg-good-soft text-good" : "bg-surface-alt text-ink-muted"}`}>
                         {m.documents.statusLabel[doc.status as keyof typeof m.documents.statusLabel] ?? doc.status}
@@ -1098,7 +1092,7 @@ export default async function QualityPage({
                     <td className={ui.td}>{s.trainerName ?? "—"}</td>
                     <td className={ui.td}>{s.location ?? "—"}</td>
                     <td className={`${ui.td} font-mono text-xs tabular`}>
-                      {new Date(s.startDate).toLocaleDateString()}{s.endDate ? ` – ${new Date(s.endDate).toLocaleDateString()}` : ""}
+                      {dt.date(s.startDate)}{s.endDate ? ` – ${dt.date(s.endDate)}` : ""}
                     </td>
                     <td className={`${ui.td} font-mono tabular`}>{s.attendances.length}</td>
                   </tr>
@@ -1238,7 +1232,7 @@ export default async function QualityPage({
                   <td className={ui.td}>{m.materialTests.types[t.testType as keyof typeof m.materialTests.types] ?? t.testType}</td>
                   <td className={`${ui.td} font-medium`}>{t.materialDescription}</td>
                   <td className={ui.td}>{t.supplier?.name ?? "—"}</td>
-                  <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(t.reportDate).toLocaleDateString()}</td>
+                  <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(t.reportDate)}</td>
                   <td className={ui.td}>
                     <span className={`${ui.chip} ${materialLabTestStatusChip[t.status] ?? ""}`}>
                       {m.materialTests.status[t.status as keyof typeof m.materialTests.status] ?? t.status}

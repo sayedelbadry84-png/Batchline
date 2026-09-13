@@ -3,16 +3,23 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { canAccessModule, canPerformAction, type ModuleKey, type ActionModuleKey } from "@/lib/permissions";
+import { createSessionToken, hashSessionToken } from "@/lib/sessionToken";
 
 export const SESSION_COOKIE = "batchline_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export async function createSession(userId: string) {
+  // BL-CR-P1-05, external-review validation (2026-09-10): the cookie
+  // carries a 32-byte CSPRNG token; the database stores only its SHA-256.
+  // The row id is an identifier again, never a credential — see
+  // src/lib/sessionToken.ts for why a cuid() was the wrong thing to hand
+  // out as a bearer secret.
+  const token = createSessionToken();
   const session = await prisma.session.create({
-    data: { userId, expiresAt: new Date(Date.now() + SESSION_TTL_MS) },
+    data: { userId, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + SESSION_TTL_MS) },
   });
   const store = await cookies();
-  store.set(SESSION_COOKIE, session.id, {
+  store.set(SESSION_COOKIE, token, {
     path: "/",
     httpOnly: true,
     sameSite: "lax",
@@ -30,7 +37,7 @@ export async function destroySession() {
   const store = await cookies();
   const token = store.get(SESSION_COOKIE)?.value;
   if (token) {
-    await prisma.session.deleteMany({ where: { id: token } });
+    await prisma.session.deleteMany({ where: { tokenHash: hashSessionToken(token) } });
   }
   store.delete(SESSION_COOKIE);
 }
@@ -42,7 +49,8 @@ export async function destroySession() {
 // arbitrary cookie value in a raw request, so if the cookie's value were the
 // user id directly, anyone who knew or guessed a valid user id could skip
 // the password step entirely and start attempting TOTP codes for that
-// account. A random cuid the client never chooses closes that off. Kept in
+// account. A 32-byte CSPRNG token the client never chooses closes that
+// off (BL-CR-P1-05 — it used to be the row's own cuid). Kept in
 // its own table rather than the Session table so nothing else in the app
 // could ever mistake a pending-2FA state for an actual logged-in session.
 // Short-lived on purpose: the user either finishes 2FA within 5 minutes or
@@ -51,11 +59,14 @@ const PENDING_2FA_COOKIE = "batchline_pending_2fa";
 const PENDING_2FA_TTL_MS = 5 * 60 * 1000;
 
 export async function setPending2faUser(userId: string) {
-  const pending = await prisma.pendingTwoFactor.create({
-    data: { userId, expiresAt: new Date(Date.now() + PENDING_2FA_TTL_MS) },
+  // Same bearer-token treatment as createSession (BL-CR-P1-05): this
+  // cookie grants a step of authentication, so it is a credential.
+  const token = createSessionToken();
+  await prisma.pendingTwoFactor.create({
+    data: { userId, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + PENDING_2FA_TTL_MS) },
   });
   const store = await cookies();
-  store.set(PENDING_2FA_COOKIE, pending.id, {
+  store.set(PENDING_2FA_COOKIE, token, {
     path: "/",
     httpOnly: true,
     sameSite: "lax",
@@ -69,11 +80,11 @@ export async function getPending2faUserId(): Promise<string | null> {
   const token = store.get(PENDING_2FA_COOKIE)?.value;
   if (!token) return null;
 
-  const pending = await prisma.pendingTwoFactor.findUnique({ where: { id: token } });
+  const pending = await prisma.pendingTwoFactor.findUnique({ where: { tokenHash: hashSessionToken(token) } });
   if (!pending) return null;
 
   if (pending.expiresAt < new Date()) {
-    await prisma.pendingTwoFactor.delete({ where: { id: token } }).catch(() => {});
+    await prisma.pendingTwoFactor.delete({ where: { id: pending.id } }).catch(() => {});
     return null;
   }
 
@@ -84,7 +95,7 @@ export async function clearPending2fa() {
   const store = await cookies();
   const token = store.get(PENDING_2FA_COOKIE)?.value;
   if (token) {
-    await prisma.pendingTwoFactor.deleteMany({ where: { id: token } });
+    await prisma.pendingTwoFactor.deleteMany({ where: { tokenHash: hashSessionToken(token) } });
   }
   store.delete(PENDING_2FA_COOKIE);
 }
@@ -97,13 +108,13 @@ export async function getCurrentUser() {
   if (!token) return null;
 
   const session = await prisma.session.findUnique({
-    where: { id: token },
+    where: { tokenHash: hashSessionToken(token) },
     include: { user: { include: { employee: true, plant: true } } },
   });
   if (!session) return null;
 
   if (session.expiresAt < new Date()) {
-    await prisma.session.delete({ where: { id: token } }).catch(() => {});
+    await prisma.session.delete({ where: { id: session.id } }).catch(() => {});
     return null;
   }
 
@@ -112,7 +123,7 @@ export async function getCurrentUser() {
   // this check, revoking access only takes effect once the session
   // naturally expires (up to 7 days later), not immediately.
   if (session.user.status !== "ACTIVE") {
-    await prisma.session.delete({ where: { id: token } }).catch(() => {});
+    await prisma.session.delete({ where: { id: session.id } }).catch(() => {});
     return null;
   }
 

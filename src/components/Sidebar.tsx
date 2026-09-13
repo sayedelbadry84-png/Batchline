@@ -23,6 +23,7 @@ export function Sidebar({
   activeSiteId,
   notifications,
   unreadNotificationCount,
+  timeZone,
 }: {
   user: { name: string; role: string };
   // Computed server-side (permissions are database-backed — see
@@ -47,6 +48,9 @@ export function Sidebar({
   activeSiteId?: string | null;
   notifications: { id: string; title: string; body: string | null; link: string | null; readAt: Date | null; createdAt: Date }[];
   unreadNotificationCount: number;
+  // Passed straight through to NotificationBell — see the note there on
+  // why this is the zone STRING and not the formatter bundle.
+  timeZone: string;
 }) {
   const pathname = usePathname();
   const canSee = (key: ModuleKey) => allowedModules.includes(key);
@@ -79,6 +83,7 @@ export function Sidebar({
           notifications={notifications}
           unreadCount={unreadNotificationCount}
           labels={{ title: common.notifications, empty: common.notificationsEmpty, markAllRead: common.markAllRead }}
+          timeZone={timeZone}
         />
       </div>
 

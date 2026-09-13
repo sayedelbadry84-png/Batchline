@@ -6,6 +6,7 @@ import { createReceipt, updateReceipt, deleteReceipt, returnReceiptToSupplier, s
 import { createSupplier } from "../suppliers/actions";
 import { plantScopeWhere } from "@/lib/siteScope";
 import { SitePlantSelect } from "@/components/SitePlantSelect";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const qcChip: Record<string, string> = {
   PENDING: "bg-surface-alt text-ink-muted",
@@ -31,6 +32,7 @@ export async function RawMaterialsReceivingTab({
   newSupplier?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const m = dict.modules.materialReceiving;
 
   const [receipts, sitesForPicker, suppliers, materials, silos, hoppers, deliveryDrivers] = await Promise.all([
@@ -167,7 +169,7 @@ export async function RawMaterialsReceivingTab({
 
               return (
                 <tr key={r.id}>
-                  <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(r.receivedAt).toLocaleString()}</td>
+                  <td className={`${ui.td} font-mono text-xs tabular`}>{dt.dateTime(r.receivedAt)}</td>
                   <td className={ui.td}>
                     <div className="font-mono text-xs" dir="ltr">{r.plant.site.code}</div>
                     <div className="text-xs text-ink-muted">{r.plant.name}</div>
@@ -206,7 +208,7 @@ export async function RawMaterialsReceivingTab({
                     <span className={`${ui.chip} ${qcChip[r.qcStatus] ?? ""}`}>{dict.status[r.qcStatus as keyof typeof dict.status] ?? r.qcStatus}</span>
                     {r.inspectedBy && (
                       <div className="mt-1 max-w-[16rem] text-xs text-ink-faint">
-                        {m.inspectedBy(r.inspectedBy.name, new Date(r.inspectionDate!).toLocaleDateString())}
+                        {m.inspectedBy(r.inspectedBy.name, dt.date(r.inspectionDate!))}
                         {r.inspectionNotes && <div className="italic">“{r.inspectionNotes}”</div>}
                       </div>
                     )}

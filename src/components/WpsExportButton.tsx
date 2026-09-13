@@ -1,6 +1,5 @@
 "use client";
 
-import ExcelJS from "exceljs";
 
 // The WPS (Wage Protection System) salary file for a payroll run — one
 // sheet per site/establishment (a real submission is per legal entity, and
@@ -12,6 +11,14 @@ import ExcelJS from "exceljs";
 // Same in-browser exceljs pattern as ExcelExportButton (see that
 // component's own comment on why exceljs over `xlsx`), extended to a
 // multi-sheet workbook since this file always more than one worksheet.
+//
+// Performance audit (2026-09-12): imported dynamically INSIDE the click
+// handler, not at module scope. exceljs is a large dependency and this is
+// a Client Component, so a static import put the whole library into the
+// first-load bundle of every page that renders an export button — paid by
+// every operator on every visit, to serve a button most of them never
+// press. `await import()` moves it to the moment it is actually needed;
+// nothing else about the behaviour changes.
 export function WpsExportButton({
   label,
   filename,
@@ -22,6 +29,7 @@ export function WpsExportButton({
   sheets: { sheetName: string; headers: string[]; rows: (string | number)[][] }[];
 }) {
   async function handleClick() {
+    const ExcelJS = (await import("exceljs")).default;
     const workbook = new ExcelJS.Workbook();
     for (const s of sheets) {
       // Excel rejects a sheet name over 31 characters, and a duplicate name

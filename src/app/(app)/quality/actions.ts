@@ -9,6 +9,7 @@ import { withSequentialNumber } from "@/lib/sequence";
 import { notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
 import { computeMaterialLabTestResults, MATERIAL_LAB_TEST_TYPE_KEYS, type MaterialLabTestType } from "@/lib/materialLabTests";
+import { decideWasteIncidentMemo } from "@/lib/tripLifecycle";
 
 function dateOrNull(formData: FormData, key: string): Date | null {
   const raw = formData.get(key);
@@ -279,40 +280,44 @@ export async function updateCertificate(formData: FormData) {
   revalidatePath("/quality");
 }
 
-// Signs off on an auto-created WasteIncidentMemo (see closeTripWithReturn
-// in trips/actions.ts, which creates one whenever a load is closed with
-// reasonCode QUALITY_REJECTED) — a real state transition distinct from the
-// return-billing reduction, which already applied regardless of this
-// approval.
-export async function approveWasteMemo(formData: FormData) {
+export type DecideWasteMemoActionState = { status: "OK" | "NOT_FOUND" | "ALREADY_DECIDED" | "MISSING_FIELDS" } | null;
+
+// Signs off on (or denies) an auto-created WasteIncidentMemo (see
+// closeTripWithReturn in trips/actions.ts, which creates one whenever a
+// load is closed with reasonCode QUALITY_REJECTED) — a real state
+// transition that also applies the actual billing reduction (on
+// approval only) and reconciles the owning Reservation atomically (see
+// decideWasteIncidentMemo's own comment, src/lib/tripLifecycle.ts —
+// PL-R2-P1-02, second production-lifecycle review).
+//
+// One unified action (not two separate approve/deny exports) so a
+// single useActionState hook can drive both of quality/page.tsx's
+// buttons from one shared form/note field — `decision` names which one
+// was pressed. Every non-OK outcome used to be a silent no-op
+// (PL-R3-P2-01, third production-lifecycle review): a memo already
+// decided by someone else in the meantime, or an out-of-scope/missing
+// id, now renders an actual reason instead of nothing happening.
+export async function decideWasteMemo(_prevState: DecideWasteMemoActionState, formData: FormData): Promise<DecideWasteMemoActionState> {
   const user = await getCurrentUser();
-  await requireActionPermission(user, "quality", "approveWasteMemo");
+  const decision = String(formData.get("decision") ?? "");
+  if (decision !== "APPROVE" && decision !== "DENY") return { status: "MISSING_FIELDS" };
+  await requireActionPermission(user, "quality", decision === "APPROVE" ? "approveWasteMemo" : "rejectWasteMemo");
 
   const id = String(formData.get("id") ?? "");
-  // A written finding is mandatory — reasonCode alone is just the coarse
-  // category picked at return-close time, not an actual QA explanation of
-  // what was wrong with the load. No note, no approval.
-  const approvalNote = String(formData.get("approvalNote") ?? "").trim();
-  if (!id || !approvalNote) return;
-  if (!(await wasteMemoInScope(id, effectiveSiteId(user)))) return;
+  // A written finding is mandatory either way — reasonCode alone is just
+  // the coarse category picked at return-close time, not an actual QA
+  // explanation of what was wrong with the load.
+  const decisionNote = String(formData.get("approvalNote") ?? "").trim();
+  if (!id || !decisionNote) return { status: "MISSING_FIELDS" };
 
-  const existing = await prisma.wasteIncidentMemo.findUnique({ where: { id } });
-  if (!existing || existing.status !== "PENDING") return;
-
-  const memo = await prisma.wasteIncidentMemo.update({
-    where: { id },
-    data: { status: "APPROVED", approvalNote, approvedAt: new Date(), approvedById: user!.id },
-  });
-
-  await logAudit({
-    module: "Quality",
-    recordId: id,
-    afterValue: `${memo.wastedVolumeM3} m3 — ${memo.reasonCode} — ${approvalNote}`,
-    reasonCode: "WASTE_MEMO_APPROVED",
-  });
-
-  revalidatePath("/quality");
-  revalidatePath(`/production/${memo.batchTicketId}`);
+  const result = await decideWasteIncidentMemo(id, decision, { allowedSiteId: effectiveSiteId(user), actorId: user!.id, actorRole: user!.role, decisionNote });
+  if (result.status === "OK") {
+    const memo = await prisma.wasteIncidentMemo.findUniqueOrThrow({ where: { id } });
+    revalidatePath("/quality");
+    revalidatePath(`/production/${memo.batchTicketId}`);
+    revalidatePath("/reservations");
+  }
+  return result;
 }
 
 // Backfills a written finding onto a memo that was approved before that

@@ -6,6 +6,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { buildStockLedger } from "@/lib/stock-ledger";
 import { getActiveSiteId } from "@/lib/siteScope";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 export default async function MaterialLedgerDetailPage({
   params,
@@ -15,6 +16,7 @@ export default async function MaterialLedgerDetailPage({
   searchParams: Promise<{ site?: string; from?: string; to?: string }>;
 }) {
   const user = await requirePageAccess("warehouses");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { site: siteParam, from: fromRaw, to: toRaw } = await searchParams;
   const { dict } = await getDictionary();
@@ -138,7 +140,7 @@ export default async function MaterialLedgerDetailPage({
       <div className={ui.card}>
         <div className="font-mono text-xs text-ink-muted uppercase">{m.detail.openingBalance}</div>
         <div className="mt-1 font-mono text-2xl tabular" dir="ltr">{openingBalanceKg.toLocaleString()} kg</div>
-        <p className="mt-1 text-xs text-ink-muted">{m.detail.openingBalanceNote(new Date(rangeStart).toLocaleDateString())}</p>
+        <p className="mt-1 text-xs text-ink-muted">{m.detail.openingBalanceNote(dt.date(rangeStart))}</p>
       </div>
 
       <div className={ui.card}>
@@ -155,7 +157,7 @@ export default async function MaterialLedgerDetailPage({
           <tbody>
             {ledger.map((e, i) => (
               <tr key={i}>
-                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{new Date(e.date).toLocaleDateString()}</td>
+                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{dt.date(e.date)}</td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${e.type === "RECEIPT" ? "bg-good-soft text-good" : "bg-accent-soft text-accent-strong"}`}>
                     {e.type === "RECEIPT" ? m.detail.receipt : m.detail.consumption}

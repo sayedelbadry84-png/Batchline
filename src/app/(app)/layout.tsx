@@ -6,6 +6,7 @@ import { getAccessibleModules } from "@/lib/permissions";
 import { getActiveSiteId } from "@/lib/siteScope";
 import { getTheme } from "@/lib/theme";
 import { Sidebar } from "@/components/Sidebar";
+import { getDisplayTimeZone } from "@/lib/displayTimeZone";
 
 export default async function AppLayout({ children }: LayoutProps<"/">) {
   const user = await getCurrentUser();
@@ -46,6 +47,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
         activeSiteId={activeSiteId}
         notifications={notifications}
         unreadNotificationCount={unreadNotificationCount}
+        timeZone={await getDisplayTimeZone()}
       />
       <main className="min-w-0 flex-1 px-10 py-8">{children}</main>
     </div>

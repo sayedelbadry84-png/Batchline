@@ -1,21 +1,32 @@
 // Minimal app-shell service worker — no Workbox, no build step. Scope is
-// deliberately narrow: cache static assets and page shells for offline/
-// flaky-connectivity loading (the batching floor and yard are exactly
-// where this matters), and never touch POST requests (Server Actions) —
-// those need to reach the server or fail loudly, not serve a stale cached
-// response. Actual offline *writes* are handled at the app level (see
-// src/lib/offlineQueue.ts), not here.
-const CACHE_NAME = "batchline-shell-v1";
-// Every offline-relevant shell — the plant-floor tablet UI, the driver's
-// own mobile UI, and the pump crew's — three different roles, three
-// different pages. All get precached so an offline navigation can fall
-// back to whichever one actually matches what the user was trying to
-// reach (see the fetch handler below) instead of always bouncing everyone
-// to /operator.
-const OPERATOR_SHELL = "/operator";
-const DRIVER_SHELL = "/driver";
-const PUMP_CREW_SHELL = "/pump-crew";
-const APP_SHELL = [OPERATOR_SHELL, DRIVER_SHELL, PUMP_CREW_SHELL, "/manifest.json", "/icon.svg"];
+// deliberately narrow: cache content-hashed static assets and one
+// data-free offline shell, and never touch POST requests (Server Actions)
+// — those need to reach the server or fail loudly, not serve a stale
+// cached response. Actual offline *writes* are handled at the app level
+// (see src/lib/offlineQueue.ts), not here.
+//
+// BL-CR-P1-03, external-review validation (2026-09-10): this worker used
+// to precache /operator, /driver and /pump-crew and to store EVERY
+// successful navigation response in one origin-wide cache. Those are
+// authenticated, per-user server-rendered pages. CacheStorage is not
+// partitioned by identity and signing out clears only the server session
+// and the cookie, so on a shared plant tablet the next person — or the
+// same device with no session at all, offline — could be served the
+// previous user's rendered operational data. Normal HTTP cache directives
+// do not help: an explicit cache.put() stores the response regardless.
+//
+// The rule now: NO authenticated navigation response is ever written to
+// the cache. What survives offline is the static asset payload plus
+// /offline, a page that renders no record of any kind. The role screens
+// come back the moment the network does, from the server, under whatever
+// session is actually current.
+const CACHE_NAME = "batchline-shell-v2";
+const OFFLINE_SHELL = "/offline";
+// /offline is server-rendered and therefore carries the root layout's
+// per-site accent colour (see getActiveSiteAccentColor) — a brand colour,
+// not personal or operational data, and the only thing about this page
+// that is not identical for every visitor.
+const APP_SHELL = [OFFLINE_SHELL, "/manifest.json", "/icon.svg"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -26,6 +37,11 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
+    // Renaming the cache to -v2 is what evicts the v1 bucket on every
+    // device that already has one, along with whatever authenticated HTML
+    // it accumulated. Deliberately only touches CacheStorage: unsynced
+    // operator readings live in localStorage (offlineQueue.ts) and must
+    // survive this untouched.
     caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))),
   );
   self.clients.claim();
@@ -38,7 +54,8 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   // Static build assets change filename on every deploy (content-hashed),
-  // so cache-first is always safe and fast.
+  // so cache-first is always safe and fast. These are the same bytes for
+  // every user, signed in or not — nothing identity-bound is stored here.
   if (url.pathname.startsWith("/_next/static/")) {
     event.respondWith(
       caches.match(request).then((cached) => cached ?? fetch(request).then((res) => {
@@ -50,30 +67,39 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Page navigations: network-first (always prefer fresh data when
-  // online), falling back to the last cached shell when the network
-  // fails — the yard/floor scenario this whole feature exists for. The
-  // fallback shell matches the role the failed navigation was actually
-  // for (driver vs. pump crew vs. operator) — a driver who goes offline
-  // mid-shift must land back on their own /driver shell, not get bounced
-  // into some other role's UI just because that's the only shell this
-  // worker used to remember.
+  // Page navigations: straight to the network, and the response is NEVER
+  // stored — see the note at the top of this file. When the network
+  // fails, the data-free /offline shell is served instead. A driver who
+  // loses signal in the yard gets a page that tells them their queued
+  // readings are safe, rather than another person's screen.
   if (request.mode === "navigate") {
-    const fallbackShell = url.pathname.startsWith(DRIVER_SHELL)
-      ? DRIVER_SHELL
-      : url.pathname.startsWith(PUMP_CREW_SHELL)
-        ? PUMP_CREW_SHELL
-        : OPERATOR_SHELL;
-    event.respondWith(
-      fetch(request)
-        .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-          return res;
-        })
-        .catch(() => caches.match(request).then((cached) => cached ?? caches.match(fallbackShell))),
-    );
+    event.respondWith(fetch(request).catch(() => caches.match(OFFLINE_SHELL)));
   }
+});
+
+// Explicit sign-out protocol (BL-CR-P1-03). Nothing user-specific is
+// cached any more, so this is defence in depth rather than the fix
+// itself: it guarantees that anything a future change starts caching at
+// runtime is dropped when the session ends. The precached shell is kept
+// (it is public and is what makes the next offline load work at all), and
+// localStorage — where unsynced readings live — is deliberately not
+// touched from here: clearing it would destroy work the operator has not
+// been able to send yet.
+self.addEventListener("message", (event) => {
+  if (!event.data || event.data.type !== "BATCHLINE_SIGNED_OUT") return;
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) =>
+      cache.keys().then((requests) =>
+        Promise.all(
+          requests.map((req) => {
+            const path = new URL(req.url).pathname;
+            const isPublicShell = APP_SHELL.includes(path) || path.startsWith("/_next/static/");
+            return isPublicShell ? Promise.resolve(false) : cache.delete(req);
+          }),
+        ),
+      ),
+    ),
+  );
 });
 
 // Web Push — the payload is whatever notify() in src/lib/notify.ts sent

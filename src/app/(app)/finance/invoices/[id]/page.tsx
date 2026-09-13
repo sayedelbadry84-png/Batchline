@@ -19,6 +19,7 @@ import {
 import { getActiveSiteId } from "@/lib/siteScope";
 import { invoiceAmountDue } from "@/lib/billing";
 import { getZatcaReadiness } from "@/lib/zatca/settings";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const statusChip: Record<string, string> = {
   DRAFT: "bg-surface-alt text-ink-muted",
@@ -33,6 +34,7 @@ export default async function InvoiceDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const user = await requirePageAccess("finance");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { dict } = await getDictionary();
   const m = dict.modules.billing;
@@ -81,11 +83,11 @@ export default async function InvoiceDetailPage({
       <div className="grid grid-cols-4 gap-4">
         <div className={ui.card}>
           <div className="font-mono text-xs text-ink-muted uppercase">{d.issued}</div>
-          <div className="mt-1 font-mono text-lg tabular">{new Date(invoice.issueDate).toLocaleDateString()}</div>
+          <div className="mt-1 font-mono text-lg tabular">{dt.date(invoice.issueDate)}</div>
         </div>
         <div className={ui.card}>
           <div className="font-mono text-xs text-ink-muted uppercase">{d.due}</div>
-          <div className="mt-1 font-mono text-lg tabular">{new Date(invoice.dueDate).toLocaleDateString()}</div>
+          <div className="mt-1 font-mono text-lg tabular">{dt.date(invoice.dueDate)}</div>
         </div>
         <div className={ui.card}>
           <div className="font-mono text-xs text-ink-muted uppercase">{d.total}</div>
@@ -230,7 +232,7 @@ export default async function InvoiceDetailPage({
               {invoice.payments.map((p) => (
                 <tr key={p.id}>
                   <td className={`${ui.td} font-mono tabular`} dir="ltr">{p.amount.toLocaleString()}</td>
-                  <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(p.paidAt).toLocaleDateString()}</td>
+                  <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(p.paidAt)}</td>
                   <td className={ui.td}>{p.method ?? "—"}</td>
                   <td className={`${ui.td} font-mono text-xs`}>{p.reference ?? "—"}</td>
                 </tr>
@@ -343,7 +345,7 @@ export default async function InvoiceDetailPage({
                 <td className={ui.td}>{d.creditReasonLabel[c.reason as keyof typeof d.creditReasonLabel] ?? c.reason}</td>
                 <td className={`${ui.td} text-xs text-ink-muted`}>{c.notes ?? "—"}</td>
                 <td className={ui.td}>{c.issuedBy.name}</td>
-                <td className={`${ui.td} font-mono text-xs tabular`}>{new Date(c.createdAt).toLocaleDateString()}</td>
+                <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(c.createdAt)}</td>
                 {zatcaReadiness.level !== "NOT_CONFIGURED" && (
                   <td className={ui.td}>
                     {c.zatcaStatus ? (

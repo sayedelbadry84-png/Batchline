@@ -5,6 +5,7 @@ import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createMaterialLabTest } from "../../actions";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 import {
   MATERIAL_LAB_TEST_TYPES,
   MATERIAL_LAB_TEST_TYPE_KEYS,
@@ -44,6 +45,7 @@ export default async function NewMaterialLabTestPage({
   searchParams: Promise<{ type?: string }>;
 }) {
   await requirePageAccess("quality");
+  const dt = await getDateFormatters();
   const { type: typeRaw } = await searchParams;
   const { dict } = await getDictionary();
   const m = dict.modules.quality;
@@ -108,7 +110,7 @@ export default async function NewMaterialLabTestPage({
               <option value="">{dict.field.unassigned}</option>
               {materialReceipts.map((r) => (
                 <option key={r.id} value={r.id}>
-                  {new Date(r.receivedAt).toLocaleDateString()} — {r.material.name} — {r.supplier.name}
+                  {dt.date(r.receivedAt)} — {r.material.name} — {r.supplier.name}
                 </option>
               ))}
             </select>

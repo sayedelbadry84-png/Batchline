@@ -44,6 +44,10 @@ const { postSiloMovement } = await import("../src/lib/inventoryLedger");
 const { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } = await import("../src/lib/batchComponentEdits");
 const { claimTripSlot, applyReclaimCredit } = await import("../src/lib/tripDispatch");
 const { requestShortageOverride, approveShortageOverrideRequest, rejectShortageOverrideRequest } = await import("../src/lib/shortageOverrideRequests");
+const { createRequisitionIfNeeded, stageAutoRequisitionIntent, processPendingAutoRequisition, retryPendingAutoRequisitions, notifyRequisitionCreated } = await import("../src/lib/materialRequisition");
+const { listDeadLetters, requeueDeadLetter, dismissDeadLetter } = await import("../src/lib/deadLetterQueue");
+type RequisitionNotifier = Parameters<typeof processPendingAutoRequisition>[1];
+const { MAX_ATTEMPTS_BEFORE_DEAD_LETTER } = await import("../src/lib/retryBackoff");
 
 const prisma = new PrismaClient();
 
@@ -66,8 +70,35 @@ let driverId: string;
 
 const ticketIds: string[] = [];
 const tripIds: string[] = [];
+const materialRequisitionIds: string[] = [];
 
 before(async () => {
+  // PL-R13-P1-01, thirteenth production-lifecycle review: several tests
+  // here exercise retryPendingAutoRequisitions, which sweeps EVERY
+  // eligible row in the database rather than only this suite's fixtures.
+  // With `--test-concurrency=1` (package.json) no sibling suite can be
+  // mid-flight, but a suite that leaked rows would still silently change
+  // what these sweeps do — so the precondition is asserted rather than
+  // assumed. Dead-lettered rows are excluded on purpose: they are, by
+  // definition, not eligible for any sweep.
+  // PL-R14-P1-01, fourteenth production-lifecycle review: the check now
+  // matches its own name. It previously counted `deadLetteredAt: null`
+  // and called those rows "sweep-eligible", which is not the sweep's
+  // actual predicate (nextAttemptAt <= now(), and no live lease) — so the
+  // diagnosis it printed was wrong even when the underlying leak was
+  // real. It now reports EVERY foreign row, and prints the identifying
+  // fields of each one so the owning suite is identifiable straight from
+  // the CI log rather than by guesswork.
+  const foreign = await prisma.pendingAutoRequisition.findMany({
+    select: { id: true, batchTicketId: true, materialId: true, siteId: true, nextAttemptAt: true, leaseOwner: true, leaseExpiresAt: true, deadLetteredAt: true },
+    take: 20,
+  });
+  assert.equal(
+    foreign.length,
+    0,
+    `another suite left PendingAutoRequisition rows behind — the queue tests below would be measuring someone else's fixtures. Rows: ${JSON.stringify(foreign, null, 2)}`,
+  );
+
   const site = await prisma.site.create({ data: { code: `TEST-SUITE-BC-${Date.now()}`, name: "TEST-SUITE-BC-SITE", city: "Test", country: "Test" } });
   siteId = site.id;
   const plant = await prisma.plant.create({ data: { siteId, name: "TEST-SUITE-BC-PLANT" } });
@@ -122,6 +153,34 @@ async function deleteMovements(where: NonNullable<Parameters<typeof prisma.inven
   await prisma.$transaction([prisma.$executeRaw`SET LOCAL app.bypass_movement_immutability = 'on'`, prisma.inventoryMovement.deleteMany({ where })]);
 }
 
+// PL-R7-P1-01, seventh production-lifecycle review: this suite's own
+// after() hook deleted adminUserId directly, unlike productionLifecycle
+// .test.ts/reservationMixRevision.test.ts's own teardown — every one of
+// this round's new writeAudit calls left AuditEvent rows referencing
+// this fixture user, and Postgres's ON DELETE SET NULL action for the
+// optional actorId FK is itself an UPDATE, which the immutability
+// trigger correctly refuses ("insert a new event instead of using
+// UPDATE"). Same narrowly scoped bypass as the other two suites.
+//
+// PL-R8-P1-01, eighth production-lifecycle review: actorId alone isn't
+// enough in THIS file specifically — completeBatchTicket(ticketId, {})
+// (no actorId) is how the great majority of this suite's own tests call
+// it, which writes its audit event with actorId: null, role: "SYSTEM".
+// Filtering by actorId alone left every one of those rows (well over
+// forty across this file) as untracked, un-swept residue that the old
+// "zero residue" assertion never actually looked at. recordId, not
+// actorId, is what every one of this file's own domain calls
+// (completeBatchTicket/cancelBatchTicket/reverseBatchTicket) actually
+// keys their audit event to — always one of this suite's own fixture
+// ticket ids — so sweeping by recordId is the one predicate that closes
+// over the SYSTEM-actor rows too, not just adminUserId's own.
+async function deleteSuiteAuditEvents() {
+  await prisma.$transaction([
+    prisma.$executeRaw`SET LOCAL app.bypass_audit_event_immutability = 'on'`,
+    prisma.auditEvent.deleteMany({ where: { OR: [{ actorId: adminUserId }, { recordId: { in: [reservationId, ...ticketIds, ...tripIds] } }] } }),
+  ]);
+}
+
 // P2025 ("record not found") is the one expected outcome here — some
 // tests already delete their own fixture (e.g. an extra Material) in
 // their own `finally` block, so by the time this runs it's legitimately
@@ -145,6 +204,7 @@ async function cleanupDelete(fn: () => Promise<unknown>): Promise<void> {
 }
 
 after(async () => {
+  for (const id of materialRequisitionIds) await cleanupDelete(() => prisma.materialRequisition.delete({ where: { id } }));
   for (const id of tripIds) {
     await prisma.drumReturn.deleteMany({ where: { tripId: id } });
     // RECLAIM_CREDIT movements are sourced by the TRIP's own id, not the
@@ -180,6 +240,27 @@ after(async () => {
   // fixture's id by hand across a dozen tests.
   const leftoverMaterialIds = (await prisma.material.findMany({ where: { name: { startsWith: "TEST-SUITE-BC-" } }, select: { id: true } })).map((m) => m.id);
   const leftoverSiloIds = (await prisma.silo.findMany({ where: { name: { startsWith: "TEST-SUITE-BC-" } }, select: { id: true } })).map((s) => s.id);
+  // PL-R9-P1-02, ninth production-lifecycle review: MaterialRequisition
+  // .materialId has no ON DELETE CASCADE — CI proved the concurrent-
+  // requisition test's own materialRequisitionIds tracking (pushed only
+  // after Promise.all resolved) was never a reliable substitute for a
+  // real, tracking-independent sweep. Deleting by materialId — the SAME
+  // generic, by-fixture-prefix predicate every other auxiliary row in
+  // this hook already uses — closes over every requisition any test in
+  // this file ever created for the shared materialId or an ad-hoc one,
+  // regardless of whether (or when) any test-local array was updated.
+  if (leftoverMaterialIds.length > 0) await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } }));
+  // PL-R9-P2-03, ninth production-lifecycle review: same by-materialId
+  // sweep, extended to the new retry queue — a test exercising the
+  // queue-on-failure path (or a row a retry never resolved) must not
+  // leak past this file's own teardown either.
+  if (leftoverMaterialIds.length > 0) await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } }));
+  // PL-R14-P1-01: by ticket id as well as by material. Completing a
+  // ticket stages one intent per resolved component, and a test that
+  // deletes its own ad-hoc Material in its `finally` leaves an intent
+  // this file's materialId-keyed sweep can no longer see — the ticket id
+  // is the key that always still matches.
+  if (ticketIds.length > 0) await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { batchTicketId: { in: ticketIds } } }));
   if (leftoverMaterialIds.length > 0) await deleteMovements({ materialId: { in: leftoverMaterialIds } });
   if (leftoverSiloIds.length > 0) await deleteMovements({ storageId: { in: leftoverSiloIds } });
   if (leftoverMaterialIds.length > 0) await prisma.batchComponentActual.deleteMany({ where: { materialId: { in: leftoverMaterialIds } } });
@@ -194,6 +275,7 @@ after(async () => {
   await cleanupDelete(() => prisma.customer.delete({ where: { id: customerId } }));
   await cleanupDelete(() => prisma.plant.delete({ where: { id: plantId } }));
   await cleanupDelete(() => prisma.site.delete({ where: { id: siteId } }));
+  await deleteSuiteAuditEvents();
   await cleanupDelete(() => prisma.user.delete({ where: { id: adminUserId } }));
 
   // Proves the sweep above actually worked, not just that it ran without
@@ -206,8 +288,24 @@ after(async () => {
     prisma.site.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
     prisma.plant.count({ where: { name: { startsWith: "TEST-SUITE-BC-" } } }),
     prisma.batchTicket.count({ where: { ticketNumber: { startsWith: "TEST-SUITE-BC-" } } }),
+    // PL-R8-P1-01: matches deleteSuiteAuditEvents' own predicate exactly
+    // — actorId OR recordId — so this genuinely proves zero residue
+    // including the SYSTEM/null-actor rows completeBatchTicket(id, {})
+    // writes, not just adminUserId's own.
+    prisma.auditEvent.count({ where: { OR: [{ actorId: adminUserId }, { recordId: { in: [reservationId, ...ticketIds, ...tripIds] } }] } }),
+    // PL-R9-P1-02: proves the materialId-keyed sweep above actually
+    // caught every requisition, not just that the subsequent material
+    // delete didn't throw — leftoverMaterialIds is the same snapshot the
+    // sweep itself used, still valid to query against even though those
+    // Material rows are already gone by this point.
+    prisma.materialRequisition.count({ where: { materialId: { in: leftoverMaterialIds } } }),
+    // PL-R9-P2-03: same reasoning as the materialRequisition count above.
+    // PL-R14-P1-01: counted by ticket id OR material — the ticket id is
+    // what still matches an intent whose ad-hoc Material a test already
+    // deleted, which is how rows escaped this assertion before.
+    prisma.pendingAutoRequisition.count({ where: { OR: [{ materialId: { in: leftoverMaterialIds } }, { batchTicketId: { in: ticketIds } }] } }),
   ]);
-  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket] = ${JSON.stringify(residue)}`);
+  assert.deepEqual(residue, [0, 0, 0, 0, 0, 0, 0, 0, 0], `leftover TEST-SUITE-BC-* fixtures after teardown: [material, silo, user, site, plant, ticket, auditEvent, materialRequisition, pendingAutoRequisition] = ${JSON.stringify(residue)}`);
 
   await prisma.$disconnect();
 });
@@ -470,7 +568,7 @@ test("a genuinely tiny but real quantity still posts a movement and reverses cle
   assert.equal(movements.length, 1); // the old bug posted zero rows here
   assert.ok(Math.abs(movements[0].quantity - -0.0005) < 1e-6, `expected ~-0.0005, got ${movements[0].quantity}`); // exact equality isn't safe here — this is a real float round-trip, not a literal
 
-  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test reversal of a tiny quantity" });
+  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test reversal of a tiny quantity" });
   assert.equal(reversal.status, "SUCCESS");
   assert.equal(await siloLevel(siloId), 10); // restored exactly, nothing left unreconciled
 });
@@ -587,7 +685,7 @@ test("a reversal that would exceed capacity fails and reversedAt stays unset (P1
   // crediting the full 10t back on reversal would overflow it.
   await prisma.silo.update({ where: { id: siloId }, data: { currentLevelTons: 495 } });
 
-  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test capacity boundary" });
+  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test capacity boundary" });
   assert.equal(reversal.status, "CAPACITY_EXCEEDED");
 
   const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
@@ -986,7 +1084,7 @@ test("cancelBatchTicket cancels a non-terminal ticket and expires any active ove
   assert.equal(request.status, "OK");
   if (request.status !== "OK") return;
 
-  const cancellation = await cancelBatchTicket(ticketId, { actorId: adminUserId, reason: "test cancellation" });
+  const cancellation = await cancelBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test cancellation" });
   assert.equal(cancellation.status, "SUCCESS");
 
   const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
@@ -1004,7 +1102,7 @@ test("cancelBatchTicket refuses an already-complete ticket (P2-01)", async () =>
   const completion = await completeBatchTicket(ticketId, {});
   assert.equal(completion.status, "SUCCESS");
 
-  const result = await cancelBatchTicket(ticketId, { actorId: adminUserId, reason: "should be refused" });
+  const result = await cancelBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "should be refused" });
   assert.equal(result.status, "INVALID_STATE");
 });
 
@@ -1065,6 +1163,191 @@ test("a COMPLETE ticket cannot be re-completed", async () => {
   assert.equal(second.status, "ALREADY_COMPLETED");
 });
 
+// PL-R8-P1-03, eighth production-lifecycle review: AutoSaveField's own
+// in-flight coalescing only serializes requests ONE mounted component
+// instance issues — it has no idea about another tab, another device, or
+// a delayed request that happens to resolve out of order. This proves
+// the actual authority is the database, not the client: a "delayed"
+// older request (one that read version 0 same as the newer one, but
+// reaches the server SECOND) must be refused as STALE_READING rather
+// than silently overwriting the value a genuinely newer request already
+// committed — real optimistic concurrency, not a timing assumption.
+test("an older delayed claimAndRecordActualField call cannot overwrite a newer one that already committed — real optimistic concurrency, not just request ordering", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+  assert.equal(component.actualVersion, 0, "a freshly created component starts at actualVersion 0");
+
+  // Both "requests" read version 0 — exactly what two different browser
+  // tabs (or an online save racing a queued offline replay) would each
+  // believe independently, with neither aware of the other.
+  const newer = await claimAndRecordActualField(ticketId, component.id, "actual", 42, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(newer.status, "OK");
+  if (newer.status === "OK") assert.equal(newer.version, 1);
+
+  // The "delayed" older request now arrives, still carrying its own
+  // stale belief that the version is 0.
+  const older = await claimAndRecordActualField(ticketId, component.id, "actual", 17, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(older.status, "STALE_READING", "a write against a version that's no longer current must be refused, not silently applied");
+
+  const finalComponent = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
+  assert.equal(finalComponent.actualMassKg, 42, "the newer value must survive untouched — the older request must never have applied");
+  assert.equal(finalComponent.actualVersion, 1, "only the one accepted write may have advanced actualVersion");
+
+  // A real caller who re-reads the current version can still save for real.
+  const retry = await claimAndRecordActualField(ticketId, component.id, "actual", 17, finalComponent.actualVersion, { id: adminUserId, role: "ADMIN" });
+  assert.equal(retry.status, "OK");
+});
+
+// ---- PL-R9-P1-03, ninth production-lifecycle review: field-specific
+// ---- version columns replace the one shared BatchComponentActual.version
+// ---- round 8 introduced — a single shared token, checked/incremented by
+// ---- two independent AutoSaveField instances (one per field), made a
+// ---- perfectly ordinary sequential save of both fields on one page load
+// ---- falsely collide: saving actual bumped the shared version, so
+// ---- moisture's own still-0 ref then read back STALE_READING with no
+// ---- competing user or device anywhere. These tests prove the fix at the
+// ---- same domain-function layer the review itself inspected.
+
+test("saving actual then moisture from one rendered component — both succeed (no false sibling-field conflict)", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+  assert.equal(component.actualVersion, 0);
+  assert.equal(component.moistureVersion, 0);
+
+  // Both fields render from the SAME page load, both starting at version
+  // 0 — exactly the "operator fills in actual, then moisture" sequence
+  // PL-R9-P1-03 found falsely rejected under the old shared column.
+  const actualSave = await claimAndRecordActualField(ticketId, component.id, "actual", 42, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(actualSave.status, "OK", "actual save must succeed — nothing has touched this component yet");
+
+  const moistureSave = await claimAndRecordActualField(ticketId, component.id, "moisture", 3.5, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(moistureSave.status, "OK", "moisture save must still succeed against its own version 0 — the actual save above must never have touched it");
+
+  const final = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
+  assert.equal(final.actualMassKg, 42);
+  assert.equal(final.moisturePct, 3.5);
+  assert.equal(final.actualVersion, 1, "only the actual save may have advanced actualVersion");
+  assert.equal(final.moistureVersion, 1, "only the moisture save may have advanced moistureVersion");
+});
+
+test("saving moisture then actual from one rendered component — both succeed (order-independent)", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+
+  const moistureSave = await claimAndRecordActualField(ticketId, component.id, "moisture", 4.1, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(moistureSave.status, "OK");
+
+  const actualSave = await claimAndRecordActualField(ticketId, component.id, "actual", 55, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(actualSave.status, "OK", "actual save must still succeed against its own version 0 — the moisture save above must never have touched it");
+
+  const final = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
+  assert.equal(final.actualMassKg, 55);
+  assert.equal(final.moisturePct, 4.1);
+  assert.equal(final.actualVersion, 1);
+  assert.equal(final.moistureVersion, 1);
+});
+
+// This is also the offline-replay case (required test 5): OfflineSyncBanner's
+// recordActualField handler calls the exact same Server Action, which calls
+// this exact same domain function with the exact same per-field arguments —
+// there is no separate offline-only code path to diverge from what the two
+// tests above already prove for actual-then-moisture and moisture-then-actual
+// starting from one shared page load's versions.
+
+test("an old tab's single-field autosave cannot overwrite a newer bulk save on the same field — stale writer rejected", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
+
+  // The bulk "Save readings" submit advances actualVersion (and
+  // moistureVersion, since it writes both fields) exactly like a real
+  // operator submitting the whole form.
+  const bulk = await claimAndRecordActuals(
+    ticketId,
+    [{ id: component.id, actualMassKg: 900, moisturePct: 2, expectedActualVersion: 0, expectedMoistureVersion: 0 }],
+    { id: adminUserId, role: "ADMIN" },
+  );
+  assert.equal(bulk.status, "OK");
+
+  // An old browser tab, still rendered from before the bulk save, now
+  // autosaves the actual field carrying its own stale belief (version 0).
+  const staleAutosave = await claimAndRecordActualField(ticketId, component.id, "actual", 111, 0, { id: adminUserId, role: "ADMIN" });
+  assert.equal(staleAutosave.status, "STALE_READING", "the old tab's write must be refused, not silently applied over the newer bulk save");
+
+  const final = await prisma.batchComponentActual.findUniqueOrThrow({ where: { id: component.id } });
+  assert.equal(final.actualMassKg, 900, "the bulk save's value must survive untouched");
+});
+
+test("a bulk save versus a concurrent single-field autosave: exactly one winner, never a partial bulk write", async () => {
+  // PL-R10-P1-02, tenth production-lifecycle review: BatchComponentActual
+  // has @@unique([batchTicketId, materialId]) — two components on ONE
+  // ticket can never share a materialId. The original fixture here
+  // created both with the same `materialId`, so Postgres rejected the
+  // insert before the race below ever ran. A genuine second component
+  // needs a genuinely second material.
+  const secondMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-BC-BULK-VS-AUTOSAVE-B", type: "CEMENT" } });
+  const ticketId = await makeTicket([
+    { materialId, targetMassKg: 1000 },
+    { materialId: secondMaterial.id, targetMassKg: 2000 },
+  ]);
+  const componentA = await prisma.batchComponentActual.findFirstOrThrow({ where: { batchTicketId: ticketId, materialId } });
+  const componentB = await prisma.batchComponentActual.findFirstOrThrow({ where: { batchTicketId: ticketId, materialId: secondMaterial.id } });
+
+  // The concurrent autosave only ever touches componentA's actual field.
+  // The bulk save covers BOTH components in one transaction — if the race
+  // makes the bulk save's belief about componentA stale, componentB must
+  // never have been written either (no partial bulk write), even though
+  // nothing ever raced componentB directly.
+  //
+  // PL-R10-P1-02: Promise.all gives NO ordering guarantee between these
+  // two — either one can reach its own transaction's commit first. The
+  // only real invariant is that EXACTLY ONE of them may end up "OK"
+  // against actualVersion 0; the other must see STALE_READING and (for
+  // the bulk side) roll back in full. Asserting a predetermined winner
+  // was the actual bug this round's review found — both legal outcomes
+  // are validated symmetrically below instead.
+  const [autosaveResult, bulkResult] = await Promise.all([
+    claimAndRecordActualField(ticketId, componentA.id, "actual", 77, 0, { id: adminUserId, role: "ADMIN" }),
+    claimAndRecordActuals(
+      ticketId,
+      [
+        { id: componentA.id, actualMassKg: 500, moisturePct: null, expectedActualVersion: 0, expectedMoistureVersion: 0 },
+        { id: componentB.id, actualMassKg: 1900, moisturePct: null, expectedActualVersion: 0, expectedMoistureVersion: 0 },
+      ],
+      { id: adminUserId, role: "ADMIN" },
+    ),
+  ]);
+
+  assert.equal(
+    [autosaveResult.status, bulkResult.status].filter((s) => s === "OK").length,
+    1,
+    `exactly one of the two concurrent writers may win against actualVersion 0, got: autosave=${autosaveResult.status}, bulk=${bulkResult.status}`,
+  );
+
+  const [finalA, finalB] = await Promise.all([
+    prisma.batchComponentActual.findUniqueOrThrow({ where: { id: componentA.id } }),
+    prisma.batchComponentActual.findUniqueOrThrow({ where: { id: componentB.id } }),
+  ]);
+
+  if (autosaveResult.status === "OK") {
+    // The autosave committed first — the bulk save's belief about
+    // componentA (version 0) was stale by the time it ran, so the WHOLE
+    // bulk write must have rolled back, including componentB, which the
+    // race never touched directly.
+    assert.equal(bulkResult.status, "STALE_READING");
+    if (bulkResult.status === "STALE_READING") assert.deepEqual(bulkResult.staleIds, [componentA.id]);
+    assert.equal(finalA.actualMassKg, 77, "the autosave's own value must survive");
+    assert.equal(finalB.actualMassKg, null, "componentB must be untouched — a stale component must roll back the ENTIRE bulk write, not just its own row");
+  } else {
+    // The bulk save committed first — the autosave's own belief about
+    // componentA (also version 0) was then stale, so it must have been
+    // refused rather than silently overwriting the bulk save's value.
+    assert.equal(autosaveResult.status, "STALE_READING", "the losing autosave must be refused, not silently applied over the bulk save's own value");
+    assert.equal(bulkResult.status, "OK");
+    assert.equal(finalA.actualMassKg, 500, "the bulk save's value for componentA must survive untouched");
+    assert.equal(finalB.actualMassKg, 1900, "componentB must have the bulk value");
+  }
+});
+
 test("completion vs. recordActualField: exactly one of two valid outcomes, never a stale-ledger/saved-edit mix", async () => {
   await resetSilo(50);
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]); // 1kg -> 0.001t, small on purpose
@@ -1072,7 +1355,7 @@ test("completion vs. recordActualField: exactly one of two valid outcomes, never
 
   const [completeResult, editResult] = await Promise.all([
     completeBatchTicket(ticketId, {}),
-    claimAndRecordActualField(ticketId, component.id, "actual", 2000), // 2kg — deliberately different from the 1kg target
+    claimAndRecordActualField(ticketId, component.id, "actual", 2000, component.actualVersion, { id: adminUserId, role: "ADMIN" }), // 2kg — deliberately different from the 1kg target
   ]);
 
   assert.equal(completeResult.status, "SUCCESS"); // completion always eventually succeeds — BATCHING never blocks its own claim
@@ -1100,7 +1383,11 @@ test("completion vs. recordActuals (bulk): exactly one of two valid outcomes", a
 
   const [completeResult, editResult] = await Promise.all([
     completeBatchTicket(ticketId, {}),
-    claimAndRecordActuals(ticketId, [{ id: component.id, actualMassKg: 3000, moisturePct: null }]),
+    claimAndRecordActuals(
+      ticketId,
+      [{ id: component.id, actualMassKg: 3000, moisturePct: null, expectedActualVersion: component.actualVersion, expectedMoistureVersion: component.moistureVersion }],
+      { id: adminUserId, role: "ADMIN" },
+    ),
   ]);
 
   assert.equal(completeResult.status, "SUCCESS");
@@ -1136,7 +1423,7 @@ test("completion vs. addTicketComponent: exactly one of two valid outcomes", asy
     // STORAGE_NOT_CONFIGURED (CR-02) rather than silently ignoring it.
     const [completeResult, editResult] = await Promise.all([
       completeBatchTicket(ticketId, {}),
-      claimAndAddTicketComponent(ticketId, secondMaterial.id, 500),
+      claimAndAddTicketComponent(ticketId, secondMaterial.id, 500, { id: adminUserId, role: "ADMIN" }),
     ]);
 
     if (editResult.status === "OK") {
@@ -1165,7 +1452,7 @@ test("completion vs. deleteTicketComponent: exactly one of two valid outcomes", 
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
   const [component] = await prisma.batchComponentActual.findMany({ where: { batchTicketId: ticketId } });
 
-  const [completeResult, editResult] = await Promise.all([completeBatchTicket(ticketId, {}), claimAndDeleteTicketComponent(ticketId, component.id)]);
+  const [completeResult, editResult] = await Promise.all([completeBatchTicket(ticketId, {}), claimAndDeleteTicketComponent(ticketId, component.id, { id: adminUserId, role: "ADMIN" })]);
 
   if (editResult.status === "OK") {
     // The component was deleted before completion's claim — completion
@@ -1184,6 +1471,957 @@ test("completion vs. deleteTicketComponent: exactly one of two valid outcomes", 
   }
 });
 
+// ======================================================================
+// PL-R6-P2-01, sixth production-lifecycle review — the audit event for
+// each of these commands now writes inside the SAME transaction as the
+// business mutation (see batchComponentEdits.ts/batchCompletion.ts's own
+// comments on writeAudit). These tests prove that atomicity directly: a
+// nonexistent actor id violates AuditEvent.actorId's own FK the same way
+// an earlier round's tests already proved for other domain functions —
+// the failure lands on the LAST write in each transaction, so a rejected
+// call must roll back the business mutation right along with it, not
+// leave a component/ticket change on file with no audit trail behind it.
+// ======================================================================
+
+test("claimAndAddTicketComponent rolls back the component write together with a failed audit insert", async () => {
+  const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
+  const componentCountBefore = await prisma.batchComponentActual.count({ where: { batchTicketId: ticketId } });
+  const auditCountBefore = await prisma.auditEvent.count({ where: { recordId: ticketId } });
+
+  await assert.rejects(() => claimAndAddTicketComponent(ticketId, materialId, 250, { id: "test-suite-bc-nonexistent-actor", role: "ADMIN" }));
+
+  const componentCountAfter = await prisma.batchComponentActual.count({ where: { batchTicketId: ticketId } });
+  const auditCountAfter = await prisma.auditEvent.count({ where: { recordId: ticketId } });
+  assert.equal(componentCountAfter, componentCountBefore, "the upserted component must never have applied");
+  assert.equal(auditCountAfter, auditCountBefore, "no partial audit row may survive");
+
+  // The ticket is still genuinely editable afterward — proves this wasn't
+  // left half-claimed by the failed attempt.
+  const retry = await claimAndAddTicketComponent(ticketId, materialId, 250, { id: adminUserId, role: "ADMIN" });
+  assert.equal(retry.status, "OK");
+});
+
+test("completeBatchTicket rolls back the ticket claim together with a failed audit insert", async () => {
+  // An inventoryTracked:false material (same fixture pattern as the
+  // reclaim tests above) means resolveTicketComponents posts NOTHING to
+  // the ledger — the only actorId-referencing write left inside this
+  // transaction is the new audit event itself, so this genuinely proves
+  // THAT write's own rollback, not just the ledger's own pre-existing FK
+  // guard tripping first.
+  const untrackedMaterial = await prisma.material.create({ data: { name: "TEST-SUITE-BC-AUDIT-ROLLBACK", type: "WATER", inventoryTracked: false } });
+  const ticketId = await makeTicket([{ materialId: untrackedMaterial.id, targetMassKg: 1000 }]);
+
+  await assert.rejects(() => completeBatchTicket(ticketId, { actorId: "test-suite-bc-nonexistent-actor", actorRole: "ADMIN" }));
+
+  const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
+  assert.notEqual(ticket.status, "COMPLETE", "the ticket claim must have rolled back together with the failed audit insert");
+  const auditCount = await prisma.auditEvent.count({ where: { recordId: ticketId } });
+  assert.equal(auditCount, 0, "no partial audit row may survive");
+
+  // A real actor can still complete it for real afterward.
+  const retry = await completeBatchTicket(ticketId, {});
+  assert.equal(retry.status, "SUCCESS");
+});
+
+// PL-R8-P2-02, eighth production-lifecycle review: createRequisitionIfNeeded's
+// own pre-check (a plain SELECT) has a race window a genuinely concurrent
+// call can win — the partial unique index MaterialRequisition_open_per_
+// material_site_key is the real backstop, and the P2002 it raises must be
+// classified precisely (not confused with an unrelated requisitionNumber
+// collision). Calling the real function directly (not a paraphrase) with
+// both calls racing against the SAME real PostgreSQL database proves both
+// the index and the classification together: exactly one row is created,
+// and the LOSING call resolves to that exact same row rather than
+// silently doing nothing. PL-R10-P2-01, tenth production-lifecycle
+// review: this now calls createRequisitionIfNeeded directly (the
+// creation-only half) rather than the old combined create+notify
+// maybeAutoRequisitionMaterial — notification delivery is a separate
+// concern, tested on its own below.
+test("two concurrent shortfall requisition attempts for the same material+site leave exactly one open requisition, and both callers resolve to it", async () => {
+  const toKg = (tons: number) => tons * 1000;
+  // Promise.allSettled, not Promise.all (PL-R9-P1-02, ninth production-
+  // lifecycle review): even though the fixed P2002 classification means
+  // neither call SHOULD reject any more, tracking the winner in a
+  // finally block — not only after a bare Promise.all resolves — means
+  // this test's own cleanup never again depends on both calls having
+  // resolved cleanly. The generic by-fixture-material sweep in this
+  // file's own after() hook is the real, tracking-independent backstop;
+  // this is defense in depth on top of it.
+  const results = await Promise.allSettled([
+    createRequisitionIfNeeded(materialId, siteId, 2, 100, 50, toKg), // 2% on hand, well under the 50% threshold
+    createRequisitionIfNeeded(materialId, siteId, 2, 100, 50, toKg),
+  ]);
+  try {
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value.status !== "BELOW_THRESHOLD" && r.value.status !== "NOT_TRACKED") {
+        materialRequisitionIds.push(r.value.requisitionId);
+      }
+    }
+
+    assert.ok(
+      results.every((r) => r.status === "fulfilled"),
+      `expected both calls to resolve, got: ${results.map((r) => (r.status === "rejected" ? String(r.reason) : r.status)).join(", ")}`,
+    );
+    const [a, b] = results.map((r) => (r.status === "fulfilled" ? r.value : null));
+    assert.ok(a && b);
+
+    const statuses = [a.status, b.status].sort();
+    assert.deepEqual(statuses, ["ALREADY_OPEN", "CREATED"], "exactly one of the two concurrent attempts may create the requisition");
+
+    const created = a.status === "CREATED" ? a : b.status === "CREATED" ? b : null;
+    const alreadyOpen = a.status === "ALREADY_OPEN" ? a : b.status === "ALREADY_OPEN" ? b : null;
+    assert.ok(created && alreadyOpen);
+    assert.equal(alreadyOpen.requisitionId, created.requisitionId, "the losing call must resolve to the SAME row the winner created, not silently do nothing");
+    assert.equal(alreadyOpen.requisitionNumber, created.requisitionNumber);
+
+    const openCount = await prisma.materialRequisition.count({
+      where: { materialId, siteId, status: { in: ["PENDING_APPROVAL", "APPROVED", "ORDERED"] } },
+    });
+    assert.equal(openCount, 1, "exactly one open requisition must exist for this material+site — the partial unique index is the real backstop");
+  } finally {
+    // Belt-and-suspenders (this file's own after() hook sweeps by
+    // materialId regardless): remove it now too so a later test in this
+    // same run never sees a stray "already open" requisition for the
+    // shared materialId fixture.
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+  }
+});
+
+// PL-R10-P2-01, tenth production-lifecycle review: PendingAutoRequisition
+// is now a real staged intent — stageAutoRequisitionIntent is what
+// completeBatchTicket itself calls, INSIDE its own completion
+// transaction, for every shortage candidate (batchCompletion.ts). This
+// proves the drain side against the real database: a row staged exactly
+// the way that transaction stages one is picked up by the cron sweep,
+// resolved for real (a real MaterialRequisition gets created), and
+// removed — nothing left to retry tomorrow.
+test("retryPendingAutoRequisitions resolves a staged intent for real and removes the row", async () => {
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+  const queued = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+  assert.equal(queued.attempts, 0);
+  assert.equal(queued.requisitionId, null, "a freshly staged intent has no requisition yet");
+
+  try {
+    const result = await retryPendingAutoRequisitions();
+    assert.ok(result.claimed >= 1);
+    assert.ok(result.resolved >= 1);
+
+    const stillQueued = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
+    assert.equal(stillQueued, null, "a fully resolved row (requisition created AND notified) must be removed, not left for another retry");
+
+    const created = await prisma.materialRequisition.findFirst({ where: { materialId, siteId, status: { in: ["PENDING_APPROVAL", "APPROVED", "ORDERED"] } } });
+    assert.ok(created, "the retry must have actually opened a real requisition, not just deleted the intent row");
+    materialRequisitionIds.push(created.id);
+  } finally {
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId, siteId } }));
+  }
+});
+
+test("retryPendingAutoRequisitions leaves an intent queued, backed off, and records the new error when the retry itself still fails", async () => {
+  // A materialId with no matching Material row drives a genuine thrown
+  // failure, not a clean terminal status: the requisition create's own
+  // required FK on materialId throws a real P2003, which
+  // withSequentialNumber's own P2002-only catch does not intercept —
+  // exactly the "the retry itself still fails" case this test wants.
+  const bogusMaterialId = "test-suite-bc-nonexistent-material-id";
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId: bogusMaterialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+  const before = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+
+  try {
+    const result = await retryPendingAutoRequisitions();
+    assert.ok(result.claimed >= 1);
+
+    const stillQueued = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
+    assert.ok(stillQueued, "a retry that fails again must leave the row queued for the next sweep, not silently drop it");
+    assert.equal(stillQueued!.attempts, 1);
+    assert.ok(stillQueued!.lastError, "the new failure's own error must be recorded");
+    assert.ok(stillQueued!.lastTriedAt);
+    // PL-R10-P2-03: a real backoff, not "retry again in the very next
+    // sweep no matter what" — and nowhere near the dead-letter threshold
+    // after just one failure.
+    assert.ok(stillQueued!.nextAttemptAt.getTime() > before.nextAttemptAt.getTime(), "a failed attempt must push nextAttemptAt further into the future, not leave it eligible again immediately");
+    assert.equal(stillQueued!.deadLetteredAt, null);
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: bogusMaterialId } }));
+  }
+});
+
+// PL-R10-P2-01's own explicit required proof: "requisition created,
+// notification fails, retry sends notification exactly once" — a
+// notifyRoles failure after the requisition itself already committed
+// must retry ONLY the notification on the next pass, never risk a
+// duplicate create. Uses processPendingAutoRequisition's injectable
+// `notify` parameter (the same DI pattern as StorageAdapter/BlobDeleter)
+// to force a real, deterministic notification failure without needing
+// to break notifyRoles itself.
+test("a notification failure after requisition creation is retried independently — notified exactly once, never a duplicate create", async () => {
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+
+  const notifyCalls: string[] = [];
+  const failingNotify: RequisitionNotifier = async (_tx, { requisitionNumber }) => {
+    notifyCalls.push(requisitionNumber);
+    throw new Error("simulated notifyRoles failure");
+  };
+
+  try {
+    const first = await processPendingAutoRequisition(intent.id, failingNotify);
+    assert.equal(first.status, "RETRY", "a notification failure must leave the intent for another attempt, not silently resolve it");
+
+    const afterFirst = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+    assert.ok(afterFirst.requisitionId, "the requisition itself must have been created and its progress recorded BEFORE the notification was even attempted");
+    const requisitionCountAfterFirst = await prisma.materialRequisition.count({ where: { id: afterFirst.requisitionId! } });
+    assert.equal(requisitionCountAfterFirst, 1);
+
+    const succeedingNotify: RequisitionNotifier = async (_tx, { requisitionNumber }) => {
+      notifyCalls.push(requisitionNumber);
+      return [];
+    };
+    const second = await processPendingAutoRequisition(intent.id, succeedingNotify);
+    assert.equal(second.status, "RESOLVED");
+
+    const afterSecond = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
+    assert.equal(afterSecond, null, "fully resolved (requisition created AND notified) — the intent row must be gone");
+
+    const requisitionCountAfterSecond = await prisma.materialRequisition.count({ where: { materialId, siteId } });
+    assert.equal(requisitionCountAfterSecond, 1, "the retry must never have created a SECOND requisition — only the notification was retried");
+    assert.equal(notifyCalls.length, 2, "notify must have been attempted twice (once failing, once succeeding) — never skipped, never duplicated beyond that");
+
+    materialRequisitionIds.push(afterFirst.requisitionId!);
+  } finally {
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId, siteId } }));
+  }
+});
+
+// PL-R12-P1-02's own explicit required proof: "Overlap the immediate call
+// and cron retry for the same intent id using barriers around requisition
+// creation. Assert exactly one requisition, a durable notification
+// outcome, no premature deletion, and no duplicate notification."
+//
+// The barrier is the injectable notifier: the immediate processor is held
+// INSIDE its notification, still holding the intent's lease, while the
+// cron sweep runs against the very same intent id. Before the owner lease
+// existed, both processors read requisitionId = null, one created the
+// requisition and the other saw ALREADY_OPEN and deleted the intent out
+// from under it — losing the notification work entirely.
+test("the immediate processor and the cron sweep cannot consume the same intent concurrently — one requisition, one notification, no premature deletion", async () => {
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+
+  const notifyCalls: string[] = [];
+  let signalInsideNotify!: () => void;
+  const insideNotify = new Promise<void>((resolve) => {
+    signalInsideNotify = resolve;
+  });
+  let releaseNotify!: () => void;
+  const heldNotify = new Promise<void>((resolve) => {
+    releaseNotify = resolve;
+  });
+
+  try {
+    const immediate = processPendingAutoRequisition(intent.id, async (_tx, { requisitionNumber }) => {
+      notifyCalls.push(requisitionNumber);
+      signalInsideNotify();
+      await heldNotify;
+      return [];
+    });
+
+    // The immediate processor now holds the lease and is mid-notification.
+    await insideNotify;
+
+    // PL-R15-P1-01, fifteenth production-lifecycle review: the row this
+    // sweep must leave alone is, at this instant, physically ROW-LOCKED
+    // by the immediate processor's still-open settlement transaction
+    // (PL-R14-P1-02 made re-asserting the lease the transaction's first
+    // statement, and that UPDATE takes the lock). The claim query uses
+    // FOR UPDATE SKIP LOCKED, so the row is excluded from the claim
+    // ENTIRELY — it is never selected, never processed, and therefore
+    // never reported BUSY. `nextAttemptAt` is the durable proof of that:
+    // claimEligiblePendingAutoRequisitions provisionally bumps it forward
+    // on every row it claims, so an unchanged value on this row means the
+    // claim genuinely never touched it. That is a per-row fact, unlike
+    // any global counter.
+    const beforeSweep = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+    const cron = await retryPendingAutoRequisitions(200, async (_tx, { requisitionNumber }) => {
+      notifyCalls.push(`cron:${requisitionNumber}`);
+      return [];
+    });
+    const afterSweep = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+    assert.equal(afterSweep.nextAttemptAt.getTime(), beforeSweep.nextAttemptAt.getTime(), "SKIP LOCKED must have excluded the locked row from the claim itself — a claimed row always has its nextAttemptAt bumped");
+    assert.equal(afterSweep.leaseOwner, beforeSweep.leaseOwner, "and the owner's lease must be untouched by the sweep");
+    // The corrected counter contract: BUSY means a row the sweep DID
+    // claim and then lost the lease race on. A row excluded by SKIP
+    // LOCKED before selection is counted in nothing at all, so expecting
+    // `busy >= 1` here was asserting the opposite of the real (and
+    // correct) queue semantics — that is what turned CI #56 red, not any
+    // production defect. Zero is the right expectation: this suite runs
+    // serially (--test-concurrency=1), so the locked intent above is the
+    // only lease held by any live processor anywhere.
+    assert.equal(cron.busy, 0, "a row another transaction holds is skipped before selection, so it is never counted BUSY");
+    assert.ok(!notifyCalls.some((c) => c.startsWith("cron:")), "the cron sweep must not have notified for an intent another processor is actively holding");
+
+    const duringOverlap = await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } });
+    assert.ok(duringOverlap, "the intent must NOT have been deleted while its owner was still working on it");
+    assert.equal(await prisma.materialRequisition.count({ where: { materialId, siteId } }), 1, "exactly one requisition may exist across both processors");
+
+    releaseNotify();
+    const result = await immediate;
+    assert.equal(result.status, "RESOLVED");
+
+    assert.deepEqual(notifyCalls.length, 1, "exactly one notification — the cron sweep must never have sent a duplicate");
+    assert.equal(await prisma.materialRequisition.count({ where: { materialId, siteId } }), 1);
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } }), null, "the intent is removed only once its work is genuinely complete");
+    const created = await prisma.materialRequisition.findFirstOrThrow({ where: { materialId, siteId } });
+    assert.ok(created.autoRequisitionNotifiedAt, "delivery must be stamped durably on the requisition itself");
+    materialRequisitionIds.push(created.id);
+  } finally {
+    releaseNotify();
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId, siteId } }));
+  }
+});
+
+// PL-R13-P1-03's own explicit required proof: stop the notifier after the
+// delivery claim would previously have been stamped but before the
+// Notification rows exist, let the lease expire (a process crash), run a
+// second processor, and prove the intent could NOT be deleted without a
+// durable Notification — and that the recipient ends up with exactly one.
+test("a crash between claiming delivery and creating the notification loses nothing and duplicates nothing", async () => {
+  const manager = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-CRASH-MANAGER", email: `test-suite-bc-crash-${Date.now()}@example.invalid`, passwordHash: "x", role: "PLANT_MANAGER", status: "ACTIVE", plantId },
+  });
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+
+  try {
+    // 1. The notifier dies exactly where the old code had already written
+    //    the "notified" stamp — after the requisition exists, before any
+    //    Notification row does.
+    const crashingNotify: RequisitionNotifier = async () => {
+      throw new Error("simulated process crash before the notification was created");
+    };
+    const crashed = await processPendingAutoRequisition(intent.id, crashingNotify);
+    assert.equal(crashed.status, "RETRY", "a crash mid-delivery must leave the intent to be retried, never resolve it");
+
+    const afterCrash = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+    assert.ok(afterCrash.requisitionId, "the requisition itself was created and recorded before delivery was attempted");
+    const requisitionAfterCrash = await prisma.materialRequisition.findUniqueOrThrow({ where: { id: afterCrash.requisitionId! } });
+    assert.equal(
+      requisitionAfterCrash.autoRequisitionNotifiedAt,
+      null,
+      "the requisition must NOT be marked announced when no Notification row exists — the stamp and the rows are one transaction now",
+    );
+    assert.equal(await prisma.notification.count({ where: { userId: manager.id } }), 0);
+
+    // 2. Simulate the crashed process's lease expiring, so a second
+    //    processor can genuinely take the row over.
+    await prisma.pendingAutoRequisition.update({ where: { id: intent.id }, data: { leaseOwner: "dead-process", leaseExpiresAt: new Date(Date.now() - 60_000), nextAttemptAt: new Date(Date.now() - 60_000) } });
+
+    // 3. A second processor, this time with the REAL notifier.
+    const second = await processPendingAutoRequisition(intent.id, notifyRequisitionCreated);
+    assert.equal(second.status, "RESOLVED");
+
+    // 4. Exactly one notification, and the intent is gone only now that a
+    //    durable Notification actually exists.
+    assert.equal(await prisma.notification.count({ where: { userId: manager.id } }), 1, "the retry must deliver exactly once — never zero (lost) and never twice (duplicated)");
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } }), null);
+    const finalRequisition = await prisma.materialRequisition.findUniqueOrThrow({ where: { id: afterCrash.requisitionId! } });
+    assert.ok(finalRequisition.autoRequisitionNotifiedAt, "only now may the requisition be marked announced");
+    materialRequisitionIds.push(finalRequisition.id);
+
+    // 5. And a further processor cannot fan out a second copy.
+    const replayed = await processPendingAutoRequisition(intent.id, notifyRequisitionCreated);
+    assert.equal(replayed.status, "RESOLVED");
+    assert.equal(await prisma.notification.count({ where: { userId: manager.id } }), 1, "a replay after full resolution must never create a second notification");
+  } finally {
+    await cleanupDelete(() => prisma.notification.deleteMany({ where: { userId: manager.id } }));
+    await cleanupDelete(() => prisma.user.delete({ where: { id: manager.id } }));
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: intent.id } }));
+  }
+});
+
+// PL-R14-P1-02's own required proof #1: worker A stalls inside delivery,
+// its lease expires, worker B takes over, then A resumes. Only ONE of
+// them may commit the stamp/notification and delete the intent — and A,
+// having lost the lease, must commit nothing at all rather than leaving
+// its writes behind and merely reporting BUSY afterwards.
+test("a worker that loses its lease mid-delivery commits nothing — the new owner is the only one that delivers", async () => {
+  const manager = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-LEASE-MANAGER", email: `test-suite-bc-lease-${Date.now()}@example.invalid`, passwordHash: "x", role: "PLANT_MANAGER", status: "ACTIVE", plantId },
+  });
+  const intent = await stageAutoRequisitionIntent(prisma, "test-suite-bc-fake-ticket-id", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+
+  let signalInsideA!: () => void;
+  const insideA = new Promise<void>((resolve) => {
+    signalInsideA = resolve;
+  });
+  let releaseA!: () => void;
+  const heldA = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  const notifiedBy: string[] = [];
+
+  try {
+    // Worker A enters delivery and stalls there, still nominally holding
+    // the lease.
+    const workerA = processPendingAutoRequisition(intent.id, async (tx, params) => {
+      notifiedBy.push("A");
+      signalInsideA();
+      await heldA;
+      return notifyRequisitionCreated(tx, params);
+    });
+    await insideA;
+
+    // A's lease expires and worker B takes the intent over for real.
+    await prisma.pendingAutoRequisition.updateMany({ where: { id: intent.id }, data: { leaseExpiresAt: new Date(Date.now() - 60_000) } });
+    const workerB = await processPendingAutoRequisition(intent.id, async (tx, params) => {
+      notifiedBy.push("B");
+      return notifyRequisitionCreated(tx, params);
+    });
+    assert.equal(workerB.status, "RESOLVED", "the new lease owner must be able to finish the work");
+
+    // A resumes and discovers it no longer owns the intent.
+    releaseA();
+    const resultA = await workerA;
+    assert.equal(resultA.status, "BUSY", "the worker that lost its lease must report BUSY, never RESOLVED");
+
+    // The decisive assertion: A committed NOTHING. Exactly one
+    // notification exists, and it is B's.
+    assert.equal(await prisma.notification.count({ where: { userId: manager.id } }), 1, "exactly one notification — the lease loser's writes must have rolled back, not merely been reported after the fact");
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: intent.id } }), null);
+    const requisitions = await prisma.materialRequisition.findMany({ where: { materialId, siteId } });
+    assert.equal(requisitions.length, 1, "and only one requisition may exist across both workers");
+    assert.ok(requisitions[0].autoRequisitionNotifiedAt);
+    materialRequisitionIds.push(requisitions[0].id);
+  } finally {
+    releaseA();
+    await cleanupDelete(() => prisma.notification.deleteMany({ where: { userId: manager.id } }));
+    await cleanupDelete(() => prisma.user.delete({ where: { id: manager.id } }));
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: intent.id } }));
+  }
+});
+
+// PL-R14-P1-02's own required proof #2: two intents for two DIFFERENT
+// tickets that resolve to the same open MaterialRequisition, processed
+// together. The dedupeKey stops a duplicate Notification row, but only a
+// single delivery winner stops a duplicate Web Push — so the recipient
+// list handed to push must be empty for the loser.
+test("two intents meeting on one requisition notify once and push once — the loser pushes nothing", async () => {
+  const manager = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-DUP-MANAGER", email: `test-suite-bc-dup-${Date.now()}@example.invalid`, passwordHash: "x", role: "PLANT_MANAGER", status: "ACTIVE", plantId },
+  });
+  const first = await stageAutoRequisitionIntent(prisma, "test-suite-bc-dup-ticket-a", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+  const second = await stageAutoRequisitionIntent(prisma, "test-suite-bc-dup-ticket-b", { materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS" });
+
+  // Records how many recipients each worker was handed for push — the
+  // number that actually determines whether a device buzzes twice.
+  const pushedCounts: number[] = [];
+  const countingNotifier = async (tx: Parameters<typeof notifyRequisitionCreated>[0], params: Parameters<typeof notifyRequisitionCreated>[1]) => {
+    const recipients = await notifyRequisitionCreated(tx, params);
+    pushedCounts.push(recipients.length);
+    return recipients;
+  };
+
+  try {
+    const [a, b] = await Promise.all([processPendingAutoRequisition(first.id, countingNotifier), processPendingAutoRequisition(second.id, countingNotifier)]);
+    assert.deepEqual([a.status, b.status].sort(), ["RESOLVED", "RESOLVED"], "both intents are genuinely finished — the second is owed nothing once the first has announced");
+
+    const requisitions = await prisma.materialRequisition.findMany({ where: { materialId, siteId } });
+    assert.equal(requisitions.length, 1, "the partial unique index means both intents meet on ONE requisition");
+    materialRequisitionIds.push(requisitions[0].id);
+
+    assert.equal(await prisma.notification.count({ where: { userId: manager.id } }), 1, "exactly one Notification row for the recipient");
+    assert.equal(
+      pushedCounts.filter((n) => n > 0).length,
+      1,
+      `exactly one worker may be handed recipients to push — the other must push nothing. Got: ${JSON.stringify(pushedCounts)}`,
+    );
+
+    assert.equal(await prisma.pendingAutoRequisition.count({ where: { id: { in: [first.id, second.id] } } }), 0, "both intents must be fully drained");
+  } finally {
+    await cleanupDelete(() => prisma.notification.deleteMany({ where: { userId: manager.id } }));
+    await cleanupDelete(() => prisma.user.delete({ where: { id: manager.id } }));
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: { in: [first.id, second.id] } } }));
+  }
+});
+
+// PL-R12-P1-03's own explicit required proof: "Test a same-site manager,
+// another-site manager, and an admin; only the same-site manager and
+// admin should receive the event." REQUISITION_APPROVAL_ROLES includes
+// plant managers, and the notification previously went out org-wide — so
+// a manager at another site was told the requisition number and material
+// name belonging to this site's shortage.
+test("an automatic requisition notification reaches the same-site manager and ADMIN, never a manager at another site", async () => {
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-BC-NOTIFY-${Date.now()}`, name: "TEST-SUITE-BC-NOTIFY-SITE-B", city: "Test", country: "Test" } });
+  const otherPlant = await prisma.plant.create({ data: { siteId: otherSite.id, name: "TEST-SUITE-BC-NOTIFY-PLANT-B" } });
+  const sameSiteManager = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-NOTIFY-SAME-SITE", email: `test-suite-bc-same-${Date.now()}@example.invalid`, passwordHash: "x", role: "PLANT_MANAGER", status: "ACTIVE", plantId },
+  });
+  const otherSiteManager = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-NOTIFY-OTHER-SITE", email: `test-suite-bc-other-${Date.now()}@example.invalid`, passwordHash: "x", role: "PLANT_MANAGER", status: "ACTIVE", plantId: otherPlant.id },
+  });
+  const admin = await prisma.user.create({
+    data: { name: "TEST-SUITE-BC-NOTIFY-ADMIN", email: `test-suite-bc-admin-${Date.now()}@example.invalid`, passwordHash: "x", role: "ADMIN", status: "ACTIVE", plantId: otherPlant.id },
+  });
+  const recipients = [sameSiteManager.id, otherSiteManager.id, admin.id];
+
+  try {
+    // The REAL notifier, not a fake — this is the exact function the
+    // intent processor calls, run inside a transaction exactly as the
+    // processor runs it (PL-R13-P1-03).
+    await prisma.$transaction(async (tx) =>
+      notifyRequisitionCreated(tx, { requisitionId: "test-suite-bc-scope-requisition", requisitionNumber: "TEST-SUITE-BC-MTR-SCOPE", materialName: "TEST-SUITE-BC-MATERIAL", siteId }),
+    );
+
+    const notified = await prisma.notification.findMany({ where: { userId: { in: recipients }, title: "TEST-SUITE-BC-MTR-SCOPE" }, select: { userId: true } });
+    const notifiedIds = notified.map((n) => n.userId).sort();
+    assert.deepEqual(notifiedIds, [sameSiteManager.id, admin.id].sort(), "only the same-site manager and ADMIN may be notified");
+    assert.ok(!notifiedIds.includes(otherSiteManager.id), "a manager at another site must never receive this site's requisition details");
+  } finally {
+    await cleanupDelete(() => prisma.notification.deleteMany({ where: { userId: { in: recipients } } }));
+    await cleanupDelete(() => prisma.user.deleteMany({ where: { id: { in: recipients } } }));
+    await cleanupDelete(() => prisma.plant.delete({ where: { id: otherPlant.id } }));
+    await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+  }
+});
+
+// ---- PL-R12-P2-03, twelfth production-lifecycle review: dead-lettered
+// ---- rows had no operations path at all — nothing showed them, and no
+// ---- action could requeue or drop one, so an abandoned consequence (a
+// ---- requisition never opened) left only a console line behind. These
+// ---- cover the review's own required cases: the attempt-14 transition,
+// ---- automatic exclusion from claims, site scoping, manual requeue and
+// ---- dismissal.
+
+test("an intent dead-letters exactly at the attempt threshold, and is then excluded from every further sweep", async () => {
+  const bogusMaterialId = `test-suite-bc-deadletter-material-${Date.now()}`;
+  const intent = await prisma.pendingAutoRequisition.create({
+    data: {
+      batchTicketId: "test-suite-bc-fake-ticket-id",
+      materialId: bogusMaterialId,
+      siteId,
+      newLevel: 2,
+      capacity: 100,
+      minThresholdPct: 50,
+      unit: "TONS",
+      // One short of the threshold: the next failure is the one that must
+      // park it.
+      attempts: MAX_ATTEMPTS_BEFORE_DEAD_LETTER - 1,
+    },
+  });
+
+  try {
+    const failing = await retryPendingAutoRequisitions(200);
+    assert.ok(failing.claimed >= 1);
+
+    const parked = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+    assert.equal(parked.attempts, MAX_ATTEMPTS_BEFORE_DEAD_LETTER);
+    assert.ok(parked.deadLetteredAt, "the attempt that reaches the threshold must park the row, not retry it forever");
+
+    // Automatic exclusion: even with its nextAttemptAt forced back into
+    // the past, a dead-lettered row must never be claimed again.
+    await prisma.pendingAutoRequisition.update({ where: { id: intent.id }, data: { nextAttemptAt: new Date(Date.now() - 60 * 60 * 1000) } });
+    const afterParking = await retryPendingAutoRequisitions(200);
+    const stillParked = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: intent.id } });
+    assert.equal(stillParked.attempts, MAX_ATTEMPTS_BEFORE_DEAD_LETTER, "a dead-lettered row must be excluded from automatic claims entirely");
+    assert.ok(afterParking.deadLettered >= 1, "the sweep must report how many rows are parked awaiting a human");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: bogusMaterialId } }));
+  }
+});
+
+test("dead letters are site-scoped: a site-scoped operator sees and can act on their own site's rows only", async () => {
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-BC-DL-${Date.now()}`, name: "TEST-SUITE-BC-DL-SITE-B", city: "Test", country: "Test" } });
+  const mine = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: `test-suite-bc-dl-mine-${Date.now()}`, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date() },
+  });
+  const theirs = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: `test-suite-bc-dl-theirs-${Date.now()}`, siteId: otherSite.id, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date() },
+  });
+
+  try {
+    const scoped = await listDeadLetters(siteId);
+    const scopedIds = scoped.rows.map((r) => r.id);
+    assert.ok(scopedIds.includes(mine.id), "an operator must see their own site's abandoned work");
+    assert.ok(!scopedIds.includes(theirs.id), "another site's abandoned work must never be listed");
+    // Blob deletions have no site of their own, so a site-scoped caller
+    // is never shown them (documented rule in deadLetterQueue.ts).
+    assert.ok(!scoped.rows.some((r) => r.kind === "BLOB_DELETION"), "storage cleanups are org-wide-only rows");
+
+    const orgWide = await listDeadLetters(null);
+    const orgWideIds = orgWide.rows.map((r) => r.id);
+    assert.ok(orgWideIds.includes(mine.id) && orgWideIds.includes(theirs.id), "an org-wide (ADMIN) caller sees every site");
+
+    // Acting across the scope boundary resolves to NOT_FOUND — never a
+    // distinct "forbidden" that would confirm the row exists.
+    const refused = await requeueDeadLetter("AUTO_REQUISITION", theirs.id, { id: adminUserId, role: "PLANT_MANAGER" }, siteId);
+    assert.equal(refused.status, "NOT_FOUND");
+    const untouched = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: theirs.id } });
+    assert.ok(untouched.deadLetteredAt, "a cross-site requeue must change nothing at all");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: { in: [mine.id, theirs.id] } } }));
+    await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+  }
+});
+
+// PL-R13-P2-01's own required proof: the site check must be part of the
+// WRITE, not a separately-timed read. A row that moves to another site
+// between the scope read and the mutation must not still be actionable by
+// the original site's operator.
+test("a dead letter that moves to another site between the scope read and the write is refused, with nothing mutated and nothing audited", async () => {
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-BC-TOCTOU-${Date.now()}`, name: "TEST-SUITE-BC-TOCTOU-SITE", city: "Test", country: "Test" } });
+  const parked = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: `test-suite-bc-toctou-${Date.now()}`, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date() },
+  });
+
+  try {
+    // The row genuinely belongs to `siteId` at scope-read time — this is
+    // the window the old code left open.
+    const listed = await listDeadLetters(siteId);
+    assert.ok(listed.rows.some((r) => r.id === parked.id));
+
+    // It moves to another site before the operator's action lands.
+    await prisma.pendingAutoRequisition.update({ where: { id: parked.id }, data: { siteId: otherSite.id } });
+
+    // PL-R14-P2-02, fourteenth production-lifecycle review: this used to
+    // prove nothing about the WRITE. requeueDeadLetter began with an
+    // inScope() pre-read, which re-read the row AFTER the move and
+    // refused there — so the site condition inside the UPDATE was never
+    // reached, let alone exercised. That pre-read is gone: the
+    // conditional mutation is now the only authorization decision, so
+    // this call genuinely tests it.
+    const requeue = await requeueDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "PLANT_MANAGER" }, siteId);
+    assert.equal(requeue.status, "NOT_FOUND", "the write's own site condition must refuse a row that has moved out of scope");
+    const afterRequeue = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: parked.id } });
+    assert.ok(afterRequeue.deadLetteredAt, "nothing may have been mutated");
+    assert.equal(afterRequeue.attempts, 14);
+
+    const dismiss = await dismissDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "PLANT_MANAGER" }, siteId);
+    assert.equal(dismiss.status, "NOT_FOUND");
+    assert.ok(await prisma.pendingAutoRequisition.findUnique({ where: { id: parked.id } }), "the row must still exist");
+
+    const audits = await prisma.auditEvent.count({ where: { recordId: parked.id } });
+    assert.equal(audits, 0, "a refused action must never write an audit event");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: parked.id } }));
+    await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+  }
+});
+
+// PL-R14-P2-02's own required proof: the site condition INSIDE the
+// mutation, exercised directly. The action-level test above now reaches
+// the write, but this pins the primitive itself — a scoped updateMany
+// must match zero rows once the row has moved, whatever any earlier read
+// believed.
+test("the scoped mutation itself matches nothing once a dead letter has moved to another site", async () => {
+  const otherSite = await prisma.site.create({ data: { code: `TEST-SUITE-BC-WRITE-${Date.now()}`, name: "TEST-SUITE-BC-WRITE-SITE", city: "Test", country: "Test" } });
+  const parked = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: `test-suite-bc-write-scope-${Date.now()}`, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date() },
+  });
+
+  try {
+    // Exactly the predicate requeueDeadLetter writes with, while the row
+    // is still in scope: it matches.
+    const wouldMatch = await prisma.pendingAutoRequisition.count({ where: { id: parked.id, deadLetteredAt: { not: null }, siteId } });
+    assert.equal(wouldMatch, 1);
+
+    await prisma.pendingAutoRequisition.update({ where: { id: parked.id }, data: { siteId: otherSite.id } });
+
+    // The same predicate now matches nothing — this is the property the
+    // action depends on, asserted on the statement rather than inferred.
+    const afterMove = await prisma.pendingAutoRequisition.updateMany({
+      where: { id: parked.id, deadLetteredAt: { not: null }, siteId },
+      data: { deadLetteredAt: null },
+    });
+    assert.equal(afterMove.count, 0, "a scoped write must match zero rows after the row leaves that site");
+    const untouched = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: parked.id } });
+    assert.ok(untouched.deadLetteredAt, "and the row must be completely unchanged");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: parked.id } }));
+    await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+  }
+});
+
+// PL-R14-P2-01's own required proof: an ADMIN sees BOTH queues, so a page
+// must be a single global slice of the union. Taking pageSize from each
+// table and merging gave up to 2 × pageSize rows on one page, a wrong
+// "showing X–Y of Z" range, and a next link to an empty page.
+test("an ADMIN page is one global slice across both queues — 30 + 30 rows page as 50 then 10, with no duplicates and no empty next page", async () => {
+  const stamp = Date.now();
+  const intentPrefix = `test-suite-bc-mixed-${stamp}-`;
+  const blobPrefix = `/api/files/delivery-photos/TEST-SUITE-BC-MIXED-${stamp}-`;
+  const base = Date.now();
+
+  // Interleaved timestamps, so a correct global ordering MUST mix the two
+  // kinds together rather than emit one table then the other.
+  await prisma.pendingAutoRequisition.createMany({
+    data: Array.from({ length: 30 }, (_, i) => ({
+      batchTicketId: "test-suite-bc-mixed-ticket",
+      materialId: `${intentPrefix}${i}`,
+      siteId,
+      newLevel: 2,
+      capacity: 100,
+      minThresholdPct: 50,
+      unit: "TONS",
+      attempts: 14,
+      deadLetteredAt: new Date(base - i * 2000),
+    })),
+  });
+  await prisma.pendingBlobDeletion.createMany({
+    data: Array.from({ length: 30 }, (_, i) => ({
+      url: `${blobPrefix}${i}.jpg`,
+      reason: "DELIVERY_PHOTO_COMPENSATION",
+      attempts: 14,
+      deadLetteredAt: new Date(base - i * 2000 - 1000),
+    })),
+  });
+
+  try {
+    const pageSize = 50;
+    const first = await listDeadLetters(null, 0, pageSize);
+    assert.equal(first.total, 60, "the total must count both queues");
+    assert.equal(first.rows.length, pageSize, "a page must be exactly one global slice — never pageSize from EACH table");
+
+    const second = await listDeadLetters(null, 1, pageSize);
+    assert.equal(second.rows.length, 10, "the remainder must be exactly 10, not another full page");
+
+    // No duplicates and nothing lost across the two pages.
+    const ids = [...first.rows, ...second.rows].map((r) => `${r.kind}:${r.id}`);
+    assert.equal(new Set(ids).size, 60, "every one of the 60 rows must appear exactly once across the two pages");
+    assert.ok(
+      first.rows.some((r) => r.kind === "AUTO_REQUISITION") && first.rows.some((r) => r.kind === "BLOB_DELETION"),
+      "a correctly ordered global page mixes both kinds — emitting one table and then the other would mean the union was not sorted as a whole",
+    );
+
+    // Descending by deadLetteredAt across the union, not within each kind.
+    const ordered = [...first.rows, ...second.rows].map((r) => r.deadLetteredAt.getTime());
+    assert.deepEqual(ordered, [...ordered].sort((a, b) => b - a), "the union must be globally ordered");
+
+    // And there is no third page.
+    const third = await listDeadLetters(null, 2, pageSize);
+    assert.equal(third.rows.length, 0);
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: { startsWith: intentPrefix } } }));
+    await cleanupDelete(() => prisma.pendingBlobDeletion.deleteMany({ where: { url: { startsWith: blobPrefix } } }));
+  }
+});
+
+// PL-R13-P2-03's own required proof: 201 rows, an accurate total, and the
+// last row genuinely reachable.
+test("the dead-letter list reports the true total and pages past the first screenful", async () => {
+  const prefix = `test-suite-bc-paging-${Date.now()}-`;
+  const base = Date.now();
+  await prisma.pendingAutoRequisition.createMany({
+    data: Array.from({ length: 201 }, (_, i) => ({
+      batchTicketId: "test-suite-bc-paging-ticket",
+      materialId: `${prefix}${i}`,
+      siteId,
+      newLevel: 2,
+      capacity: 100,
+      minThresholdPct: 50,
+      unit: "TONS",
+      attempts: 14,
+      // Descending deadLetteredAt ordering, so row i sits at index i.
+      deadLetteredAt: new Date(base - i * 1000),
+    })),
+  });
+
+  try {
+    const pageSize = 50;
+    const first = await listDeadLetters(siteId, 0, pageSize);
+    assert.equal(first.total, 201, "the total must be the real count, not the size of one page");
+    assert.equal(first.rows.length, pageSize);
+
+    // Walk to the final page and prove the 201st row is genuinely
+    // reachable rather than hidden behind the cap.
+    const last = await listDeadLetters(siteId, 4, pageSize);
+    assert.equal(last.total, 201);
+    assert.equal(last.rows.length, 1, "the 201st row must be on its own final page");
+    assert.equal(last.rows[0].subject, `${prefix}200`, "and it must be the oldest dead letter, not a repeat of the first page");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: { startsWith: prefix } } }));
+  }
+});
+
+test("requeueing a dead letter makes it claimable again with a fresh attempt budget, and is audited", async () => {
+  const parked = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date(), lastError: "the original failure", leaseOwner: "someone-who-died", leaseExpiresAt: new Date(Date.now() + 60_000) },
+  });
+
+  try {
+    const result = await requeueDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "ADMIN" }, null);
+    assert.equal(result.status, "OK");
+
+    const requeued = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: parked.id } });
+    assert.equal(requeued.deadLetteredAt, null);
+    assert.equal(requeued.attempts, 0, "a manual requeue must restore the attempt budget, or one more failure would instantly re-park it");
+    assert.equal(requeued.leaseOwner, null, "a stale lease must not leave a requeued row unclaimable");
+    assert.equal(requeued.lastError, "the original failure", "the failure history is kept — that is why the operator requeued it");
+
+    const audit = await prisma.auditEvent.findFirst({ where: { recordId: parked.id, reasonCode: "DEAD_LETTER_REQUEUED" } });
+    assert.ok(audit, "remediating abandoned work must be audited");
+
+    // A second requeue is refused: the row is no longer dead-lettered.
+    const again = await requeueDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "ADMIN" }, null);
+    assert.equal(again.status, "NOT_DEAD_LETTERED");
+
+    // And it is genuinely claimable again.
+    const sweep = await retryPendingAutoRequisitions(200, async () => []);
+    assert.ok(sweep.claimed >= 1);
+  } finally {
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: parked.id } }));
+  }
+});
+
+test("dismissing a dead letter removes it for good, and records that the consequence was abandoned knowingly", async () => {
+  const parked = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: `test-suite-bc-dismiss-${Date.now()}`, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", attempts: 14, deadLetteredAt: new Date() },
+  });
+
+  try {
+    const result = await dismissDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "ADMIN" }, null);
+    assert.equal(result.status, "OK");
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: parked.id } }), null);
+
+    const audit = await prisma.auditEvent.findFirst({ where: { recordId: parked.id, reasonCode: "DEAD_LETTER_DISMISSED" } });
+    assert.ok(audit, "discarding abandoned work must leave a record that a human decided to drop it");
+
+    const again = await dismissDeadLetter("AUTO_REQUISITION", parked.id, { id: adminUserId, role: "ADMIN" }, null);
+    assert.equal(again.status, "NOT_FOUND");
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { id: parked.id } }));
+  }
+});
+
+// PL-R12-P2-06, twelfth production-lifecycle review: the small test below
+// proves the scheduling RULE, but the acceptance case was stated as 200
+// poison rows and a 201st resolvable one at the real production claim
+// size — the boundary where a full batch of failures could still occupy
+// every slot. This is that literal case.
+test("200 always-failing intents plus a 201st resolvable one at the real claim size: the resolvable intent is still reached on the next sweep", async () => {
+  const stamp = Date.now();
+  const poisonTicketId = `test-suite-bc-bulk-poison-${stamp}`;
+  const poisonMaterialPrefix = `test-suite-bc-bulk-poison-material-${stamp}-`;
+
+  // Explicit nextAttemptAt so eligibility ordering is controlled rather
+  // than dependent on insertion timing: every poison intent sorts
+  // strictly ahead of the resolvable one — the worst case for starvation.
+  // Distinct materialIds keep each row unique under the
+  // (batchTicketId, materialId, siteId) index.
+  const base = Date.now() - 60 * 60 * 1000;
+  await prisma.pendingAutoRequisition.createMany({
+    data: Array.from({ length: 200 }, (_, i) => ({
+      batchTicketId: poisonTicketId,
+      materialId: `${poisonMaterialPrefix}${i}`,
+      siteId,
+      newLevel: 2,
+      capacity: 100,
+      minThresholdPct: 50,
+      unit: "TONS",
+      nextAttemptAt: new Date(base + i),
+    })),
+  });
+  const resolvable = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: poisonTicketId, materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", nextAttemptAt: new Date(base + 1000) },
+  });
+
+  const notified: string[] = [];
+  const notify: RequisitionNotifier = async (_tx, { requisitionNumber }) => {
+    notified.push(requisitionNumber);
+    return [];
+  };
+
+  try {
+    // The REAL production claim size — exactly the batch boundary where a
+    // full set of failures could otherwise fill every slot forever.
+    //
+    // PL-R13-P1-01, thirteenth production-lifecycle review: every
+    // assertion here is about THIS test's own rows. The previous version
+    // asserted `second.resolved === 1` on the sweep's global counter —
+    // but the sweep drains every eligible row in the database, so a row
+    // belonging to another suite made the count 3 and turned CI red. The
+    // counters are a global fact about the queue; only the row-level
+    // outcomes below are a fact about this test.
+    const first = await retryPendingAutoRequisitions(200, notify);
+    assert.ok(first.claimed >= 200, "the first sweep must fill its batch with the 200 poison rows queued ahead of everything else");
+    assert.ok(await prisma.pendingAutoRequisition.findUnique({ where: { id: resolvable.id } }), "the resolvable intent is behind all 200 — it must not be reached on the first sweep");
+    // length, not deepEqual against []: assert.deepEqual is a type
+    // predicate and would narrow `notified` to never[] for the rest of
+    // this test.
+    assert.equal(notified.length, 0, "and nothing may have been notified for it yet");
+
+    await retryPendingAutoRequisitions(200, notify);
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: resolvable.id } }), null, "the 201st intent must be drained on the very next sweep — 200 permanent failures must never occupy every claim slot");
+
+    const created = await prisma.materialRequisition.findFirstOrThrow({ where: { materialId, siteId } });
+    assert.ok(notified.includes(created.requisitionNumber), "the notification that fired must be this intent's own requisition, not merely some row the sweep happened to resolve");
+    materialRequisitionIds.push(created.id);
+
+    // The poison intents are all still queued, all backed off, none
+    // dead-lettered after a single failure apiece.
+    const poisonRows = await prisma.pendingAutoRequisition.findMany({ where: { batchTicketId: poisonTicketId, materialId: { startsWith: poisonMaterialPrefix } } });
+    assert.equal(poisonRows.length, 200);
+    assert.ok(poisonRows.every((r) => r.attempts === 1 && r.deadLetteredAt === null));
+  } finally {
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { batchTicketId: poisonTicketId } }));
+  }
+});
+
+// PL-R10-P2-03's own explicit required proof: "test that 200 poison rows
+// do not starve a newer resolvable row." A small claim limit (1) proves
+// the SAME general mechanism a real 200-row backlog relies on — a blind
+// `orderBy: createdAt` (the actual Round 10 bug) would re-select the
+// identical oldest, permanently-failing row on every single sweep,
+// forever; real backoff moves a failing row's own nextAttemptAt into the
+// future, so the very next sweep naturally reaches whatever resolvable
+// row is queued right behind it, regardless of how many failing rows
+// came before it.
+test("a permanently-failing intent does not starve a newer resolvable one — a second sweep reaches the resolvable row instead of re-claiming the poisoned one", async () => {
+  const bogusMaterialId = "test-suite-bc-starvation-poison-material";
+  // PL-R13-P1-01: explicit, far-past nextAttemptAt values rather than
+  // insertion order. With limit=1 the sweep claims the globally oldest
+  // eligible row, so these two must be provably older than anything any
+  // other test could leave behind — otherwise which row gets claimed is
+  // not this test's decision at all.
+  const base = Date.now() - 6 * 60 * 60 * 1000;
+  const poison = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId: bogusMaterialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", nextAttemptAt: new Date(base) },
+  });
+  const resolvable = await prisma.pendingAutoRequisition.create({
+    data: { batchTicketId: "test-suite-bc-fake-ticket-id", materialId, siteId, newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", nextAttemptAt: new Date(base + 1000) },
+  });
+
+  try {
+    // limit=1: the first sweep can only claim ONE row — the oldest by
+    // nextAttemptAt, i.e. the poison one — and fails it, pushing its own
+    // nextAttemptAt into the future via the same backoff every genuinely
+    // poisoned row gets.
+    await retryPendingAutoRequisitions(1);
+    const poisonAfterFirst = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: poison.id } });
+    assert.equal(poisonAfterFirst.attempts, 1, "the poison row must be the one claimed first — it is the oldest eligible row");
+    assert.ok(await prisma.pendingAutoRequisition.findUnique({ where: { id: resolvable.id } }), "the resolvable row must not have been reached yet");
+
+    // A second sweep, same tiny limit — if the poison row still occupied
+    // the only claim slot (the actual Round 10 bug), this would claim the
+    // SAME poison row again instead of the resolvable one queued right
+    // behind it.
+    await retryPendingAutoRequisitions(1);
+
+    assert.equal(await prisma.pendingAutoRequisition.findUnique({ where: { id: resolvable.id } }), null, "the resolvable intent must have actually been processed and removed");
+    const poisonStillThere = await prisma.pendingAutoRequisition.findUniqueOrThrow({ where: { id: poison.id } });
+    assert.equal(poisonStillThere.attempts, 1, "the poison row must NOT have been reattempted in the second sweep — it's still correctly backed off");
+
+    materialRequisitionIds.push((await prisma.materialRequisition.findFirstOrThrow({ where: { materialId, siteId } })).id);
+  } finally {
+    await cleanupDelete(() => prisma.materialRequisition.deleteMany({ where: { materialId, siteId } }));
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { materialId: { in: [materialId, bogusMaterialId] }, siteId } }));
+  }
+});
+
 // ---- 7/8. Reversal restores exact quantities once; a second reversal --
 // ---- is a no-op --------------------------------------------------------
 
@@ -1195,7 +2433,7 @@ test("reversal restores the exact posted quantities once, and a second reversal 
   assert.equal(completion.status, "SUCCESS");
   assert.equal(await siloLevel(siloId), 34);
 
-  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test reversal" });
+  const reversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test reversal" });
   assert.equal(reversal.status, "SUCCESS");
   assert.equal(await siloLevel(siloId), 40);
 
@@ -1206,7 +2444,7 @@ test("reversal restores the exact posted quantities once, and a second reversal 
   const movements = await prisma.inventoryMovement.findMany({ where: { sourceType: "BatchTicket", sourceId: ticketId } });
   assert.equal(movements.length, 2); // completion + reversal
 
-  const secondReversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "second attempt" });
+  const secondReversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "second attempt" });
   assert.equal(secondReversal.status, "ALREADY_REVERSED");
   assert.equal(await siloLevel(siloId), 40);
 
@@ -1236,7 +2474,7 @@ test("reversing a COMPLETE ticket with no posted movements is refused, not silen
   });
   ticketIds.push(ticket.id);
 
-  const result = await reverseBatchTicket(ticket.id, { actorId: adminUserId, reason: "test pre-ledger reversal" });
+  const result = await reverseBatchTicket(ticket.id, { actorId: adminUserId, actorRole: "ADMIN", reason: "test pre-ledger reversal" });
   assert.equal(result.status, "NO_POSTED_MOVEMENTS");
 
   const fresh = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticket.id } });
@@ -1373,7 +2611,7 @@ test("a reversed ticket cannot be dispatched", async () => {
   await resetSilo(50);
   const ticketId = await makeTicket([{ materialId, targetMassKg: 1000 }]);
   assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
-  assert.equal((await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test" })).status, "SUCCESS");
+  assert.equal((await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test" })).status, "SUCCESS");
 
   assert.equal(await tryDispatch(ticketId), "REJECTED");
   const tripCount = await prisma.trip.count({ where: { batchTicketId: ticketId } });
@@ -1386,7 +2624,7 @@ test("a dispatched ticket cannot be reversed", async () => {
   assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
   assert.equal(await tryDispatch(ticketId), "OK");
 
-  const result = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "test" });
+  const result = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "test" });
   assert.equal(result.status, "INVALID_STATE");
   const ticket = await prisma.batchTicket.findUniqueOrThrow({ where: { id: ticketId } });
   assert.equal(ticket.reversedAt, null);
@@ -1398,7 +2636,7 @@ test("concurrent reversal and dispatch on the same ticket are mutually exclusive
   assert.equal((await completeBatchTicket(ticketId, {})).status, "SUCCESS");
 
   const [reversalResult, dispatchResult] = await Promise.all([
-    reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "race test" }),
+    reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "race test" }),
     tryDispatch(ticketId),
   ]);
 
@@ -1425,7 +2663,7 @@ test("reversal fails atomically when the storage can't hold the full credit back
   // to land at 504, which can't fit.
   await prisma.silo.update({ where: { id: siloId }, data: { currentLevelTons: 498 } });
 
-  const result = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "capacity test" });
+  const result = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "capacity test" });
   assert.equal(result.status, "CAPACITY_EXCEEDED");
 
   // Rolled back entirely — not clamped and stamped as if it succeeded.
@@ -1436,7 +2674,7 @@ test("reversal fails atomically when the storage can't hold the full credit back
   assert.equal(movements.length, 1); // only the original completion — no reversal row was left behind
 
   await prisma.silo.update({ where: { id: siloId }, data: { currentLevelTons: 14 } }); // restore for a clean re-check below
-  const cleanReversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, reason: "capacity test retry" });
+  const cleanReversal = await reverseBatchTicket(ticketId, { actorId: adminUserId, actorRole: "ADMIN", reason: "capacity test retry" });
   assert.equal(cleanReversal.status, "SUCCESS");
   assert.equal(await siloLevel(siloId), 20);
 });

@@ -7,6 +7,7 @@ import { getDictionary } from "@/lib/i18n";
 import { addComponent, deleteComponent, setMixStatus, updateMixDesign } from "../actions";
 import { estimateCo2eKg, CO2E_FACTOR_KG_PER_KG } from "@/lib/carbon";
 import { PrintButton } from "@/components/PrintButton";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 export default async function MixDesignDetailPage({
   params,
@@ -16,6 +17,7 @@ export default async function MixDesignDetailPage({
   searchParams: Promise<{ editComponent?: string; edit?: string }>;
 }) {
   await requirePageAccess("mix-designs");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { editComponent: editComponentId, edit: editingFields } = await searchParams;
   const { dict } = await getDictionary();
@@ -294,7 +296,7 @@ export default async function MixDesignDetailPage({
         </div>
         <div className="mb-3 flex items-baseline justify-between" dir="ltr">
           <span className="font-mono text-sm font-semibold">{mix.code} — {mix.grade}</span>
-          <span className="font-mono text-xs text-ink-muted">{d.generatedOn(new Date().toLocaleDateString())}</span>
+          <span className="font-mono text-xs text-ink-muted">{d.generatedOn(dt.date(new Date()))}</span>
         </div>
         <table className={ui.table}>
           <thead>

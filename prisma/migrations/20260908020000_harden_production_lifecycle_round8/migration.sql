@@ -1,0 +1,15 @@
+-- PL-R8-P1-03, eighth production-lifecycle review — a per-field React ref
+-- inside one mounted AutoSaveField instance only serializes the requests
+-- THAT component instance itself issues; it has no idea about another
+-- browser tab, another device, or a queued offline reading replayed
+-- later. An older reading could still commit last and silently overwrite
+-- a genuinely newer one. This adds the real, database-level authority
+-- recordActualField now enforces: an optimistic-concurrency version
+-- column on the exact two fields AutoSaveField writes
+-- (actualMassKg/moisturePct).
+--
+-- Additive, backward-compatible: every existing row defaults to 0, which
+-- is exactly the value a fresh page load's own defaultValue-derived
+-- expectedVersion will already send for a component nobody has ever
+-- autosaved a field on yet.
+ALTER TABLE "BatchComponentActual" ADD COLUMN "version" INTEGER NOT NULL DEFAULT 0;

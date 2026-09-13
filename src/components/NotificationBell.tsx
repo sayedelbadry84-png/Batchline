@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { markNotificationRead, markAllNotificationsRead } from "@/app/(app)/notifications/actions";
+import { createDateFormatters } from "@/lib/datetime";
 
 type NotificationItem = {
   id: string;
@@ -23,12 +24,20 @@ export function NotificationBell({
   notifications,
   unreadCount,
   labels,
+  timeZone,
 }: {
   notifications: NotificationItem[];
   unreadCount: number;
   labels: { title: string; empty: string; markAllRead: string };
+  // The plant's IANA zone, resolved server-side. A STRING, not the
+  // formatter bundle — its fields are functions, and functions do not
+  // cross the RSC boundary (the defect commit 5776765 removed from
+  // FleetMap). Formatting here rather than in the browser's own zone also
+  // keeps a notification's timestamp identical to the record it points at.
+  timeZone: string;
 }) {
   const [open, setOpen] = useState(false);
+  const dt = createDateFormatters(timeZone);
 
   return (
     <div className="relative">
@@ -75,7 +84,7 @@ export function NotificationBell({
                       <span className="font-medium">{n.title}</span>
                     )}
                     {n.body && <p className="text-ink-muted text-xs">{n.body}</p>}
-                    <p className="text-ink-faint mt-0.5 font-mono text-[0.65rem]" dir="ltr">{new Date(n.createdAt).toLocaleString()}</p>
+                    <p className="text-ink-faint mt-0.5 font-mono text-[0.65rem]" dir="ltr">{dt.dateTime(n.createdAt)}</p>
                   </div>
                   {!n.readAt && (
                     <form action={markNotificationRead}>

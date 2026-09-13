@@ -1,0 +1,24 @@
+-- PL-R7-P1-01, seventh production-lifecycle review — AuditEvent.actorId's
+-- FK has always been ON DELETE SET NULL (the baseline migration's own
+-- default for an optional relation), but the audit-immutability trigger
+-- (harden_production_lifecycle_invariants, first production-lifecycle
+-- review) correctly rejects ANY update to an already-inserted AuditEvent
+-- row, including the UPDATE ... SET "actorId" = NULL Postgres performs
+-- for ON DELETE SET NULL. The two were never actually compatible — a
+-- real hard delete of any audited user has always failed through a
+-- confusing "AuditEvent rows are immutable" trigger error instead of a
+-- clear FK violation.
+--
+-- No application code path hard-deletes a User today — the app already
+-- has its own account-lifecycle mechanism for this (User.status
+-- ACTIVE/DISABLED, a disabled account simply fails login), matching the
+-- review's own recommendation to prefer deactivation over deletion. This
+-- migration closes the gap defensively, the same way earlier rounds'
+-- inverse-bound triggers backstopped a path no application code takes
+-- either: ON DELETE RESTRICT makes an attempted hard delete of an
+-- audited user fail with a direct, correctly-worded FK violation instead
+-- of the confusing immutability-trigger error, and — per this review's
+-- own explicit instruction — the audit-immutability trigger itself is
+-- left completely untouched.
+ALTER TABLE "AuditEvent" DROP CONSTRAINT "AuditEvent_actorId_fkey";
+ALTER TABLE "AuditEvent" ADD CONSTRAINT "AuditEvent_actorId_fkey" FOREIGN KEY ("actorId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;

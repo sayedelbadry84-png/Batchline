@@ -7,11 +7,13 @@ import { getDictionary } from "@/lib/i18n";
 import { PrintButton } from "@/components/PrintButton";
 import { WpsExportButton } from "@/components/WpsExportButton";
 import { updatePayrollLine, approvePayrollRun, markPayrollRunPaid, cancelPayrollRun } from "../actions";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 // Salary data — same ADMIN-only boundary as the payroll tab itself
 // (employees/page.tsx) and every action in payroll/actions.ts.
 export default async function PayrollRunPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requirePageAccess("employees");
+  const dt = await getDateFormatters();
   if (user.role !== "ADMIN") redirect("/employees");
   const { id } = await params;
   const { dict } = await getDictionary();
@@ -81,7 +83,7 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
           <div className={ui.eyebrow}>{p.eyebrow}</div>
           <h1 className={ui.h1}>{run.runNumber}</h1>
           <p className={ui.intro}>
-            {new Date(run.periodStart).toLocaleDateString("en-GB")} — {new Date(run.periodEnd).toLocaleDateString("en-GB")}
+            {dt.date(run.periodStart)} — {dt.date(run.periodEnd)}
           </p>
         </div>
         <div className="no-print flex items-center gap-2">

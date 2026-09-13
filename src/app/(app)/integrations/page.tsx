@@ -6,6 +6,7 @@ import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createApiKey, revokeApiKey, dismissNewApiKeyReveal } from "./actions";
 import { NEW_KEY_REVEAL_COOKIE } from "./constants";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const SCOPES = ["ALL", "TELEMATICS", "SCADA", "REPORTS"] as const;
 
@@ -14,6 +15,7 @@ export default async function IntegrationsPage() {
   // /users and /permissions: credentials that can write GPS/silo data into
   // the system are a system-admin concern, never a database-editable grant.
   const user = await getCurrentUser();
+  const dt = await getDateFormatters();
   if (!user) redirect("/login");
   if (user.role !== "ADMIN") redirect("/access-denied?module=integrations");
 
@@ -62,7 +64,7 @@ export default async function IntegrationsPage() {
                   <td className={`${ui.td} font-medium`}>{k.label}<div className="text-xs">{k.global ? "All sites" : sites.find(s => s.id === k.siteId)?.name ?? "Unassigned — disabled"}</div></td>
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{k.keyPrefix}…</td>
                   <td className={ui.td}>{m.scopeLabel[k.scope as keyof typeof m.scopeLabel] ?? k.scope}</td>
-                  <td className={ui.td}>{k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : m.neverUsed}</td>
+                  <td className={ui.td}>{k.lastUsedAt ? dt.dateTime(k.lastUsedAt) : m.neverUsed}</td>
                   <td className={ui.td}>
                     <span className={`${ui.chip} ${k.revokedAt ? "bg-critical-soft text-critical" : "bg-good-soft text-good"}`}>
                       {k.revokedAt ? m.revoked : m.active}

@@ -7,6 +7,7 @@ import { getDictionary } from "@/lib/i18n";
 import { getActiveSiteId } from "@/lib/siteScope";
 import { Modal } from "@/components/Modal";
 import { computeLaborCost, hourlyWageRate } from "@/lib/maintenance";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 import {
   startMaintenanceOrder,
   completeMaintenanceOrder,
@@ -23,10 +24,6 @@ const statusChip: Record<string, string> = {
   CANCELLED: "bg-critical-soft text-critical",
 };
 
-function fmtDateTime(d: Date | null): string {
-  if (!d) return "—";
-  return new Date(d).toLocaleString();
-}
 
 export default async function MaintenanceOrderDetailPage({
   params,
@@ -36,6 +33,7 @@ export default async function MaintenanceOrderDetailPage({
   searchParams: Promise<{ complete?: string }>;
 }) {
   const user = await requirePageAccess("maintenance");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { complete: completeFlag } = await searchParams;
   const { dict } = await getDictionary();
@@ -225,7 +223,7 @@ export default async function MaintenanceOrderDetailPage({
                 <td className={`${ui.td} font-mono tabular`}>{p.unitCost.toFixed(2)}</td>
                 <td className={`${ui.td} font-mono tabular`}>{p.lineTotal.toFixed(2)}</td>
                 <td className={`${ui.td} font-mono text-xs`} dir="ltr">{p.serialNumber ?? "—"}</td>
-                <td className={ui.td}>{p.issuedBy.name} · {fmtDateTime(p.issuedAt)}</td>
+                <td className={ui.td}>{p.issuedBy.name} · {dt.dateTime(p.issuedAt)}</td>
               </tr>
             ))}
             {order.parts.length === 0 && (

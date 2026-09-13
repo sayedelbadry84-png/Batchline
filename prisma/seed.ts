@@ -1,9 +1,22 @@
+import { randomBytes } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { checkDemoSeedAllowed } from "../src/lib/seedGuard";
 
 const prisma = new PrismaClient();
 
 async function main() {
+  // PR4-R4-P1-01: refuse before opening anything. See src/lib/seedGuard.ts
+  // for why this needs two independent conditions.
+  const allowed = checkDemoSeedAllowed(process.env);
+  if (allowed.status === "REFUSED") {
+    console.error(`Refusing to run the demo seed.
+
+${allowed.reason}
+`);
+    process.exit(1);
+  }
+
   const site = await prisma.site.create({
     data: { code: "S1", name: "6th of October Site", city: "6th of October City" },
   });
@@ -126,15 +139,23 @@ async function main() {
     },
   });
 
-  // Dev-only seeded logins — same password for every account, printed to
-  // the console below. Never do this for a real deployment.
+  // Dev-only seeded logins. The non-privileged demo accounts share one
+  // well-known password so the screens are easy to explore; the seed can
+  // only reach a development database at all (see the guard at the top).
   const DEV_PASSWORD_HASH = await bcrypt.hash("batchline123", 10);
+  // PR4-R4-P1-01: the ADMINISTRATOR does not. A repository-known password
+  // on an account that can do anything is the part that turns a seeded
+  // database into a compromised one, so this password exists only in this
+  // process: supply SEED_ADMIN_PASSWORD, or one is generated and printed
+  // once, below, and never written down anywhere else.
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD || randomBytes(18).toString("base64url");
+  const ADMIN_PASSWORD_HASH = await bcrypt.hash(adminPassword, 10);
   await prisma.user.createMany({
     data: [
       { email: "plant.operator@batchline.dev", name: "Ahmed Farouk", passwordHash: DEV_PASSWORD_HASH, role: "PLANT_OPERATOR", plantId: plant.id, employeeId: empAhmed.id },
       { email: "quality@batchline.dev", name: "Mona Ezzat", passwordHash: DEV_PASSWORD_HASH, role: "QUALITY_SUPERVISOR", plantId: plant.id, employeeId: empMona.id },
       { email: "accountant@batchline.dev", name: "Nourhan Sami", passwordHash: DEV_PASSWORD_HASH, role: "ACCOUNTANT", plantId: plant.id, employeeId: empNour.id },
-      { email: "admin@batchline.dev", name: "Batchline Admin", passwordHash: DEV_PASSWORD_HASH, role: "ADMIN", plantId: plant.id },
+      { email: "admin@batchline.dev", name: "Batchline Admin", passwordHash: ADMIN_PASSWORD_HASH, role: "ADMIN", plantId: plant.id },
       { email: "karim.driver@batchline.dev", name: "Karim Adel", passwordHash: DEV_PASSWORD_HASH, role: "DRIVER", plantId: plant.id, employeeId: empKarim.id },
       { email: "hassan.driver@batchline.dev", name: "Hassan Zaki", passwordHash: DEV_PASSWORD_HASH, role: "DRIVER", plantId: plant.id, employeeId: empHassan.id },
     ],
@@ -182,7 +203,9 @@ async function main() {
     },
   });
 
-  console.log("Seed complete. Log in at /login with any seeded email and password 'batchline123'.");
+  console.log("Seed complete. The demo (non-admin) logins use the password in this file.");
+  console.log(`Administrator: admin@batchline.dev / ${adminPassword}`);
+  console.log("That administrator password is shown once and is not stored anywhere else — copy it now, or re-run the seed on a fresh database.");
 }
 
 main()

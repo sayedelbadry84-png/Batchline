@@ -9,7 +9,7 @@ export type FleetMapTruck = {
   code: string;
   lastLat: number;
   lastLng: number;
-  lastPingAt: string | null;
+  pingLabel: string;
   driverName: string | null;
   status: string;
 };
@@ -27,15 +27,7 @@ function truckIcon(status: string) {
   });
 }
 
-export function FleetMap({
-  trucks,
-  neverPingedLabel,
-  lastPingLabel,
-}: {
-  trucks: FleetMapTruck[];
-  neverPingedLabel: string;
-  lastPingLabel: (when: string) => string;
-}) {
+export function FleetMap({ trucks }: { trucks: FleetMapTruck[] }) {
   if (trucks.length === 0) return null;
 
   const center: [number, number] = [trucks[0].lastLat, trucks[0].lastLng];
@@ -53,9 +45,7 @@ export function FleetMap({
               <div style={{ fontFamily: "monospace" }}>
                 <strong>{t.code}</strong>
                 {t.driverName && <div>{t.driverName}</div>}
-                <div style={{ fontSize: "0.8em", color: "#666" }}>
-                  {t.lastPingAt ? lastPingLabel(new Date(t.lastPingAt).toLocaleString()) : neverPingedLabel}
-                </div>
+                <div style={{ fontSize: "0.8em", color: "#666" }}>{t.pingLabel}</div>
               </div>
             </Popup>
           </Marker>

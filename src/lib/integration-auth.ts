@@ -33,6 +33,12 @@ export function safeEqual(a: string, b: string): boolean {
 // already gives an attacker nothing to time against), but the legacy env
 // var is still compared with safeEqual since that's a direct string
 // compare, not a hash lookup.
+// How stale lastUsedAt may get before it is refreshed. Fifteen minutes
+// is far finer than any question anyone asks of this field, and coarse
+// enough that a device polling every few seconds writes once per window
+// instead of thousands of times.
+const LAST_USED_REFRESH_MS = 15 * 60 * 1000;
+
 export async function verifyIntegrationRequest(request: NextRequest, requiredScope: IntegrationScope): Promise<NextResponse | IntegrationPrincipal> {
   const auth = request.headers.get("authorization") ?? "";
   const presentedKey = auth.startsWith("Bearer ") ? auth.slice(7) : "";
@@ -55,6 +61,24 @@ export async function verifyIntegrationRequest(request: NextRequest, requiredSco
     return NextResponse.json({ error: `This key is not scoped for ${requiredScope}.` }, { status: 403 });
   }
 
-  await prisma.apiKey.update({ where: { id: key.id }, data: { lastUsedAt: new Date() } });
+  // Performance audit (2026-09-12): this used to write lastUsedAt on
+  // EVERY accepted request. SCADA and telematics are polling endpoints —
+  // one row update per silo reading and per truck ping, forever — which
+  // turns a liveness hint into the hottest write in the system, and one
+  // that serialises every concurrent request from the same device behind
+  // a single row lock.
+  //
+  // The field answers "is this key still in use", a question no one asks
+  // to the second. Updating it at most once per staleness window keeps
+  // that answer while removing the per-request write, and the conditional
+  // WHERE means two concurrent requests cannot both perform it: the
+  // second matches no row.
+  const staleBefore = new Date(Date.now() - LAST_USED_REFRESH_MS);
+  if (!key.lastUsedAt || key.lastUsedAt < staleBefore) {
+    await prisma.apiKey.updateMany({
+      where: { id: key.id, OR: [{ lastUsedAt: null }, { lastUsedAt: { lt: staleBefore } }] },
+      data: { lastUsedAt: new Date() },
+    });
+  }
   return { keyId: key.id, scope: key.scope, siteId: key.siteId, global: key.global };
 }

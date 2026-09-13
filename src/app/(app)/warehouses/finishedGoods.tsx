@@ -4,11 +4,8 @@ import { getDictionary } from "@/lib/i18n";
 import { getActiveSiteId } from "@/lib/siteScope";
 import type { CurrentUser } from "@/lib/session";
 import { createFinishedProduct, recordFinishedProductMovement } from "./actions";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
-function fmtDate(d: Date | null): string {
-  if (!d) return "—";
-  return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
-}
 
 // New — side products (precast blocks, etc.), never the ready-mix concrete
 // itself, which is delivered same-day and never warehoused. Deliberately
@@ -22,6 +19,7 @@ export async function FinishedGoodsTab({
   dict: Awaited<ReturnType<typeof getDictionary>>["dict"];
   user: CurrentUser | null;
 }) {
+  const dt = await getDateFormatters();
   const m = dict.modules.warehouses.finishedGoods;
   const siteId = await getActiveSiteId(user);
 
@@ -153,7 +151,7 @@ export async function FinishedGoodsTab({
             <tbody>
               {movements.map((mv) => (
                 <tr key={mv.id}>
-                  <td className={ui.td}>{fmtDate(mv.occurredAt)}</td>
+                  <td className={ui.td}>{dt.date(mv.occurredAt)}</td>
                   <td className={ui.td}>{mv.product.name}</td>
                   <td className={ui.td}>{mv.site.code}</td>
                   <td className={ui.td}>

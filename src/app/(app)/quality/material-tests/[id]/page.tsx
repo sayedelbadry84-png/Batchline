@@ -6,6 +6,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { setMaterialLabTestStatus } from "../../actions";
 import { MATERIAL_LAB_TEST_TYPES, type MaterialLabTestResults, type MaterialLabTestType } from "@/lib/materialLabTests";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const statusChip: Record<string, string> = {
   PENDING: "bg-surface-alt text-ink-muted",
@@ -21,6 +22,7 @@ function fmt(v: number | string | undefined): string {
 
 export default async function MaterialLabTestDetailPage({ params }: { params: Promise<{ id: string }> }) {
   await requirePageAccess("quality");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { dict } = await getDictionary();
   const m = dict.modules.quality;
@@ -73,13 +75,13 @@ export default async function MaterialLabTestDetailPage({ params }: { params: Pr
         </div>
         <div>
           <div className={ui.label}>{d.f.reportDate}</div>
-          <div className="font-mono tabular">{new Date(test.reportDate).toLocaleDateString()}</div>
+          <div className="font-mono tabular">{dt.date(test.reportDate)}</div>
         </div>
         <div>
           <div className={ui.label}>{d.f.materialReceipt}</div>
           <div>
             {test.materialReceipt
-              ? `${new Date(test.materialReceipt.receivedAt).toLocaleDateString()} — ${test.materialReceipt.material.name} — ${test.materialReceipt.supplier.name}`
+              ? `${dt.date(test.materialReceipt.receivedAt)} — ${test.materialReceipt.material.name} — ${test.materialReceipt.supplier.name}`
               : "—"}
           </div>
         </div>
@@ -165,17 +167,17 @@ export default async function MaterialLabTestDetailPage({ params }: { params: Pr
         <div>
           <div className={ui.label}>{d.f.sampledByName}</div>
           <div>{test.sampledByName ?? "—"}</div>
-          <div className="text-xs text-ink-muted">{test.sampledAt ? new Date(test.sampledAt).toLocaleDateString() : "—"}</div>
+          <div className="text-xs text-ink-muted">{test.sampledAt ? dt.date(test.sampledAt) : "—"}</div>
         </div>
         <div>
           <div className={ui.label}>{d.f.testedByName}</div>
           <div>{test.testedByName ?? "—"}</div>
-          <div className="text-xs text-ink-muted">{test.testedAt ? new Date(test.testedAt).toLocaleDateString() : "—"}</div>
+          <div className="text-xs text-ink-muted">{test.testedAt ? dt.date(test.testedAt) : "—"}</div>
         </div>
         <div>
           <div className={ui.label}>{d.f.checkedByName}</div>
           <div>{test.checkedByName ?? "—"}</div>
-          <div className="text-xs text-ink-muted">{test.checkedAt ? new Date(test.checkedAt).toLocaleDateString() : "—"}</div>
+          <div className="text-xs text-ink-muted">{test.checkedAt ? dt.date(test.checkedAt) : "—"}</div>
         </div>
       </div>
 
@@ -205,7 +207,7 @@ export default async function MaterialLabTestDetailPage({ params }: { params: Pr
       </div>
 
       <div className="text-xs text-ink-faint">
-        {d.createdBy(test.createdBy.name, new Date(test.createdAt).toLocaleDateString())}
+        {d.createdBy(test.createdBy.name, dt.date(test.createdAt))}
       </div>
     </div>
   );

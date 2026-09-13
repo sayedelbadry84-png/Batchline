@@ -13,6 +13,7 @@ import { Modal } from "@/components/Modal";
 import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
 import { DeliveryGroupRow } from "./DeliveryGroupRow";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 // A single mixer truck load — the same hard ceiling releaseBatchTicket
 // enforces server-side, so this is display/UX only, not the real gate.
@@ -38,12 +39,6 @@ function addDays(dateParam: string, delta: number): string {
   d.setUTCDate(d.getUTCDate() + delta);
   return toDateParam(d);
 }
-function fmtTime(d: Date): string {
-  return new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-function fmtDateTime(d: Date): string {
-  return new Date(d).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
 
 export default async function ProductionPage({
   searchParams,
@@ -51,6 +46,7 @@ export default async function ProductionPage({
   searchParams: Promise<{ manualBooking?: string; date?: string; dateTo?: string; releaseError?: string; releaseErrorMaterial?: string; manualBookingKept?: string }>;
 }) {
   const user = await requirePageAccess("production");
+  const dt = await getDateFormatters();
   const canEditMix = await canPerformAction(user.role, "production", "editReservationMix");
   const { dict } = await getDictionary();
   const m = dict.modules.production;
@@ -406,9 +402,9 @@ export default async function ProductionPage({
                   {tickets.map((t) => (
                     <tr key={t.id}>
                       <td className={`${ui.td} font-mono text-xs tabular`}>
-                        {t.releasedAt ? (isRange ? fmtDateTime(t.releasedAt) : fmtTime(t.releasedAt)) : "—"}
+                        {t.releasedAt ? (isRange ? dt.dayTime(t.releasedAt) : dt.time(t.releasedAt)) : "—"}
                         {t.batchCompletedAt && (
-                          <div className="font-normal text-ink-muted">{m.loadTimeShort(isRange ? fmtDateTime(t.batchCompletedAt) : fmtTime(t.batchCompletedAt))}</div>
+                          <div className="font-normal text-ink-muted">{m.loadTimeShort(isRange ? dt.dayTime(t.batchCompletedAt) : dt.time(t.batchCompletedAt))}</div>
                         )}
                       </td>
                       <td className={`${ui.td} text-xs`}>{t.plant.name}</td>

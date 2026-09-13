@@ -14,6 +14,7 @@ import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
 import { ReservationReminderButton } from "@/components/ReservationReminderButton";
 import { ReservationMixSelect } from "@/components/ReservationMixSelect";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const statusChip: Record<string, string> = {
   REQUESTED: "bg-surface-alt text-ink-muted",
@@ -38,12 +39,6 @@ function addDays(dateParam: string, delta: number): string {
   d.setUTCDate(d.getUTCDate() + delta);
   return toDateParam(d);
 }
-function fmtTime(d: Date): string {
-  return new Date(d).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-function fmtDateTime(d: Date): string {
-  return new Date(d).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
 
 export default async function ReservationsPage({
   searchParams,
@@ -51,6 +46,7 @@ export default async function ReservationsPage({
   searchParams: Promise<{ edit?: string; date?: string; dateTo?: string; new?: string }>;
 }) {
   const user = await requirePageAccess("reservations");
+  const dt = await getDateFormatters();
   const { dict } = await getDictionary();
   const m = dict.modules.reservations;
   const { edit: editId, date: dateRaw, dateTo: dateToRaw, new: newFlag } = await searchParams;
@@ -196,13 +192,13 @@ export default async function ReservationsPage({
           <div className="flex flex-col gap-2">
             {dueForReminder.map((r) => {
               const minsUntil = Math.max(0, Math.round((r.pourWindowStart.getTime() - nowMs) / 60000));
-              const message = m.reminderMessage(r.reservationNumber, r.project.name, r.mix.code, r.requestedVolumeM3, fmtDateTime(r.pourWindowStart), r.siteLocation);
+              const message = m.reminderMessage(r.reservationNumber, r.project.name, r.mix.code, r.requestedVolumeM3, dt.dayTime(r.pourWindowStart), r.siteLocation);
               return (
                 <div key={r.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface-alt px-3 py-2 text-sm">
                   <div>
                     <span className="font-medium">{r.reservationNumber}</span> — {r.project.name} ({r.project.customer.legalName})
                     <span className="ms-2 text-ink-muted">
-                      {fmtDateTime(r.pourWindowStart)} · {m.reminderDueIn(minsUntil)}
+                      {dt.dayTime(r.pourWindowStart)} · {m.reminderDueIn(minsUntil)}
                     </span>
                   </div>
                   {r.siteContactPhone ? (
@@ -398,7 +394,7 @@ export default async function ReservationsPage({
                 : "—";
               return (
                 <tr key={r.id}>
-                  <td className={`${ui.td} font-mono text-xs tabular`}>{isRange ? fmtDateTime(r.pourWindowStart) : fmtTime(r.pourWindowStart)}</td>
+                  <td className={`${ui.td} font-mono text-xs tabular`}>{isRange ? dt.dayTime(r.pourWindowStart) : dt.time(r.pourWindowStart)}</td>
                   <td className={ui.td}>
                     {r.project.name}
                     <div className="font-mono text-xs text-ink-muted" dir="ltr">{r.reservationNumber}</div>

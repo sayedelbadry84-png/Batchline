@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { getReleasedVolumeM3, closeReservationForId } from "@/lib/reservations";
-import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
+import { effectiveSiteId, isSiteInScope, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { getCustomerOutstandingBalance } from "@/lib/billing";
 import { isPumpAvailable } from "@/lib/pumpSchedule";
 import { withSequentialNumber } from "@/lib/sequence";
@@ -377,7 +377,17 @@ export async function markReservationReminderSent(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  await prisma.reservation.update({ where: { id }, data: { reminderSentAt: new Date() } });
+  // BL-CR-P1-02, external-review validation: role permission is not site
+  // permission. Without the scope in this write's own WHERE clause, a
+  // reservations user at one site could stamp another site's reservation
+  // as "reminder sent" and suppress the reminder its own customer was
+  // owed. A miss writes nothing and reports nothing, exactly like an id
+  // that does not exist.
+  const marked = await prisma.reservation.updateMany({
+    where: { id, ...reservationSiteScopeWhere(effectiveSiteId(user)) },
+    data: { reminderSentAt: new Date() },
+  });
+  if (marked.count !== 1) return;
   await logAudit({ module: "Reservations", recordId: id, reasonCode: "RESERVATION_REMINDER_SENT" });
   revalidatePath("/reservations");
 }

@@ -2,9 +2,12 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { requirePageAccess } from "@/lib/session";
+import { effectiveSiteId, siteScopeWhere } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
+import { UnofficialDocumentNotice } from "@/components/UnofficialDocumentNotice";
 import { PrintButton } from "@/components/PrintButton";
 import { convertQuoteLineToReservation } from "../../actions";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const cellBorder = { border: "1px solid #000" };
 
@@ -28,14 +31,25 @@ function Cell({ label, value, className = "" }: { label: string; value: string |
 }
 
 export default async function QuoteDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  await requirePageAccess("sales");
+  const user = await requirePageAccess("sales");
+  const dt = await getDateFormatters();
   const { id } = await params;
   const { dict } = await getDictionary();
   const m = dict.modules.sales;
   const d = m.quoteDoc;
 
-  const quote = await prisma.quote.findUnique({
-    where: { id },
+  // BL-CR-P1-01, external-review validation: the route parameter is not
+  // an authorization boundary. requirePageAccess above proves the caller
+  // may use this MODULE; it says nothing about whether this particular
+  // record belongs to their site. Folding the scope into the database
+  // predicate (findFirst, not findUnique-by-id) is what makes a
+  // cross-site id behave exactly like a nonexistent one — including for
+  // ADMIN, whose effectiveSiteId is null and whose predicate is
+  // therefore unrestricted, unchanged. Deliberately NOT a fetch-then-
+  // compare: a distinguishable "forbidden" answer still confirms the
+  // record exists.
+  const quote = await prisma.quote.findFirst({
+    where: { id, ...siteScopeWhere(effectiveSiteId(user)) },
     include: {
       customer: true,
       project: true,
@@ -48,6 +62,7 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      <UnofficialDocumentNotice label={dict.common.unofficialDocument} />
       <div className="no-print flex items-center justify-between gap-3">
         <Link href="/sales?tab=quotes" className="text-sm font-medium text-accent-strong hover:underline">
           ← {dict.field.cancel}
@@ -67,8 +82,8 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
 
         <div className="grid grid-cols-3">
           <Cell label={d.quoteNumber} value={quote.quoteNumber} />
-          <Cell label={d.date} value={new Date(quote.createdAt).toLocaleDateString("en-GB")} className="text-center" />
-          <Cell label={d.validUntil} value={quote.validUntil ? new Date(quote.validUntil).toLocaleDateString("en-GB") : null} className="text-end" />
+          <Cell label={d.date} value={dt.date(quote.createdAt)} className="text-center" />
+          <Cell label={d.validUntil} value={quote.validUntil ? dt.date(quote.validUntil) : null} className="text-end" />
         </div>
 
         <div className="grid grid-cols-2">

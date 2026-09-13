@@ -19,6 +19,7 @@ import {
 } from "./actions";
 import { resolvePlantIdForSite } from "@/lib/siteScope";
 import { createSupplier, createMaterial, updateSupplier, updateMaterial, createSupplierEvaluation, setSupplierStatus } from "../suppliers/actions";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const PURCHASING_TABS = ["orders", "contracts", "suppliers"] as const;
 type PurchasingTab = (typeof PURCHASING_TABS)[number];
@@ -42,10 +43,6 @@ const poStatusChip: Record<string, string> = {
   CANCELLED: "bg-critical-soft text-critical",
 };
 
-function fmtDate(d: Date | null): string {
-  if (!d) return "—";
-  return new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" });
-}
 
 export default async function PurchasingPage({
   searchParams,
@@ -168,6 +165,7 @@ async function OrdersTab({
   newFromMaterialReqFlag?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const ordersRaw = await prisma.purchaseOrder.findMany({
     where: siteScope,
     orderBy: { createdAt: "desc" },
@@ -280,7 +278,7 @@ async function OrdersTab({
                   {o.approvedAt && <span className={`${ui.chip} bg-good-soft text-good ms-1`}>{m.orders.approved}</span>}
                 </td>
                 <td className={`${ui.td} font-mono`}>{o.total.toFixed(2)} {o.currency}</td>
-                <td className={ui.td}>{fmtDate(o.expectedDate)}</td>
+                <td className={ui.td}>{dt.date(o.expectedDate)}</td>
                 <td className={ui.td}>
                   <div className="flex flex-col gap-1">
                     <Link href={`${baseUrl}&viewPO=${o.id}`} className="text-xs font-medium text-accent-strong hover:underline">{m.orders.viewLines}</Link>
@@ -475,6 +473,7 @@ async function ContractsTab({
   renewId?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const contracts = await prisma.supplierContract.findMany({
     orderBy: { createdAt: "desc" },
     include: { supplier: true, material: true },
@@ -506,7 +505,7 @@ async function ContractsTab({
                 <td className={ui.td}>{c.supplier.name}</td>
                 <td className={ui.td}>{c.material?.name ?? "—"}</td>
                 <td className={`${ui.td} font-mono`}>{c.pricePerUnit != null ? c.pricePerUnit.toFixed(2) : "—"}</td>
-                <td className={ui.td}>{fmtDate(c.startDate)} — {c.endDate ? fmtDate(c.endDate) : "∞"}</td>
+                <td className={ui.td}>{dt.date(c.startDate)} — {c.endDate ? dt.date(c.endDate) : "∞"}</td>
                 <td className={ui.td}>
                   <span className={`${ui.chip} ${c.status === "ACTIVE" ? "bg-good-soft text-good" : "bg-surface-alt text-ink-muted"}`}>
                     {m.contracts.statusLabel[c.status as keyof typeof m.contracts.statusLabel] ?? c.status}
@@ -625,6 +624,7 @@ async function SuppliersTab({
   editMaterialId?: string;
   baseUrl: string;
 }) {
+  const dt = await getDateFormatters();
   const sm = dict.modules.suppliers;
 
   const [suppliers, materials, evaluations] = await Promise.all([
@@ -712,9 +712,9 @@ async function SuppliersTab({
                       <span className={`${ui.chip} ${supplierStatusChip[s.status] ?? ""}`}>{sm.status[s.status as keyof typeof sm.status] ?? s.status}</span>
                       <div className="mt-1 text-xs text-ink-faint">
                         {s.status === "DISCONTINUED" && s.discontinuedOn
-                          ? sm.discontinuedOn(new Date(s.discontinuedOn).toLocaleDateString())
+                          ? sm.discontinuedOn(dt.date(s.discontinuedOn))
                           : s.approvedOn
-                            ? sm.approvedOn(new Date(s.approvedOn).toLocaleDateString())
+                            ? sm.approvedOn(dt.date(s.approvedOn))
                             : null}
                       </div>
                       {s.status === "ACTIVE" ? (

@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { getCurrentUser } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
+import { getDateFormatters } from "@/lib/displayTimeZone";
 
 const ROW_LIMIT = 300;
 
@@ -16,6 +17,7 @@ export default async function AuditLogPage({
   // system-admin concern, never a database-editable grant another role
   // could end up with by accident.
   const user = await getCurrentUser();
+  const dt = await getDateFormatters();
   if (!user) redirect("/login");
   if (user.role !== "ADMIN") redirect("/access-denied?module=audit-log");
   const { dict } = await getDictionary();
@@ -46,7 +48,14 @@ export default async function AuditLogPage({
       orderBy: { createdAt: "desc" },
       take: ROW_LIMIT,
     }),
-    prisma.auditEvent.findMany({ distinct: ["module"], select: { module: true }, orderBy: { module: "asc" } }),
+    // Health audit (2026-09-10): this was
+    // `findMany({ distinct: ["module"] })`, which pulls the `module`
+    // column of EVERY audit row — a table that takes a row per SCADA
+    // reading and per telematics ping — back into the application just to
+    // fill a dropdown with a dozen values. SELECT DISTINCT does the same
+    // work in the database and returns only the distinct rows. Same
+    // values, same order, same shape.
+    prisma.$queryRaw<{ module: string }[]>`SELECT DISTINCT "module" FROM "AuditEvent" ORDER BY "module" ASC`,
   ]);
 
   return (
@@ -98,7 +107,7 @@ export default async function AuditLogPage({
           <tbody>
             {events.map((e) => (
               <tr key={e.id}>
-                <td className={`${ui.td} font-mono text-xs tabular`} dir="ltr">{new Date(e.createdAt).toLocaleString()}</td>
+                <td className={`${ui.td} font-mono text-xs tabular`} dir="ltr">{dt.dateTime(e.createdAt)}</td>
                 <td className={ui.td}>
                   {e.actor ? (
                     <>

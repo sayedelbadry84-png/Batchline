@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { safeEqual } from "@/lib/integration-auth";
+import { retryPendingBlobDeletions } from "@/lib/blob";
+import { retryPendingAutoRequisitions } from "@/lib/materialRequisition";
 
 // Daily housekeeping (see vercel.json) — the "background job" half of what
 // this app was missing at scale: instead of a paid queue/Redis (not
@@ -69,11 +71,34 @@ export async function GET(request: NextRequest) {
     await logAudit({ module: "Sales", recordId: q.id, afterValue: "EXPIRED", reasonCode: "QUOTE_AUTO_EXPIRED" });
   }
 
+  // PL-R9-P2-02, ninth production-lifecycle review: durable retry for a
+  // delivery-photo blob whose compensating delete itself failed — see
+  // PendingBlobDeletion's own comment in schema.prisma. Runs after the
+  // DB-only sweeps above so a slow/failing blob-storage retry never
+  // delays session/login-attempt/quote housekeeping ahead of it.
+  const blobDeletions = await retryPendingBlobDeletions();
+
+  // PL-R9-P2-03, ninth production-lifecycle review: durable retry for
+  // completeBatch's own best-effort auto-requisition follow-up — see
+  // PendingAutoRequisition's own comment in schema.prisma.
+  const autoRequisitions = await retryPendingAutoRequisitions();
+
+  // PL-R12-P2-02/P2-03, twelfth production-lifecycle review: the full
+  // structured counts, not just attempted/succeeded. bookkeepingFailed
+  // and deadLettered are the two an operator actually has to act on — a
+  // sweep that resolved nothing and dead-lettered rows previously looked
+  // identical here to a completely clean run.
   return NextResponse.json({
     ranAt: now.toISOString(),
     expiredSessionsDeleted: expiredSessions.count,
     staleLoginAttemptsDeleted: staleLoginAttempts.count,
     abandonedTotpSetupsCleared: abandonedTotpSetups.count,
+    // `quotesExpired` counts the expirations that actually WON their
+    // conditional claim above, not the size of the pre-scan — the same
+    // "count what committed, never what was attempted" rule the two
+    // queue sweeps below report by (see QueueSweepCounts).
     quotesExpired,
+    pendingBlobDeletions: blobDeletions,
+    pendingAutoRequisitions: autoRequisitions,
   });
 }
