@@ -44,7 +44,7 @@ const { postSiloMovement } = await import("../src/lib/inventoryLedger");
 const { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComponent, claimAndDeleteTicketComponent } = await import("../src/lib/batchComponentEdits");
 const { claimTripSlot, applyReclaimCredit } = await import("../src/lib/tripDispatch");
 const { requestShortageOverride, approveShortageOverrideRequest, rejectShortageOverrideRequest } = await import("../src/lib/shortageOverrideRequests");
-const { createRequisitionIfNeeded, stageAutoRequisitionIntent, processPendingAutoRequisition, retryPendingAutoRequisitions, notifyRequisitionCreated } = await import("../src/lib/materialRequisition");
+const { createRequisitionIfNeeded, stageAutoRequisitionIntent, processPendingAutoRequisition, retryPendingAutoRequisitions, notifyRequisitionCreated, claimEligiblePendingAutoRequisitions } = await import("../src/lib/materialRequisition");
 const { listDeadLetters, requeueDeadLetter, dismissDeadLetter } = await import("../src/lib/deadLetterQueue");
 type RequisitionNotifier = Parameters<typeof processPendingAutoRequisition>[1];
 const { MAX_ATTEMPTS_BEFORE_DEAD_LETTER } = await import("../src/lib/retryBackoff");
@@ -2380,6 +2380,65 @@ test("200 always-failing intents plus a 201st resolvable one at the real claim s
 // future, so the very next sweep naturally reaches whatever resolvable
 // row is queued right behind it, regardless of how many failing rows
 // came before it.
+// Queue claim overshoot (2026-09-13). Tests 74 and 75 below failed on some
+// CI runs and passed on byte-identical code on others, each time because
+// the row queued BEHIND the claim limit had already been drained by the
+// first sweep. The claim was `UPDATE ... WHERE id IN (SELECT ... LIMIT n
+// FOR UPDATE SKIP LOCKED)`: on a nested-loop plan PostgreSQL re-runs that
+// subquery per outer row, FOR UPDATE re-checks each row's newest version
+// — already pushed into the future by this same UPDATE — and the rescan
+// returns the next eligible row. Plan choice follows table statistics,
+// which is why it was intermittent.
+//
+// This steers the planner towards that shape inside a transaction and
+// holds the real claim function to its limit there. The old statement is
+// run alongside it and only LOGGED, never asserted: whether a given
+// PostgreSQL build reproduces the overshoot on demand is exactly the kind
+// of plan-dependent fact that must not decide whether CI is green.
+test("a queue claim never takes more rows than its limit, even on a nested-loop plan", async () => {
+  const stamp = Date.now();
+  const ticket = `test-suite-bc-claim-limit-${stamp}`;
+  // Far older than anything another test could leave, so these ten are
+  // the head of the queue.
+  const base = Date.now() - 24 * 60 * 60 * 1000;
+  await prisma.pendingAutoRequisition.createMany({
+    data: Array.from({ length: 10 }, (_, i) => ({
+      batchTicketId: ticket, materialId: `${ticket}-m${i}`, siteId,
+      newLevel: 2, capacity: 100, minThresholdPct: 50, unit: "TONS", nextAttemptAt: new Date(base + i),
+    })),
+  });
+
+  const ROLLBACK = new Error("rollback probe");
+  let newShape = -1;
+  let oldShape = -1;
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(`SET LOCAL enable_hashjoin = off`);
+      await tx.$executeRawUnsafe(`SET LOCAL enable_mergejoin = off`);
+      await tx.$executeRawUnsafe(`SET LOCAL enable_seqscan = off`);
+
+      await tx.$executeRawUnsafe(`SAVEPOINT probe`);
+      oldShape = (await tx.$queryRawUnsafe<{ id: string }[]>(`
+        UPDATE "PendingAutoRequisition" SET "nextAttemptAt" = now() + interval '1 hour'
+        WHERE id IN (SELECT id FROM "PendingAutoRequisition"
+                     WHERE "nextAttemptAt" <= now() AND "deadLetteredAt" IS NULL
+                     ORDER BY "nextAttemptAt" ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
+        RETURNING id`)).length;
+      await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT probe`);
+
+      newShape = (await claimEligiblePendingAutoRequisitions(1, tx)).length;
+      throw ROLLBACK; // leave the queue exactly as it was
+    });
+  } catch (e) {
+    if (e !== ROLLBACK) throw e;
+  } finally {
+    await cleanupDelete(() => prisma.pendingAutoRequisition.deleteMany({ where: { batchTicketId: ticket } }));
+  }
+
+  console.log(`[claim-limit probe] limit=1 under a forced nested loop: old IN-subquery claimed ${oldShape}, CTE claim claimed ${newShape}`);
+  assert.equal(newShape, 1, "the claim must take exactly its limit — rows past it belong to the next sweep");
+});
+
 test("a permanently-failing intent does not starve a newer resolvable one — a second sweep reaches the resolvable row instead of re-claiming the poisoned one", async () => {
   const bogusMaterialId = "test-suite-bc-starvation-poison-material";
   // PL-R13-P1-01: explicit, far-past nextAttemptAt values rather than

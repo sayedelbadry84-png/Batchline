@@ -79,19 +79,36 @@ export async function deleteFileDurable(appUrl: string, reason: string, deleteFn
 // overlapping cron invocations safe — see retryBackoff.ts's own comment
 // for the exact policy this shares with materialRequisition.ts's
 // identical claim pattern for PendingAutoRequisition.
-async function claimEligiblePendingBlobDeletions(limit: number): Promise<{ id: string; url: string; attempts: number }[]> {
+// Why a CTE and not `WHERE id IN (SELECT ... LIMIT n FOR UPDATE SKIP
+// LOCKED)`, which this used until 2026-09-13: that form does not bound
+// the claim to n rows. When the planner puts the locking subquery on the
+// inner side of a nested loop it RE-EXECUTES it per outer row, and each
+// re-execution re-checks rows through FOR UPDATE against their newest
+// version — which this very UPDATE has just pushed into the future. The
+// row it claimed is no longer eligible, so the rescan hands back the next
+// one, and the next. Whether that plan is chosen depends on table
+// statistics, so the overshoot was intermittent: it is what made
+// batchCompletion tests 74 and 75 fail on some CI runs and pass on
+// byte-identical code on others, each time with the row queued BEHIND the
+// claim limit already drained by the first sweep.
+//
+// A CTE that takes row locks is never inlined — PostgreSQL evaluates it
+// exactly once — so the LIMIT is a real bound whatever the join plan.
+export async function claimEligiblePendingBlobDeletions(limit: number): Promise<{ id: string; url: string; attempts: number }[]> {
   const provisionalLease = computeNextAttempt(0);
   return prisma.$queryRaw<{ id: string; url: string; attempts: number }[]>`
-    UPDATE "PendingBlobDeletion"
-    SET "nextAttemptAt" = ${provisionalLease}
-    WHERE id IN (
+    WITH picked AS (
       SELECT id FROM "PendingBlobDeletion"
       WHERE "nextAttemptAt" <= now() AND "deadLetteredAt" IS NULL
       ORDER BY "nextAttemptAt" ASC
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
     )
-    RETURNING id, url, attempts
+    UPDATE "PendingBlobDeletion" q
+    SET "nextAttemptAt" = ${provisionalLease}
+    FROM picked
+    WHERE q.id = picked.id
+    RETURNING q.id, q.url, q.attempts
   `;
 }
 
