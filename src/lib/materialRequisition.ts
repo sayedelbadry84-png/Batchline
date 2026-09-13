@@ -493,19 +493,39 @@ export async function processPendingAutoRequisition(intentId: string, notify: Re
 // skipped here silently and is reported in no counter at all (it is not
 // claimed, so it cannot be BUSY). That is the intended contract; the
 // owner's own transaction is what will finish or release it.
-async function claimEligiblePendingAutoRequisitions(limit: number): Promise<{ id: string }[]> {
+// Why a CTE and not `WHERE id IN (SELECT ... LIMIT n FOR UPDATE SKIP
+// LOCKED)`, which this used until 2026-09-13: that form does not bound
+// the claim to n rows. When the planner puts the locking subquery on the
+// inner side of a nested loop it RE-EXECUTES it per outer row, and each
+// re-execution re-checks rows through FOR UPDATE against their newest
+// version — which this very UPDATE has just pushed into the future. The
+// row it claimed is no longer eligible, so the rescan hands back the next
+// one, and the next. Whether that plan is chosen depends on table
+// statistics, so the overshoot was intermittent: it is what made
+// batchCompletion tests 74 and 75 fail on some CI runs and pass on
+// byte-identical code on others, each time with the row queued BEHIND the
+// claim limit already drained by the first sweep.
+//
+// A CTE that takes row locks is never inlined — PostgreSQL evaluates it
+// exactly once — so the LIMIT is a real bound whatever the join plan.
+// `client` exists for tests/batchCompletion.test.ts, which runs this exact
+// statement inside a transaction with the planner steered towards the
+// nested-loop shape that used to overshoot. Production callers pass nothing.
+export async function claimEligiblePendingAutoRequisitions(limit: number, client: Pick<Prisma.TransactionClient, "$queryRaw"> = prisma): Promise<{ id: string }[]> {
   const provisionalLease = computeNextAttempt(0);
-  return prisma.$queryRaw<{ id: string }[]>`
-    UPDATE "PendingAutoRequisition"
-    SET "nextAttemptAt" = ${provisionalLease}
-    WHERE id IN (
+  return client.$queryRaw<{ id: string }[]>`
+    WITH picked AS (
       SELECT id FROM "PendingAutoRequisition"
       WHERE "nextAttemptAt" <= now() AND "deadLetteredAt" IS NULL
       ORDER BY "nextAttemptAt" ASC
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
     )
-    RETURNING id
+    UPDATE "PendingAutoRequisition" q
+    SET "nextAttemptAt" = ${provisionalLease}
+    FROM picked
+    WHERE q.id = picked.id
+    RETURNING q.id
   `;
 }
 

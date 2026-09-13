@@ -244,6 +244,34 @@ right.
    but on mount a pre-existing local subscription still reports "enabled"
    without asking the server whether it is registered.
 
+9. **Intermittent: `batchCompletion.test.ts` tests 74 and 75 (queue
+   starvation).** Status: fix shipped 2026-09-13, NOT YET PROVEN — the
+   failure was nondeterministic, so only a run of green CI builds over
+   time can confirm it.
+   - Symptom, verbatim: `the resolvable intent is behind all 200 — it must
+     not be reached on the first sweep` (74, actual `~`) and `the
+     resolvable row must not have been reached yet` (75) — the row queued
+     behind the claim limit was already drained by the first sweep.
+   - Runs: failed `34684441516` then passed `34684636652` on identical
+     code (2026-09-12); failed again on the `main` merge build of
+     `349c647` (2026-09-13).
+   - Ruled out: another writer draining the row — the only
+     `PendingAutoRequisition` deletes are by `id` + lease owner, and no
+     caller processes intents in the background; ordering by timestamp —
+     both tests set explicit, far-past `nextAttemptAt` values.
+   - Cause (mechanism, not reproduced on demand): the claim was
+     `UPDATE ... WHERE id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`.
+     On a nested-loop plan the subquery is re-executed per outer row, FOR
+     UPDATE re-checks the just-updated row as ineligible, and the rescan
+     returns the next one — so a sweep could claim past its limit. Plan
+     choice follows statistics, hence intermittent. Both queue claims
+     (`materialRequisition.ts`, `blob.ts`) now use a locking CTE, which is
+     evaluated once. The new test "a queue claim never takes more rows
+     than its limit" logs whether the old shape overshoots under a forced
+     nested loop — read that line in CI before calling this closed.
+   - The two-consecutive-runs gate was weakened while this was open: a
+     green result could be obtained by re-running.
+
 Fixed since earlier revisions of this list — **do not re-report**: ZATCA
 chain generation (now Serializable with a site row lock), invoice
 numbering (now uses `withSequentialNumber`), `getClientIp` (see
