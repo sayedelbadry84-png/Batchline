@@ -268,7 +268,12 @@ right.
      (`materialRequisition.ts`, `blob.ts`) now use a locking CTE, which is
      evaluated once. The new test "a queue claim never takes more rows
      than its limit" logs whether the old shape overshoots under a forced
-     nested loop — read that line in CI before calling this closed.
+     nested loop. First CI run of it (`34778939300`): the old shape
+     claimed 1 — the forced plan did NOT reproduce the overshoot, so the
+     mechanism above remains a hypothesis, not a confirmed cause.
+   - Cheapest next test: when 74/75 next fail, capture `EXPLAIN` of the
+     claim statement from that same run (add it to the failure message)
+     to see whether the inner side was a rescanned subquery.
    - The two-consecutive-runs gate was weakened while this was open: a
      green result could be obtained by re-running.
 
