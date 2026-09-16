@@ -19,7 +19,7 @@ export default async function AuditLogPage({
   const user = await getCurrentUser();
   const dt = await getDateFormatters();
   if (!user) redirect("/login");
-  if (user.role !== "ADMIN") redirect("/access-denied?module=audit-log");
+  if (user.role !== "ADMIN") redirect("/access-denied");
   const { dict } = await getDictionary();
   const m = dict.modules.auditLog;
 

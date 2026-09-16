@@ -1,7 +1,8 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { Prisma } from "@prisma/client";
+import { logAudit, writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { withSequentialNumber } from "@/lib/sequence";
 import { postCashTransaction } from "@/lib/ledger";
@@ -232,6 +233,9 @@ export async function markPayrollRunPaid(formData: FormData) {
   await requireActionPermission(user, "employees", "markPayrollRunPaid");
 
   const id = String(formData.get("id") ?? "");
+  // Optional, but kept exactly as the payer typed it (trimmed): it is
+  // matched by eye against a bank statement, so it must not be rewritten.
+  const paymentReference = String(formData.get("paymentReference") ?? "").trim().slice(0, 120) || null;
   if (!id) return;
 
   const run = await prisma.payrollRun.findUnique({
@@ -255,43 +259,88 @@ export async function markPayrollRunPaid(formData: FormData) {
       bySite.set(plant.siteId, { siteId: plant.siteId, currency: plant.currency, total: lineCost });
     }
   }
+  const sites = [...bySite.values()]
+    .map((site) => ({ ...site, total: Math.round(site.total * 100) / 100 }))
+    .filter((site) => site.total > 0);
+  const description = `Payroll run ${run.runNumber}`;
+  const paidAt = new Date();
 
-  for (const site of bySite.values()) {
-    if (site.total <= 0) continue;
-    const description = `Payroll run ${run.runNumber}`;
-    // The cash transaction and its journal entry commit as one unit — see
-    // the same rationale on generateInvoiceForProject in
-    // billing/actions.ts.
-    await prisma.$transaction(async (tx) => {
-      const txn = await withSequentialNumber(
-        "TXN",
-        (yr) => tx.cashTransaction.count({ where: { createdAt: yr } }),
-        (txnNumber) =>
-          tx.cashTransaction.create({
-            data: {
-              txnNumber,
-              siteId: site.siteId,
-              direction: "OUT",
-              category: "PAYROLL",
-              amount: site.total,
-              currency: site.currency,
-              description,
-              occurredAt: new Date(),
-              createdById: user!.id,
-            },
-          }),
-      );
-      await postCashTransaction(tx, { siteId: site.siteId, currency: site.currency, txnId: txn.id, direction: "OUT", category: "PAYROLL", amount: site.total, description });
-    }, TX_OPTIONS);
+  // One transaction for the whole payment, CLAIMED first.
+  //
+  // This used to post one cash transaction per site, each in its own
+  // transaction, and only afterwards flip the run to PAID with a plain
+  // update. Two defects followed from that shape. A double click — or two
+  // admins on the same run — both read APPROVED and both posted the whole
+  // payroll to the cash ledger. And a failure on the second site left the
+  // first site's cash posted against a run still marked APPROVED, so the
+  // natural retry posted it again.
+  //
+  // Now the APPROVED -> PAID transition is a conditional updateMany inside
+  // the same transaction as every posting: the loser of a race claims
+  // nothing and posts nothing, and any failure rolls back the claim along
+  // with the cash. withSequentialNumber wraps the transaction rather than
+  // sitting inside it (a P2002 aborts a Postgres transaction, so a retry
+  // must start a fresh one); the per-site numbers are consecutive from the
+  // helper's candidate, so a collision on any of them retries the lot.
+  try {
+    await withSequentialNumber(
+      "TXN",
+      (yr) => prisma.cashTransaction.count({ where: { createdAt: yr } }),
+      (firstNumber) =>
+        prisma.$transaction(
+          async (tx) => {
+            const claim = await tx.payrollRun.updateMany({
+              where: { id, status: "APPROVED" },
+              data: { status: "PAID", paidAt, paidById: user!.id, paymentReference },
+            });
+            if (claim.count !== 1) throw new PayrollAlreadySettled();
+
+            const [prefix, year, seq] = firstNumber.split("-");
+            for (const [i, site] of sites.entries()) {
+              const txnNumber = `${prefix}-${year}-${String(Number(seq) + i).padStart(4, "0")}`;
+              const txn = await tx.cashTransaction.create({
+                data: {
+                  txnNumber,
+                  siteId: site.siteId,
+                  direction: "OUT",
+                  category: "PAYROLL",
+                  amount: site.total,
+                  currency: site.currency,
+                  description,
+                  reference: paymentReference,
+                  occurredAt: paidAt,
+                  createdById: user!.id,
+                },
+              });
+              await postCashTransaction(tx, { siteId: site.siteId, currency: site.currency, txnId: txn.id, direction: "OUT", category: "PAYROLL", amount: site.total, description });
+            }
+
+            await writeAudit(tx, { id: user!.id, role: user!.role }, {
+              module: "Employees",
+              recordId: id,
+              field: "status",
+              beforeValue: "APPROVED",
+              afterValue: paymentReference ? `PAID (ref ${paymentReference})` : "PAID",
+              reasonCode: "PAYROLL_RUN_PAID",
+            });
+          },
+          { ...TX_OPTIONS, isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        ),
+    );
+  } catch (e) {
+    // Someone else settled it first — the same silent outcome as the
+    // status guard above, and nothing was posted by this attempt.
+    if (e instanceof PayrollAlreadySettled) return;
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2034") return;
+    throw e;
   }
 
-  await prisma.payrollRun.update({ where: { id }, data: { status: "PAID", paidAt: new Date() } });
-
-  await logAudit({ module: "Employees", recordId: id, afterValue: "PAID", reasonCode: "PAYROLL_RUN_PAID" });
   revalidatePath(`/employees/payroll/${id}`);
   revalidatePath("/employees");
   revalidatePath("/finance");
 }
+
+class PayrollAlreadySettled extends Error {}
 
 export async function cancelPayrollRun(formData: FormData) {
   const user = await getCurrentUser();

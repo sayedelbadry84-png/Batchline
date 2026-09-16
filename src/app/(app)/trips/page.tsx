@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
@@ -91,7 +92,9 @@ export default async function TripsPage() {
                     {t.batchTicket.reservation.project.customer.legalName}
                     {t.batchTicket.reservation.project.customer.code ? ` (${t.batchTicket.reservation.project.customer.code})` : ""}
                   </div>
-                  <div className="font-mono text-xs text-ink-muted" dir="ltr">{t.batchTicket.ticketNumber}</div>
+                  <Link href={`/trips/${encodeURIComponent(t.batchTicket.ticketNumber)}`} className="font-mono text-xs text-accent-strong hover:underline" dir="ltr">
+                    {t.batchTicket.ticketNumber}
+                  </Link>
                 </td>
                 <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.batchTicket.reservation.reservationNumber}</td>
                 <td className={ui.td}>
@@ -185,7 +188,11 @@ export default async function TripsPage() {
                     {t.batchTicket.reservation.project.customer.code ? ` (${t.batchTicket.reservation.project.customer.code})` : ""}
                   </div>
                 </td>
-                <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.batchTicket.ticketNumber}</td>
+                <td className={`${ui.td} font-mono text-xs`} dir="ltr">
+                  <Link href={`/trips/${encodeURIComponent(t.batchTicket.ticketNumber)}`} className="text-accent-strong hover:underline">
+                    {t.batchTicket.ticketNumber}
+                  </Link>
+                </td>
                 <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.batchTicket.reservation.reservationNumber}</td>
                 <td className={ui.td}>
                   <span className="font-mono text-xs" dir="ltr">{t.batchTicket.mix.code}</span>

@@ -14,7 +14,7 @@ export default async function PermissionsPage() {
   // every other page — this IS the screen that edits that table, so an
   // Admin who mis-clicks a checkbox elsewhere must still always be able to
   // reach this one specific page to undo it.
-  if (user.role !== "ADMIN") redirect("/access-denied?module=permissions");
+  if (user.role !== "ADMIN") redirect("/access-denied");
 
   const { dict, locale } = await getDictionary();
   const m = dict.modules.permissions;

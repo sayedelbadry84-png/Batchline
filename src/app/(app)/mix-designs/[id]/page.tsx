@@ -14,12 +14,12 @@ export default async function MixDesignDetailPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ editComponent?: string; edit?: string }>;
+  searchParams: Promise<{ editComponent?: string; edit?: string; componentError?: string }>;
 }) {
   await requirePageAccess("mix-designs");
   const dt = await getDateFormatters();
   const { id } = await params;
-  const { editComponent: editComponentId, edit: editingFields } = await searchParams;
+  const { editComponent: editComponentId, edit: editingFields, componentError } = await searchParams;
   const { dict } = await getDictionary();
   const m = dict.modules.mixDesigns;
   const d = m.detail;
@@ -199,6 +199,14 @@ export default async function MixDesignDetailPage({
                           </select>
                         </div>
                         <div>
+                          <label className={ui.label}>{d.sgField}</label>
+                          {c.material.specificGravity ? (
+                            <div className="py-2 font-mono text-sm tabular" dir="ltr">{c.material.specificGravity}</div>
+                          ) : (
+                            <input name="specificGravity" type="number" step="0.01" min="0.5" max="4" title={d.sgHint} className={`${ui.input} w-24`} dir="ltr" />
+                          )}
+                        </div>
+                        <div>
                           <label className={ui.label}>{d.toleranceField}</label>
                           <input name="tolerancePct" type="number" step="0.5" defaultValue={c.tolerancePct} className={`${ui.input} w-20`} />
                         </div>
@@ -244,6 +252,11 @@ export default async function MixDesignDetailPage({
           </table>
         </div>
 
+        {componentError && componentError in d.componentError && (
+          <p role="alert" className="col-span-full rounded-md border border-critical bg-critical-soft px-3 py-2 text-sm text-critical">
+            {d.componentError[componentError as keyof typeof d.componentError]}
+          </p>
+        )}
         <form action={addComponent} className={`${ui.card} flex flex-col gap-3`}>
           <input type="hidden" name="mixId" value={mix.id} />
           <h2 className="font-display text-lg font-semibold">{d.addTitle}</h2>
@@ -268,6 +281,11 @@ export default async function MixDesignDetailPage({
               <option value="KG">{d.unitKg}</option>
               <option value="LITER">{d.unitLiter}</option>
             </select>
+          </div>
+          <div>
+            <label className={ui.label}>{d.sgField}</label>
+            <input name="specificGravity" type="number" step="0.01" min="0.5" max="4" className={ui.input} dir="ltr" />
+            <p className="mt-1 text-xs text-ink-muted">{d.sgHint}</p>
           </div>
           <div>
             <label className={ui.label}>{d.toleranceField}</label>

@@ -117,6 +117,7 @@ model User {
   creditNotesIssued                 CreditNote[]
   payrollRunsCreated                PayrollRun[]              @relation("PayrollRunCreatedBy")
   payrollRunsApproved               PayrollRun[]              @relation("PayrollRunApprovedBy")
+  payrollRunsPaid                   PayrollRun[]              @relation("PayrollRunPaidBy")
   endOfServiceSettlementsCalculated EndOfServiceSettlement[]  @relation("EOSCalculatedBy")
   notifications                     Notification[]
   pushSubscriptions                 PushSubscription[]
@@ -977,19 +978,27 @@ model EndOfServiceSettlement {
 }
 
 model PayrollRun {
-  id           String    @id @default(cuid())
-  runNumber    String    @unique // PYR-YYYY-NNNN
-  periodStart  DateTime
-  periodEnd    DateTime
-  status       String    @default("DRAFT") // DRAFT, APPROVED, PAID, CANCELLED
-  createdById  String
-  createdBy    User      @relation("PayrollRunCreatedBy", fields: [createdById], references: [id])
-  approvedById String?
-  approvedBy   User?     @relation("PayrollRunApprovedBy", fields: [approvedById], references: [id])
-  approvedAt   DateTime?
-  paidAt       DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id               String    @id @default(cuid())
+  runNumber        String    @unique // PYR-YYYY-NNNN
+  periodStart      DateTime
+  periodEnd        DateTime
+  status           String    @default("DRAFT") // DRAFT, APPROVED, PAID, CANCELLED
+  createdById      String
+  createdBy        User      @relation("PayrollRunCreatedBy", fields: [createdById], references: [id])
+  approvedById     String?
+  approvedBy       User?     @relation("PayrollRunApprovedBy", fields: [approvedById], references: [id])
+  approvedAt       DateTime?
+  paidAt           DateTime?
+  // Who recorded the payment and the bank / transfer reference it went
+  // out under. Marking a run paid posts real cash transactions, and
+  // before 2026-09-16 the only trace left on the run itself was a status
+  // and a timestamp — nothing an auditor or an employee's pay query could
+  // be matched against.
+  paidById         String?
+  paidBy           User?     @relation("PayrollRunPaidBy", fields: [paidById], references: [id])
+  paymentReference String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   lines PayrollLine[]
 }
