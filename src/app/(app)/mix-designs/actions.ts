@@ -1,7 +1,8 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { logAudit, writeAudit } from "@/lib/audit";
+import { canPerformAction } from "@/lib/permissions";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -53,6 +54,32 @@ export async function updateMixDesign(formData: FormData) {
   revalidatePath("/mix-designs");
 }
 
+// Specific gravity is a property of the MATERIAL, not of the mix — the same
+// admixture has the same SG in every design that uses it — so it is stored
+// on Material and shown per component row. What this action adds is the
+// ability to supply it from the mix design form when the material has
+// none, because that is exactly when it is needed.
+//
+// It was needed and silently missing before. A dose entered in liters is
+// converted to kg by multiplying by SG; when the material had no SG the
+// conversion was skipped and the LITER figure was stored as if it were
+// kilograms. An admixture at SG 1.2 dosed at 5 L/m³ was recorded as 5 kg
+// instead of 6 — a 17% under-dose in the batching target, with nothing on
+// screen to say so. A liter dose now requires an SG, from the material or
+// from this form, and is refused with a visible message otherwise.
+// Specific gravity is a property of the MATERIAL, not of the mix — the same
+// admixture has the same SG in every design that uses it — so it is stored
+// on Material and shown per component row. What this action adds is the
+// ability to supply it from the mix design form when the material has
+// none, because that is exactly when it is needed.
+//
+// It was needed and silently missing before. A dose entered in liters is
+// converted to kg by multiplying by SG; when the material had no SG the
+// conversion was skipped and the LITER figure was stored as if it were
+// kilograms. An admixture at SG 1.2 dosed at 5 L/m³ was recorded as 5 kg
+// instead of 6 — a 17% under-dose in the batching target, with nothing on
+// screen to say so. A liter dose now requires an SG, from the material or
+// from this form, and is refused with a visible message otherwise.
 export async function addComponent(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "mix-designs", "addComponent");
@@ -62,41 +89,74 @@ export async function addComponent(formData: FormData) {
   const enteredValue = Number(formData.get("designMassKgPerM3") ?? 0);
   const tolerancePct = Number(formData.get("tolerancePct") ?? 2);
   const dosageUnit = String(formData.get("dosageUnit") ?? "KG");
+  const sgRaw = String(formData.get("specificGravity") ?? "").trim();
 
-  if (!mixId || !materialId || !enteredValue) return;
+  if (!mixId || !materialId || !Number.isFinite(enteredValue) || enteredValue <= 0) return;
+  if (dosageUnit !== "KG" && dosageUnit !== "LITER") return;
+  if (!Number.isFinite(tolerancePct) || tolerancePct < 0 || tolerancePct > 100) return;
 
-  // Chemical admixtures are conventionally dosed by volume on site — when
-  // the operator enters liters, convert to the kg the yield-factor math
-  // actually needs using the material's own specific gravity (the same
-  // absolute-volume-method conversion already used for design volume);
-  // designMassKgPerM3 stays the one stored figure either way.
-  let designMassKgPerM3 = enteredValue;
-  if (dosageUnit === "LITER") {
-    const material = await prisma.material.findUnique({ where: { id: materialId } });
-    if (material?.specificGravity) designMassKgPerM3 = enteredValue * material.specificGravity;
+  const back = (error: string) => `/mix-designs/${mixId}?componentError=${error}&editComponent=${encodeURIComponent(materialId)}`;
+
+  const material = await prisma.material.findUnique({ where: { id: materialId }, select: { specificGravity: true } });
+  if (!material) return;
+
+  let specificGravity = material.specificGravity;
+  let fillMaterialSg: number | null = null;
+  if (sgRaw !== "") {
+    const entered = Number(sgRaw);
+    // Plausible range for concrete materials: lightweight aggregate ~0.6,
+    // Portland cement ~3.15. Outside it is a typo, not a material.
+    if (!Number.isFinite(entered) || entered < 0.5 || entered > 4) redirect(back("SG_INVALID"));
+    // Only ever FILLS a gap. A material that already has an SG keeps it:
+    // changing an existing value would silently rescale every other mix
+    // using that material, which is a Purchasing decision, not this form's.
+    if (specificGravity == null) {
+      fillMaterialSg = entered;
+      specificGravity = entered;
+    }
   }
 
-  await prisma.mixComponent.upsert({
-    where: { mixId_materialId: { mixId, materialId } },
-    create: { mixId, materialId, designMassKgPerM3, tolerancePct, dosageUnit },
-    update: { designMassKgPerM3, tolerancePct, dosageUnit },
-  });
+  if (dosageUnit === "LITER" && !specificGravity) redirect(back("SG_REQUIRED"));
+  if (fillMaterialSg !== null && !(await canPerformAction(user!.role, "purchasing", "updateMaterial"))) redirect(back("SG_NOT_PERMITTED"));
 
-  await logAudit({
-    module: "MixDesign",
-    recordId: mixId,
-    field: "component",
-    afterValue: `${materialId}: ${designMassKgPerM3} kg/m3`,
-    reasonCode: "COMPONENT_UPDATED",
+  const designMassKgPerM3 = dosageUnit === "LITER" ? enteredValue * specificGravity! : enteredValue;
+  const actor = { id: user!.id, role: user!.role };
+
+  await prisma.$transaction(async (tx) => {
+    if (fillMaterialSg !== null) {
+      // Conditional on still being empty, so two people filling it at once
+      // cannot overwrite each other.
+      const filled = await tx.material.updateMany({ where: { id: materialId, specificGravity: null }, data: { specificGravity: fillMaterialSg } });
+      if (filled.count === 1) {
+        await writeAudit(tx, actor, {
+          module: "Suppliers",
+          recordId: materialId,
+          field: "specificGravity",
+          afterValue: String(fillMaterialSg),
+          reasonCode: "MATERIAL_SG_SET_FROM_MIX_DESIGN",
+        });
+      }
+    }
+
+    await tx.mixComponent.upsert({
+      where: { mixId_materialId: { mixId, materialId } },
+      create: { mixId, materialId, designMassKgPerM3, tolerancePct, dosageUnit },
+      update: { designMassKgPerM3, tolerancePct, dosageUnit },
+    });
+
+    await writeAudit(tx, actor, {
+      module: "MixDesign",
+      recordId: mixId,
+      field: "component",
+      afterValue: `${materialId}: ${designMassKgPerM3} kg/m3${dosageUnit === "LITER" ? ` (${enteredValue} L at SG ${specificGravity})` : ""}`,
+      reasonCode: "COMPONENT_UPDATED",
+    });
   });
 
   revalidatePath(`/mix-designs/${mixId}`);
+  redirect(`/mix-designs/${mixId}`);
 }
 
-// Freely removable at any mix status, including APPROVED — a mix design
-// edited mid-production never touches tickets already released against
-// it, since BatchTicket snapshots its own component targets at release
-// time (see releaseBatchTicket in production/actions.ts).
 export async function deleteComponent(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "mix-designs", "deleteComponent");

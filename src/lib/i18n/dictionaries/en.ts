@@ -403,6 +403,13 @@ const en: typeof ar = {
         addInSuppliers: "Add it in Suppliers",
         designMassField: "Design dose (per m³)",
         dosageUnitField: "Dosage unit",
+        sgField: "Specific gravity",
+        sgHint: "Needed for liter dosing. Only fills a material that has none — change an existing value in Purchasing.",
+        componentError: {
+          SG_REQUIRED: "A dose in liters needs the material's specific gravity to convert to kg. Enter it below, or set it on the material in Purchasing.",
+          SG_INVALID: "Specific gravity must be a number between 0.5 and 4.",
+          SG_NOT_PERMITTED: "Your role can't set a material's specific gravity. Ask Purchasing to add it.",
+        },
         unitKg: "kg",
         unitLiter: "Liter — chemical admixture",
         unitKgShort: "kg",
