@@ -1,11 +1,12 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { logAudit, writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { CO2E_FACTOR_KG_PER_KG } from "@/lib/carbon";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 
 // Purchasing procedure P/QM/008 §7.5 banding, applied to the weighted score.
 function bandCategory(weightedScorePct: number): string {
@@ -71,22 +72,56 @@ export async function createMaterial(formData: FormData) {
   revalidatePath("/purchasing");
 }
 
+// The saved edit has to be SEEN to count as saved. This used to write the
+// row and revalidate /purchasing, but the page was still addressed with
+// `&editSupplier=<id>`, so it re-rendered the same open edit form — the
+// catalog row with the new values never appeared, and an end-to-end pass
+// correctly reported the edit as not persisted. Leaving edit mode on
+// success is what puts the stored values back in front of the user.
+//
+// Also: the write is a conditional updateMany rather than update(), so an
+// id that no longer exists is a quiet refusal instead of an unhandled
+// P2025; a lead time that is not a whole number of days is refused
+// rather than silently cleared; and the audit row carries the before
+// value and commits with the change.
 export async function updateSupplier(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "purchasing", "updateSupplier");
 
   const id = String(formData.get("id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
-  const materialCatalog = String(formData.get("materialCatalog") ?? "").trim();
-  const leadTimeDays = Number(formData.get("leadTimeDays") ?? 0) || null;
+  const materialCatalog = String(formData.get("materialCatalog") ?? "").trim() || null;
+  const leadTimeRaw = String(formData.get("leadTimeDays") ?? "").trim();
   const address = String(formData.get("address") ?? "").trim() || null;
   const contactMethod = String(formData.get("contactMethod") ?? "").trim() || null;
   if (!id || !name) return;
 
-  await prisma.supplier.update({ where: { id }, data: { name, materialCatalog, leadTimeDays, address, contactMethod } });
+  let leadTimeDays: number | null = null;
+  if (leadTimeRaw !== "") {
+    const parsed = Number(leadTimeRaw);
+    if (!Number.isInteger(parsed) || parsed < 0 || parsed > 3650) return;
+    leadTimeDays = parsed;
+  }
 
-  await logAudit({ module: "Suppliers", recordId: id, afterValue: name, reasonCode: "SUPPLIER_UPDATED" });
+  const updated = await prisma.$transaction(async (tx) => {
+    const before = await tx.supplier.findUnique({ where: { id }, select: { name: true, materialCatalog: true, leadTimeDays: true, address: true, contactMethod: true } });
+    if (!before) return false;
+    const claim = await tx.supplier.updateMany({ where: { id }, data: { name, materialCatalog, leadTimeDays, address, contactMethod } });
+    if (claim.count !== 1) return false;
+    await writeAudit(tx, { id: user!.id, role: user!.role }, {
+      module: "Suppliers",
+      recordId: id,
+      field: "name/catalog/leadTime/address/contact",
+      beforeValue: `${before.name} / ${before.materialCatalog ?? ""} / ${before.leadTimeDays ?? ""} / ${before.address ?? ""} / ${before.contactMethod ?? ""}`,
+      afterValue: `${name} / ${materialCatalog ?? ""} / ${leadTimeDays ?? ""} / ${address ?? ""} / ${contactMethod ?? ""}`,
+      reasonCode: "SUPPLIER_UPDATED",
+    });
+    return true;
+  });
+  if (!updated) return;
+
   revalidatePath("/purchasing");
+  redirect("/purchasing?tab=suppliers");
 }
 
 export async function updateMaterial(formData: FormData) {
@@ -112,6 +147,9 @@ export async function updateMaterial(formData: FormData) {
 
   await logAudit({ module: "Suppliers", recordId: id, afterValue: name, reasonCode: "MATERIAL_UPDATED" });
   revalidatePath("/purchasing");
+  // Same defect as updateSupplier above: without leaving edit mode the
+  // saved values never replace the open form.
+  redirect("/purchasing?tab=suppliers");
 }
 
 export async function createSupplierEvaluation(formData: FormData) {
