@@ -29,9 +29,23 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
       },
       createdBy: true,
       approvedBy: true,
+      paidBy: true,
     },
   });
   if (!run) notFound();
+
+  // The cash this run actually moved, so "paid" on the page is backed by
+  // the ledger rows an accountant would reconcile against rather than a
+  // status chip alone. markPayrollRunPaid writes them with exactly this
+  // description and category in the same transaction as the status.
+  const postedTransactions =
+    run.status === "PAID"
+      ? await prisma.cashTransaction.findMany({
+          where: { category: "PAYROLL", description: `Payroll run ${run.runNumber}` },
+          select: { id: true, txnNumber: true, amount: true, currency: true, site: { select: { name: true } } },
+          orderBy: { txnNumber: "asc" },
+        })
+      : [];
 
   const totalGross = run.lines.reduce((sum, l) => sum + l.grossPay, 0);
   const totalIncentives = run.lines.reduce((sum, l) => sum + l.incentiveAmount, 0);
@@ -112,12 +126,51 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
           </>
         )}
         {run.status === "APPROVED" && (
-          <form action={markPayrollRunPaid}>
+          <form action={markPayrollRunPaid} className="flex flex-wrap items-end gap-2">
             <input type="hidden" name="id" value={run.id} />
+            <div>
+              <label htmlFor="paymentReference" className={ui.label}>{p.paymentReferenceField}</label>
+              <input id="paymentReference" name="paymentReference" maxLength={120} className={`${ui.input} w-72`} dir="ltr" />
+            </div>
             <button className={ui.button}>{p.markPaid}</button>
           </form>
         )}
       </div>
+
+      {run.status === "PAID" && (
+        <section className={ui.card} aria-labelledby="payment-record">
+          <h2 id="payment-record" className="font-display text-sm font-semibold">{p.paymentRecordTitle}</h2>
+          <dl className="mt-3 grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+            <div>
+              <dt className="text-xs text-ink-muted">{p.paidOn}</dt>
+              <dd className="font-mono tabular" dir="ltr">{dt.dateTime(run.paidAt)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-ink-muted">{p.paidBy}</dt>
+              <dd>{run.paidBy?.name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-ink-muted">{p.paymentReference}</dt>
+              <dd className="font-mono" dir="ltr">{run.paymentReference ?? <span className="font-sans text-ink-faint">{p.noPaymentReference}</span>}</dd>
+            </div>
+          </dl>
+          {!run.paidById && <p className="mt-2 text-xs text-ink-faint">{p.paidBeforeRecording}</p>}
+          {postedTransactions.length > 0 && (
+            <div className="mt-4">
+              <div className="text-xs text-ink-muted">{p.postedTransactions}</div>
+              <ul className="mt-1 flex flex-col gap-1 text-sm">
+                {postedTransactions.map((t) => (
+                  <li key={t.id} className="flex justify-between gap-4">
+                    <span className="font-mono" dir="ltr">{t.txnNumber}</span>
+                    <span className="text-ink-muted">{t.site.name}</span>
+                    <span className="font-mono tabular" dir="ltr">{t.amount.toFixed(2)} {t.currency}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <div className={ui.card}>
