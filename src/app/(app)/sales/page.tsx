@@ -913,6 +913,16 @@ async function QuotesTab({
                 <td className={ui.td}>
                   <div className="flex flex-col gap-1">
                     <Link href={`/sales/quotes/${q.id}`} className="text-xs font-medium text-accent-strong hover:underline">{m.quotes.view}</Link>
+                    {/* The conversion itself lives on the quote page, one
+                        button per line — a quote can carry several mixes,
+                        each becoming its own reservation. It was only ever
+                        reachable by opening "View" first, so an accepted
+                        quote in this list gave no hint the step existed. */}
+                    {q.status === "ACCEPTED" && (
+                      <Link href={`/sales/quotes/${q.id}#convert`} className="text-xs font-medium text-accent-strong hover:underline">
+                        {m.quoteDoc.convertToReservation}
+                      </Link>
+                    )}
                     {q.status === "DRAFT" && q.finalApprovedAt && (
                       <form action={markQuoteSent}>
                         <input type="hidden" name="id" value={q.id} />

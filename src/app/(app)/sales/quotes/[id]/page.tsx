@@ -136,7 +136,7 @@ export default async function QuoteDetailPage({ params }: { params: Promise<{ id
       </div>
 
       {quote.status === "ACCEPTED" && (
-        <div className="no-print flex flex-col gap-2">
+        <div id="convert" className="no-print flex scroll-mt-4 flex-col gap-2">
           <h2 className="font-display text-sm font-semibold">{d.convertToReservation}</h2>
           {quote.lines.map((l) => (
             <div key={l.id} className="flex items-center justify-between rounded-md border border-border p-2 text-sm">
