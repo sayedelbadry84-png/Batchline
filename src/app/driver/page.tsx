@@ -66,6 +66,9 @@ export default async function DriverHomePage() {
           enableLabel={d.enableNotifications}
           enabledLabel={d.notificationsEnabled}
           deniedLabel={d.notificationsDenied}
+          checkingLabel={d.notificationsChecking}
+          resyncFailedLabel={d.notificationsResyncFailed}
+          retryLabel={d.notificationsRetry}
         />
       </div>
 

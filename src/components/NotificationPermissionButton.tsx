@@ -13,7 +13,13 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
   return Uint8Array.from([...rawData].map((c) => c.charCodeAt(0)));
 }
 
-type Status = "checking" | "unsupported" | "idle" | "enabled" | "denied";
+// "checking" and "resyncFailed" are both states the person holding the
+// phone has to be able to SEE. Checking used to render nothing at all, so
+// on every refresh the control simply blinked into existence a moment
+// later with no sign that anything had been verified; and a device whose
+// existing subscription could not be re-registered fell back to the plain
+// "Enable" button, indistinguishable from one that had never subscribed.
+type Status = "checking" | "unsupported" | "idle" | "enabled" | "denied" | "resyncFailed";
 
 // A single button that requests notification permission, subscribes this
 // browser to Web Push via the already-registered service worker (see
@@ -28,10 +34,16 @@ export function NotificationPermissionButton({
   enableLabel,
   enabledLabel,
   deniedLabel,
+  checkingLabel,
+  resyncFailedLabel,
+  retryLabel,
 }: {
   enableLabel: string;
   enabledLabel: string;
   deniedLabel: string;
+  checkingLabel: string;
+  resyncFailedLabel: string;
+  retryLabel: string;
 }) {
   // Lazy initializer, not an effect — this check is a pure read of
   // capabilities that already exist the moment this component mounts, so
@@ -72,12 +84,16 @@ export function NotificationPermissionButton({
           body: JSON.stringify(sub.toJSON()),
         });
         if (cancelled) return;
-        setStatus(res.ok ? "enabled" : "idle");
+        // A local subscription the server would not accept is its own
+        // state, not "idle": this device WAS set up, and the fix is to
+        // retry the registration, not to start over from a permission
+        // prompt.
+        setStatus(res.ok ? "enabled" : "resyncFailed");
       } catch {
         // serviceWorker.ready never settles in some browsers when no
         // worker is registered, and the fetch can fail offline. Either way
-        // the component must not sit in "checking" forever with nothing on
-        // screen — fall back to the actionable state.
+        // the component must not sit in "checking" forever — fall back to
+        // the actionable state.
         if (!cancelled) setStatus("idle");
       }
     })();
@@ -130,17 +146,45 @@ export function NotificationPermissionButton({
     setStatus("enabled");
   }
 
-  if (status === "checking" || status === "unsupported") return null;
+  if (status === "unsupported") return null;
 
+  // role="status" so a screen reader hears the reconciliation finish, and
+  // data-state so the outcome is checkable without reading the copy.
+  if (status === "checking") {
+    return (
+      <span role="status" aria-live="polite" data-state="checking" className="text-xs text-ink-muted">
+        {checkingLabel}
+      </span>
+    );
+  }
   if (status === "enabled") {
-    return <span className="text-xs font-medium text-good">✓ {enabledLabel}</span>;
+    return (
+      <span role="status" aria-live="polite" data-state="enabled" className="text-xs font-medium text-good">
+        ✓ {enabledLabel}
+      </span>
+    );
   }
   if (status === "denied") {
-    return <span className="text-xs text-ink-faint">{deniedLabel}</span>;
+    return (
+      <span data-state="denied" className="text-xs text-ink-faint">
+        {deniedLabel}
+      </span>
+    );
+  }
+  if (status === "resyncFailed") {
+    return (
+      <span role="status" aria-live="polite" data-state="resyncFailed" className="flex items-center gap-2 text-xs text-warn">
+        {resyncFailedLabel}
+        <button onClick={() => setStatus("checking")} className="rounded-md border border-border px-2 py-1 font-medium text-ink hover:bg-surface-alt">
+          {retryLabel}
+        </button>
+      </span>
+    );
   }
 
   return (
     <button
+      data-state="idle"
       onClick={enable}
       className="rounded-md border border-accent px-3 py-1.5 text-xs font-medium text-accent-strong"
     >

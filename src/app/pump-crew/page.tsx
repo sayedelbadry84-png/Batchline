@@ -72,6 +72,9 @@ export default async function PumpCrewHomePage() {
           enableLabel={dict.driver.enableNotifications}
           enabledLabel={dict.driver.notificationsEnabled}
           deniedLabel={dict.driver.notificationsDenied}
+          checkingLabel={dict.driver.notificationsChecking}
+          resyncFailedLabel={dict.driver.notificationsResyncFailed}
+          retryLabel={dict.driver.notificationsRetry}
         />
       </div>
 
