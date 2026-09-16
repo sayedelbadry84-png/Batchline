@@ -17,7 +17,7 @@ export default async function IntegrationsPage() {
   const user = await getCurrentUser();
   const dt = await getDateFormatters();
   if (!user) redirect("/login");
-  if (user.role !== "ADMIN") redirect("/access-denied?module=integrations");
+  if (user.role !== "ADMIN") redirect("/access-denied");
 
   const { dict } = await getDictionary();
   const m = dict.modules.integrations;

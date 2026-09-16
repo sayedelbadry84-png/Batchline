@@ -16,7 +16,7 @@ export default async function UsersPage({
   // database-editable grant another role could end up with by accident.
   const user = await getCurrentUser();
   if (!user) redirect("/login");
-  if (user.role !== "ADMIN") redirect("/access-denied?module=users");
+  if (user.role !== "ADMIN") redirect("/access-denied");
   const { dict, locale } = await getDictionary();
   const m = dict.modules.users;
   const { edit: editId, resetPassword: resetId } = await searchParams;

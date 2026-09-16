@@ -17,7 +17,7 @@ export default async function RolesPage({
   // with by accident.
   const user = await getCurrentUser();
   if (!user) redirect("/login");
-  if (user.role !== "ADMIN") redirect("/access-denied?module=roles");
+  if (user.role !== "ADMIN") redirect("/access-denied");
 
   const { dict } = await getDictionary();
   const m = dict.modules.roles;
