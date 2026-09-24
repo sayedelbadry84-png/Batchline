@@ -697,6 +697,41 @@ test("a quote line from another site cannot be converted into a reservation", as
   assert.equal(await prisma.reservation.count(), before, "another site's accepted quote must not book production here");
 });
 
+// FR-RES-002: the credit limit was read with Number(), so "Infinity"
+// stored a limit no balance could reach, switching the check off.
+function redirectTarget(e: unknown): string {
+  const digest = typeof e === "object" && e !== null && "digest" in e ? String((e as { digest: unknown }).digest) : "";
+  return digest;
+}
+
+test("the customer forms refuse an infinite, NaN, negative or sub-halala credit limit, and accept a valid one", async () => {
+  const customers = await import("../src/app/(app)/customers/actions");
+  await asUser(adminId);
+  for (const creditLimit of ["Infinity", "NaN", "-100", "1e9", "100.005", "abc"]) {
+    const legalName = `${prefix}-CUST-LIMIT-${creditLimit}`;
+    await assert.rejects(
+      () => customers.createCustomer(form({ legalName, creditLimit })),
+      (e: unknown) => redirectTarget(e).includes("customerResult=INVALID_CREDIT_LIMIT"),
+      `create must refuse creditLimit "${creditLimit}" with a visible result`,
+    );
+    assert.equal(await prisma.customer.count({ where: { legalName } }), 0);
+  }
+
+  await customers.createCustomer(form({ legalName: `${prefix}-CUST-LIMIT-OK`, creditLimit: "2500.50" }));
+  const created = await prisma.customer.findFirstOrThrow({ where: { legalName: `${prefix}-CUST-LIMIT-OK` } });
+  assert.equal(created.creditLimit, 2500.5);
+
+  await assert.rejects(
+    () => customers.updateCustomer(form({ id: created.id, legalName: created.legalName, creditLimit: "Infinity" })),
+    (e: unknown) => redirectTarget(e).includes("customerResult=INVALID_CREDIT_LIMIT"),
+  );
+  assert.equal((await prisma.customer.findUniqueOrThrow({ where: { id: created.id } })).creditLimit, 2500.5, "a refused update changes nothing");
+
+  // A blank field keeps the existing default meaning: 0, no credit.
+  await customers.updateCustomer(form({ id: created.id, legalName: created.legalName, creditLimit: "" }));
+  assert.equal((await prisma.customer.findUniqueOrThrow({ where: { id: created.id } })).creditLimit, 0);
+});
+
 // PR4-R1-P1-03 — the audit write is inside the money transaction, proved
 // by making that write fail and showing nothing else survived.
 test("a failed audit insert rolls back the payment, the bill status and the journal", async () => {
@@ -1359,6 +1394,7 @@ after(async () => {
   await prisma.user.deleteMany({ where: { id: { in: users } } });
   await prisma.user.deleteMany({ where: { name: prefix } });
   await prisma.customer.deleteMany({ where: { id: customerId } });
+  await prisma.customer.deleteMany({ where: { legalName: { startsWith: `${prefix}-CUST-LIMIT-` } } });
   await prisma.mixDesign.deleteMany({ where: { id: mixId } });
   await prisma.supplier.deleteMany({ where: { id: supplierId } });
   await prisma.plant.deleteMany({ where: { id: { in: [plantA, plantB].filter(Boolean) } } });

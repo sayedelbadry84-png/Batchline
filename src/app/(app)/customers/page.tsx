@@ -13,13 +13,13 @@ import { createProject, updateProject } from "../projects/actions";
 export default async function CustomersPage({
   searchParams,
 }: {
-  searchParams: Promise<{ edit?: string; editProject?: string }>;
+  searchParams: Promise<{ edit?: string; editProject?: string; customerResult?: string }>;
 }) {
   await requirePageAccess("customers");
   const { dict } = await getDictionary();
   const m = dict.modules.customers;
   const mp = dict.modules.projects;
-  const { edit: editId, editProject: editProjectId } = await searchParams;
+  const { edit: editId, editProject: editProjectId, customerResult } = await searchParams;
 
   const [customers, projects] = await Promise.all([
     prisma.customer.findMany({
@@ -39,6 +39,11 @@ export default async function CustomersPage({
         <h1 className={ui.h1}>{m.title}</h1>
         <p className={ui.intro}>{m.intro}</p>
       </header>
+      {customerResult === "INVALID_CREDIT_LIMIT" && (
+        <p role="alert" className="rounded-md border border-critical/40 bg-critical-soft px-3 py-2 text-sm text-critical">
+          {m.invalidCreditLimit}
+        </p>
+      )}
 
       <div>
         <h2 className="mb-1 font-display text-lg font-semibold">{m.customersTitle}</h2>
@@ -78,7 +83,7 @@ export default async function CustomersPage({
                           </div>
                           <div>
                             <label className={ui.label}>{m.f.creditLimit}</label>
-                            <input name="creditLimit" type="number" step="1000" defaultValue={c.creditLimit} className={`${ui.input} w-28`} />
+                            <input name="creditLimit" type="number" step="0.01" min="0" defaultValue={c.creditLimit} className={`${ui.input} w-28`} />
                           </div>
                           <div>
                             <label className={ui.label}>{m.f.paymentTerms}</label>
@@ -148,7 +153,7 @@ export default async function CustomersPage({
             </div>
             <div>
               <label className={ui.label}>{m.f.creditLimit}</label>
-              <input name="creditLimit" type="number" step="1000" defaultValue={0} className={ui.input} />
+              <input name="creditLimit" type="number" step="0.01" min="0" defaultValue={0} className={ui.input} />
             </div>
             <div>
               <label className={ui.label}>{m.f.paymentTerms}</label>

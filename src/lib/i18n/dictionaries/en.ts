@@ -892,6 +892,7 @@ const en: typeof ar = {
       intro: "A customer's account and every job site (project) under it, in one screen — a customer belongs to the whole company, not one plant, and any project under it can be served by any line.",
       customersTitle: "Customers",
       customersIntro: "Builders and contractors — credit terms, contacts, and the project count billed against each account.",
+      invalidCreditLimit: "Not saved: the credit limit must be a non-negative amount with at most two decimal places.",
       col: { code: "Code", customer: "Customer", creditLimit: "Credit limit", terms: "Terms", contact: "Contact", projects: "Projects" },
       empty: "No customers yet.",
       newTitle: "New customer",
