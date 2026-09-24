@@ -28,6 +28,7 @@ require("next/cache");
 require.cache[require.resolve("next/cache")]!.exports = { revalidatePath: () => {} };
 
 const { prisma } = await import("../src/lib/prisma");
+const { Prisma } = await import("@prisma/client");
 const { createSessionToken, hashSessionToken } = await import("../src/lib/sessionToken");
 const suppliers = await import("../src/app/(app)/suppliers/actions");
 const payroll = await import("../src/app/(app)/employees/payroll/actions");
@@ -106,6 +107,30 @@ test("an invalid lead time is refused rather than silently clearing the stored o
   assert.equal((await prisma.supplier.findUniqueOrThrow({ where: { id: supplier.id } })).leadTimeDays, 5);
 });
 
+// Runs `hook` immediately before each $transaction the action starts —
+// the window where a concurrent request's commit lands, or where Postgres
+// would abort it. A hook that throws stands in for that abort.
+async function beforeEachTransaction<T>(hook: (call: number) => Promise<void>, run: () => Promise<T>): Promise<T> {
+  const original = prisma.$transaction.bind(prisma);
+  let call = 0;
+  prisma.$transaction = (async (...args: Parameters<typeof prisma.$transaction>) => {
+    await hook(call++);
+    return (original as (...a: typeof args) => unknown)(...args);
+  }) as typeof prisma.$transaction;
+  try {
+    return await run();
+  } finally {
+    prisma.$transaction = original;
+  }
+}
+
+function serializationFailure() {
+  return new Prisma.PrismaClientKnownRequestError("could not serialize access due to read/write dependencies among transactions", {
+    code: "P2034",
+    clientVersion: Prisma.prismaVersion.client,
+  });
+}
+
 // ----------------------------------------------------------------- payroll
 
 async function approvedRun() {
@@ -167,6 +192,42 @@ test("two simultaneous 'mark paid' clicks post the payroll to the cash ledger on
   assert.ok(txns.every((t) => t.reference === stored.paymentReference), "the postings belong to the submit whose reference the run kept");
 });
 
+test("a transient serialization failure while marking a run paid is retried, not silently dropped", async () => {
+  const run = await approvedRun();
+  await asUser(adminId);
+  // The defect: P2034 was treated as "someone else already paid it" and
+  // the action returned — run still APPROVED, no cash, nothing on screen.
+  await beforeEachTransaction(
+    async (call) => {
+      if (call === 0) throw serializationFailure();
+    },
+    () => payroll.markPayrollRunPaid(form({ id: run.id, paymentReference: "RETRIED" })),
+  );
+
+  const stored = await prisma.payrollRun.findUniqueOrThrow({ where: { id: run.id } });
+  assert.equal(stored.status, "PAID", "the retry must settle the run");
+  assert.equal(stored.paymentReference, "RETRIED");
+  const txns = await prisma.cashTransaction.findMany({ where: { description: `Payroll run ${run.runNumber}` } });
+  assert.equal(txns.length, 2, "posted once per site — the failed attempt posted nothing");
+});
+
+test("a serialization failure that outlasts the retries surfaces as an error instead of looking like success", async () => {
+  const run = await approvedRun();
+  await asUser(adminId);
+  await assert.rejects(
+    beforeEachTransaction(
+      async () => {
+        throw serializationFailure();
+      },
+      () => payroll.markPayrollRunPaid(form({ id: run.id })),
+    ),
+    (e: unknown) => (e as { code?: string }).code === "P2034",
+  );
+
+  assert.equal((await prisma.payrollRun.findUniqueOrThrow({ where: { id: run.id } })).status, "APPROVED");
+  assert.equal(await prisma.cashTransaction.count({ where: { description: `Payroll run ${run.runNumber}` } }), 0);
+});
+
 // -------------------------------------------------------------- mix design
 
 async function mixWithAdmixture(specificGravity: number | null) {
@@ -204,33 +265,15 @@ test("the mix design form never overwrites a material's existing specific gravit
   assert.ok(Math.abs(component.designMassKgPerM3 - 11) < 1e-9, "the dose converts with the material's own SG");
 });
 
-// Runs `hook` once, immediately before the action's next $transaction
-// starts — the window between its pre-read and its write, where a
-// concurrent request's commit lands.
-async function withHookBeforeNextTransaction<T>(hook: () => Promise<unknown>, run: () => Promise<T>): Promise<T> {
-  const original = prisma.$transaction.bind(prisma);
-  let fired = false;
-  prisma.$transaction = (async (...args: Parameters<typeof prisma.$transaction>) => {
-    if (!fired) {
-      fired = true;
-      await hook();
-    }
-    return (original as (...a: typeof args) => unknown)(...args);
-  }) as typeof prisma.$transaction;
-  try {
-    return await run();
-  } finally {
-    prisma.$transaction = original;
-  }
-}
-
 test("two people filling an empty specific gravity at once: the dose converts with the SG the material ends up with", async () => {
   const { mix, material } = await mixWithAdmixture(null);
   await asUser(adminId);
   // The other user's 1.2 commits after this request read the material as
   // empty but before it writes. This request entered 2.0 for 10 L.
-  await withHookBeforeNextTransaction(
-    () => prisma.material.update({ where: { id: material.id }, data: { specificGravity: 1.2 } }),
+  await beforeEachTransaction(
+    async (call) => {
+      if (call === 0) await prisma.material.update({ where: { id: material.id }, data: { specificGravity: 1.2 } });
+    },
     () => digestOf(() => mixDesigns.addComponent(form({ mixId: mix.id, materialId: material.id, designMassKgPerM3: "10", dosageUnit: "LITER", tolerancePct: "2", specificGravity: "2.0" }))),
   );
 

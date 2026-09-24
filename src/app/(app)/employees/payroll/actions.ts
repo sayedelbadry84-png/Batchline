@@ -6,6 +6,7 @@ import { logAudit, writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { withSequentialNumber } from "@/lib/sequence";
 import { postCashTransaction } from "@/lib/ledger";
+import { withRetry } from "@/lib/inventoryLedger";
 import { revalidatePath } from "next/cache";
 import { activityForRole, aggregateIncentiveResults, buildSitePricingMap, getIncentiveSiteData } from "@/lib/incentives";
 
@@ -282,56 +283,66 @@ export async function markPayrollRunPaid(formData: FormData) {
   // sitting inside it (a P2002 aborts a Postgres transaction, so a retry
   // must start a fresh one); the per-site numbers are consecutive from the
   // helper's candidate, so a collision on any of them retries the lot.
+  //
+  // A serialization failure (P2034) is retried, not treated as "already
+  // settled". It used to return silently like the claim-lost case, but
+  // P2034 says only that Postgres could not order this transaction against
+  // some other one — often unrelated postings to the same cash accounts —
+  // so the run stayed APPROVED with nothing posted and nothing on screen.
+  // A genuine double submit still resolves correctly: the retry finds the
+  // run PAID and loses the claim. If contention outlasts the retries the
+  // error propagates, which is visible, rather than looking like success.
   try {
-    await withSequentialNumber(
-      "TXN",
-      (yr) => prisma.cashTransaction.count({ where: { createdAt: yr } }),
-      (firstNumber) =>
-        prisma.$transaction(
-          async (tx) => {
-            const claim = await tx.payrollRun.updateMany({
-              where: { id, status: "APPROVED" },
-              data: { status: "PAID", paidAt, paidById: user!.id, paymentReference },
-            });
-            if (claim.count !== 1) throw new PayrollAlreadySettled();
-
-            const [prefix, year, seq] = firstNumber.split("-");
-            for (const [i, site] of sites.entries()) {
-              const txnNumber = `${prefix}-${year}-${String(Number(seq) + i).padStart(4, "0")}`;
-              const txn = await tx.cashTransaction.create({
-                data: {
-                  txnNumber,
-                  siteId: site.siteId,
-                  direction: "OUT",
-                  category: "PAYROLL",
-                  amount: site.total,
-                  currency: site.currency,
-                  description,
-                  reference: paymentReference,
-                  occurredAt: paidAt,
-                  createdById: user!.id,
-                },
+    await withRetry(() =>
+      withSequentialNumber(
+        "TXN",
+        (yr) => prisma.cashTransaction.count({ where: { createdAt: yr } }),
+        (firstNumber) =>
+          prisma.$transaction(
+            async (tx) => {
+              const claim = await tx.payrollRun.updateMany({
+                where: { id, status: "APPROVED" },
+                data: { status: "PAID", paidAt, paidById: user!.id, paymentReference },
               });
-              await postCashTransaction(tx, { siteId: site.siteId, currency: site.currency, txnId: txn.id, direction: "OUT", category: "PAYROLL", amount: site.total, description });
-            }
+              if (claim.count !== 1) throw new PayrollAlreadySettled();
 
-            await writeAudit(tx, { id: user!.id, role: user!.role }, {
-              module: "Employees",
-              recordId: id,
-              field: "status",
-              beforeValue: "APPROVED",
-              afterValue: paymentReference ? `PAID (ref ${paymentReference})` : "PAID",
-              reasonCode: "PAYROLL_RUN_PAID",
-            });
-          },
-          { ...TX_OPTIONS, isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-        ),
+              const [prefix, year, seq] = firstNumber.split("-");
+              for (const [i, site] of sites.entries()) {
+                const txnNumber = `${prefix}-${year}-${String(Number(seq) + i).padStart(4, "0")}`;
+                const txn = await tx.cashTransaction.create({
+                  data: {
+                    txnNumber,
+                    siteId: site.siteId,
+                    direction: "OUT",
+                    category: "PAYROLL",
+                    amount: site.total,
+                    currency: site.currency,
+                    description,
+                    reference: paymentReference,
+                    occurredAt: paidAt,
+                    createdById: user!.id,
+                  },
+                });
+                await postCashTransaction(tx, { siteId: site.siteId, currency: site.currency, txnId: txn.id, direction: "OUT", category: "PAYROLL", amount: site.total, description });
+              }
+
+              await writeAudit(tx, { id: user!.id, role: user!.role }, {
+                module: "Employees",
+                recordId: id,
+                field: "status",
+                beforeValue: "APPROVED",
+                afterValue: paymentReference ? `PAID (ref ${paymentReference})` : "PAID",
+                reasonCode: "PAYROLL_RUN_PAID",
+              });
+            },
+            { ...TX_OPTIONS, isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+          ),
+      ),
     );
   } catch (e) {
     // Someone else settled it first — the same silent outcome as the
     // status guard above, and nothing was posted by this attempt.
     if (e instanceof PayrollAlreadySettled) return;
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2034") return;
     throw e;
   }
 
