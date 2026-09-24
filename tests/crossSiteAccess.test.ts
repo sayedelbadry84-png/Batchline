@@ -1229,6 +1229,33 @@ test("a failed audit insert rolls back the whole statement import", async () => 
   assert.equal((await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled, true);
 });
 
+// The import's identity is the SHA-256 of the uploaded BYTES. It used to
+// hash the decoded text, and every invalid UTF-8 sequence decodes to the
+// same U+FFFD, so two different files that differed only in such bytes
+// shared one digest and the second was dropped as a replay.
+test("two statement files that decode to the same text but differ in bytes are two imports", async () => {
+  await asUser(accountantId);
+  const importsBefore = await prisma.bankStatementImport.count({ where: { siteId: siteA } });
+  const head = new TextEncoder().encode(`date,description,reference,amount\n2026-09-01,${prefix}-BYTES-`);
+  const tail = new TextEncoder().encode(",,-4.56\n");
+  const fileWith = (invalidByte: number) => {
+    const data = new FormData();
+    data.set("siteId", siteA);
+    data.set("file", new File([head, new Uint8Array([invalidByte]), tail], "statement.csv", { type: "text/csv" }));
+    return data;
+  };
+
+  await finance.importBankStatement(fileWith(0xff));
+  await finance.importBankStatement(fileWith(0xfe));
+
+  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore + 2, "different bytes are different files, whatever they decode to");
+  assert.equal(await prisma.bankStatementLine.count({ where: { siteId: siteA, description: { startsWith: `${prefix}-BYTES-` } } }), 2);
+
+  // And the identical bytes again are still a replay.
+  await finance.importBankStatement(fileWith(0xff));
+  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore + 2);
+});
+
 // A statement line one halala off a payment is left for a human. The
 // matcher used to allow a 0.01 float difference.
 test("a statement line one minor unit off a payment imports unmatched and leaves the payment unreconciled", async () => {

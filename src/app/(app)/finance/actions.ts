@@ -409,7 +409,14 @@ export async function importBankStatement(formData: FormData) {
   const file = formData.get("file");
   if (!siteId || !isSiteInScope(siteId, effectiveSiteId(actor)) || !(file instanceof File) || file.size === 0) return;
 
-  const text = await file.text();
+  // Read once as bytes: the import's identity is the digest of these
+  // exact bytes, and the parser reads the same bytes decoded. Hashing the
+  // decoded text instead let two different files share an identity —
+  // invalid UTF-8 sequences all decode to U+FFFD, so files that differed
+  // only there were one "file", and the second was silently dropped as a
+  // replay.
+  const bytes = Buffer.from(await file.arrayBuffer());
+  const text = new TextDecoder("utf-8").decode(bytes);
   const { lines, errors } = parseBankStatementCsv(text);
   if (lines.length === 0) return;
 
@@ -453,7 +460,7 @@ export async function importBankStatement(formData: FormData) {
   // as UNMATCHED. That is deliberate: the line is real bank data and must
   // appear for a human to reconcile, but it must not assert a claim the
   // database already gave to someone else.
-  const fileDigest = createHash("sha256").update(text, "utf8").digest("hex");
+  const fileDigest = createHash("sha256").update(bytes).digest("hex");
 
   const imported = await prisma
     .$transaction(async (tx) => {
