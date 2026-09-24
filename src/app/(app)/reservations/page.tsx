@@ -3,7 +3,9 @@ import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
-import { createReservation, updateReservation, approveReservationInitial, approveReservationFinal, closeReservation, markReservationReminderSent } from "./actions";
+import { createReservation, updateReservation, cancelReservation, approveReservationInitial, approveReservationFinal, closeReservation, markReservationReminderSent } from "./actions";
+import { allowedEditStatuses } from "@/lib/reservationEdits";
+import { describeReservationResult } from "@/lib/reservationResultText";
 import { getActiveSiteId, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3, reservationsDueForReminder } from "@/lib/reservations";
 import { canPerformAction } from "@/lib/permissions";
@@ -43,13 +45,14 @@ function addDays(dateParam: string, delta: number): string {
 export default async function ReservationsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ edit?: string; date?: string; dateTo?: string; new?: string }>;
+  searchParams: Promise<{ edit?: string; date?: string; dateTo?: string; new?: string; reservationResult?: string }>;
 }) {
   const user = await requirePageAccess("reservations");
   const dt = await getDateFormatters();
   const { dict } = await getDictionary();
   const m = dict.modules.reservations;
-  const { edit: editId, date: dateRaw, dateTo: dateToRaw, new: newFlag } = await searchParams;
+  const { edit: editId, date: dateRaw, dateTo: dateToRaw, new: newFlag, reservationResult } = await searchParams;
+  const resultBanner = describeReservationResult(m.result, reservationResult);
   const siteId = await getActiveSiteId(user);
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
   const selectedDate = isDateParam(dateRaw) ? dateRaw : toDateParam(new Date());
@@ -66,9 +69,10 @@ export default async function ReservationsPage({
   // "day" concept.
   const dayStart = new Date(`${selectedDate}T00:00:00`);
   const dayEnd = addDays(selectedDateTo, 1);
-  const [canApproveInitial, canApproveFinal] = await Promise.all([
+  const [canApproveInitial, canApproveFinal, canCancel] = await Promise.all([
     canPerformAction(user.role, "reservations", "approveInitial"),
     canPerformAction(user.role, "reservations", "approveFinal"),
+    canPerformAction(user.role, "reservations", "cancel"),
   ]);
 
   const reservationInclude = {
@@ -183,6 +187,14 @@ export default async function ReservationsPage({
         <h1 className={ui.h1}>{m.title}</h1>
         <p className={ui.intro}>{m.intro}</p>
       </header>
+      {resultBanner && (
+        <p
+          role={resultBanner.ok ? "status" : "alert"}
+          className={`rounded-md border px-3 py-2 text-sm ${resultBanner.ok ? "border-good/40 bg-good-soft text-good" : "border-critical/40 bg-critical-soft text-critical"}`}
+        >
+          {resultBanner.text}
+        </p>
+      )}
 
       {dueForReminder.length > 0 && (
         <div className={`${ui.card} border-warn`}>
@@ -297,8 +309,11 @@ export default async function ReservationsPage({
                         </div>
                         <div>
                           <label className={ui.label}>{m.f.status}</label>
+                          {/* Only the statuses this edit may set: the current one, or a
+                              hold. Every other transition has its own action, and
+                              updateReservationForId refuses anything else. */}
                           <select name="status" defaultValue={r.status} required className={`${ui.select} w-36`}>
-                            {["REQUESTED", "CONFIRMED", "ON_HOLD", "IN_PRODUCTION", "DELIVERED", "CANCELLED"].map((s) => (
+                            {allowedEditStatuses(r.status).map((s) => (
                               <option key={s} value={s}>{dict.status[s as keyof typeof dict.status] ?? s}</option>
                             ))}
                           </select>
@@ -382,6 +397,15 @@ export default async function ReservationsPage({
                           {dict.field.cancel}
                         </Link>
                       </form>
+                      {canCancel && r.released === 0 && r.status !== "DELIVERED" && (
+                        <form action={cancelReservation} className="mt-3 flex flex-wrap items-center gap-2">
+                          <input type="hidden" name="id" value={r.id} />
+                          <button className="rounded-md border border-critical/40 px-3 py-2 text-sm font-medium text-critical hover:bg-critical-soft">
+                            {m.cancelReservation}
+                          </button>
+                          <span className="text-xs text-ink-muted">{m.cancelReservationHint}</span>
+                        </form>
+                      )}
                     </td>
                   </tr>
                 );

@@ -697,6 +697,45 @@ test("a quote line from another site cannot be converted into a reservation", as
   assert.equal(await prisma.reservation.count(), before, "another site's accepted quote must not book production here");
 });
 
+// FR-RES-002: converting an accepted quote used to book a CONFIRMED,
+// fully signed-off reservation whatever the customer owed. It now makes
+// the same credit decision as every other reservation path. This suite's
+// customer has the default limit of 0 (no credit), so it is over it.
+async function acceptedQuoteLine() {
+  const quote = await makeQuote(siteA);
+  const project = await prisma.project.create({ data: { name: `${prefix}-PROJ-CREDIT-${randomUUID().slice(0, 6)}`, customerId, siteAddress: "Test" } });
+  projectIds.push(project.id);
+  await prisma.quote.update({ where: { id: quote.id }, data: { status: "ACCEPTED", projectId: project.id } });
+  return prisma.quoteLine.create({ data: { quoteId: quote.id, mixId, estimatedVolumeM3: 10, unitPrice: 100, lineTotal: 1000 } });
+}
+
+test("converting a quote for a customer at or over the credit limit books the reservation ON_HOLD, not release-ready", async () => {
+  await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 0 } });
+  const line = await acceptedQuoteLine();
+  await asUser(salesId);
+  await sales.convertQuoteLineToReservation(form({ quoteLineId: line.id }));
+
+  const reservation = await prisma.reservation.findUniqueOrThrow({ where: { quoteLineId: line.id } });
+  assert.equal(reservation.status, "ON_HOLD");
+  assert.notEqual(reservation.initialApprovedAt, null, "the quote's acceptance still counts as the initial sign-off");
+  assert.equal(reservation.finalApprovedAt, null, "final approval, which re-checks credit, is what makes it releasable");
+  assert.equal(await prisma.auditEvent.count({ where: { recordId: reservation.id, reasonCode: "RESERVATION_CREATED_FROM_QUOTE_CREDIT_HOLD" } }), 1);
+});
+
+test("converting a quote for a customer within the limit still books a confirmed, signed-off reservation", async () => {
+  await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 1_000_000 } });
+  try {
+    const line = await acceptedQuoteLine();
+    await asUser(salesId);
+    await sales.convertQuoteLineToReservation(form({ quoteLineId: line.id }));
+    const reservation = await prisma.reservation.findUniqueOrThrow({ where: { quoteLineId: line.id } });
+    assert.equal(reservation.status, "CONFIRMED");
+    assert.notEqual(reservation.finalApprovedAt, null);
+  } finally {
+    await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 0 } });
+  }
+});
+
 // FR-RES-002: the credit limit was read with Number(), so "Infinity"
 // stored a limit no balance could reach, switching the check off.
 function redirectTarget(e: unknown): string {

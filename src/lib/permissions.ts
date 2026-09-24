@@ -207,6 +207,9 @@ export const ACTION_ROLES = {
   reservations: {
     create: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
     edit: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
+    // Cancelling used to happen through the edit form's free status field,
+    // so it defaults to exactly the roles that could do it that way.
+    cancel: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
     approveInitial: ["PLANT_OPERATOR", "ADMIN"],
     approveFinal: ["ADMIN"],
   },
