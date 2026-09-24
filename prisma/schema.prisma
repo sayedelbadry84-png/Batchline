@@ -128,6 +128,9 @@ model User {
   shortageOverrideRequestsDecided   ShortageOverrideRequest[] @relation("ShortageOverrideApprovedBy")
   reservationMixRevisionsCreated    ReservationMixRevision[]  @relation("ReservationMixRevisionCreatedBy")
   reservationMixRevisionsResolved   ReservationMixRevision[]  @relation("ReservationMixRevisionResolvedBy")
+
+  creditLimitRequestsMade    CustomerCreditLimitRequest[] @relation("CreditLimitRequestRequestedBy")
+  creditLimitRequestsDecided CustomerCreditLimitRequest[] @relation("CreditLimitRequestDecidedBy")
 }
 
 model Session {
@@ -658,6 +661,45 @@ model Customer {
   opportunities    Opportunity[]
   fieldVisits      FieldVisit[]
   quotes           Quote[]
+
+  creditLimitRequests CustomerCreditLimitRequest[]
+}
+
+// A proposed increase to Customer.creditLimit, and its decision. The limit
+// gates every reservation (src/lib/creditPolicy.ts), so it is a financial
+// authorization: the customer forms no longer write it at all, and the
+// only way it goes up is a request approved by a different person with the
+// approve permission and company-wide scope (src/lib/creditLimitRequests.ts),
+// which writes the new limit, the decision and its audit row in one
+// transaction.
+//
+// Amounts are exact minor units (halalas), not Float, even though
+// Customer.creditLimit is still Float: the conversion happens once, at
+// approval. previousLimitMinor is the limit the request was made against;
+// if the customer's limit has changed by the time it is decided, the
+// request goes STALE instead of being applied over a baseline nobody saw.
+//
+// Rows are history: a new proposal is a new row. At most one PENDING row
+// per customer (partial unique index in the migration), and CHECKs keep a
+// decided row consistent: a decider who is not the requester, a strict
+// increase, and a status from the fixed set.
+model CustomerCreditLimitRequest {
+  id                 String    @id @default(cuid())
+  customerId         String
+  customer           Customer  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  previousLimitMinor BigInt
+  proposedLimitMinor BigInt
+  reason             String
+  status             String    @default("PENDING") // PENDING, APPROVED, REJECTED, STALE
+  requestedById      String
+  requestedBy        User      @relation("CreditLimitRequestRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  requestedAt        DateTime  @default(now())
+  decidedById        String?
+  decidedBy          User?     @relation("CreditLimitRequestDecidedBy", fields: [decidedById], references: [id], onDelete: Restrict)
+  decidedAt          DateTime?
+  decisionNote       String?
+
+  @@index([customerId, requestedAt])
 }
 
 model Supplier {

@@ -8,6 +8,7 @@ createRequire(import.meta.url)("./setup/stubServerOnly.cjs");
 const { decideCredit } = await import("../src/lib/creditPolicy");
 const { allowedEditStatuses, RESERVATION_STATUSES } = await import("../src/lib/reservationEdits");
 const { describeReservationResult } = await import("../src/lib/reservationResultText");
+const { describeCustomerResult } = await import("../src/lib/customerResultText");
 const arModule = await import("../src/lib/i18n/dictionaries/ar");
 const enModule = await import("../src/lib/i18n/dictionaries/en");
 
@@ -63,4 +64,21 @@ test("the release refusal for credit has its own text on the production page, in
     assert.ok(r.CREDIT_HOLD.length > 0 && r.CREDIT_HOLD !== r.INVALID_STATE);
     assert.ok(r.manualBookingHeldNote.length > 0 && r.manualBookingHeldNote !== r.manualBookingKeptNote);
   }
+});
+
+test("every credit limit request outcome renders in both languages; only a request, approval or rejection reads as success", () => {
+  const codes = Object.keys(en.modules.customers.creditLimitRequests.result);
+  assert.deepEqual(Object.keys(ar.modules.customers.creditLimitRequests.result).sort(), [...codes].sort());
+  for (const code of ["REQUESTED", "APPROVED", "REJECTED", "STALE", "FORBIDDEN", "SELF_DECISION", "ALREADY_PENDING", "NOT_AN_INCREASE", "INVALID_AMOUNT"]) {
+    assert.ok(codes.includes(code), `${code} must have text`);
+  }
+  for (const dict of [ar, en]) {
+    for (const code of codes) {
+      const banner = describeCustomerResult(dict.modules.customers.creditLimitRequests.result, code);
+      assert.ok(banner && banner.text.length > 0);
+      assert.equal(banner!.ok, ["REQUESTED", "APPROVED", "REJECTED"].includes(code), code);
+    }
+  }
+  assert.equal(describeCustomerResult(en.modules.customers.creditLimitRequests.result, "toString"), null);
+  assert.equal(describeCustomerResult(en.modules.customers.creditLimitRequests.result, undefined), null);
 });

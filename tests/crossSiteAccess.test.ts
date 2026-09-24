@@ -736,39 +736,28 @@ test("converting a quote for a customer within the limit still books a confirmed
   }
 });
 
-// FR-RES-002: the credit limit was read with Number(), so "Infinity"
-// stored a limit no balance could reach, switching the check off.
-function redirectTarget(e: unknown): string {
-  const digest = typeof e === "object" && e !== null && "digest" in e ? String((e as { digest: unknown }).digest) : "";
-  return digest;
-}
-
-test("the customer forms refuse an infinite, NaN, negative or sub-halala credit limit, and accept a valid one", async () => {
+// CL-1 (credit-limit approval audit): the customer forms used to write
+// Customer.creditLimit for every role with createCustomer/updateCustomer,
+// PLANT_OPERATOR included, so an operator could raise a financial
+// authorization in one submit. The forms no longer write it at all; the
+// only way up is an approved request (src/lib/creditLimitRequests.ts,
+// tested in reservationCredit.test.ts).
+test("a crafted creditLimit in either customer form never changes the approved limit, and ordinary edits still work", async () => {
   const customers = await import("../src/app/(app)/customers/actions");
-  await asUser(adminId);
-  for (const creditLimit of ["Infinity", "NaN", "-100", "1e9", "100.005", "abc"]) {
-    const legalName = `${prefix}-CUST-LIMIT-${creditLimit}`;
-    await assert.rejects(
-      () => customers.createCustomer(form({ legalName, creditLimit })),
-      (e: unknown) => redirectTarget(e).includes("customerResult=INVALID_CREDIT_LIMIT"),
-      `create must refuse creditLimit "${creditLimit}" with a visible result`,
-    );
-    assert.equal(await prisma.customer.count({ where: { legalName } }), 0);
+
+  await asUser(operatorId);
+  await customers.createCustomer(form({ legalName: `${prefix}-CUST-LIMIT-NEW`, creditLimit: "5000000" }));
+  const created = await prisma.customer.findFirstOrThrow({ where: { legalName: `${prefix}-CUST-LIMIT-NEW` } });
+  assert.equal(created.creditLimit, 0, "a new customer starts with no credit, whatever the form posted");
+
+  for (const userId of [operatorId, accountantId, adminId]) {
+    await asUser(userId);
+    await customers.updateCustomer(form({ id: created.id, legalName: `${prefix}-CUST-LIMIT-NEW`, paymentTerms: "Net 45", creditLimit: "9999999" }));
+    const row = await prisma.customer.findUniqueOrThrow({ where: { id: created.id } });
+    assert.equal(row.creditLimit, 0, `updateCustomer as ${userId} must not write the limit`);
+    assert.equal(row.paymentTerms, "Net 45", "the ordinary fields are still saved");
   }
-
-  await customers.createCustomer(form({ legalName: `${prefix}-CUST-LIMIT-OK`, creditLimit: "2500.50" }));
-  const created = await prisma.customer.findFirstOrThrow({ where: { legalName: `${prefix}-CUST-LIMIT-OK` } });
-  assert.equal(created.creditLimit, 2500.5);
-
-  await assert.rejects(
-    () => customers.updateCustomer(form({ id: created.id, legalName: created.legalName, creditLimit: "Infinity" })),
-    (e: unknown) => redirectTarget(e).includes("customerResult=INVALID_CREDIT_LIMIT"),
-  );
-  assert.equal((await prisma.customer.findUniqueOrThrow({ where: { id: created.id } })).creditLimit, 2500.5, "a refused update changes nothing");
-
-  // A blank field keeps the existing default meaning: 0, no credit.
-  await customers.updateCustomer(form({ id: created.id, legalName: created.legalName, creditLimit: "" }));
-  assert.equal((await prisma.customer.findUniqueOrThrow({ where: { id: created.id } })).creditLimit, 0);
+  assert.equal(await prisma.auditEvent.count({ where: { recordId: created.id, reasonCode: "CUSTOMER_UPDATED" } }), 3, "each edit commits with its audit row");
 });
 
 // PR4-R1-P1-03 — the audit write is inside the money transaction, proved
