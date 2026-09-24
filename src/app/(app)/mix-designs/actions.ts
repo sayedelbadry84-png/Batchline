@@ -106,15 +106,22 @@ export async function addComponent(formData: FormData) {
   if (dosageUnit === "LITER" && !specificGravity) redirect(back("SG_REQUIRED"));
   if (fillMaterialSg !== null && !(await canPerformAction(user!.role, "purchasing", "updateMaterial"))) redirect(back("SG_NOT_PERMITTED"));
 
-  const designMassKgPerM3 = dosageUnit === "LITER" ? enteredValue * specificGravity! : enteredValue;
   const actor = { id: user!.id, role: user!.role };
 
-  await prisma.$transaction(async (tx) => {
-    if (fillMaterialSg !== null) {
-      // Conditional on still being empty, so two people filling it at once
-      // cannot overwrite each other.
-      const filled = await tx.material.updateMany({ where: { id: materialId, specificGravity: null }, data: { specificGravity: fillMaterialSg } });
-      if (filled.count === 1) {
+  // The SG the dose is converted with is re-read under a row lock here, not
+  // taken from the read above. Two people filling the same empty SG at once
+  // (1.2 and 2.0) used to each convert with their OWN figure: the second's
+  // fill correctly matched no row, but its dose had already been computed
+  // at 2.0 and was stored against a material that says 1.2. Converting with
+  // whatever the material holds once locked is the same rule as a material
+  // that already had an SG: the material's value wins, the form's only
+  // fills a gap.
+  try {
+    await prisma.$transaction(async (tx) => {
+      const [locked] = await tx.$queryRaw<{ specificGravity: number | null }[]>`SELECT "specificGravity" FROM "Material" WHERE "id" = ${materialId} FOR UPDATE`;
+      let sg = locked?.specificGravity ?? null;
+      if (sg == null && fillMaterialSg !== null) {
+        await tx.material.update({ where: { id: materialId }, data: { specificGravity: fillMaterialSg } });
         await writeAudit(tx, actor, {
           module: "Suppliers",
           recordId: materialId,
@@ -122,27 +129,37 @@ export async function addComponent(formData: FormData) {
           afterValue: String(fillMaterialSg),
           reasonCode: "MATERIAL_SG_SET_FROM_MIX_DESIGN",
         });
+        sg = fillMaterialSg;
       }
-    }
+      // Only reachable if the SG was cleared between the read above and the
+      // lock; refused the same way as a material that never had one.
+      if (dosageUnit === "LITER" && !sg) throw new SgMissing();
+      const designMassKgPerM3 = dosageUnit === "LITER" ? enteredValue * sg! : enteredValue;
 
-    await tx.mixComponent.upsert({
-      where: { mixId_materialId: { mixId, materialId } },
-      create: { mixId, materialId, designMassKgPerM3, tolerancePct, dosageUnit },
-      update: { designMassKgPerM3, tolerancePct, dosageUnit },
-    });
+      await tx.mixComponent.upsert({
+        where: { mixId_materialId: { mixId, materialId } },
+        create: { mixId, materialId, designMassKgPerM3, tolerancePct, dosageUnit },
+        update: { designMassKgPerM3, tolerancePct, dosageUnit },
+      });
 
-    await writeAudit(tx, actor, {
-      module: "MixDesign",
-      recordId: mixId,
-      field: "component",
-      afterValue: `${materialId}: ${designMassKgPerM3} kg/m3${dosageUnit === "LITER" ? ` (${enteredValue} L at SG ${specificGravity})` : ""}`,
-      reasonCode: "COMPONENT_UPDATED",
+      await writeAudit(tx, actor, {
+        module: "MixDesign",
+        recordId: mixId,
+        field: "component",
+        afterValue: `${materialId}: ${designMassKgPerM3} kg/m3${dosageUnit === "LITER" ? ` (${enteredValue} L at SG ${sg})` : ""}`,
+        reasonCode: "COMPONENT_UPDATED",
+      });
     });
-  });
+  } catch (e) {
+    if (e instanceof SgMissing) redirect(back("SG_REQUIRED"));
+    throw e;
+  }
 
   revalidatePath(`/mix-designs/${mixId}`);
   redirect(`/mix-designs/${mixId}`);
 }
+
+class SgMissing extends Error {}
 
 // Freely removable at any mix status, including APPROVED — a mix design
 // edited mid-production never touches tickets already released against

@@ -204,6 +204,47 @@ test("the mix design form never overwrites a material's existing specific gravit
   assert.ok(Math.abs(component.designMassKgPerM3 - 11) < 1e-9, "the dose converts with the material's own SG");
 });
 
+// Runs `hook` once, immediately before the action's next $transaction
+// starts — the window between its pre-read and its write, where a
+// concurrent request's commit lands.
+async function withHookBeforeNextTransaction<T>(hook: () => Promise<unknown>, run: () => Promise<T>): Promise<T> {
+  const original = prisma.$transaction.bind(prisma);
+  let fired = false;
+  prisma.$transaction = (async (...args: Parameters<typeof prisma.$transaction>) => {
+    if (!fired) {
+      fired = true;
+      await hook();
+    }
+    return (original as (...a: typeof args) => unknown)(...args);
+  }) as typeof prisma.$transaction;
+  try {
+    return await run();
+  } finally {
+    prisma.$transaction = original;
+  }
+}
+
+test("two people filling an empty specific gravity at once: the dose converts with the SG the material ends up with", async () => {
+  const { mix, material } = await mixWithAdmixture(null);
+  await asUser(adminId);
+  // The other user's 1.2 commits after this request read the material as
+  // empty but before it writes. This request entered 2.0 for 10 L.
+  await withHookBeforeNextTransaction(
+    () => prisma.material.update({ where: { id: material.id }, data: { specificGravity: 1.2 } }),
+    () => digestOf(() => mixDesigns.addComponent(form({ mixId: mix.id, materialId: material.id, designMassKgPerM3: "10", dosageUnit: "LITER", tolerancePct: "2", specificGravity: "2.0" }))),
+  );
+
+  assert.equal((await prisma.material.findUniqueOrThrow({ where: { id: material.id } })).specificGravity, 1.2, "the first fill stands");
+  const component = await prisma.mixComponent.findFirstOrThrow({ where: { mixId: mix.id, materialId: material.id } });
+  // The defect: 10 L × 2.0 = 20 kg stored against a material that says 1.2.
+  assert.ok(Math.abs(component.designMassKgPerM3 - 12) < 1e-9, `10 L at the material's SG 1.2 is 12 kg, got ${component.designMassKgPerM3}`);
+  assert.equal(
+    await prisma.auditEvent.count({ where: { recordId: material.id, reasonCode: "MATERIAL_SG_SET_FROM_MIX_DESIGN" } }),
+    0,
+    "this request did not set the SG, so it must not audit that it did",
+  );
+});
+
 test("a role that cannot edit materials cannot set a specific gravity from the mix design form", async () => {
   const { mix, material } = await mixWithAdmixture(null);
   await asUser(qualityId);
