@@ -67,19 +67,6 @@ export async function updateMixDesign(formData: FormData) {
 // instead of 6 — a 17% under-dose in the batching target, with nothing on
 // screen to say so. A liter dose now requires an SG, from the material or
 // from this form, and is refused with a visible message otherwise.
-// Specific gravity is a property of the MATERIAL, not of the mix — the same
-// admixture has the same SG in every design that uses it — so it is stored
-// on Material and shown per component row. What this action adds is the
-// ability to supply it from the mix design form when the material has
-// none, because that is exactly when it is needed.
-//
-// It was needed and silently missing before. A dose entered in liters is
-// converted to kg by multiplying by SG; when the material had no SG the
-// conversion was skipped and the LITER figure was stored as if it were
-// kilograms. An admixture at SG 1.2 dosed at 5 L/m³ was recorded as 5 kg
-// instead of 6 — a 17% under-dose in the batching target, with nothing on
-// screen to say so. A liter dose now requires an SG, from the material or
-// from this form, and is refused with a visible message otherwise.
 export async function addComponent(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "mix-designs", "addComponent");
@@ -157,6 +144,10 @@ export async function addComponent(formData: FormData) {
   redirect(`/mix-designs/${mixId}`);
 }
 
+// Freely removable at any mix status, including APPROVED — a mix design
+// edited mid-production never touches tickets already released against
+// it, since BatchTicket snapshots its own component targets at release
+// time (see releaseBatchTicket in production/actions.ts).
 export async function deleteComponent(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "mix-designs", "deleteComponent");
