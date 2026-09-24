@@ -22,7 +22,10 @@ export type ParsedBankStatementLine = {
   amountMinor: number;
 };
 
-export type BankStatementParseError = { row: number; message: string };
+// A code, not a sentence: the refusal is shown to the person who uploaded
+// the file, in their language, by the import form. `value` is the cell as
+// it appeared in the file.
+export type BankStatementParseError = { row: number; code: "BAD_DATE" | "BAD_AMOUNT"; value: string };
 
 export type BankStatementParseResult = {
   lines: ParsedBankStatementLine[];
@@ -84,11 +87,11 @@ export function parseBankStatementCsv(text: string): BankStatementParseResult {
     const amountMinor = amountRaw !== undefined ? parseSignedMoneyToMinor(amountRaw) : null;
 
     if (!date || Number.isNaN(date.getTime())) {
-      errors.push({ row: rowNumber, message: `Unrecognized date: "${dateRaw ?? ""}"` });
+      errors.push({ row: rowNumber, code: "BAD_DATE", value: dateRaw ?? "" });
       continue;
     }
     if (amountMinor === null || amountMinor === 0) {
-      errors.push({ row: rowNumber, message: `Unrecognized or zero amount: "${amountRaw ?? ""}"` });
+      errors.push({ row: rowNumber, code: "BAD_AMOUNT", value: amountRaw ?? "" });
       continue;
     }
     lines.push({ date, description: (description ?? "").trim(), reference: (reference ?? "").trim(), amount: amountMinor / 100, amountMinor });
