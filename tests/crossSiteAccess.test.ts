@@ -1229,6 +1229,26 @@ test("a failed audit insert rolls back the whole statement import", async () => 
   assert.equal((await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled, true);
 });
 
+// A statement line one halala off a payment is left for a human. The
+// matcher used to allow a 0.01 float difference.
+test("a statement line one minor unit off a payment imports unmatched and leaves the payment unreconciled", async () => {
+  const bill = await makeSupplierBill(siteA, 210.01);
+  await asUser(accountantId);
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "210.01" }));
+  const payment = await prisma.supplierPayment.findFirstOrThrow({ where: { supplierBillId: bill.id } });
+  const day = payment.paidAt.toISOString().slice(0, 10);
+
+  await finance.importBankStatement(statementForm(siteA, [{ date: day, amount: "-210.00", description: `${prefix}-OFF-BY-ONE` }]));
+
+  const line = await prisma.bankStatementLine.findFirstOrThrow({ where: { description: `${prefix}-OFF-BY-ONE` } });
+  assert.equal(line.matchedId, null, "210.00 must not auto-reconcile a 210.01 payment");
+  assert.equal((await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled, false);
+
+  await finance.importBankStatement(statementForm(siteA, [{ date: day, amount: "-210.01", description: `${prefix}-EXACT` }]));
+  const exact = await prisma.bankStatementLine.findFirstOrThrow({ where: { description: `${prefix}-EXACT` } });
+  assert.equal(exact.matchedId, payment.id, "the exact amount still matches");
+});
+
 // Integration audit (2026-09-12): a SCADA reading delayed in transit must
 // not overwrite a newer one that already landed.
 //
