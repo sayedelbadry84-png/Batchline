@@ -7,6 +7,7 @@ import { logout } from "@/app/login/actions";
 import { setLocale } from "@/app/locale-actions";
 import { releaseBatchTicket } from "@/app/(app)/production/actions";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
+import { describeReleaseError } from "@/lib/releaseRouting";
 
 const ACTION_STATUS_CHIP: Record<string, string> = {
   RELEASED: "bg-info-soft text-ink",
@@ -42,16 +43,7 @@ export default async function OperatorHomePage({
   // banner (RMR-R4-P2-01) — a release failure from this field view used
   // to redirect to a route that doesn't exist (/operator/ticket with no
   // id) and show nothing at all.
-  const releaseErrorText =
-    releaseError === "STORAGE_NOT_CONFIGURED"
-      ? m.releaseError.STORAGE_NOT_CONFIGURED(releaseErrorMaterial ?? "")
-      : releaseError === "INVALID_STATE"
-        ? m.releaseError.INVALID_STATE
-        : releaseError === "NOT_FOUND"
-          ? m.releaseError.NOT_FOUND
-          : releaseError === "NO_REMAINING_VOLUME"
-            ? m.releaseError.NO_REMAINING_VOLUME
-            : null;
+  const releaseErrorText = describeReleaseError(m.releaseError, releaseError, releaseErrorMaterial);
 
   const [readyReservationsRaw, actionTickets] = await Promise.all([
     prisma.reservation.findMany({

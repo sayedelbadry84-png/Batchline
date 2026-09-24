@@ -25,6 +25,34 @@ export function releaseFailurePath(target: ReleaseReturnTarget, params: URLSearc
   return `${base}?${params.toString()}`;
 }
 
+// The banner text for a failed release, read back from the redirect's
+// `releaseError` query parameter. Production and the operator home page
+// each carried their own copy of this chain, so a new refusal reason had
+// to be added twice and would silently render nothing on whichever page
+// was missed. An unknown code (a hand-edited URL) renders nothing rather
+// than a misleading message.
+export type ReleaseErrorMessages = {
+  STORAGE_NOT_CONFIGURED: (material: string) => string;
+  INVALID_STATE: string;
+  MIX_NOT_APPROVED: string;
+  NOT_FOUND: string;
+  NO_REMAINING_VOLUME: string;
+};
+
+export function describeReleaseError(messages: ReleaseErrorMessages, code: string | undefined, material: string | undefined): string | null {
+  switch (code) {
+    case "STORAGE_NOT_CONFIGURED":
+      return messages.STORAGE_NOT_CONFIGURED(material ?? "");
+    case "INVALID_STATE":
+    case "MIX_NOT_APPROVED":
+    case "NOT_FOUND":
+    case "NO_REMAINING_VOLUME":
+      return messages[code];
+    default:
+      return null;
+  }
+}
+
 // startTrip's own returnTo field (production/actions.ts) — same open-
 // redirect shape as returnPrefix above (PL-P2-02, first production-
 // lifecycle review): Next's redirect() accepts an absolute external URL,
