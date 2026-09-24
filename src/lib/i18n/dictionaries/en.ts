@@ -557,6 +557,7 @@ const en: typeof ar = {
       releaseError: {
         STORAGE_NOT_CONFIGURED: (material: string) => `Couldn't release the ticket: no storage is configured for "${material}" at this station.`,
         INVALID_STATE: "Couldn't release the ticket: the reservation or station's state changed before the release finished — please try again.",
+        MIX_NOT_APPROVED: "Couldn't release the ticket: this reservation's mix design is not approved. A quality supervisor must approve it before it can be batched.",
         NOT_FOUND: "Couldn't release the ticket: the reservation or station no longer exists.",
         NO_REMAINING_VOLUME: "Couldn't release the ticket: this reservation has no remaining volume left.",
         manualBookingKeptNote: "The manual booking was saved — retry the release from the ready-to-release list below once the reason above is resolved.",
