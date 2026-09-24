@@ -511,11 +511,22 @@ export async function importBankStatement(formData: FormData) {
       });
       return true;
     }, TX_OPTIONS)
-    .catch((e) => {
+    .catch(async (e) => {
       // A repeat of a file this site has already imported. Silent by
       // design, like every other refusal here — and nothing was written,
       // because the unique index rejected the very first statement.
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") return false;
+      //
+      // Only THAT conflict is a replay. Any P2002 used to be treated as
+      // one, so a uniqueness failure anywhere else in this transaction
+      // rolled the import back and reported nothing. Classified by asking
+      // the database whether this site's import of this digest now exists,
+      // not by parsing Prisma's meta.target (see materialRequisition.ts for
+      // why that string proved unreliable). A unique conflict is reported
+      // only once the winner has committed, so this read is authoritative.
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+        const existing = await prisma.bankStatementImport.findUnique({ where: { siteId_fileDigest: { siteId, fileDigest } }, select: { id: true } });
+        if (existing) return false;
+      }
       throw e;
     });
   if (!imported) return;

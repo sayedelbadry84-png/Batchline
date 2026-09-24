@@ -1256,6 +1256,44 @@ test("two statement files that decode to the same text but differ in bytes are t
   assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore + 2);
 });
 
+// Any P2002 inside the import used to be read as "this file was already
+// imported" and swallowed, so a uniqueness failure on anything else rolled
+// the import back and reported nothing at all.
+test("a unique violation that is not the file-digest replay surfaces instead of being swallowed", async () => {
+  await asUser(accountantId);
+  const importsBefore = await prisma.bankStatementImport.count({ where: { siteId: siteA } });
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_xs_unique_on_line() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."description" LIKE '%-UNRELATED-UNIQUE' THEN
+        RAISE EXCEPTION 'injected unrelated unique violation' USING ERRCODE = 'unique_violation';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER test_xs_unique_on_line_trigger BEFORE INSERT ON "BankStatementLine"
+    FOR EACH ROW EXECUTE FUNCTION test_xs_unique_on_line();
+  `);
+  const rows = [{ date: "2026-09-02", amount: "-8.90", description: `${prefix}-UNRELATED-UNIQUE` }];
+  try {
+    await assert.rejects(
+      () => finance.importBankStatement(statementForm(siteA, rows)),
+      (e: unknown) => typeof e === "object" && e !== null && (e as { code?: string }).code === "P2002",
+      "an unrelated uniqueness failure must reach the caller",
+    );
+    assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore, "and nothing from the failed import may remain");
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_unique_on_line_trigger ON "BankStatementLine";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_unique_on_line();`);
+  }
+
+  // With the fault gone, the same file imports: it was never recorded.
+  await finance.importBankStatement(statementForm(siteA, rows));
+  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore + 1);
+});
+
 // A statement line one halala off a payment is left for a human. The
 // matcher used to allow a 0.01 float difference.
 test("a statement line one minor unit off a payment imports unmatched and leaves the payment unreconciled", async () => {
