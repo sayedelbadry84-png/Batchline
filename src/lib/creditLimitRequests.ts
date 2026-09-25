@@ -255,3 +255,42 @@ export async function decideCreditLimitRequest(
   }
 }
 
+// ---- Who may read requests ---------------------------------------------
+//
+// A request carries a commercial reason, the amounts, and who asked and
+// who decided. The Customers page is open to plant operators, but that is
+// access to the customer list, not to the credit approval queue. So:
+//
+// - a decider (ADMIN) sees every request, since they must see the queue;
+// - anyone who may request sees only their own requests and decisions on
+//   them, so they can follow up;
+// - everyone else sees none, including which customers have one pending.
+//
+// Enforced in the query, not by hiding table rows in the page.
+export type CreditLimitRequestVisibility = "ALL" | "OWN" | "NONE";
+
+export async function creditLimitRequestVisibility(viewer: CreditLimitActor): Promise<CreditLimitRequestVisibility> {
+  if (viewer.role === CREDIT_LIMIT_DECIDER_ROLE) return "ALL";
+  if (await canPerformAction(viewer.role, "customers", "requestCreditLimitIncrease")) return "OWN";
+  return "NONE";
+}
+
+export async function listCreditLimitRequestsFor(viewer: CreditLimitActor) {
+  const visibility = await creditLimitRequestVisibility(viewer);
+  if (visibility === "NONE") return { visibility, pending: [], recent: [] };
+  const scope: Prisma.CustomerCreditLimitRequestWhereInput = visibility === "OWN" ? { requestedById: viewer.id } : {};
+  const [pending, recent] = await Promise.all([
+    prisma.customerCreditLimitRequest.findMany({
+      where: { ...scope, status: "PENDING" },
+      orderBy: { requestedAt: "asc" },
+      include: { customer: { select: { legalName: true, creditLimit: true } }, requestedBy: { select: { name: true } } },
+    }),
+    prisma.customerCreditLimitRequest.findMany({
+      where: { ...scope, status: { not: "PENDING" } },
+      orderBy: { requestedAt: "desc" },
+      take: 10,
+      include: { customer: { select: { legalName: true } }, requestedBy: { select: { name: true } }, decidedBy: { select: { name: true } } },
+    }),
+  ]);
+  return { visibility, pending, recent };
+}

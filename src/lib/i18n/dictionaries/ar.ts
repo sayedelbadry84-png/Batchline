@@ -880,6 +880,8 @@ const ar = {
         pendingTitle: "بانتظار القرار",
         recentTitle: "أحدث القرارات",
         noPending: "لا توجد زيادة بانتظار القرار.",
+        ownOnlyNote: "تُعرض طلباتك فقط.",
+        hiddenNote: "لا تظهر طلبات حد الائتمان إلا لمن قدّمها ولمسؤولي النظام الذين يبتّون فيها.",
         col: { customer: "العميل", current: "الحالي", proposed: "المقترح", requestedBy: "مقدّم الطلب", requestedAt: "تاريخ الطلب", reason: "السبب", status: "الحالة", decidedBy: "صاحب القرار", note: "ملاحظة" },
         decisionNote: "ملاحظة القرار (مطلوبة عند الرفض)",
         approve: "اعتماد",

@@ -51,6 +51,7 @@ const DeliveryNoteSupplementPage = (await import("../src/app/(app)/production/[i
 const PurchaseOrderDetailPage = (await import("../src/app/(app)/purchasing/orders/[id]/page")).default;
 const QuoteDetailPage = (await import("../src/app/(app)/sales/quotes/[id]/page")).default;
 const CustomerStatementPage = (await import("../src/app/(app)/finance/customers/[id]/statement/page")).default;
+const CustomersPage = (await import("../src/app/(app)/customers/page")).default;
 const sales = await import("../src/app/(app)/sales/actions");
 const finance = await import("../src/app/(app)/finance/actions");
 const plants = await import("../src/app/(app)/plants/actions");
@@ -758,6 +759,54 @@ test("a crafted creditLimit in either customer form never changes the approved l
     assert.equal(row.paymentTerms, "Net 45", "the ordinary fields are still saved");
   }
   assert.equal(await prisma.auditEvent.count({ where: { recordId: created.id, reasonCode: "CUSTOMER_UPDATED" } }), 3, "each edit commits with its audit row");
+});
+
+// F3 (PR #9 follow-up audit): the Customers page is open to plant
+// operators, and it listed every pending credit limit request with its
+// commercial reason, amounts and people, and every recent decision with
+// its note. Which requests a user may read is now decided in the query:
+// the decider sees the queue, a requester sees their own, anyone else
+// sees none. Proved by rendering the real page as each of them.
+test("the Customers page shows credit limit requests only to the decider and to their own requester", async () => {
+  const { requestCreditLimitIncrease } = await import("../src/lib/creditLimitRequests");
+  const mine = await prisma.customer.create({ data: { legalName: `${prefix}-CUST-LIMIT-READ-OWN` } });
+  const theirs = await prisma.customer.create({ data: { legalName: `${prefix}-CUST-LIMIT-READ-ADMIN` } });
+  const ownReason = `${prefix} own reason: bank guarantee on file`;
+  const adminReason = `${prefix} admin reason: parent company guarantee`;
+  const adminNote = `${prefix} admin decision note`;
+  const own = await requestCreditLimitIncrease(mine.id, { proposedLimit: "7000", reason: ownReason }, { id: accountantId, role: "ACCOUNTANT" });
+  assert.equal(own.status, "OK");
+  // Rows by someone else, written directly: one pending, one decided.
+  await prisma.customerCreditLimitRequest.create({
+    data: { customerId: theirs.id, previousLimitMinor: BigInt(0), proposedLimitMinor: BigInt(900000), reason: adminReason, requestedById: adminId },
+  });
+  await prisma.customerCreditLimitRequest.create({
+    data: {
+      customerId: theirs.id, previousLimitMinor: BigInt(0), proposedLimitMinor: BigInt(500000), reason: `${adminReason} (earlier)`, requestedById: adminId,
+      status: "REJECTED", decidedById: accountantId, decidedAt: new Date(), decisionNote: adminNote,
+    },
+  });
+
+  const pageText = async (userId: string) => {
+    await asUser(userId);
+    return renderedText(await CustomersPage({ searchParams: Promise.resolve({}) }));
+  };
+
+  const asOperator = await pageText(operatorId);
+  assert.ok(asOperator.includes(`${prefix}-CUST-LIMIT-READ-OWN`), "positive control: the operator still sees the customer list");
+  for (const secret of [ownReason, adminReason, adminNote]) {
+    assert.ok(!asOperator.includes(secret), `a plant operator must not read "${secret}"`);
+  }
+
+  const asAccountant = await pageText(accountantId);
+  assert.ok(asAccountant.includes(ownReason), "a requester sees their own request");
+  assert.ok(!asAccountant.includes(adminReason), "but not someone else's");
+  assert.ok(!asAccountant.includes(adminNote), "nor a decision on someone else's request");
+
+  const asAdmin = await pageText(adminId);
+  for (const text of [ownReason, adminReason, adminNote]) {
+    assert.ok(asAdmin.includes(text), `the decider sees the whole queue: "${text}"`);
+  }
 });
 
 // F2 (PR #9 follow-up audit), at the action: a real failure is shown as a

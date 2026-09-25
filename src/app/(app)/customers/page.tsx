@@ -5,7 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createCustomer, updateCustomer, requestCreditLimitIncreaseAction, decideCreditLimitRequestAction } from "./actions";
 import { canPerformAction } from "@/lib/permissions";
-import { CREDIT_LIMIT_DECIDER_ROLE } from "@/lib/creditLimitRequests";
+import { CREDIT_LIMIT_DECIDER_ROLE, listCreditLimitRequestsFor } from "@/lib/creditLimitRequests";
 import { getDateFormatters } from "@/lib/displayTimeZone";
 import { describeCustomerResult } from "@/lib/customerResultText";
 import { createProject, updateProject } from "../projects/actions";
@@ -43,19 +43,10 @@ export default async function CustomersPage({
       include: { customer: true, _count: { select: { reservations: true } } },
     }),
   ]);
-  const [pendingRequests, recentDecisions] = await Promise.all([
-    prisma.customerCreditLimitRequest.findMany({
-      where: { status: "PENDING" },
-      orderBy: { requestedAt: "asc" },
-      include: { customer: { select: { legalName: true, creditLimit: true } }, requestedBy: { select: { name: true } } },
-    }),
-    prisma.customerCreditLimitRequest.findMany({
-      where: { status: { not: "PENDING" } },
-      orderBy: { requestedAt: "desc" },
-      take: 10,
-      include: { customer: { select: { legalName: true } }, requestedBy: { select: { name: true } }, decidedBy: { select: { name: true } } },
-    }),
-  ]);
+  // Which requests this user may read is decided in the query (see
+  // listCreditLimitRequestsFor): the queue for deciders, a requester's own
+  // requests, and nothing for anyone else.
+  const { visibility: requestVisibility, pending: pendingRequests, recent: recentDecisions } = await listCreditLimitRequestsFor({ id: user.id, role: user.role });
   const pendingByCustomer = new Map(pendingRequests.map((r) => [r.customerId, r]));
   const money = (minor: bigint) => (Number(minor) / 100).toLocaleString();
 
@@ -235,8 +226,12 @@ export default async function CustomersPage({
           </form>
         )}
 
+        {requestVisibility === "NONE" ? (
+          <p className="text-sm text-ink-muted">{cl.hiddenNote}</p>
+        ) : (
         <div>
           <h3 className="mb-2 font-semibold">{cl.pendingTitle}</h3>
+          {requestVisibility === "OWN" && <p className="mb-2 text-xs text-ink-muted">{cl.ownOnlyNote}</p>}
           {pendingRequests.length === 0 ? (
             <p className="text-sm text-ink-muted">{cl.noPending}</p>
           ) : (
@@ -281,6 +276,7 @@ export default async function CustomersPage({
             </table>
           )}
         </div>
+        )}
 
         {recentDecisions.length > 0 && (
           <div>

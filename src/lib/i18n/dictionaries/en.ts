@@ -923,6 +923,8 @@ const en: typeof ar = {
         pendingTitle: "Awaiting decision",
         recentTitle: "Recent decisions",
         noPending: "No increase is awaiting a decision.",
+        ownOnlyNote: "Showing your own requests only.",
+        hiddenNote: "Credit limit requests are shown only to the people who make them and to the administrators who decide them.",
         col: { customer: "Customer", current: "Current", proposed: "Proposed", requestedBy: "Requested by", requestedAt: "Requested", reason: "Reason", status: "Status", decidedBy: "Decided by", note: "Note" },
         decisionNote: "Decision note (required to reject)",
         approve: "Approve",

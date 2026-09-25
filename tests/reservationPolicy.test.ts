@@ -81,4 +81,8 @@ test("every credit limit request outcome renders in both languages; only a reque
   }
   assert.equal(describeCustomerResult(en.modules.customers.creditLimitRequests.result, "toString"), null);
   assert.equal(describeCustomerResult(en.modules.customers.creditLimitRequests.result, undefined), null);
+  for (const dict of [ar, en]) {
+    const cl = dict.modules.customers.creditLimitRequests;
+    assert.ok(cl.ownOnlyNote.length > 0 && cl.hiddenNote.length > 0, "the page says why requests are filtered or hidden");
+  }
 });
