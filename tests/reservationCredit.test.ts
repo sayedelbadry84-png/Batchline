@@ -60,6 +60,7 @@ const tripIds: string[] = [];
 const truckIds: string[] = [];
 const employeeIds: string[] = [];
 const extraPlantIds: string[] = [];
+const extraSiteIds: string[] = [];
 
 before(async () => {
   siteId = (await prisma.site.create({ data: { code: `${PREFIX}-A`, name: `${PREFIX}-SITE-A`, city: "Test", country: "Test" } })).id;
@@ -110,7 +111,7 @@ after(async () => {
   await prisma.material.delete({ where: { id: cementMaterialId } });
   await prisma.plant.deleteMany({ where: { id: { in: extraPlantIds } } });
   await prisma.plant.delete({ where: { id: plantId } });
-  await prisma.site.deleteMany({ where: { id: { in: [siteId, otherSiteId] } } });
+  await prisma.site.deleteMany({ where: { id: { in: [siteId, otherSiteId, ...extraSiteIds] } } });
   // AuditEvent is append-only at the database; the test-only bypass the
   // other suites use removes this suite's own rows, by actor.
   const users = [adminUserId, secondAdminId, accountantId, operatorId];
@@ -336,6 +337,73 @@ test("a customer whose items span two currencies cannot be compared with the lim
   invoiceIds.push(sar.id);
   const decision = await evaluateCustomerCredit(prisma, customerId);
   assert.deepEqual([decision?.mixedCurrency, decision?.status], [true, "OVER_LIMIT"]);
+});
+
+// F1 (audit of 3741ff6): every issued invoice added its currency, paid or
+// not, so one settled SAR invoice held an EGP customer for ever.
+test("a settled invoice in another currency is history, not exposure: only an amount still owed makes a customer mixed-currency", async () => {
+  const { customerId, projectId } = await makeCustomer(150);
+  await approvedReservation(projectId); // 1 m3 at 100, EGP station
+  const sarInvoice = async () => {
+    const inv = await prisma.invoice.create({ data: { invoiceNumber: `${PREFIX}-INV-${invoiceIds.length}`, customerId, dueDate: new Date(), subtotal: 10, total: 10, status: "SENT", currency: "SAR" } });
+    invoiceIds.push(inv.id);
+    return inv;
+  };
+  const fits = (volumeM3: number) => evaluateCustomerCredit(prisma, customerId, { kind: "NEW_BOOKING", mixId, siteId, volumeM3 });
+
+  // Settled by a payment, and settled by a credit note.
+  const paid = await sarInvoice();
+  await prisma.payment.create({ data: { invoiceId: paid.id, amount: 10 } });
+  const credited = await sarInvoice();
+  await prisma.creditNote.create({ data: { creditNoteNumber: `${PREFIX}-CN-${credited.id}`, invoiceId: credited.id, amount: 10, reason: "OTHER", issuedById: adminUserId } });
+
+  const exact = await fits(0.5);
+  assert.deepEqual(
+    [exact?.mixedCurrency, exact?.unpriced, exact?.exposureMinor, exact?.proposedMinor, exact?.status],
+    [false, false, 10000, 5000, "WITHIN_LIMIT"],
+    "the settled SAR invoices add neither currency nor amount; 100 + 50 uses the limit exactly",
+  );
+  assert.equal((await fits(0.51))?.status, "OVER_LIMIT", "and the limit still decides");
+
+  // Control: one halala still owed on a SAR invoice is SAR exposure.
+  const owed = await sarInvoice();
+  await prisma.payment.create({ data: { invoiceId: owed.id, amount: 9.99 } });
+  const mixed = await fits(0.01);
+  assert.deepEqual([mixed?.mixedCurrency, mixed?.status], [true, "OVER_LIMIT"]);
+});
+
+// F2 (audit of 3741ff6): a booking released in full before its trips
+// finish stays IN_PRODUCTION with nothing left to release, and its zero
+// remainder still demanded an active station at its site.
+test("a booking with nothing left to release needs no active station; one with volume left still holds, and its tickets still count", async () => {
+  const { customerId, projectId } = await makeCustomer(999999);
+  const elsewhere = await prisma.site.create({ data: { code: `${PREFIX}-C`, name: `${PREFIX}-SITE-C`, city: "Test", country: "Test" } });
+  extraSiteIds.push(elsewhere.id);
+  const elsewherePlant = await prisma.plant.create({ data: { siteId: elsewhere.id, name: `${PREFIX}-PLANT-C` } });
+  extraPlantIds.push(elsewherePlant.id);
+
+  const exhausted = await makeReservation(projectId, { requestedVolumeM3: 20 });
+  assert.equal((await releaseTicketForReservation(exhausted.id, 20, plantId, actor())).status, "OK");
+  assert.equal((await prisma.reservation.findUniqueOrThrow({ where: { id: exhausted.id } })).status, "IN_PRODUCTION");
+
+  const newBooking = () => evaluateCustomerCredit(prisma, customerId, { kind: "NEW_BOOKING", mixId, siteId: elsewhere.id, volumeM3: 1 });
+  await prisma.plant.update({ where: { id: plantId }, data: { status: "FROZEN" } });
+  try {
+    const decision = await newBooking();
+    assert.deepEqual(
+      [decision?.unpriced, decision?.exposureMinor, decision?.proposedMinor, decision?.status],
+      [false, 200000, 10000, "WITHIN_LIMIT"],
+      "the released 20 m3 ticket still counts; the empty remainder needs no station",
+    );
+
+    // Control: with volume still to release at the station-less site, the
+    // remainder cannot be valued and the new booking holds.
+    await prisma.reservation.update({ where: { id: exhausted.id }, data: { requestedVolumeM3: 25 } });
+    const held = await newBooking();
+    assert.deepEqual([held?.unpriced, held?.status], [true, "OVER_LIMIT"]);
+  } finally {
+    await prisma.plant.update({ where: { id: plantId }, data: { status: "ACTIVE" } });
+  }
 });
 
 // E1 (exposure audit): an edit that changes volume, mix or project clears

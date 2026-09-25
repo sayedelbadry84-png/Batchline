@@ -226,23 +226,40 @@ export async function evaluateCustomerCredit(db: Db, customerId: string, proposa
       unpriced = true;
       continue;
     }
+    // Only an amount still owed is exposure, and only exposure has a
+    // currency that matters here: a fully settled invoice is history, and
+    // counting its currency held a customer with one paid SAR invoice and
+    // an EGP booking as mixed-currency for ever (audit of 3741ff6, F1).
+    const dueMinor = toMinorUnits(invoiceAmountDue({ total, payments: [{ amount: paid }], creditNotes: [{ amount: credited }] }));
+    if (dueMinor <= 0) continue;
     currencies.add(inv.currency);
-    exposureMinor += toMinorUnits(invoiceAmountDue({ total, payments: [{ amount: paid }], creditNotes: [{ amount: credited }] }));
+    exposureMinor += dueMinor;
   }
   for (const t of snap.tickets) {
     currencies.add(t.currency);
     exposureMinor += value(t.volume, t.mixId, t.taxRatePct);
   }
+  // An unreleased volume at a site. A finite volume of zero or less is no
+  // commitment at all, so it needs neither a price nor an active station:
+  // a booking released in full whose trips have not finished used to make
+  // the whole customer unpriced once its site's last station left ACTIVE,
+  // although its tickets are valued on their own (audit of 3741ff6, F2).
+  // A non-finite volume still fails closed in value().
+  const commitment = (volumeRaw: JsonNumber, mixId: string, siteId: string): number => {
+    const volume = num(volumeRaw);
+    if (volume !== null && volume <= 0) return 0;
+    return value(volumeRaw, mixId, siteTax(siteId));
+  };
   for (const r of snap.reservations) {
     if (r.id === targetId) continue;
-    exposureMinor += value(remaining(r), r.mixId, siteTax(r.siteId));
+    exposureMinor += commitment(remaining(r), r.mixId, r.siteId);
   }
 
   let proposedMinor = 0;
   if (proposal?.kind === "NEW_BOOKING") {
-    proposedMinor = value(proposal.volumeM3, proposal.mixId, siteTax(proposal.siteId));
+    proposedMinor = commitment(proposal.volumeM3, proposal.mixId, proposal.siteId);
   } else if (snap.target) {
-    proposedMinor = value(remaining(snap.target), snap.target.mixId, siteTax(snap.target.siteId));
+    proposedMinor = commitment(remaining(snap.target), snap.target.mixId, snap.target.siteId);
   }
 
   const limit = num(snap.creditLimit);
