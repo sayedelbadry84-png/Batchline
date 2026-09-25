@@ -566,6 +566,27 @@ test("a manual booking within the limit is confirmed and released, as before", a
   assert.equal((await prisma.reservation.findUniqueOrThrow({ where: { id: result.reservationId } })).status, "IN_PRODUCTION");
 });
 
+// N1 (audit of f955650): createManualBooking had no positive-volume guard
+// of its own, and a new booking's non-positive volume was valued at 0, so
+// a -1 m3 booking fit under any limit and was stored fully approved.
+test("a manual booking of zero, negative or non-finite volume writes nothing, and the credit policy fails such a proposal closed", async () => {
+  const { customerId, projectId } = await makeCustomer(999999);
+  for (const volumeM3 of [-1, 0, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.deepEqual(await createManualBooking({ projectId, siteId, plantId, mixId, volumeM3 }, actor()), { status: "INVALID_VOLUME" }, `volume ${volumeM3}`);
+    const decision = await evaluateCustomerCredit(prisma, customerId, { kind: "NEW_BOOKING", mixId, siteId, volumeM3 });
+    assert.deepEqual([decision?.unpriced, decision?.proposedMinor, decision?.status], [true, 0, "OVER_LIMIT"], `a new booking of ${volumeM3} must not fit`);
+  }
+  assert.equal(await prisma.reservation.count({ where: { projectId } }), 0, "no reservation row for any invalid volume");
+
+  // A positive fractional volume is still a valid booking.
+  const fits = await evaluateCustomerCredit(prisma, customerId, { kind: "NEW_BOOKING", mixId, siteId, volumeM3: 0.5 });
+  assert.deepEqual([fits?.unpriced, fits?.proposedMinor, fits?.status], [false, 5000, "WITHIN_LIMIT"]);
+  const booked = await createManualBooking({ projectId, siteId, plantId, mixId, volumeM3: 0.5 }, actor());
+  assert.equal(booked.status, "RELEASED");
+  if (booked.status !== "RELEASED") throw new Error("unreachable");
+  reservationIds.push(booked.reservationId);
+});
+
 // ---- 3. Release re-decides credit ---------------------------------------
 
 test("a customer who goes over the limit after approval cannot be released against, until a payment brings them back", async () => {

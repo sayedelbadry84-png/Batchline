@@ -753,6 +753,44 @@ test("converting a quote for a customer within the limit still books a confirmed
   }
 });
 
+// N1 (audit of f955650): createReservation checked `!requestedVolumeM3`,
+// which lets -1 and Infinity through, and a negative booking consumed no
+// credit, so it was stored CONFIRMED. Quote conversion trusted the line.
+test("a booking or quote conversion of zero, negative or non-finite volume writes no reservation; a fractional one still books", async () => {
+  await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 1_000_000 } });
+  await prisma.priceListEntry.upsert({
+    where: { customerId_mixId: { customerId, mixId } },
+    create: { customerId, mixId, pricePerM3: 100 },
+    update: { pricePerM3: 100 },
+  });
+  try {
+    const project = await prisma.project.create({ data: { name: `${prefix}-PROJ-N1-${randomUUID().slice(0, 6)}`, customerId, siteAddress: "Test" } });
+    projectIds.push(project.id);
+    await asUser(adminId);
+    const book = (requestedVolumeM3: string) =>
+      reservations.createReservation(form({ projectId: project.id, siteId: siteA, mixId, requestedVolumeM3, pourWindowStart: "2026-10-01T08:00" }));
+    for (const volume of ["-1", "0", "-0.5", "NaN", "Infinity", "-Infinity", "abc"]) {
+      await book(volume);
+      assert.equal(await prisma.reservation.count({ where: { projectId: project.id } }), 0, `volume ${volume} must not be booked`);
+    }
+    await book("0.5");
+    const booked = await prisma.reservation.findMany({ where: { projectId: project.id } });
+    reservationIds.push(...booked.map((r) => r.id));
+    assert.deepEqual(booked.map((r) => r.requestedVolumeM3), [0.5], "a positive fractional volume still books");
+
+    for (const estimatedVolumeM3 of [-1, 0]) {
+      const line = await acceptedQuoteLine();
+      await prisma.quoteLine.update({ where: { id: line.id }, data: { estimatedVolumeM3 } });
+      await asUser(salesId);
+      await sales.convertQuoteLineToReservation(form({ quoteLineId: line.id }));
+      assert.equal(await prisma.reservation.count({ where: { quoteLineId: line.id } }), 0, `a quote line of ${estimatedVolumeM3} m3 must not become a booking`);
+    }
+  } finally {
+    await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 0 } });
+    await prisma.priceListEntry.deleteMany({ where: { customerId, mixId } });
+  }
+});
+
 // CL-1 (credit-limit approval audit): the customer forms used to write
 // Customer.creditLimit for every role with createCustomer/updateCustomer,
 // PLANT_OPERATOR included, so an operator could raise a financial

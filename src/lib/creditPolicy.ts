@@ -257,7 +257,14 @@ export async function evaluateCustomerCredit(db: Db, customerId: string, proposa
 
   let proposedMinor = 0;
   if (proposal?.kind === "NEW_BOOKING") {
-    proposedMinor = commitment(proposal.volumeM3, proposal.mixId, proposal.siteId);
+    // Unlike an existing booking's remainder, a NEW booking of zero, less,
+    // or a non-finite volume is not "nothing left": it is invalid input,
+    // and commitment() valuing it at 0 let a -1 m3 booking fit under any
+    // limit (audit of f955650, N1). Every caller refuses it first; this
+    // makes a caller that forgets fail closed rather than pass.
+    const volume = num(proposal.volumeM3);
+    if (volume === null || volume <= 0) unpriced = true;
+    else proposedMinor = commitment(volume, proposal.mixId, proposal.siteId);
   } else if (snap.target) {
     proposedMinor = commitment(remaining(snap.target), snap.target.mixId, snap.target.siteId);
   }

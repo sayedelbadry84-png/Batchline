@@ -33,9 +33,14 @@ export type ManualBookingResult =
   | { status: "RELEASED"; reservationId: string; ticketId: string }
   | { status: "HELD_FOR_CREDIT"; reservationId: string }
   | { status: "RELEASE_REFUSED"; reservationId: string; release: Exclude<ReleaseTicketResult, { status: "OK" }> }
-  | { status: "NOT_FOUND" };
+  | { status: "NOT_FOUND" }
+  | { status: "INVALID_VOLUME" };
 
 export async function createManualBooking(input: ManualBookingInput, actor: ReleaseActor): Promise<ManualBookingResult> {
+  // createManualRelease refuses this too, but the domain function is what
+  // writes a CONFIRMED, fully approved row, so it must not rely on its
+  // one caller (audit of f955650, N1).
+  if (!Number.isFinite(input.volumeM3) || input.volumeM3 <= 0) return { status: "INVALID_VOLUME" };
   const now = new Date();
   const booked = await withSequentialNumber(
     "RES",

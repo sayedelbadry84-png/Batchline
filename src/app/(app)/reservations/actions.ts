@@ -58,7 +58,10 @@ export async function createReservation(formData: FormData) {
   const pourWindowStartRaw = String(formData.get("pourWindowStart") ?? "");
   const notes = String(formData.get("notes") ?? "").trim() || null;
 
-  if (!projectId || !siteId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw) return;
+  if (!projectId || !siteId || !mixId || !pourWindowStartRaw) return;
+  // `!requestedVolumeM3` let -1 and Infinity through (audit of f955650,
+  // N1): a negative booking was stored CONFIRMED and consumed no credit.
+  if (!Number.isFinite(requestedVolumeM3) || requestedVolumeM3 <= 0) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
   const project = await prisma.project.findUnique({ where: { id: projectId }, include: { customer: true } });

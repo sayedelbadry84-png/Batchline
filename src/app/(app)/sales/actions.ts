@@ -639,6 +639,10 @@ export async function convertQuoteLineToReservation(formData: FormData) {
             include: { quote: true },
           });
           if (!line?.quote.projectId) throw new ScopeLostError();
+          // Quote lines are written with a positive volume today, but a
+          // legacy or hand-edited line must not become a negative booking
+          // (audit of f955650, N1). Nothing is converted.
+          if (!Number.isFinite(line.estimatedVolumeM3) || line.estimatedVolumeM3 <= 0) throw new ScopeLostError();
 
           // Accepting a quote is the commercial sign-off, never a credit
           // decision. This used to book a CONFIRMED, fully signed-off

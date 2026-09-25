@@ -133,7 +133,7 @@ export async function createManualRelease(formData: FormData) {
   // always be server-derived from the session, never form data
   // (RMR-R5-P1-01).
   const result = await createManualBooking({ projectId, siteId, plantId, mixId, volumeM3 }, { id: user!.id, role: user!.role, allowedSiteId: effectiveSiteId(user!) });
-  if (result.status === "NOT_FOUND") return;
+  if (result.status === "NOT_FOUND" || result.status === "INVALID_VOLUME") return;
   if (result.status !== "RELEASED") {
     // Operational decision (RMR-R2-P2-03): the reservation is KEPT, never
     // rolled back or auto-cancelled, and the banner says where it went.
