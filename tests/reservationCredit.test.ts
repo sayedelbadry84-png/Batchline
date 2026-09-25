@@ -600,6 +600,72 @@ test("approval applies once; replays, rejection, a second proposal and concurren
   assert.equal(await prisma.customerCreditLimitRequest.count({ where: { customerId, status: "PENDING" } }), 1);
 });
 
+// F2 (PR #9 follow-up audit): every P2002 in the request transaction used
+// to be reported as ALREADY_PENDING, so a uniqueness failure anywhere else
+// (the audit insert included) rolled the request back and told the user a
+// request was already waiting when none was.
+// Which statement the rethrown uniqueness error came from, or the business
+// outcome if one was (wrongly) returned instead.
+function uniqueViolationSource(e: unknown): string {
+  const known = e as { code?: string; meta?: { modelName?: string } };
+  return `${known.code} on ${known.meta?.modelName}`;
+}
+
+test("a unique violation that is not the one-pending index is rethrown with its real error, never reported as ALREADY_PENDING", async () => {
+  const { customerId } = await makeCustomer(0);
+  const requester = person(accountantId, "ACCOUNTANT");
+
+  // 1. At the audit insert.
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_rc_unique_on_request_audit() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."reasonCode" = 'CREDIT_LIMIT_INCREASE_REQUESTED' THEN
+        RAISE EXCEPTION 'injected unrelated unique violation' USING ERRCODE = 'unique_violation';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`CREATE TRIGGER test_rc_unique_on_request_audit_trigger BEFORE INSERT ON "AuditEvent" FOR EACH ROW EXECUTE FUNCTION test_rc_unique_on_request_audit();`);
+  try {
+    const outcome = await requestCreditLimitIncrease(customerId, { proposedLimit: "4000", reason: REASON }, requester).then(
+      (r) => r.status,
+      (e: unknown) => uniqueViolationSource(e),
+    );
+    assert.equal(outcome, "P2002 on AuditEvent", "the audit insert's own error must reach the caller");
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_rc_unique_on_request_audit_trigger ON "AuditEvent";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_rc_unique_on_request_audit();`);
+  }
+  assert.equal(await prisma.customerCreditLimitRequest.count({ where: { customerId } }), 0, "the request rolled back with its audit row");
+
+  // 2. On the request table itself, but not the one-pending index: same
+  // model, still not a duplicate, because no pending request exists.
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_rc_unique_on_request() RETURNS trigger AS $fn$
+    BEGIN
+      RAISE EXCEPTION 'injected unique violation on the request row' USING ERRCODE = 'unique_violation';
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`CREATE TRIGGER test_rc_unique_on_request_trigger BEFORE INSERT ON "CustomerCreditLimitRequest" FOR EACH ROW EXECUTE FUNCTION test_rc_unique_on_request();`);
+  try {
+    const outcome = await requestCreditLimitIncrease(customerId, { proposedLimit: "4000", reason: REASON }, requester).then(
+      (r) => r.status,
+      (e: unknown) => uniqueViolationSource(e),
+    );
+    assert.equal(outcome, "P2002 on CustomerCreditLimitRequest", "a violation on the request row that is not the pending index is rethrown too");
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_rc_unique_on_request_trigger ON "CustomerCreditLimitRequest";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_rc_unique_on_request();`);
+  }
+
+  assert.equal(await limitOf(customerId), 0);
+  assert.equal(await prisma.customerCreditLimitRequest.count({ where: { customerId } }), 0);
+  // With the faults gone the same request is accepted: nothing was pending.
+  assert.equal((await requestCreditLimitIncrease(customerId, { proposedLimit: "4000", reason: REASON }, requester)).status, "OK");
+});
+
 // F1 (PR #9 follow-up audit): with deciding fixed to ADMIN and never the
 // requester, a request that no one else could decide would sit PENDING
 // and block every later request for that customer.

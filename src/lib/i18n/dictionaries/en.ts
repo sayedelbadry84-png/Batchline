@@ -944,6 +944,7 @@ const en: typeof ar = {
           SELF_DECISION: "Not done: you can't decide your own request. Another administrator must decide it.",
           NOTE_REQUIRED: "Not rejected: a rejection needs a note.",
           NO_ELIGIBLE_APPROVER: "Not requested: there is no other active administrator to decide it, and nobody may decide their own request.",
+          FAILED: "Not done: the change could not be saved, and nothing was changed. Try again; if it keeps failing, report it.",
         },
       },
       col: { code: "Code", customer: "Customer", creditLimit: "Credit limit", terms: "Terms", contact: "Contact", projects: "Projects" },

@@ -98,13 +98,23 @@ export async function requestCreditLimitIncreaseAction(formData: FormData) {
 
   const customerId = String(formData.get("customerId") ?? "");
   if (!customerId) redirect(customersResultPath("NOT_FOUND"));
-  const result = await requestCreditLimitIncrease(
-    customerId,
-    { proposedLimit: formData.get("proposedLimit"), reason: String(formData.get("reason") ?? "") },
-    { id: user!.id, role: user!.role },
-  );
+  let code: string;
+  try {
+    const result = await requestCreditLimitIncrease(
+      customerId,
+      { proposedLimit: formData.get("proposedLimit"), reason: String(formData.get("reason") ?? "") },
+      { id: user!.id, role: user!.role },
+    );
+    code = result.status === "OK" ? "REQUESTED" : result.status;
+  } catch (e) {
+    // A real failure (a constraint other than "one pending per customer",
+    // an audit write refused) is logged with its own error and shown as a
+    // failure, never as a business outcome like ALREADY_PENDING.
+    console.error("requestCreditLimitIncrease failed", e);
+    code = "FAILED";
+  }
   revalidatePath("/customers");
-  redirect(customersResultPath(result.status === "OK" ? "REQUESTED" : result.status));
+  redirect(customersResultPath(code));
 }
 
 export async function decideCreditLimitRequestAction(formData: FormData) {
@@ -117,8 +127,14 @@ export async function decideCreditLimitRequestAction(formData: FormData) {
 
   const requestId = String(formData.get("requestId") ?? "");
   if (!requestId) redirect(customersResultPath("NOT_FOUND"));
-  const result = await decideCreditLimitRequest(requestId, decision, String(formData.get("decisionNote") ?? ""), { id: user!.id, role: user!.role });
+  let code: string;
+  try {
+    code = (await decideCreditLimitRequest(requestId, decision, String(formData.get("decisionNote") ?? ""), { id: user!.id, role: user!.role })).status;
+  } catch (e) {
+    console.error("decideCreditLimitRequest failed", e);
+    code = "FAILED";
+  }
   revalidatePath("/customers");
   revalidatePath("/reservations");
-  redirect(customersResultPath(result.status));
+  redirect(customersResultPath(code));
 }

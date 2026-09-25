@@ -17,6 +17,7 @@ export type CreditLimitResultMessages = {
   SELF_DECISION: string;
   NOTE_REQUIRED: string;
   NO_ELIGIBLE_APPROVER: string;
+  FAILED: string;
 };
 
 const SUCCESS = new Set(["REQUESTED", "APPROVED", "REJECTED"]);

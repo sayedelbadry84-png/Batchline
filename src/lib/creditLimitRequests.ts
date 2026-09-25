@@ -52,8 +52,17 @@ class Abort<R> extends Error {
   }
 }
 
-function isUniqueViolation(e: unknown): boolean {
-  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
+// A duplicate pending request fails on the partial unique index
+// "CustomerCreditLimitRequest_one_pending_per_customer_key", which Prisma
+// reports as P2002 on this model with target ["customerId"]. Any other
+// unique violation in the transaction (the audit insert, a future
+// constraint) is a real failure and must not be reported as "a request
+// is already pending". The caller additionally confirms a pending row
+// exists after the rollback before saying so.
+function isPendingIndexConflict(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") return false;
+  const meta = e.meta as { modelName?: unknown; target?: unknown } | undefined;
+  return meta?.modelName === "CustomerCreditLimitRequest" && Array.isArray(meta.target) && meta.target.length === 1 && meta.target[0] === "customerId";
 }
 
 // ---- Request ------------------------------------------------------------
@@ -128,8 +137,13 @@ export async function requestCreditLimitIncrease(
   } catch (e) {
     if (e instanceof Abort) return e.result as RequestCreditLimitResult;
     // The partial unique index is the backstop for two requests racing
-    // past the count above.
-    if (isUniqueViolation(e)) return { status: "ALREADY_PENDING" };
+    // past the count above. Only that conflict, with the winning pending
+    // row actually on file, is "already pending"; anything else is
+    // rethrown with its real error.
+    if (isPendingIndexConflict(e)) {
+      const winner = await prisma.customerCreditLimitRequest.count({ where: { customerId, status: "PENDING" } });
+      if (winner > 0) return { status: "ALREADY_PENDING" };
+    }
     throw e;
   }
 }

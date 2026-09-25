@@ -760,6 +760,50 @@ test("a crafted creditLimit in either customer form never changes the approved l
   assert.equal(await prisma.auditEvent.count({ where: { recordId: created.id, reasonCode: "CUSTOMER_UPDATED" } }), 3, "each edit commits with its audit row");
 });
 
+// F2 (PR #9 follow-up audit), at the action: a real failure is shown as a
+// failure, never as a business outcome like ALREADY_PENDING.
+test("a failure inside a credit limit request is shown as FAILED, and only an ADMIN reaches the decision action", async () => {
+  const customers = await import("../src/app/(app)/customers/actions");
+  const target = await prisma.customer.create({ data: { legalName: `${prefix}-CUST-LIMIT-FAIL` } });
+  const redirectOf = (e: unknown) => String((e as { digest?: string }).digest ?? e);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_xs_unique_on_limit_audit() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."reasonCode" = 'CREDIT_LIMIT_INCREASE_REQUESTED' THEN
+        RAISE EXCEPTION 'injected unrelated unique violation' USING ERRCODE = 'unique_violation';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`CREATE TRIGGER test_xs_unique_on_limit_audit_trigger BEFORE INSERT ON "AuditEvent" FOR EACH ROW EXECUTE FUNCTION test_xs_unique_on_limit_audit();`);
+  const originalError = console.error;
+  try {
+    await asUser(accountantId);
+    console.error = () => {};
+    const outcome = await customers
+      .requestCreditLimitIncreaseAction(form({ customerId: target.id, proposedLimit: "3000", reason: "Guarantee received from the bank" }))
+      .then(() => "no redirect", redirectOf);
+    assert.match(outcome, /customerResult=FAILED/);
+  } finally {
+    console.error = originalError;
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_unique_on_limit_audit_trigger ON "AuditEvent";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_unique_on_limit_audit();`);
+  }
+  assert.equal(await prisma.customerCreditLimitRequest.count({ where: { customerId: target.id } }), 0);
+
+  const retried = await customers
+    .requestCreditLimitIncreaseAction(form({ customerId: target.id, proposedLimit: "3000", reason: "Guarantee received from the bank" }))
+    .then(() => "no redirect", redirectOf);
+  assert.match(retried, /customerResult=REQUESTED/, "nothing was pending, so the retry is accepted");
+
+  const pending = await prisma.customerCreditLimitRequest.findFirstOrThrow({ where: { customerId: target.id, status: "PENDING" } });
+  await asUser(accountantId);
+  await assert.rejects(() => customers.decideCreditLimitRequestAction(form({ requestId: pending.id, decision: "APPROVE" })), /not permitted/);
+  assert.equal((await prisma.customer.findUniqueOrThrow({ where: { id: target.id } })).creditLimit, 0);
+});
+
 // PR4-R1-P1-03 — the audit write is inside the money transaction, proved
 // by making that write fail and showing nothing else survived.
 test("a failed audit insert rolls back the payment, the bill status and the journal", async () => {
@@ -1419,6 +1463,7 @@ after(async () => {
   await prisma.purchaseOrder.deleteMany({ where: { id: { in: purchaseOrderIds } } });
   await prisma.reservation.deleteMany({ where: { id: { in: reservationIds } } });
   await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
+  await prisma.customerCreditLimitRequest.deleteMany({ where: { customer: { legalName: { startsWith: `${prefix}-CUST-LIMIT-` } } } });
   await prisma.user.deleteMany({ where: { id: { in: users } } });
   await prisma.user.deleteMany({ where: { name: prefix } });
   await prisma.customer.deleteMany({ where: { id: customerId } });
