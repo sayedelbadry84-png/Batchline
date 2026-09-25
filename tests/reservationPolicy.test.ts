@@ -20,8 +20,9 @@ function unwrapDefault<T>(m: T): T {
 const ar = unwrapDefault(arModule.default);
 const en = unwrapDefault(enModule.default);
 
-test("decideCredit: a proposal must fit, headroom must remain, and a zero limit or an unpriced item always holds", () => {
-  const d = (exposureMinor: number, proposedMinor: number, limitMinor: number, unpriced = false) => decideCredit({ exposureMinor, proposedMinor, limitMinor, unpriced }).status;
+test("decideCredit: a proposal must fit, headroom must remain, and a zero limit, an unpriced item or mixed currencies always hold", () => {
+  const d = (exposureMinor: number, proposedMinor: number, limitMinor: number, unpriced = false, mixedCurrency = false) =>
+    decideCredit({ exposureMinor, proposedMinor, limitMinor, unpriced, mixedCurrency }).status;
   assert.equal(d(9999, 0, 10000), "WITHIN_LIMIT", "headroom left");
   assert.equal(d(10000, 0, 10000), "OVER_LIMIT", "no headroom left at the limit");
   assert.equal(d(5000, 5000, 10000), "WITHIN_LIMIT", "a proposal may use the limit exactly");
@@ -29,8 +30,9 @@ test("decideCredit: a proposal must fit, headroom must remain, and a zero limit 
   assert.equal(d(0, 0, 0), "OVER_LIMIT", "a zero limit is no credit");
   assert.equal(d(0, 1, 0), "OVER_LIMIT");
   assert.equal(d(0, 1, 100, true), "OVER_LIMIT", "an item that cannot be priced cannot be shown to fit");
-  assert.deepEqual(decideCredit({ exposureMinor: 1234, proposedMinor: 100, limitMinor: 5000, unpriced: false }), {
-    status: "WITHIN_LIMIT", exposureMinor: 1234, proposedMinor: 100, limitMinor: 5000, unpriced: false,
+  assert.equal(d(0, 1, 100, false, true), "OVER_LIMIT", "a sum across currencies cannot be compared with the limit");
+  assert.deepEqual(decideCredit({ exposureMinor: 1234, proposedMinor: 100, limitMinor: 5000, unpriced: false, mixedCurrency: false }), {
+    status: "WITHIN_LIMIT", exposureMinor: 1234, proposedMinor: 100, limitMinor: 5000, unpriced: false, mixedCurrency: false,
   });
 });
 

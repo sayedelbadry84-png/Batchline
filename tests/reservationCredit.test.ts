@@ -59,6 +59,7 @@ const invoiceIds: string[] = [];
 const tripIds: string[] = [];
 const truckIds: string[] = [];
 const employeeIds: string[] = [];
+const extraPlantIds: string[] = [];
 
 before(async () => {
   siteId = (await prisma.site.create({ data: { code: `${PREFIX}-A`, name: `${PREFIX}-SITE-A`, city: "Test", country: "Test" } })).id;
@@ -107,6 +108,7 @@ after(async () => {
   await prisma.mixDesign.deleteMany({ where: { id: { in: [mixId, otherMixId] } } });
   await prisma.silo.delete({ where: { id: siloId } });
   await prisma.material.delete({ where: { id: cementMaterialId } });
+  await prisma.plant.deleteMany({ where: { id: { in: extraPlantIds } } });
   await prisma.plant.delete({ where: { id: plantId } });
   await prisma.site.deleteMany({ where: { id: { in: [siteId, otherSiteId] } } });
   // AuditEvent is append-only at the database; the test-only bypass the
@@ -257,16 +259,133 @@ test("exposure counts unpaid issued invoices, unbilled delivered concrete and co
   assert.equal(await exposure(), 100000);
 });
 
+async function approvedReservation(projectId: string, data: { mixId?: string; siteId?: string; requestedVolumeM3?: number } = {}) {
+  const now = new Date();
+  const reservation = await prisma.reservation.create({
+    data: {
+      reservationNumber: `${PREFIX}-RES-${reservationIds.length}`,
+      projectId,
+      siteId: data.siteId ?? siteId,
+      mixId: data.mixId ?? mixId,
+      requestedVolumeM3: data.requestedVolumeM3 ?? 1,
+      originalVolumeM3: data.requestedVolumeM3 ?? 1,
+      pourWindowStart: now,
+      status: "CONFIRMED",
+      initialApprovedAt: now,
+      initialApprovedById: adminUserId,
+      finalApprovedAt: now,
+      finalApprovedById: adminUserId,
+    },
+  });
+  reservationIds.push(reservation.id);
+  return reservation;
+}
+
 test("a commitment that cannot be priced holds, whatever the limit", async () => {
   const { customerId, projectId } = await makeCustomer(999999);
   await prisma.priceListEntry.deleteMany({ where: { customerId, mixId: otherMixId } });
-  const unpriced = await prisma.reservation.create({
-    data: { reservationNumber: `${PREFIX}-RES-${reservationIds.length}`, projectId, siteId, mixId: otherMixId, requestedVolumeM3: 1, originalVolumeM3: 1, pourWindowStart: new Date(), status: "CONFIRMED" },
-  });
-  reservationIds.push(unpriced.id);
+  await approvedReservation(projectId, { mixId: otherMixId });
   const decision = await evaluateCustomerCredit(prisma, customerId);
   assert.equal(decision?.unpriced, true);
   assert.equal(decision?.status, "OVER_LIMIT", "an exposure that cannot be valued cannot be shown to fit");
+});
+
+// E2 (exposure audit of 6b1e13f): only an absent price used to count as
+// unpriced. A stored zero made a commitment free and a negative price
+// subtracted from exposure, making room for other bookings.
+test("a stored price of zero, below zero, NaN or Infinity cannot be valued, and holds", async () => {
+  const { customerId, projectId } = await makeCustomer(999999);
+  await approvedReservation(projectId, { requestedVolumeM3: 10 });
+  for (const bad of ["0", "-5", "'NaN'", "'Infinity'"]) {
+    await prisma.$executeRawUnsafe(`UPDATE "PriceListEntry" SET "pricePerM3" = ${bad} WHERE "customerId" = $1 AND "mixId" = $2`, customerId, mixId);
+    const decision = await evaluateCustomerCredit(prisma, customerId);
+    assert.equal(decision?.unpriced, true, `price ${bad} must not be valued`);
+    assert.equal(decision?.status, "OVER_LIMIT", `price ${bad} must not make room`);
+  }
+  await prisma.priceListEntry.update({ where: { customerId_mixId: { customerId, mixId } }, data: { pricePerM3: 100 } });
+  const ok = await evaluateCustomerCredit(prisma, customerId);
+  assert.deepEqual([ok?.status, ok?.exposureMinor, ok?.unpriced], ["WITHIN_LIMIT", 100000, false], "a positive price values it again");
+});
+
+// E3 (exposure audit): the rate for an unreleased booking was the highest
+// among ALL the site's stations, decommissioned ones included, and a site
+// with no station fell back to 0%.
+test("an unreleased booking is taxed at the highest ACTIVE station rate, and a site with no active station cannot be valued", async () => {
+  const { customerId, projectId } = await makeCustomer(999999);
+  const retired = await prisma.plant.create({ data: { siteId, name: `${PREFIX}-PLANT-RETIRED`, status: "DECOMMISSIONED", taxRatePct: 50 } });
+  extraPlantIds.push(retired.id);
+  await prisma.plant.update({ where: { id: plantId }, data: { taxRatePct: 15 } });
+  try {
+    await approvedReservation(projectId, { requestedVolumeM3: 20 });
+    assert.equal((await evaluateCustomerCredit(prisma, customerId))?.exposureMinor, 230000, "20 m3 x 100 x 1.15: the decommissioned 50% is not used");
+  } finally {
+    await prisma.plant.update({ where: { id: plantId }, data: { taxRatePct: 0 } });
+  }
+  // The other site has no ACTIVE station at all: no rate, no valuation.
+  const other = await makeCustomer(999999);
+  await approvedReservation(other.projectId, { siteId: otherSiteId });
+  const decision = await evaluateCustomerCredit(prisma, other.customerId);
+  assert.deepEqual([decision?.unpriced, decision?.status], [true, "OVER_LIMIT"]);
+});
+
+test("a customer whose items span two currencies cannot be compared with the limit, and holds", async () => {
+  const { customerId, projectId } = await makeCustomer(999999);
+  await approvedReservation(projectId);
+  assert.equal((await evaluateCustomerCredit(prisma, customerId))?.status, "WITHIN_LIMIT", "EGP station, no invoices");
+  const sar = await prisma.invoice.create({ data: { invoiceNumber: `${PREFIX}-INV-${invoiceIds.length}`, customerId, dueDate: new Date(), subtotal: 10, total: 10, status: "SENT", currency: "SAR" } });
+  invoiceIds.push(sar.id);
+  const decision = await evaluateCustomerCredit(prisma, customerId);
+  assert.deepEqual([decision?.mixedCurrency, decision?.status], [true, "OVER_LIMIT"]);
+});
+
+// E1 (exposure audit): an edit that changes volume, mix or project clears
+// the approvals but leaves the status, and the edited booking used to
+// keep counting at its new size, consuming headroom nobody approved.
+test("an edit that clears a booking's approvals stops its remainder counting until final approval re-signs it, or refuses it", async () => {
+  const { customerId, projectId } = await makeCustomer(10000);
+  const exposure = async () => (await evaluateCustomerCredit(prisma, customerId))!.exposureMinor;
+  const reservation = await makeReservation(projectId);
+  assert.equal(await exposure(), 200000);
+  assert.equal((await releaseTicketForReservation(reservation.id, 5, plantId, actor())).status, "OK");
+  let row = await prisma.reservation.findUniqueOrThrow({ where: { id: reservation.id } });
+  assert.equal(row.status, "IN_PRODUCTION");
+
+  // Raised to 200 m3: approvals cleared, still IN_PRODUCTION. Only the
+  // released ticket counts now.
+  assert.equal((await updateReservationForId(reservation.id, editInput(row, { requestedVolumeM3: 200 }), actor())).status, "OK");
+  row = await prisma.reservation.findUniqueOrThrow({ where: { id: reservation.id } });
+  assert.deepEqual([row.status, row.finalApprovedAt], ["IN_PRODUCTION", null]);
+  assert.equal(await exposure(), 50000, "the unapproved 195 m3 consumes nothing; the released 5 m3 still does");
+
+  // Re-signing it is a credit decision: 195 m3 (19500) + 500 does not fit 10000.
+  await prisma.reservation.update({ where: { id: reservation.id }, data: { initialApprovedAt: new Date(), initialApprovedById: adminUserId } });
+  assert.equal((await approveReservationFinalForId(reservation.id, actor())).status, "CREDIT_HOLD");
+  assert.equal(await exposure(), 50000);
+
+  // Reduced to 60 m3 (55 remaining = 5500, + 500): re-approved, counted again.
+  row = await prisma.reservation.findUniqueOrThrow({ where: { id: reservation.id } });
+  assert.equal((await updateReservationForId(reservation.id, editInput(row, { requestedVolumeM3: 60 }), actor())).status, "OK");
+  await prisma.reservation.update({ where: { id: reservation.id }, data: { initialApprovedAt: new Date(), initialApprovedById: adminUserId } });
+  assert.equal((await approveReservationFinalForId(reservation.id, actor())).status, "OK");
+  assert.equal(await exposure(), 600000);
+
+  // A confirmed booking switched to another mix: approvals cleared, not counted.
+  const second = await makeReservation(projectId, { requestedVolumeM3: 10 });
+  assert.equal(await exposure(), 700000);
+  assert.equal((await updateReservationForId(second.id, editInput(second, { mixId: otherMixId }), actor())).status, "OK");
+  assert.equal((await prisma.reservation.findUniqueOrThrow({ where: { id: second.id } })).finalApprovedAt, null);
+  assert.equal(await exposure(), 600000);
+});
+
+// Valuation is at the current price list and tax rates (dynamic
+// revaluation): a price rise after approval can stop later releases.
+test("a price rise after approval revalues the commitment, and release re-decides with it", async () => {
+  const { customerId, projectId } = await makeCustomer(2500);
+  const reservation = await makeReservation(projectId);
+  assert.equal((await releaseTicketForReservation(reservation.id, 5, plantId, actor())).status, "OK", "20 m3 at 100 fits 2500");
+  await prisma.priceListEntry.update({ where: { customerId_mixId: { customerId, mixId } }, data: { pricePerM3: 150 } });
+  assert.equal((await evaluateCustomerCredit(prisma, customerId))?.exposureMinor, 300000, "20 m3 now at 150");
+  assert.equal((await releaseTicketForReservation(reservation.id, 5, plantId, actor())).status, "CREDIT_HOLD");
 });
 
 test("a booking may use the limit exactly, and nothing more fits after it", async () => {

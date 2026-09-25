@@ -22,19 +22,37 @@ type Db = Prisma.TransactionClient | typeof prisma;
 //   whose trip is not on an issued (non-draft, non-cancelled) invoice, at
 //   its delivered volume if the trip recorded one, else its released
 //   volume, exactly the volume billing will invoice;
-// - open commitments: every CONFIRMED or IN_PRODUCTION reservation's
-//   remaining volume (requested less released, the same arithmetic as
-//   getRemainingVolumeM3). REQUESTED and ON_HOLD reservations are not yet
-//   commitments; they become one only through final approval, which
-//   decides credit for them.
+// - open commitments: the remaining volume (requested less released, the
+//   same arithmetic as getRemainingVolumeM3) of every CONFIRMED or
+//   IN_PRODUCTION reservation that holds a final approval. A booking is a
+//   commitment only while it carries that financial sign-off: REQUESTED
+//   and ON_HOLD ones have not had it yet, and an edit that changes volume,
+//   mix or project clears it (reservationEdits.ts) while leaving the
+//   status as it was. Counting such an edited booking would let an edit
+//   consume headroom no one approved; it counts again once final
+//   approval, which decides credit for it, re-signs it. Tickets already
+//   released against it keep counting as unbilled deliveries meanwhile.
 //
 // Unbilled and open volumes are valued the way billing will value them:
 // the customer's price list entry for the reservation's mix, plus tax.
 // A ticket uses its own station's tax rate; a reservation not yet
 // released, whose station is not chosen until release, uses the highest
-// rate among its site's stations, so the estimate never understates. A
-// commitment with no price on file cannot be valued, and the decision
-// fails closed rather than counting it as zero.
+// rate among its site's ACTIVE stations (the only ones release accepts),
+// so the estimate never understates for the station actually chosen.
+// Valuation is at the CURRENT price list and tax rates: a later change
+// revalues commitments already approved, and release re-decides with it.
+//
+// Anything that cannot be valued makes the decision fail closed instead
+// of counting as zero ("unpriced"): no price on file, a stored price that
+// is not a finite amount above zero (a zero or negative price would make
+// a commitment free or subtract from exposure), any non-finite amount or
+// volume, or a site with no ACTIVE station to take a tax rate from.
+//
+// The limit has no currency of its own, so it can only be compared with a
+// sum in ONE currency. Invoices carry theirs; tickets and bookings are in
+// their station's. When a customer's items span more than one currency
+// the sum is meaningless, and the decision fails closed ("mixedCurrency")
+// rather than adding SAR to EGP.
 //
 // A decision is about a PROPOSAL: the booking being created, or the
 // reservation being approved or released. That reservation is taken out
@@ -63,12 +81,13 @@ export type CreditDecision = {
   proposedMinor: number;
   limitMinor: number;
   unpriced: boolean;
+  mixedCurrency: boolean;
 };
 
-export function decideCredit(input: { exposureMinor: number; proposedMinor: number; limitMinor: number; unpriced: boolean }): CreditDecision {
-  const { exposureMinor, proposedMinor, limitMinor, unpriced } = input;
-  const within = limitMinor > 0 && !unpriced && exposureMinor < limitMinor && exposureMinor + proposedMinor <= limitMinor;
-  return { status: within ? "WITHIN_LIMIT" : "OVER_LIMIT", exposureMinor, proposedMinor, limitMinor, unpriced };
+export function decideCredit(input: { exposureMinor: number; proposedMinor: number; limitMinor: number; unpriced: boolean; mixedCurrency: boolean }): CreditDecision {
+  const { exposureMinor, proposedMinor, limitMinor, unpriced, mixedCurrency } = input;
+  const within = limitMinor > 0 && !unpriced && !mixedCurrency && exposureMinor < limitMinor && exposureMinor + proposedMinor <= limitMinor;
+  return { status: within ? "WITHIN_LIMIT" : "OVER_LIMIT", exposureMinor, proposedMinor, limitMinor, unpriced, mixedCurrency };
 }
 
 // What is being decided. A new booking is described by its mix, site and
@@ -76,14 +95,18 @@ export function decideCredit(input: { exposureMinor: number; proposedMinor: numb
 // and its remaining volume is read in the same snapshot as everything else.
 export type CreditProposal = { kind: "NEW_BOOKING"; mixId: string; siteId: string; volumeM3: number } | { kind: "RESERVATION"; reservationId: string };
 
+// Numbers arrive through JSON: a stored NaN or Infinity comes back as a
+// string, which num() below turns into "cannot be valued".
+type JsonNumber = number | string;
+
 type ExposureSnapshot = {
-  creditLimit: number;
-  invoices: { total: number; paid: number; credited: number }[];
-  tickets: { mixId: string; volume: number; taxRatePct: number }[];
-  reservations: { id: string; mixId: string; siteId: string; requested: number; released: number }[];
-  target: { id: string; mixId: string; siteId: string; requested: number; released: number } | null;
-  prices: { mixId: string; price: number }[];
-  siteTax: { siteId: string; rate: number }[];
+  creditLimit: JsonNumber;
+  invoices: { total: JsonNumber; paid: JsonNumber; credited: JsonNumber; currency: string }[];
+  tickets: { mixId: string; volume: JsonNumber; taxRatePct: JsonNumber; currency: string }[];
+  reservations: { id: string; mixId: string; siteId: string; requested: JsonNumber; released: JsonNumber }[];
+  target: { id: string; mixId: string; siteId: string; requested: JsonNumber; released: JsonNumber } | null;
+  prices: { mixId: string; price: JsonNumber }[];
+  sites: { siteId: string; rate: JsonNumber; currencies: string[] }[];
 };
 
 async function readExposure(db: Db, customerId: string, targetReservationId: string | null): Promise<ExposureSnapshot | null> {
@@ -94,7 +117,7 @@ async function readExposure(db: Db, customerId: string, targetReservationId: str
       'creditLimit', c."creditLimit",
       'invoices', COALESCE((
         SELECT json_agg(json_build_object(
-          'total', i."total",
+          'total', i."total", 'currency', i."currency",
           'paid', (SELECT COALESCE(SUM(p."amount"), 0) FROM "Payment" p WHERE p."invoiceId" = i."id"),
           'credited', (SELECT COALESCE(SUM(n."amount"), 0) FROM "CreditNote" n WHERE n."invoiceId" = i."id")))
         FROM "Invoice" i
@@ -103,7 +126,7 @@ async function readExposure(db: Db, customerId: string, targetReservationId: str
         SELECT json_agg(json_build_object(
           'mixId', r."mixId",
           'volume', COALESCE(tr."volumeDeliveredM3", t."volumeM3"),
-          'taxRatePct', pl."taxRatePct"))
+          'taxRatePct', pl."taxRatePct", 'currency', pl."currency"))
         FROM "BatchTicket" t
         JOIN "Reservation" r ON r."id" = t."reservationId"
         JOIN "Project" pj ON pj."id" = r."projectId"
@@ -123,7 +146,7 @@ async function readExposure(db: Db, customerId: string, targetReservationId: str
             FROM "BatchTicket" t2 LEFT JOIN "Trip" tr2 ON tr2."batchTicketId" = t2."id"
             WHERE t2."reservationId" = r."id" AND t2."status" <> 'CANCELLED')))
         FROM "Reservation" r JOIN "Project" pj ON pj."id" = r."projectId"
-        WHERE pj."customerId" = c."id" AND r."status" IN ('CONFIRMED', 'IN_PRODUCTION')), '[]'::json),
+        WHERE pj."customerId" = c."id" AND r."status" IN ('CONFIRMED', 'IN_PRODUCTION') AND r."finalApprovedAt" IS NOT NULL), '[]'::json),
       'target', (
         SELECT json_build_object(
           'id', r."id", 'mixId', r."mixId", 'siteId', r."siteId", 'requested', r."requestedVolumeM3",
@@ -136,9 +159,12 @@ async function readExposure(db: Db, customerId: string, targetReservationId: str
       'prices', COALESCE((
         SELECT json_agg(json_build_object('mixId', e."mixId", 'price', e."pricePerM3"))
         FROM "PriceListEntry" e WHERE e."customerId" = c."id"), '[]'::json),
-      'siteTax', COALESCE((
-        SELECT json_agg(json_build_object('siteId', s."siteId", 'rate', s."rate"))
-        FROM (SELECT "siteId", MAX("taxRatePct") AS "rate" FROM "Plant" GROUP BY "siteId") s), '[]'::json)
+      'sites', COALESCE((
+        SELECT json_agg(json_build_object('siteId', s."siteId", 'rate', s."rate", 'currencies', s."currencies"))
+        FROM (
+          SELECT "siteId", MAX("taxRatePct") AS "rate", array_agg(DISTINCT "currency") AS "currencies"
+          FROM "Plant" WHERE "status" = 'ACTIVE' GROUP BY "siteId"
+        ) s), '[]'::json)
     ) AS "snapshot"
     FROM "Customer" c
     WHERE c."id" = ${customerId}
@@ -146,12 +172,8 @@ async function readExposure(db: Db, customerId: string, targetReservationId: str
   return rows[0]?.snapshot ?? null;
 }
 
-// Value of a volume of the customer's concrete, tax included, in minor
-// units; null when the mix has no price on file for this customer.
-function valueMinor(volumeM3: number, price: number | undefined, taxRatePct: number): number | null {
-  if (price === undefined) return null;
-  if (volumeM3 <= 0) return 0;
-  return toMinorUnits(volumeM3 * price * (1 + taxRatePct / 100));
+function num(x: JsonNumber | undefined | null): number | null {
+  return typeof x === "number" && Number.isFinite(x) ? x : null;
 }
 
 // null when the customer (or the proposed reservation, for this customer)
@@ -165,37 +187,72 @@ export async function evaluateCustomerCredit(db: Db, customerId: string, proposa
   if (targetId !== null && !snap.target) return null;
 
   const priceByMix = new Map(snap.prices.map((p) => [p.mixId, p.price]));
-  const siteRate = new Map(snap.siteTax.map((s) => [s.siteId, s.rate]));
+  const siteById = new Map(snap.sites.map((s) => [s.siteId, s]));
+  const currencies = new Set<string>();
   let unpriced = false;
-  const priced = (v: number | null) => {
-    if (v === null) {
+
+  // Value of a volume of the customer's concrete, tax included, in minor
+  // units; 0 (and unpriced set) when it cannot be valued.
+  const value = (volumeRaw: JsonNumber, mixId: string, taxRaw: JsonNumber | null): number => {
+    const volume = num(volumeRaw);
+    const price = num(priceByMix.get(mixId));
+    const tax = num(taxRaw);
+    if (volume === null || price === null || price <= 0 || tax === null || tax < 0) {
       unpriced = true;
       return 0;
     }
-    return v;
+    return volume <= 0 ? 0 : toMinorUnits(volume * price * (1 + tax / 100));
+  };
+  // An unreleased booking's tax rate and currency come from its site's
+  // ACTIVE stations; a site with none cannot be valued.
+  const siteTax = (siteId: string): JsonNumber | null => {
+    const site = siteById.get(siteId);
+    if (!site) return null;
+    for (const c of site.currencies) currencies.add(c);
+    return site.rate;
+  };
+  const remaining = (r: { requested: JsonNumber; released: JsonNumber }): JsonNumber => {
+    const requested = num(r.requested);
+    const released = num(r.released);
+    return requested === null || released === null ? Number.NaN : Math.max(0, requested - released);
   };
 
   let exposureMinor = 0;
   for (const inv of snap.invoices) {
-    exposureMinor += toMinorUnits(invoiceAmountDue({ total: inv.total, payments: [{ amount: inv.paid }], creditNotes: [{ amount: inv.credited }] }));
+    const total = num(inv.total);
+    const paid = num(inv.paid);
+    const credited = num(inv.credited);
+    if (total === null || paid === null || credited === null) {
+      unpriced = true;
+      continue;
+    }
+    currencies.add(inv.currency);
+    exposureMinor += toMinorUnits(invoiceAmountDue({ total, payments: [{ amount: paid }], creditNotes: [{ amount: credited }] }));
   }
   for (const t of snap.tickets) {
-    exposureMinor += priced(valueMinor(t.volume, priceByMix.get(t.mixId), t.taxRatePct));
+    currencies.add(t.currency);
+    exposureMinor += value(t.volume, t.mixId, t.taxRatePct);
   }
   for (const r of snap.reservations) {
     if (r.id === targetId) continue;
-    exposureMinor += priced(valueMinor(Math.max(0, r.requested - r.released), priceByMix.get(r.mixId), siteRate.get(r.siteId) ?? 0));
+    exposureMinor += value(remaining(r), r.mixId, siteTax(r.siteId));
   }
 
   let proposedMinor = 0;
   if (proposal?.kind === "NEW_BOOKING") {
-    proposedMinor = priced(valueMinor(proposal.volumeM3, priceByMix.get(proposal.mixId), siteRate.get(proposal.siteId) ?? 0));
+    proposedMinor = value(proposal.volumeM3, proposal.mixId, siteTax(proposal.siteId));
   } else if (snap.target) {
-    const t = snap.target;
-    proposedMinor = priced(valueMinor(Math.max(0, t.requested - t.released), priceByMix.get(t.mixId), siteRate.get(t.siteId) ?? 0));
+    proposedMinor = value(remaining(snap.target), snap.target.mixId, siteTax(snap.target.siteId));
   }
 
-  return decideCredit({ exposureMinor, proposedMinor, limitMinor: toMinorUnits(snap.creditLimit), unpriced });
+  const limit = num(snap.creditLimit);
+  return decideCredit({
+    exposureMinor,
+    proposedMinor,
+    limitMinor: limit === null ? 0 : toMinorUnits(limit),
+    unpriced,
+    mixedCurrency: currencies.size > 1,
+  });
 }
 
 export async function evaluateProjectCredit(db: Db, projectId: string, proposal?: CreditProposal): Promise<CreditDecision | null> {
