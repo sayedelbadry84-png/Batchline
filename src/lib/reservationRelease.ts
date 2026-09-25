@@ -5,6 +5,7 @@ import { getRemainingVolumeM3 } from "@/lib/reservations";
 import { withSequentialNumber } from "@/lib/sequence";
 import { resolveTicketComponents } from "@/lib/batchCompletion";
 import { withRetry } from "@/lib/inventoryLedger";
+import { evaluateProjectCredit } from "@/lib/creditPolicy";
 
 // See the same note on production/actions.ts's own TX_OPTIONS —
 // several sequential round trips to Neon inside one transaction can
@@ -24,6 +25,7 @@ export type ReleaseTicketResult =
   | { status: "OK"; ticket: BatchTicket }
   | { status: "NOT_FOUND" }
   | { status: "INVALID_STATE" }
+  | { status: "CREDIT_HOLD" }
   | { status: "NO_REMAINING_VOLUME" }
   | { status: "STORAGE_NOT_CONFIGURED"; material: string };
 
@@ -103,6 +105,19 @@ export async function releaseTicketForReservation(reservationId: string, request
           if (!isApproved || !RELEASABLE_RESERVATION_STATUSES.has(reservation.status)) {
             throw new ReleaseAbort({ status: "INVALID_STATE" });
           }
+
+          // Credit is decided again here, from the customer's exposure as it
+          // is inside this transaction (creditPolicy.ts). CONFIRMED plus two
+          // approvals only says the booking fitted when it was approved;
+          // other commitments or price changes since can have taken the
+          // customer over, and every release after that point used to go
+          // through anyway. This reservation's remaining volume is the
+          // proposal, so releasing it is never counted twice. The
+          // reservation is left as it is: once a payment or a smaller
+          // commitment brings the customer back under the limit, release
+          // works again without a fresh approval.
+          const credit = await evaluateProjectCredit(tx, reservation.projectId, { kind: "RESERVATION", reservationId });
+          if (!credit || credit.status === "OVER_LIMIT") throw new ReleaseAbort({ status: "CREDIT_HOLD" });
 
           const plant = await tx.plant.findUnique({ where: { id: plantId }, select: { siteId: true, status: true } });
           if (!plant) throw new ReleaseAbort({ status: "NOT_FOUND" });

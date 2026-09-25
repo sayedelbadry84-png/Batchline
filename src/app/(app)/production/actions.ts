@@ -13,13 +13,13 @@ import { claimAndRecordActuals, claimAndRecordActualField, claimAndAddTicketComp
 import { startTripForTicket, type StartTripResult } from "@/lib/tripDispatch";
 import { reassignTrip, type ReassignTripResult } from "@/lib/tripAssignment";
 import { releaseTicketForReservation } from "@/lib/reservationRelease";
+import { createManualBooking } from "@/lib/manualBooking";
 import { parseReturnTarget, releaseSuccessPath, releaseFailurePath, parseTripReturnTarget, tripReturnPath } from "@/lib/releaseRouting";
 import {
   requestShortageOverride as requestShortageOverrideDomain,
   approveShortageOverrideRequest as approveShortageOverrideRequestDomain,
   rejectShortageOverrideRequest as rejectShortageOverrideRequestDomain,
 } from "@/lib/shortageOverrideRequests";
-import { withSequentialNumber } from "@/lib/sequence";
 import { SHORTAGE_OVERRIDE_DECISION_ROLES } from "@/lib/permissions";
 import { notify, notifyRoles } from "@/lib/notify";
 import { revalidatePath } from "next/cache";
@@ -127,64 +127,35 @@ export async function createManualRelease(formData: FormData) {
   if (!(await isPlantInScope(plantId, siteId))) return;
   if (!(await isPlantActive(plantId))) return; // frozen/decommissioned line: no new bookings
 
-  const now = new Date();
-  const reservation = await withSequentialNumber(
-    "RES",
-    (yr) => prisma.reservation.count({ where: { createdAt: yr } }),
-    (reservationNumber) =>
-      prisma.reservation.create({
-        data: {
-          reservationNumber,
-          projectId,
-          siteId,
-          mixId,
-          requestedVolumeM3: volumeM3,
-          pourWindowStart: now,
-          status: "CONFIRMED",
-          initialApprovedAt: now,
-          initialApprovedById: user!.id,
-          finalApprovedAt: now,
-          finalApprovedById: user!.id,
-        },
-      }),
-  );
-
-  await logAudit({
-    module: "Reservations",
-    recordId: reservation.id,
-    afterValue: `${volumeM3} m3`,
-    reasonCode: "MANUAL_BOOKING_CREATED",
-  });
-
   // effectiveSiteId(user!) here, not the form's own `siteId` — that's
   // the site the operator CHOSE to book against (already validated
   // in scope above), not the actor's own authority; allowedSiteId must
   // always be server-derived from the session, never form data
   // (RMR-R5-P1-01).
-  const result = await releaseTicketForReservation(reservation.id, volumeM3, plantId, { id: user!.id, role: user!.role, allowedSiteId: effectiveSiteId(user!) });
-  if (result.status !== "OK") {
-    // Operational decision (RMR-R2-P2-03): the reservation created just
-    // above is KEPT, not rolled back or auto-cancelled — it's a real,
-    // confirmed, fully-signed-off booking (self-approved, same as any
-    // other manual booking), and once whatever blocked release is fixed
-    // (e.g. a requisition arrives), it already shows up in the normal
-    // "ready to release" list below like any other confirmed reservation,
-    // so an operator can just retry it from there — no separate recovery
-    // flow needed. What was actually missing was any visible sign that
-    // this happened at all; now logged AND surfaced as a banner (with an
-    // explicit note that the booking is on file for retry), rather than
-    // a walk-in customer's booking silently vanishing from view with no
-    // ticket and no explanation.
+  const result = await createManualBooking({ projectId, siteId, plantId, mixId, volumeM3 }, { id: user!.id, role: user!.role, allowedSiteId: effectiveSiteId(user!) });
+  if (result.status === "NOT_FOUND" || result.status === "INVALID_VOLUME") return;
+  if (result.status !== "RELEASED") {
+    // Operational decision (RMR-R2-P2-03): the reservation is KEPT, never
+    // rolled back or auto-cancelled, and the banner says where it went.
+    //
+    // HELD_FOR_CREDIT: the customer is at or over their credit limit, so
+    // the booking was saved ON_HOLD and nothing was released. It waits for
+    // final approval, which re-checks credit.
+    // RELEASE_REFUSED: the booking is CONFIRMED and signed off, and shows
+    // up in the "ready to release" list for a retry once whatever blocked
+    // the release is fixed (e.g. a requisition arrives, or a payment brings
+    // the customer back under their limit).
+    const code = result.status === "HELD_FOR_CREDIT" ? "CREDIT_HOLD" : result.release.status;
     await logAudit({
       module: "Production",
-      recordId: reservation.id,
-      reasonCode: `RELEASE_${result.status}`,
-      afterValue: result.status === "STORAGE_NOT_CONFIGURED" ? result.material : undefined,
+      recordId: result.reservationId,
+      reasonCode: `RELEASE_${code}`,
+      afterValue: result.status === "RELEASE_REFUSED" && result.release.status === "STORAGE_NOT_CONFIGURED" ? result.release.material : undefined,
     });
     revalidatePath("/production");
     revalidatePath("/reservations");
-    const params = new URLSearchParams({ releaseError: result.status, manualBookingKept: "1" });
-    if (result.status === "STORAGE_NOT_CONFIGURED") params.set("releaseErrorMaterial", result.material);
+    const params = new URLSearchParams({ releaseError: code, manualBookingKept: result.status === "HELD_FOR_CREDIT" ? "held" : "1" });
+    if (result.status === "RELEASE_REFUSED" && result.release.status === "STORAGE_NOT_CONFIGURED") params.set("releaseErrorMaterial", result.release.material);
     redirect(`/production?${params.toString()}`);
   }
 
@@ -193,7 +164,7 @@ export async function createManualRelease(formData: FormData) {
   // the ticket (RMR-R4-P2-02).
   revalidatePath("/production");
   revalidatePath("/reservations");
-  redirect(`/production/${result.ticket.id}`);
+  redirect(`/production/${result.ticketId}`);
 }
 
 // PL-R10-P1-04, tenth production-lifecycle review: was a bare void-

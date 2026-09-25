@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { resolvePlantBillingDefaults } from "@/lib/plantBilling";
 import { logAudit, writeAudit } from "@/lib/audit";
+import { evaluateProjectCredit } from "@/lib/creditPolicy";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
@@ -638,6 +639,27 @@ export async function convertQuoteLineToReservation(formData: FormData) {
             include: { quote: true },
           });
           if (!line?.quote.projectId) throw new ScopeLostError();
+          // Quote lines are written with a positive volume today, but a
+          // legacy or hand-edited line must not become a negative booking
+          // (audit of f955650, N1). Nothing is converted.
+          if (!Number.isFinite(line.estimatedVolumeM3) || line.estimatedVolumeM3 <= 0) throw new ScopeLostError();
+
+          // Accepting a quote is the commercial sign-off, never a credit
+          // decision. This used to book a CONFIRMED, fully signed-off
+          // reservation whatever the customer owed, so converting a quote
+          // was a way around a credit hold. The same decision every
+          // reservation path makes (creditPolicy.ts), from this snapshot:
+          // if it does not fit under the limit, the reservation is created ON_HOLD with
+          // only the initial approval, and final approval, which re-checks
+          // credit, is what makes it releasable.
+          const credit = await evaluateProjectCredit(tx, line.quote.projectId, {
+            kind: "NEW_BOOKING",
+            mixId: line.mixId,
+            siteId: line.quote.siteId,
+            volumeM3: line.estimatedVolumeM3,
+          });
+          if (!credit) throw new ScopeLostError();
+          const held = credit.status === "OVER_LIMIT";
 
           const reservation = await tx.reservation.create({
             data: {
@@ -648,11 +670,10 @@ export async function convertQuoteLineToReservation(formData: FormData) {
               requestedVolumeM3: line.estimatedVolumeM3,
               originalVolumeM3: line.estimatedVolumeM3,
               pourWindowStart: now,
-              status: "CONFIRMED",
+              status: held ? "ON_HOLD" : "CONFIRMED",
               initialApprovedAt: now,
               initialApprovedById: actor!.id,
-              finalApprovedAt: now,
-              finalApprovedById: actor!.id,
+              ...(held ? {} : { finalApprovedAt: now, finalApprovedById: actor!.id }),
               quoteLineId: line.id,
             },
           });
@@ -660,7 +681,7 @@ export async function convertQuoteLineToReservation(formData: FormData) {
             module: "Reservations",
             recordId: reservation.id,
             afterValue: `${line.estimatedVolumeM3} m3 (from ${line.quote.quoteNumber})`,
-            reasonCode: "RESERVATION_CREATED_FROM_QUOTE",
+            reasonCode: held ? "RESERVATION_CREATED_FROM_QUOTE_CREDIT_HOLD" : "RESERVATION_CREATED_FROM_QUOTE",
           });
           return { reservation, quoteId: line.quoteId };
         }),

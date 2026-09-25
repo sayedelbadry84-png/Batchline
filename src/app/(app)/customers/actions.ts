@@ -1,9 +1,11 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
-import { getCurrentUser, requireActionPermission } from "@/lib/session";
+import { writeAudit } from "@/lib/audit";
+import { getCurrentUser, requireActionPermission, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
+import { requestCreditLimitIncrease, decideCreditLimitRequest, CREDIT_LIMIT_DECIDER_ROLE } from "@/lib/creditLimitRequests";
+import { redirect } from "next/navigation";
 
 // "C-00001" style — one past whatever the highest existing auto-generated
 // number is. Only ever consulted when the operator leaves the code field
@@ -21,6 +23,18 @@ async function generateNextCustomerCode(): Promise<string> {
   return `C-${String(max + 1).padStart(5, "0")}`;
 }
 
+function customersResultPath(code: string) {
+  return `/customers?${new URLSearchParams({ customerResult: code }).toString()}`;
+}
+
+// Neither customer form writes Customer.creditLimit. It gates every
+// reservation (creditPolicy.ts), and these actions are open to every role
+// with customers.createCustomer/updateCustomer, PLANT_OPERATOR included,
+// so a limit set here would be an authorization nobody approved. A new
+// customer starts at 0 (no credit); the only way up is
+// requestCreditLimitIncrease followed by a different person's approval
+// (src/lib/creditLimitRequests.ts). A creditLimit field in a crafted
+// submission is ignored, not stored.
 export async function createCustomer(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "customers", "createCustomer");
@@ -28,7 +42,6 @@ export async function createCustomer(formData: FormData) {
   const legalName = String(formData.get("legalName") ?? "").trim();
   const codeInput = String(formData.get("code") ?? "").trim();
   const taxId = String(formData.get("taxId") ?? "").trim();
-  const creditLimit = Number(formData.get("creditLimit") ?? 0);
   const paymentTerms = String(formData.get("paymentTerms") ?? "Net 30").trim();
   const contactEmail = String(formData.get("contactEmail") ?? "").trim();
   const contactPhone = String(formData.get("contactPhone") ?? "").trim();
@@ -36,11 +49,13 @@ export async function createCustomer(formData: FormData) {
   if (!legalName) return;
   const code = codeInput || (await generateNextCustomerCode());
 
-  const customer = await prisma.customer.create({
-    data: { code, legalName, taxId, creditLimit, paymentTerms, contactEmail, contactPhone },
+  // The customer and its audit row commit together.
+  await prisma.$transaction(async (tx) => {
+    const customer = await tx.customer.create({
+      data: { code, legalName, taxId, creditLimit: 0, paymentTerms, contactEmail, contactPhone },
+    });
+    await writeAudit(tx, { id: user!.id, role: user!.role }, { module: "Customers", recordId: customer.id, afterValue: `${code} — ${legalName}`, reasonCode: "CUSTOMER_CREATED" });
   });
-
-  await logAudit({ module: "Customers", recordId: customer.id, afterValue: `${code} — ${legalName}`, reasonCode: "CUSTOMER_CREATED" });
   revalidatePath("/customers");
 }
 
@@ -52,21 +67,74 @@ export async function updateCustomer(formData: FormData) {
   const legalName = String(formData.get("legalName") ?? "").trim();
   const codeInput = String(formData.get("code") ?? "").trim();
   const taxId = String(formData.get("taxId") ?? "").trim();
-  const creditLimit = Number(formData.get("creditLimit") ?? 0);
   const paymentTerms = String(formData.get("paymentTerms") ?? "Net 30").trim();
   const contactEmail = String(formData.get("contactEmail") ?? "").trim();
   const contactPhone = String(formData.get("contactPhone") ?? "").trim();
 
   if (!id || !legalName) return;
 
-  await prisma.customer.update({
-    where: { id },
-    // A blank code field leaves the existing code untouched rather than
-    // clearing it — the edit form always renders it pre-filled, so blank
-    // here means "wasn't submitted," not "the operator wants it removed."
-    data: { ...(codeInput ? { code: codeInput } : {}), legalName, taxId, creditLimit, paymentTerms, contactEmail, contactPhone },
+  // creditLimit is deliberately absent from this write (see above). The
+  // update and its audit row commit together; the audit used to be
+  // written after the change had already committed.
+  const updated = await prisma.$transaction(async (tx) => {
+    const result = await tx.customer.updateMany({
+      where: { id },
+      // A blank code field leaves the existing code untouched rather than
+      // clearing it — the edit form always renders it pre-filled, so blank
+      // here means "wasn't submitted," not "the operator wants it removed."
+      data: { ...(codeInput ? { code: codeInput } : {}), legalName, taxId, paymentTerms, contactEmail, contactPhone },
+    });
+    if (result.count !== 1) return false;
+    await writeAudit(tx, { id: user!.id, role: user!.role }, { module: "Customers", recordId: id, afterValue: legalName, reasonCode: "CUSTOMER_UPDATED" });
+    return true;
   });
-
-  await logAudit({ module: "Customers", recordId: id, afterValue: legalName, reasonCode: "CUSTOMER_UPDATED" });
+  if (!updated) return;
   revalidatePath("/customers");
+}
+
+export async function requestCreditLimitIncreaseAction(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "customers", "requestCreditLimitIncrease");
+
+  const customerId = String(formData.get("customerId") ?? "");
+  if (!customerId) redirect(customersResultPath("NOT_FOUND"));
+  let code: string;
+  try {
+    const result = await requestCreditLimitIncrease(
+      customerId,
+      { proposedLimit: formData.get("proposedLimit"), reason: String(formData.get("reason") ?? "") },
+      { id: user!.id, role: user!.role },
+    );
+    code = result.status === "OK" ? "REQUESTED" : result.status;
+  } catch (e) {
+    // A real failure (a constraint other than "one pending per customer",
+    // an audit write refused) is logged with its own error and shown as a
+    // failure, never as a business outcome like ALREADY_PENDING.
+    console.error("requestCreditLimitIncrease failed", e);
+    code = "FAILED";
+  }
+  revalidatePath("/customers");
+  redirect(customersResultPath(code));
+}
+
+export async function decideCreditLimitRequestAction(formData: FormData) {
+  const user = await getCurrentUser();
+  // Not an ActionPermission: who decides is fixed (CREDIT_LIMIT_DECIDER_ROLE,
+  // src/lib/creditLimitRequests.ts), and the decision re-reads the
+  // decider's role inside its own transaction.
+  requireRole(user, [CREDIT_LIMIT_DECIDER_ROLE]);
+  const decision = formData.get("decision") === "APPROVE" ? "APPROVE" : "REJECT";
+
+  const requestId = String(formData.get("requestId") ?? "");
+  if (!requestId) redirect(customersResultPath("NOT_FOUND"));
+  let code: string;
+  try {
+    code = (await decideCreditLimitRequest(requestId, decision, String(formData.get("decisionNote") ?? ""), { id: user!.id, role: user!.role })).status;
+  } catch (e) {
+    console.error("decideCreditLimitRequest failed", e);
+    code = "FAILED";
+  }
+  revalidatePath("/customers");
+  revalidatePath("/reservations");
+  redirect(customersResultPath(code));
 }
