@@ -134,8 +134,13 @@ before(async () => {
   const b = await prisma.site.create({ data: { code: `${prefix}-B`, name: `${prefix} B`, city: "Test", country: "Test" } });
   siteA = a.id;
   siteB = b.id;
-  plantA = (await prisma.plant.create({ data: { name: `${prefix} A`, siteId: siteA } })).id;
-  plantB = (await prisma.plant.create({ data: { name: `${prefix} B`, siteId: siteB } })).id;
+  // SAR, like every invoice, bill and order this suite creates for them:
+  // in the application an invoice takes its station's currency, and the
+  // credit decision holds a customer whose items span two currencies
+  // (creditPolicy.ts). Left at the EGP default, the fixture itself was
+  // such a customer.
+  plantA = (await prisma.plant.create({ data: { name: `${prefix} A`, siteId: siteA, currency: "SAR" } })).id;
+  plantB = (await prisma.plant.create({ data: { name: `${prefix} B`, siteId: siteB, currency: "SAR" } })).id;
 
   // Every non-admin reader lives at site A. ADMIN's effectiveSiteId is
   // null (unrestricted), which is the other half of the contract: the
