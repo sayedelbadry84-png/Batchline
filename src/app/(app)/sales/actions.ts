@@ -645,10 +645,15 @@ export async function convertQuoteLineToReservation(formData: FormData) {
           // reservation whatever the customer owed, so converting a quote
           // was a way around a credit hold. The same decision every
           // reservation path makes (creditPolicy.ts), from this snapshot:
-          // at or over the limit, the reservation is created ON_HOLD with
+          // if it does not fit under the limit, the reservation is created ON_HOLD with
           // only the initial approval, and final approval, which re-checks
           // credit, is what makes it releasable.
-          const credit = await evaluateProjectCredit(tx, line.quote.projectId);
+          const credit = await evaluateProjectCredit(tx, line.quote.projectId, {
+            kind: "NEW_BOOKING",
+            mixId: line.mixId,
+            siteId: line.quote.siteId,
+            volumeM3: line.estimatedVolumeM3,
+          });
           if (!credit) throw new ScopeLostError();
           const held = credit.status === "OVER_LIMIT";
 

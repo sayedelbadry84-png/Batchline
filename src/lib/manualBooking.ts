@@ -19,7 +19,7 @@ import { releaseTicketForReservation, type ReleaseActor, type ReleaseTicketResul
 // - within the limit: CONFIRMED and self-approved, then released. Release
 //   decides credit again inside its own transaction, so a balance that
 //   changes in between is still caught there.
-// - at or over the limit: the booking is kept ON_HOLD with only the
+// - not fitting under the limit: the booking is kept ON_HOLD with only the
 //   initial approval, nothing is released, and the result says so. The
 //   hold is lifted by final approval, which re-checks credit, exactly as
 //   for any other held reservation.
@@ -42,7 +42,7 @@ export async function createManualBooking(input: ManualBookingInput, actor: Rele
     (yr) => prisma.reservation.count({ where: { createdAt: yr } }),
     (reservationNumber) =>
       prisma.$transaction(async (tx) => {
-        const credit = await evaluateProjectCredit(tx, input.projectId);
+        const credit = await evaluateProjectCredit(tx, input.projectId, { kind: "NEW_BOOKING", mixId: input.mixId, siteId: input.siteId, volumeM3: input.volumeM3 });
         if (!credit) return null;
         const held = credit.status === "OVER_LIMIT";
         const reservation = await tx.reservation.create({

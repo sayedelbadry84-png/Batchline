@@ -205,7 +205,9 @@ export async function approveReservationFinalForId(id: string, actor: Reservatio
       if (!reservation.initialApprovedAt || reservation.finalApprovedAt) throw new Abort<ApproveFinalResult>({ status: "INVALID_STATE" });
       if (reservation.status === "DELIVERED" || reservation.status === "CANCELLED") throw new Abort<ApproveFinalResult>({ status: "INVALID_STATE" });
 
-      const credit = await evaluateProjectCredit(tx, reservation.projectId);
+      // The reservation's own remaining volume is the proposal; whatever
+      // else the customer has committed is the exposure it must fit beside.
+      const credit = await evaluateProjectCredit(tx, reservation.projectId, { kind: "RESERVATION", reservationId: id });
       if (!credit || credit.status === "OVER_LIMIT") throw new Abort<ApproveFinalResult>({ status: "CREDIT_HOLD" });
 
       await tx.reservation.update({

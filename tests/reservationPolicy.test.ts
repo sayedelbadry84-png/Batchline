@@ -20,12 +20,18 @@ function unwrapDefault<T>(m: T): T {
 const ar = unwrapDefault(arModule.default);
 const en = unwrapDefault(enModule.default);
 
-test("decideCredit holds at the limit, compares in minor units, and treats a zero limit as no credit", () => {
-  assert.equal(decideCredit(99.99, 100).status, "WITHIN_LIMIT");
-  assert.equal(decideCredit(100, 100).status, "OVER_LIMIT");
-  assert.equal(decideCredit(0.1 + 0.2, 0.3).status, "OVER_LIMIT", "float dust must not put a balance a hair under the limit");
-  assert.equal(decideCredit(0, 0).status, "OVER_LIMIT");
-  assert.deepEqual(decideCredit(12.34, 50), { status: "WITHIN_LIMIT", outstandingMinor: 1234, limitMinor: 5000 });
+test("decideCredit: a proposal must fit, headroom must remain, and a zero limit or an unpriced item always holds", () => {
+  const d = (exposureMinor: number, proposedMinor: number, limitMinor: number, unpriced = false) => decideCredit({ exposureMinor, proposedMinor, limitMinor, unpriced }).status;
+  assert.equal(d(9999, 0, 10000), "WITHIN_LIMIT", "headroom left");
+  assert.equal(d(10000, 0, 10000), "OVER_LIMIT", "no headroom left at the limit");
+  assert.equal(d(5000, 5000, 10000), "WITHIN_LIMIT", "a proposal may use the limit exactly");
+  assert.equal(d(5000, 5001, 10000), "OVER_LIMIT", "one halala over does not fit");
+  assert.equal(d(0, 0, 0), "OVER_LIMIT", "a zero limit is no credit");
+  assert.equal(d(0, 1, 0), "OVER_LIMIT");
+  assert.equal(d(0, 1, 100, true), "OVER_LIMIT", "an item that cannot be priced cannot be shown to fit");
+  assert.deepEqual(decideCredit({ exposureMinor: 1234, proposedMinor: 100, limitMinor: 5000, unpriced: false }), {
+    status: "WITHIN_LIMIT", exposureMinor: 1234, proposedMinor: 100, limitMinor: 5000, unpriced: false,
+  });
 });
 
 test("the edit form may only keep the current status or place a hold", () => {

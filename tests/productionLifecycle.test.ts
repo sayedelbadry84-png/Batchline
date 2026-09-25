@@ -116,6 +116,11 @@ before(async () => {
     data: { code: `TEST-SUITE-PL-MIX-${Date.now()}`, grade: "C25", slumpTargetMm: 100, wcRatio: 0.5, components: { create: [{ materialId, designMassKgPerM3: 300 }] } },
   });
   mixId = mix.id;
+  // The credit limit caps total exposure, valued at the customer's price
+  // list (creditPolicy.ts); a commitment with no price cannot be valued
+  // and holds. A nominal price keeps this fixture's releases well inside
+  // its limit.
+  await prisma.priceListEntry.create({ data: { customerId, mixId, pricePerM3: 1 } });
 
   const admin = await prisma.user.create({
     data: { email: `test-suite-pl-admin-${Date.now()}@example.invalid`, name: "TEST-SUITE-PL-ADMIN", passwordHash: "not-a-real-hash", role: "ADMIN" },
@@ -188,6 +193,7 @@ after(async () => {
   for (const id of crewIds) await cleanupDelete(() => prisma.pumpCrewMember.delete({ where: { id } }));
   for (const id of extraPlantIds) await cleanupDelete(() => prisma.plant.delete({ where: { id } }));
 
+  await cleanupDelete(() => prisma.priceListEntry.deleteMany({ where: { customerId } }));
   await cleanupDelete(() => prisma.mixDesign.delete({ where: { id: mixId } }));
   await cleanupDelete(() => prisma.silo.delete({ where: { id: siloId } }));
   await cleanupDelete(() => prisma.material.delete({ where: { id: materialId } }));

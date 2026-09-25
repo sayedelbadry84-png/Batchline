@@ -105,7 +105,8 @@ export async function createReservation(formData: FormData) {
   // the silent-return below like every other rejected submission here.
   //
   // Credit is decided in the same transaction (creditPolicy.ts): a
-  // customer at or over their limit gets an ON_HOLD reservation, which
+  // booking that does not fit under the customer's limit, counting
+  // everything already committed, gets an ON_HOLD reservation, which
   // only final approval, re-checking credit, can clear. The audit row
   // commits with the reservation; it used to be written afterwards.
   try {
@@ -114,7 +115,7 @@ export async function createReservation(formData: FormData) {
         for (const row of pumpRows) {
           if (!(await isPumpAvailable(tx, row.pumpId, pourWindowStart))) throw new Error("PUMP_UNAVAILABLE");
         }
-        const credit = await evaluateCustomerCredit(tx, project.customer.id);
+        const credit = await evaluateCustomerCredit(tx, project.customer.id, { kind: "NEW_BOOKING", mixId, siteId, volumeM3: requestedVolumeM3 });
         if (!credit) throw new Error("CUSTOMER_NOT_FOUND");
         const overCreditLimit = credit.status === "OVER_LIMIT";
         const reservation = await withSequentialNumber(

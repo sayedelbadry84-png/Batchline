@@ -515,7 +515,7 @@ const en: typeof ar = {
         NO_PRICE_ON_FILE: "Not saved: there is no price on file for this customer and mix.",
         BELOW_RELEASED: "Not saved: the volume can't go below what has already been released.",
         FROZEN_AFTER_RELEASE: "Not saved: the project, mix and site can't change once concrete has been released for this reservation.",
-        CREDIT_HOLD: "Not approved: the customer is at or over their credit limit. The reservation stays on hold until a payment brings them under it.",
+        CREDIT_HOLD: "Not approved: this reservation does not fit under the customer's credit limit, counting unpaid invoices, delivered but unbilled concrete and confirmed bookings. It stays on hold until payments, a smaller commitment or an approved higher limit make room for it.",
         HAS_RELEASED_VOLUME: "Not cancelled: concrete has already been released for this reservation. Use End reservation instead.",
       },
       reminderPanelTitle: "Upcoming pour reminders",
@@ -572,7 +572,7 @@ const en: typeof ar = {
       releaseError: {
         STORAGE_NOT_CONFIGURED: (material: string) => `Couldn't release the ticket: no storage is configured for "${material}" at this station.`,
         INVALID_STATE: "Couldn't release the ticket: the reservation or station's state changed before the release finished — please try again.",
-        CREDIT_HOLD: "Couldn't release the ticket: the customer is at or over their credit limit. Record a payment or have the limit reviewed, then release again.",
+        CREDIT_HOLD: "Couldn't release the ticket: the customer's exposure (unpaid invoices, delivered but unbilled concrete and confirmed bookings) is over their credit limit. Record a payment or have the limit reviewed, then release again.",
         manualBookingHeldNote: "The manual booking was saved ON HOLD because of the customer's credit limit, and no ticket was released. It needs final approval, which re-checks credit, before it can be released.",
         NOT_FOUND: "Couldn't release the ticket: the reservation or station no longer exists.",
         NO_REMAINING_VOLUME: "Couldn't release the ticket: this reservation has no remaining volume left.",
@@ -911,7 +911,7 @@ const en: typeof ar = {
       customersIntro: "Builders and contractors — credit terms, contacts, and the project count billed against each account.",
       creditLimitRequests: {
         title: "Credit limit increases",
-        intro: "A customer's credit limit decides whether their reservations are held and their tickets released. It is not edited on the customer form: an increase is requested with a reason, and only takes effect when an administrator other than the requester approves it. Until then reservations and releases keep using the approved limit.",
+        intro: "A customer's credit limit decides whether their reservations are held and their tickets released. It is not edited on the customer form: an increase is requested with a reason, and only takes effect when an administrator other than the requester approves it. Until then reservations and releases keep using the approved limit. The limit caps the customer's total exposure: unpaid invoices, delivered but unbilled concrete, and the remaining volume of confirmed bookings, valued at their price list with tax.",
         approvedLimit: "Approved limit",
         pendingSuffix: "pending",
         requestTitle: "Request an increase",

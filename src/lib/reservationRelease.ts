@@ -106,15 +106,17 @@ export async function releaseTicketForReservation(reservationId: string, request
             throw new ReleaseAbort({ status: "INVALID_STATE" });
           }
 
-          // Credit is decided again here, from the customer's receivables as
-          // they are inside this transaction. CONFIRMED plus two approvals
-          // only says the customer was within their limit when the booking
-          // was approved; invoices issued since can have taken them over it,
-          // and every release after that point used to go through anyway.
-          // The reservation is left as it is: once a payment brings the
-          // balance back under the limit, release works again without a
-          // fresh approval.
-          const credit = await evaluateProjectCredit(tx, reservation.projectId);
+          // Credit is decided again here, from the customer's exposure as it
+          // is inside this transaction (creditPolicy.ts). CONFIRMED plus two
+          // approvals only says the booking fitted when it was approved;
+          // other commitments or price changes since can have taken the
+          // customer over, and every release after that point used to go
+          // through anyway. This reservation's remaining volume is the
+          // proposal, so releasing it is never counted twice. The
+          // reservation is left as it is: once a payment or a smaller
+          // commitment brings the customer back under the limit, release
+          // works again without a fresh approval.
+          const credit = await evaluateProjectCredit(tx, reservation.projectId, { kind: "RESERVATION", reservationId });
           if (!credit || credit.status === "OVER_LIMIT") throw new ReleaseAbort({ status: "CREDIT_HOLD" });
 
           const plant = await tx.plant.findUnique({ where: { id: plantId }, select: { siteId: true, status: true } });

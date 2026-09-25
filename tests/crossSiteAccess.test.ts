@@ -725,6 +725,16 @@ test("converting a quote for a customer at or over the credit limit books the re
 
 test("converting a quote for a customer within the limit still books a confirmed, signed-off reservation", async () => {
   await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 1_000_000 } });
+  // The limit caps total exposure valued at the customer's price list
+  // (creditPolicy.ts). In the real flow, sending the quote writes that
+  // price (markQuoteSent); this fixture accepts the quote directly, so it
+  // writes the price itself. Without one the booking cannot be valued and
+  // holds.
+  await prisma.priceListEntry.upsert({
+    where: { customerId_mixId: { customerId, mixId } },
+    create: { customerId, mixId, pricePerM3: 100 },
+    update: { pricePerM3: 100 },
+  });
   try {
     const line = await acceptedQuoteLine();
     await asUser(salesId);
@@ -734,6 +744,7 @@ test("converting a quote for a customer within the limit still books a confirmed
     assert.notEqual(reservation.finalApprovedAt, null);
   } finally {
     await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 0 } });
+    await prisma.priceListEntry.deleteMany({ where: { customerId, mixId } });
   }
 });
 

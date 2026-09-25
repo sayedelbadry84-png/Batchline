@@ -56,6 +56,9 @@ const customerIds: string[] = [];
 const projectIds: string[] = [];
 const reservationIds: string[] = [];
 const invoiceIds: string[] = [];
+const tripIds: string[] = [];
+const truckIds: string[] = [];
+const employeeIds: string[] = [];
 
 before(async () => {
   siteId = (await prisma.site.create({ data: { code: `${PREFIX}-A`, name: `${PREFIX}-SITE-A`, city: "Test", country: "Test" } })).id;
@@ -84,6 +87,10 @@ before(async () => {
 });
 
 after(async () => {
+  await prisma.invoiceLine.deleteMany({ where: { tripId: { in: tripIds } } });
+  await prisma.trip.deleteMany({ where: { id: { in: tripIds } } });
+  await prisma.truck.deleteMany({ where: { id: { in: truckIds } } });
+  await prisma.employee.deleteMany({ where: { id: { in: employeeIds } } });
   const tickets = await prisma.batchTicket.findMany({ where: { reservationId: { in: reservationIds } }, select: { id: true } });
   const ticketIds = tickets.map((t) => t.id);
   if (ticketIds.length > 0) {
@@ -181,14 +188,108 @@ async function ticketsFor(reservationId: string) {
 
 // ---- The credit decision itself ---------------------------------------
 
-test("the credit policy counts issued receivables against the limit in minor units, and 'at the limit' holds", async () => {
-  const { customerId } = await makeCustomer(100);
-  assert.equal((await evaluateCustomerCredit(prisma, customerId))?.status, "WITHIN_LIMIT");
-  await issueInvoice(customerId, 99.99);
-  assert.equal((await evaluateCustomerCredit(prisma, customerId))?.status, "WITHIN_LIMIT", "one halala under the limit is within it");
-  await issueInvoice(customerId, 0.01);
+// ---- 0. What the limit caps -----------------------------------------------
+// Owner decision (PR #9): the limit is a ceiling on total committed
+// exposure, not on issued receivables alone.
+
+async function makeTrip(ticketId: string, volumeDeliveredM3: number) {
+  const truck = await prisma.truck.create({ data: { plantId, code: `${PREFIX}-TRK-${truckIds.length}`, drumCapacityM3: 12, status: "ACTIVE" } });
+  truckIds.push(truck.id);
+  const driver = await prisma.employee.create({ data: { plantId, name: `${PREFIX}-DRV-${employeeIds.length}`, role: "DRIVER", status: "ACTIVE" } });
+  employeeIds.push(driver.id);
+  const trip = await prisma.trip.create({ data: { batchTicketId: ticketId, truckId: truck.id, driverId: driver.id, status: "CLOSED", volumeDeliveredM3 } });
+  tripIds.push(trip.id);
+  return trip;
+}
+
+test("exposure counts unpaid issued invoices, unbilled delivered concrete and confirmed bookings, at the price list with tax, never twice", async () => {
+  const { customerId, projectId } = await makeCustomer(100000);
+  const exposure = async () => (await evaluateCustomerCredit(prisma, customerId))!.exposureMinor;
+  assert.equal(await exposure(), 0);
+
+  // An issued invoice is a receivable; a draft is not.
+  await issueInvoice(customerId, 1000);
+  const draft = await prisma.invoice.create({ data: { invoiceNumber: `${PREFIX}-INV-${invoiceIds.length}`, customerId, dueDate: new Date(), subtotal: 500, total: 500, status: "DRAFT" } });
+  invoiceIds.push(draft.id);
+  assert.equal(await exposure(), 100000);
+
+  // A confirmed booking is a commitment (20 m3 at 100); one on hold is not yet.
+  const confirmed = await makeReservation(projectId);
+  await makeReservation(projectId, { status: "ON_HOLD", approved: false });
+  assert.equal(await exposure(), 300000);
+
+  // Releasing moves volume from the booking to an unbilled ticket: no change.
+  assert.equal((await releaseTicketForReservation(confirmed.id, 5, plantId, actor())).status, "OK");
+  assert.equal(await exposure(), 300000);
+
+  // Tax: the ticket at its station's rate, the unreleased rest at the
+  // highest rate among the site's stations. 1000 + 5*115 + 15*115.
+  await prisma.plant.update({ where: { id: plantId }, data: { taxRatePct: 15 } });
+  try {
+    assert.equal(await exposure(), 330000);
+  } finally {
+    await prisma.plant.update({ where: { id: plantId }, data: { taxRatePct: 0 } });
+  }
+
+  // A short delivery counts what was delivered, as billing will, and the
+  // booking's remaining volume grows to match (getRemainingVolumeM3).
+  const ticket = await prisma.batchTicket.findFirstOrThrow({ where: { reservationId: confirmed.id } });
+  const trip = await makeTrip(ticket.id, 4);
+  assert.equal(await exposure(), 300000);
+
+  // On a draft invoice the delivery is still unbilled; once that invoice
+  // is issued it is a receivable instead. Never both, never neither.
+  const billing = await prisma.invoice.create({
+    data: {
+      invoiceNumber: `${PREFIX}-INV-${invoiceIds.length}`, customerId, dueDate: new Date(), subtotal: 400, total: 400, status: "DRAFT",
+      lines: { create: [{ tripId: trip.id, description: "test", volumeM3: 4, unitPrice: 100, lineTotal: 400 }] },
+    },
+  });
+  invoiceIds.push(billing.id);
+  assert.equal(await exposure(), 300000);
+  await prisma.invoice.update({ where: { id: billing.id }, data: { status: "SENT" } });
+  assert.equal(await exposure(), 300000);
+
+  // A payment reduces it; a cancelled ticket or booking no longer counts.
+  await prisma.payment.create({ data: { invoiceId: billing.id, amount: 400 } });
+  assert.equal(await exposure(), 260000);
+  await prisma.reservation.update({ where: { id: confirmed.id }, data: { status: "CANCELLED" } });
+  assert.equal(await exposure(), 100000);
+});
+
+test("a commitment that cannot be priced holds, whatever the limit", async () => {
+  const { customerId, projectId } = await makeCustomer(999999);
+  await prisma.priceListEntry.deleteMany({ where: { customerId, mixId: otherMixId } });
+  const unpriced = await prisma.reservation.create({
+    data: { reservationNumber: `${PREFIX}-RES-${reservationIds.length}`, projectId, siteId, mixId: otherMixId, requestedVolumeM3: 1, originalVolumeM3: 1, pourWindowStart: new Date(), status: "CONFIRMED" },
+  });
+  reservationIds.push(unpriced.id);
   const decision = await evaluateCustomerCredit(prisma, customerId);
-  assert.deepEqual(decision, { status: "OVER_LIMIT", outstandingMinor: 10000, limitMinor: 10000 }, "exactly at the limit holds");
+  assert.equal(decision?.unpriced, true);
+  assert.equal(decision?.status, "OVER_LIMIT", "an exposure that cannot be valued cannot be shown to fit");
+});
+
+test("a booking may use the limit exactly, and nothing more fits after it", async () => {
+  const { projectId } = await makeCustomer(400);
+  const exact = await createManualBooking({ projectId, siteId, plantId, mixId, volumeM3: 4 }, actor());
+  if ("reservationId" in exact) reservationIds.push(exact.reservationId);
+  assert.equal(exact.status, "RELEASED", "4 m3 at 100 against a limit of 400 fits exactly");
+  const more = await createManualBooking({ projectId, siteId, plantId, mixId, volumeM3: 0.5 }, actor());
+  if ("reservationId" in more) reservationIds.push(more.reservationId);
+  assert.equal(more.status, "HELD_FOR_CREDIT", "the exposure is at the limit: nothing more fits");
+});
+
+test("two approvals that each fit alone, but not together, cannot both go through", async () => {
+  const { projectId } = await makeCustomer(3000);
+  const held = [];
+  for (let i = 0; i < 2; i++) {
+    const r = await makeReservation(projectId, { status: "ON_HOLD", approved: false });
+    await prisma.reservation.update({ where: { id: r.id }, data: { initialApprovedAt: new Date(), initialApprovedById: adminUserId } });
+    held.push(r);
+  }
+  const results = await Promise.all(held.map((r) => approveReservationFinalForId(r.id, actor())));
+  assert.deepEqual(results.map((r) => r.status).sort(), ["CREDIT_HOLD", "OK"], "20 m3 + 20 m3 at 100 does not fit under 3000");
+  assert.equal(await prisma.reservation.count({ where: { id: { in: held.map((r) => r.id) }, status: "CONFIRMED" } }), 1);
 });
 
 // ---- 1. The edit form can no longer set an arbitrary status -------------
@@ -281,19 +382,19 @@ test("a manual booking within the limit is confirmed and released, as before", a
 // ---- 3. Release re-decides credit ---------------------------------------
 
 test("a customer who goes over the limit after approval cannot be released against, until a payment brings them back", async () => {
-  const { customerId, projectId } = await makeCustomer(1000);
+  const { customerId, projectId } = await makeCustomer(3000);
   const reservation = await makeReservation(projectId);
 
-  // Approved and CONFIRMED while within the limit; then an invoice takes
-  // the customer to it.
-  const invoice = await issueInvoice(customerId, 1000);
+  // Approved and CONFIRMED (20 m3 at 100 = 2000) while within the limit;
+  // then an invoice takes the customer one halala over it.
+  const invoice = await issueInvoice(customerId, 1000.01);
   const refused = await releaseTicketForReservation(reservation.id, 5, plantId, actor());
   assert.equal(refused.status, "CREDIT_HOLD", "old approvals must not carry a release past a credit limit reached since");
   assert.equal(await ticketsFor(reservation.id), 0);
   assert.equal((await prisma.reservation.findUniqueOrThrow({ where: { id: reservation.id } })).status, "CONFIRMED", "the refusal changes nothing");
 
-  // A payment brings the balance under the limit: release works again.
-  await prisma.payment.create({ data: { invoiceId: invoice.id, amount: 1 } });
+  // A payment brings the exposure back to the limit: release works again.
+  await prisma.payment.create({ data: { invoiceId: invoice.id, amount: 0.01 } });
   const released = await releaseTicketForReservation(reservation.id, 5, plantId, actor());
   assert.equal(released.status, "OK");
 });
@@ -745,7 +846,7 @@ test("end to end: limit 0 holds, a separately approved increase lets final appro
   const confirmedEarlier = await makeReservation(projectId);
   assert.equal((await releaseTicketForReservation(confirmedEarlier.id, 5, plantId, actor())).status, "CREDIT_HOLD", "an older CONFIRMED booking is rechecked at release");
 
-  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "1000", reason: REASON }, person(accountantId, "ACCOUNTANT"));
+  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, person(accountantId, "ACCOUNTANT"));
   if (requested.status !== "OK") throw new Error(`request refused: ${requested.status}`);
   assert.equal((await approveReservationFinalForId(held.id, actor())).status, "CREDIT_HOLD", "a pending request lifts nothing");
 
@@ -754,7 +855,8 @@ test("end to end: limit 0 holds, a separately approved increase lets final appro
   assert.equal((await prisma.reservation.findUniqueOrThrow({ where: { id: held.id } })).status, "CONFIRMED");
   assert.equal((await releaseTicketForReservation(confirmedEarlier.id, 5, plantId, actor())).status, "OK");
 
-  // Receivables reaching the raised limit hold again.
-  await issueInvoice(customerId, 1000);
+  // Both bookings (2 x 2000) fit under 5000. An invoice of 1000 would use
+  // the limit exactly; one halala more and the next release holds.
+  await issueInvoice(customerId, 1000.01);
   assert.equal((await releaseTicketForReservation(held.id, 5, plantId, actor())).status, "CREDIT_HOLD");
 });
