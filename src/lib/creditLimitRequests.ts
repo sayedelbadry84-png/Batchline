@@ -16,21 +16,33 @@ import { canPerformAction } from "@/lib/permissions";
 // - anyone with customers.requestCreditLimitIncrease may PROPOSE a higher
 //   limit, with a reason. A proposal changes nothing: creditPolicy.ts
 //   reads Customer.creditLimit only;
-// - only a different person, holding customers.approveCreditLimitIncrease
-//   at the moment of the decision AND company-wide scope, may approve it.
+// - only an ADMIN other than the requester may approve or reject it.
 //   Approval writes the limit, the decision and the audit row in one
 //   transaction, under the Customer row lock.
 //
-// Customer is company-wide (no siteId), so its limit is company-wide
-// authority. A plant-pinned account may be granted the request action,
-// because a request authorizes nothing, but never the decision, whatever
-// the permissions screen says: a site-scoped user deciding a company-wide
-// limit is exactly the inference this refuses to make.
+// Who decides is fixed here, not on the Permissions screen. Customer is
+// company-wide (no siteId), so its limit is company-wide financial
+// authority. An earlier version put approve/reject on the editable
+// ACTION_ROLES table AND required effectiveSiteId(actor) === null, which
+// only ADMIN ever satisfies: the screen could show an accountant as
+// "granted" a decision the server would always refuse. Deriving financial
+// authority from a plant-data scope helper was the wrong source anyway.
+// Until the owner defines a delegable company-wide credit-approval role,
+// the rule is the one the code actually enforced: ADMIN decides,
+// ACCOUNTANT (or ADMIN) requests, and the two are different people.
+//
+// The decider's role and status are read from the User row, under a
+// share lock, inside the same transaction that writes the decision. A
+// role change or deactivation that commits first is seen; one that
+// starts during the decision waits for it to finish. The role the session
+// carried in is only a fast early refusal, never the authority.
 //
 // Lowering a limit is not part of this flow (it only ever restricts), and
 // no path in the application lowers it today.
 
-export type CreditLimitActor = { id: string; role: string; allowedSiteId: string | null };
+export type CreditLimitActor = { id: string; role: string };
+
+export const CREDIT_LIMIT_DECIDER_ROLE = "ADMIN";
 
 const MIN_REASON_LENGTH = 10;
 
@@ -53,7 +65,8 @@ export type RequestCreditLimitResult =
   | { status: "INVALID_AMOUNT" }
   | { status: "NOT_AN_INCREASE" }
   | { status: "REASON_REQUIRED" }
-  | { status: "ALREADY_PENDING" };
+  | { status: "ALREADY_PENDING" }
+  | { status: "NO_ELIGIBLE_APPROVER" };
 
 export async function requestCreditLimitIncrease(
   customerId: string,
@@ -73,8 +86,10 @@ export async function requestCreditLimitIncrease(
 
   try {
     const requestId = await prisma.$transaction(async (tx) => {
-      // Lock order, shared with the decision below: Customer row first,
-      // then request rows.
+      // Lock order, shared with the decision below: Customer row, then
+      // request rows. (The decision takes a share lock on its own User row
+      // before either; this path locks no User row, so the two cannot
+      // wait on each other in opposite orders.)
       const locked = await tx.$queryRaw<{ creditLimit: number }[]>`SELECT "creditLimit" FROM "Customer" WHERE "id" = ${customerId} FOR UPDATE`;
       if (locked.length === 0) throw new Abort<RequestCreditLimitResult>({ status: "NOT_FOUND" });
       const currentMinor = toMinorUnits(locked[0].creditLimit);
@@ -82,6 +97,13 @@ export async function requestCreditLimitIncrease(
 
       const pending = await tx.customerCreditLimitRequest.count({ where: { customerId, status: "PENDING" } });
       if (pending > 0) throw new Abort<RequestCreditLimitResult>({ status: "ALREADY_PENDING" });
+
+      // A request nobody may decide would sit PENDING forever and block
+      // every later one for this customer. Deciders are active ADMINs
+      // other than the requester; an ADMIN requesting with no second
+      // ADMIN on the system is told so instead.
+      const deciders = await tx.user.count({ where: { role: CREDIT_LIMIT_DECIDER_ROLE, status: "ACTIVE", id: { not: actor.id } } });
+      if (deciders === 0) throw new Abort<RequestCreditLimitResult>({ status: "NO_ELIGIBLE_APPROVER" });
 
       const request = await tx.customerCreditLimitRequest.create({
         data: {
@@ -130,11 +152,9 @@ export async function decideCreditLimitRequest(
   note: string,
   actor: CreditLimitActor,
 ): Promise<DecideCreditLimitResult> {
-  // Permission as it stands NOW, not when the request was made or the page
-  // was rendered: revoking the permission stops a pending approval.
-  const actionKey = decision === "APPROVE" ? "approveCreditLimitIncrease" : "rejectCreditLimitIncrease";
-  if (!(await canPerformAction(actor.role, "customers", actionKey))) return { status: "FORBIDDEN" };
-  if (actor.allowedSiteId !== null) return { status: "FORBIDDEN" };
+  // Early refusal from the session's role; the authority itself is
+  // re-read from the User row inside the transaction below.
+  if (actor.role !== CREDIT_LIMIT_DECIDER_ROLE) return { status: "FORBIDDEN" };
   const decisionNote = note.trim() || null;
   if (decision === "REJECT" && !decisionNote) return { status: "NOTE_REQUIRED" };
 
@@ -146,6 +166,14 @@ export async function decideCreditLimitRequest(
 
   try {
     const outcome = await prisma.$transaction(async (tx) => {
+      // The decider's authority as it stands at this commit. FOR SHARE
+      // conflicts with the UPDATE that changes a role or deactivates an
+      // account, so neither can slip in between this check and the
+      // decision's commit.
+      const decider = await tx.$queryRaw<{ role: string; status: string }[]>`SELECT "role", "status" FROM "User" WHERE "id" = ${actor.id} FOR SHARE`;
+      if (decider.length === 0 || decider[0].role !== CREDIT_LIMIT_DECIDER_ROLE || decider[0].status !== "ACTIVE") {
+        throw new Abort<DecideCreditLimitResult>({ status: "FORBIDDEN" });
+      }
       const locked = await tx.$queryRaw<{ creditLimit: number }[]>`SELECT "creditLimit" FROM "Customer" WHERE "id" = ${target.customerId} FOR UPDATE`;
       if (locked.length === 0) throw new Abort<DecideCreditLimitResult>({ status: "NOT_FOUND" });
       await tx.$queryRaw`SELECT "id" FROM "CustomerCreditLimitRequest" WHERE "id" = ${requestId} FOR UPDATE`;
@@ -212,3 +240,4 @@ export async function decideCreditLimitRequest(
     throw e;
   }
 }
+

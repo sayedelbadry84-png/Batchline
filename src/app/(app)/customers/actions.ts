@@ -2,10 +2,9 @@
 
 import { prisma } from "@/lib/prisma";
 import { writeAudit } from "@/lib/audit";
-import { getCurrentUser, requireActionPermission } from "@/lib/session";
+import { getCurrentUser, requireActionPermission, requireRole } from "@/lib/session";
 import { revalidatePath } from "next/cache";
-import { effectiveSiteId } from "@/lib/siteScope";
-import { requestCreditLimitIncrease, decideCreditLimitRequest } from "@/lib/creditLimitRequests";
+import { requestCreditLimitIncrease, decideCreditLimitRequest, CREDIT_LIMIT_DECIDER_ROLE } from "@/lib/creditLimitRequests";
 import { redirect } from "next/navigation";
 
 // "C-00001" style — one past whatever the highest existing auto-generated
@@ -102,7 +101,7 @@ export async function requestCreditLimitIncreaseAction(formData: FormData) {
   const result = await requestCreditLimitIncrease(
     customerId,
     { proposedLimit: formData.get("proposedLimit"), reason: String(formData.get("reason") ?? "") },
-    { id: user!.id, role: user!.role, allowedSiteId: effectiveSiteId(user) },
+    { id: user!.id, role: user!.role },
   );
   revalidatePath("/customers");
   redirect(customersResultPath(result.status === "OK" ? "REQUESTED" : result.status));
@@ -110,16 +109,15 @@ export async function requestCreditLimitIncreaseAction(formData: FormData) {
 
 export async function decideCreditLimitRequestAction(formData: FormData) {
   const user = await getCurrentUser();
+  // Not an ActionPermission: who decides is fixed (CREDIT_LIMIT_DECIDER_ROLE,
+  // src/lib/creditLimitRequests.ts), and the decision re-reads the
+  // decider's role inside its own transaction.
+  requireRole(user, [CREDIT_LIMIT_DECIDER_ROLE]);
   const decision = formData.get("decision") === "APPROVE" ? "APPROVE" : "REJECT";
-  await requireActionPermission(user, "customers", decision === "APPROVE" ? "approveCreditLimitIncrease" : "rejectCreditLimitIncrease");
 
   const requestId = String(formData.get("requestId") ?? "");
   if (!requestId) redirect(customersResultPath("NOT_FOUND"));
-  const result = await decideCreditLimitRequest(requestId, decision, String(formData.get("decisionNote") ?? ""), {
-    id: user!.id,
-    role: user!.role,
-    allowedSiteId: effectiveSiteId(user),
-  });
+  const result = await decideCreditLimitRequest(requestId, decision, String(formData.get("decisionNote") ?? ""), { id: user!.id, role: user!.role });
   revalidatePath("/customers");
   revalidatePath("/reservations");
   redirect(customersResultPath(result.status));

@@ -35,6 +35,7 @@ const { updateReservationForId, approveReservationFinalForId, cancelReservationF
 const { createManualBooking } = await import("../src/lib/manualBooking");
 const { evaluateCustomerCredit } = await import("../src/lib/creditPolicy");
 const { requestCreditLimitIncrease, decideCreditLimitRequest } = await import("../src/lib/creditLimitRequests");
+const { ACTION_ROLES, ACTION_LIST } = await import("../src/lib/permissions");
 
 const prisma = new PrismaClient();
 const PREFIX = `TEST-SUITE-RC-${Date.now()}`;
@@ -410,10 +411,10 @@ test("the database refuses a negative, infinite or NaN credit limit", async () =
 // ---- Credit limit increases: request, decision, and the gate end to end --
 // Customer.creditLimit used to be a field on the ordinary customer form,
 // writable by every role with customers.updateCustomer. It is now raised
-// only by a request approved by a different, company-wide actor holding
-// the approve permission at the moment of the decision.
+// only by a request approved by an active ADMIN other than the requester,
+// whose stored role is re-read inside the decision's transaction.
 
-const companyWide = (id: string, role: string) => ({ id, role, allowedSiteId: null as string | null });
+const person = (id: string, role: string) => ({ id, role });
 
 async function withActionRoles(actionKey: string, roles: string[], fn: () => Promise<void>) {
   // ActionPermission rows replace the compiled default for this action for
@@ -433,39 +434,50 @@ async function limitOf(customerId: string) {
 
 const REASON = "Annual contract signed with a bank guarantee";
 
-test("only permitted roles can request, approve or reject, and a site-scoped actor can never decide", async () => {
+test("only an active ADMIN other than the requester decides; the Permissions table cannot delegate it", async () => {
   const { customerId } = await makeCustomer(0);
-  assert.equal((await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, { id: operatorId, role: "PLANT_OPERATOR", allowedSiteId: siteId })).status, "FORBIDDEN");
+  assert.equal((await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, { id: operatorId, role: "PLANT_OPERATOR" })).status, "FORBIDDEN");
 
-  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, { id: accountantId, role: "ACCOUNTANT", allowedSiteId: siteId });
-  assert.equal(requested.status, "OK", "a request authorizes nothing, so finance may make one from a plant");
+  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, { id: accountantId, role: "ACCOUNTANT" });
+  assert.equal(requested.status, "OK", "a request authorizes nothing, so finance may make one");
   if (requested.status !== "OK") throw new Error("unreachable");
 
-  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", companyWide(operatorId, "PLANT_OPERATOR"))).status, "FORBIDDEN");
-  assert.equal((await decideCreditLimitRequest(requested.requestId, "REJECT", "no", companyWide(operatorId, "PLANT_OPERATOR"))).status, "FORBIDDEN");
-  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", companyWide(accountantId, "ACCOUNTANT"))).status, "FORBIDDEN", "the requester's role does not decide by default");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(operatorId, "PLANT_OPERATOR"))).status, "FORBIDDEN");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "REJECT", "no", person(operatorId, "PLANT_OPERATOR"))).status, "FORBIDDEN");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(accountantId, "ACCOUNTANT"))).status, "FORBIDDEN");
 
-  // Even when the permissions screen grants ACCOUNTANT the decision, a
-  // plant-pinned account cannot decide a company-wide limit.
+  // F1: approve/reject are not on the editable ACTION_ROLES table any
+  // more, so the Permissions screen has nothing to grant, and even a
+  // leftover ActionPermission row for the old keys grants nothing.
+  assert.equal(Object.hasOwn(ACTION_ROLES.customers, "approveCreditLimitIncrease"), false);
+  assert.equal(Object.hasOwn(ACTION_ROLES.customers, "rejectCreditLimitIncrease"), false);
+  assert.equal(ACTION_LIST.some((a) => a.moduleKey === "customers" && /CreditLimitIncrease$/.test(a.actionKey) && a.actionKey !== "requestCreditLimitIncrease"), false);
   await withActionRoles("approveCreditLimitIncrease", ["ACCOUNTANT", "ADMIN"], async () => {
-    const otherAccountant = await prisma.user.create({ data: { email: `${PREFIX.toLowerCase()}-acct2@example.invalid`, name: `${PREFIX}-ACCOUNTANT-2`, passwordHash: "x", role: "ACCOUNTANT" } });
-    try {
-      assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", { id: otherAccountant.id, role: "ACCOUNTANT", allowedSiteId: siteId })).status, "FORBIDDEN");
-    } finally {
-      await prisma.user.delete({ where: { id: otherAccountant.id } });
-    }
+    await withActionRoles("rejectCreditLimitIncrease", ["ACCOUNTANT", "ADMIN"], async () => {
+      const otherAccountant = await prisma.user.create({ data: { email: `${PREFIX.toLowerCase()}-acct2@example.invalid`, name: `${PREFIX}-ACCOUNTANT-2`, passwordHash: "x", role: "ACCOUNTANT" } });
+      try {
+        assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(otherAccountant.id, "ACCOUNTANT"))).status, "FORBIDDEN");
+        assert.equal((await decideCreditLimitRequest(requested.requestId, "REJECT", "no", person(otherAccountant.id, "ACCOUNTANT"))).status, "FORBIDDEN");
+        // The authority is the stored role, not whatever the caller says:
+        // an accountant presented as ADMIN is still refused.
+        assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(otherAccountant.id, "ADMIN"))).status, "FORBIDDEN");
+      } finally {
+        await prisma.user.delete({ where: { id: otherAccountant.id } });
+      }
+    });
   });
 
   assert.equal(await limitOf(customerId), 0, "nothing above changed the limit");
   assert.equal((await prisma.customerCreditLimitRequest.findUniqueOrThrow({ where: { id: requested.requestId } })).status, "PENDING");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(adminUserId, "ADMIN"))).status, "APPROVED", "an ADMIN other than the requester decides");
 });
 
 test("a requester cannot decide their own request, even holding every permission", async () => {
   const { customerId } = await makeCustomer(0);
-  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "7000", reason: REASON }, companyWide(adminUserId, "ADMIN"));
+  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "7000", reason: REASON }, person(adminUserId, "ADMIN"));
   if (requested.status !== "OK") throw new Error(`request refused: ${requested.status}`);
-  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", companyWide(adminUserId, "ADMIN"))).status, "SELF_DECISION");
-  assert.equal((await decideCreditLimitRequest(requested.requestId, "REJECT", "changed my mind", companyWide(adminUserId, "ADMIN"))).status, "SELF_DECISION");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(adminUserId, "ADMIN"))).status, "SELF_DECISION");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "REJECT", "changed my mind", person(adminUserId, "ADMIN"))).status, "SELF_DECISION");
   assert.equal(await limitOf(customerId), 0);
 
   // The database refuses the same thing if the application ever didn't.
@@ -474,21 +486,69 @@ test("a requester cannot decide their own request, even holding every permission
   );
 });
 
-test("revoking the approve permission while a request is pending stops its approval", async () => {
+test("demoting or deactivating the approver while a request is pending stops its approval", async () => {
   const { customerId } = await makeCustomer(0);
-  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "3000", reason: REASON }, companyWide(accountantId, "ACCOUNTANT"));
+  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "3000", reason: REASON }, person(accountantId, "ACCOUNTANT"));
   if (requested.status !== "OK") throw new Error(`request refused: ${requested.status}`);
-  await withActionRoles("approveCreditLimitIncrease", ["QUALITY_SUPERVISOR"], async () => {
-    assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", companyWide(adminUserId, "ADMIN"))).status, "FORBIDDEN");
-  });
+  try {
+    // The session still says ADMIN; the stored role no longer does.
+    await prisma.user.update({ where: { id: secondAdminId }, data: { role: "ACCOUNTANT" } });
+    assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(secondAdminId, "ADMIN"))).status, "FORBIDDEN");
+    await prisma.user.update({ where: { id: secondAdminId }, data: { role: "ADMIN", status: "INACTIVE" } });
+    assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(secondAdminId, "ADMIN"))).status, "FORBIDDEN");
+  } finally {
+    await prisma.user.update({ where: { id: secondAdminId }, data: { role: "ADMIN", status: "ACTIVE" } });
+  }
   assert.equal(await limitOf(customerId), 0);
-  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", companyWide(adminUserId, "ADMIN"))).status, "APPROVED", "with the permission restored it goes through");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(secondAdminId, "ADMIN"))).status, "APPROVED", "restored, it goes through");
   assert.equal(await limitOf(customerId), 3000);
+});
+
+async function waitUntilBlockedOn(queryPattern: string, timeoutMs = 10000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await prisma.$queryRaw<{ pid: number }[]>`
+      SELECT pid FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock' AND query ILIKE ${queryPattern} AND pid <> pg_backend_pid()
+    `;
+    if (rows.length > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for a query matching ${queryPattern} to block on a lock`);
+}
+
+// F4 (PR #9 follow-up audit): the permission used to be checked before the
+// transaction, so a demotion committing while the decision ran did not
+// stop it. The decider's User row is now share-locked and re-read inside
+// the decision's transaction: a demotion holding that row makes the
+// decision wait, and once it commits the decision sees it.
+test("a demotion committed while the decision waits for the approver's row is seen, and nothing is approved", async () => {
+  const { customerId } = await makeCustomer(0);
+  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "2500", reason: REASON }, person(accountantId, "ACCOUNTANT"));
+  if (requested.status !== "OK") throw new Error(`request refused: ${requested.status}`);
+  let decision: ReturnType<typeof decideCreditLimitRequest> | undefined;
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`UPDATE "User" SET "role" = 'ACCOUNTANT' WHERE "id" = ${secondAdminId}`;
+        decision = decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(secondAdminId, "ADMIN"));
+        await waitUntilBlockedOn('%"User"%FOR SHARE%');
+      },
+      { timeout: 20000 },
+    );
+    assert.equal((await decision!).status, "FORBIDDEN", "the decision must see the demotion that committed while it waited");
+  } finally {
+    await decision?.catch(() => undefined);
+    await prisma.user.update({ where: { id: secondAdminId }, data: { role: "ADMIN" } });
+  }
+  assert.equal(await limitOf(customerId), 0);
+  assert.equal((await prisma.customerCreditLimitRequest.findUniqueOrThrow({ where: { id: requested.requestId } })).status, "PENDING");
+  assert.equal(await prisma.auditEvent.count({ where: { recordId: customerId, reasonCode: "CREDIT_LIMIT_INCREASE_APPROVED" } }), 0);
 });
 
 test("invalid, equal and lower proposals are refused; a valid amount is stored exactly in minor units", async () => {
   const { customerId } = await makeCustomer(1000);
-  const actor = companyWide(accountantId, "ACCOUNTANT");
+  const actor = person(accountantId, "ACCOUNTANT");
   for (const proposedLimit of ["-1", "Infinity", "NaN", "1e5", "100.005", "99999999999999999999", "abc", "", "1,500"]) {
     const result = await requestCreditLimitIncrease(customerId, { proposedLimit, reason: REASON }, actor);
     assert.equal(result.status, "INVALID_AMOUNT", `"${proposedLimit}" must be refused`);
@@ -509,54 +569,75 @@ test("invalid, equal and lower proposals are refused; a valid amount is stored e
 
 test("approval applies once; replays, rejection, a second proposal and concurrent decisions are deterministic", async () => {
   const { customerId } = await makeCustomer(0);
-  const actor = companyWide(accountantId, "ACCOUNTANT");
+  const actor = person(accountantId, "ACCOUNTANT");
   const first = await requestCreditLimitIncrease(customerId, { proposedLimit: "4000", reason: REASON }, actor);
   if (first.status !== "OK") throw new Error(`request refused: ${first.status}`);
   assert.equal((await requestCreditLimitIncrease(customerId, { proposedLimit: "9000", reason: REASON }, actor)).status, "ALREADY_PENDING");
 
   // Two approvers at once: exactly one applies.
   const decisions = await Promise.all([
-    decideCreditLimitRequest(first.requestId, "APPROVE", "", companyWide(adminUserId, "ADMIN")),
-    decideCreditLimitRequest(first.requestId, "APPROVE", "", companyWide(secondAdminId, "ADMIN")),
+    decideCreditLimitRequest(first.requestId, "APPROVE", "", person(adminUserId, "ADMIN")),
+    decideCreditLimitRequest(first.requestId, "APPROVE", "", person(secondAdminId, "ADMIN")),
   ]);
   assert.deepEqual(decisions.map((d) => d.status).sort(), ["APPROVED", "NOT_PENDING"]);
   assert.equal(await limitOf(customerId), 4000);
   assert.equal(await prisma.auditEvent.count({ where: { recordId: customerId, reasonCode: "CREDIT_LIMIT_INCREASE_APPROVED" } }), 1);
-  assert.equal((await decideCreditLimitRequest(first.requestId, "APPROVE", "", companyWide(secondAdminId, "ADMIN"))).status, "NOT_PENDING", "a replay does nothing");
+  assert.equal((await decideCreditLimitRequest(first.requestId, "APPROVE", "", person(secondAdminId, "ADMIN"))).status, "NOT_PENDING", "a replay does nothing");
 
   // A rejection needs a note and changes no limit.
   const second = await requestCreditLimitIncrease(customerId, { proposedLimit: "8000", reason: REASON }, actor);
   if (second.status !== "OK") throw new Error(`request refused: ${second.status}`);
-  assert.equal((await decideCreditLimitRequest(second.requestId, "REJECT", "  ", companyWide(adminUserId, "ADMIN"))).status, "NOTE_REQUIRED");
-  assert.equal((await decideCreditLimitRequest(second.requestId, "REJECT", "Payment history too short", companyWide(adminUserId, "ADMIN"))).status, "REJECTED");
+  assert.equal((await decideCreditLimitRequest(second.requestId, "REJECT", "  ", person(adminUserId, "ADMIN"))).status, "NOTE_REQUIRED");
+  assert.equal((await decideCreditLimitRequest(second.requestId, "REJECT", "Payment history too short", person(adminUserId, "ADMIN"))).status, "REJECTED");
   assert.equal(await limitOf(customerId), 4000);
 
   // Two requests racing: one is recorded, the other is told one is pending.
   const racing = await Promise.all([
     requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, actor),
-    requestCreditLimitIncrease(customerId, { proposedLimit: "6000", reason: REASON }, companyWide(adminUserId, "ADMIN")),
+    requestCreditLimitIncrease(customerId, { proposedLimit: "6000", reason: REASON }, person(adminUserId, "ADMIN")),
   ]);
   assert.deepEqual(racing.map((r) => r.status).sort(), ["ALREADY_PENDING", "OK"]);
   assert.equal(await prisma.customerCreditLimitRequest.count({ where: { customerId, status: "PENDING" } }), 1);
 });
 
+// F1 (PR #9 follow-up audit): with deciding fixed to ADMIN and never the
+// requester, a request that no one else could decide would sit PENDING
+// and block every later request for that customer.
+test("a request nobody else could decide is refused as NO_ELIGIBLE_APPROVER", async () => {
+  const { customerId } = await makeCustomer(0);
+  // The test database is disposable, but other ACTIVE admins may exist in
+  // it (seed data, a developer's own account). They are suspended for the
+  // duration of this test and restored exactly afterwards.
+  const others = await prisma.user.findMany({ where: { role: "ADMIN", status: "ACTIVE", id: { not: adminUserId } }, select: { id: true } });
+  const otherIds = others.map((u) => u.id);
+  try {
+    await prisma.user.updateMany({ where: { id: { in: otherIds } }, data: { status: "INACTIVE" } });
+    assert.equal((await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, person(adminUserId, "ADMIN"))).status, "NO_ELIGIBLE_APPROVER");
+    assert.equal(await prisma.customerCreditLimitRequest.count({ where: { customerId } }), 0);
+    // An accountant's request is fine: the one remaining ADMIN can decide it.
+    assert.equal((await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, person(accountantId, "ACCOUNTANT"))).status, "OK");
+  } finally {
+    await prisma.user.updateMany({ where: { id: { in: otherIds } }, data: { status: "ACTIVE" } });
+  }
+});
+
 test("a request made against a limit that has since changed goes stale instead of being applied", async () => {
   const { customerId } = await makeCustomer(1000);
-  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, companyWide(accountantId, "ACCOUNTANT"));
+  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, person(accountantId, "ACCOUNTANT"));
   if (requested.status !== "OK") throw new Error(`request refused: ${requested.status}`);
   // The limit changes underneath it (an out-of-band correction).
   await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 1500 } });
 
-  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", companyWide(adminUserId, "ADMIN"))).status, "STALE");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(adminUserId, "ADMIN"))).status, "STALE");
   assert.equal(await limitOf(customerId), 1500, "a stale request is never applied");
   assert.equal((await prisma.customerCreditLimitRequest.findUniqueOrThrow({ where: { id: requested.requestId } })).status, "STALE");
-  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", companyWide(adminUserId, "ADMIN"))).status, "NOT_PENDING");
-  assert.equal((await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, companyWide(accountantId, "ACCOUNTANT"))).status, "OK", "a fresh request against the current limit is accepted");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(adminUserId, "ADMIN"))).status, "NOT_PENDING");
+  assert.equal((await requestCreditLimitIncrease(customerId, { proposedLimit: "5000", reason: REASON }, person(accountantId, "ACCOUNTANT"))).status, "OK", "a fresh request against the current limit is accepted");
 });
 
 test("a failed audit insert at approval rolls back both the request and the limit; the retry records one full audit row", async () => {
   const { customerId } = await makeCustomer(0);
-  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "12000", reason: REASON }, companyWide(accountantId, "ACCOUNTANT"));
+  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "12000", reason: REASON }, person(accountantId, "ACCOUNTANT"));
   if (requested.status !== "OK") throw new Error(`request refused: ${requested.status}`);
 
   await prisma.$executeRawUnsafe(`
@@ -571,7 +652,7 @@ test("a failed audit insert at approval rolls back both the request and the limi
   `);
   await prisma.$executeRawUnsafe(`CREATE TRIGGER test_rc_reject_limit_audit_trigger BEFORE INSERT ON "AuditEvent" FOR EACH ROW EXECUTE FUNCTION test_rc_reject_limit_audit();`);
   try {
-    await assert.rejects(() => decideCreditLimitRequest(requested.requestId, "APPROVE", "", companyWide(adminUserId, "ADMIN")));
+    await assert.rejects(() => decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(adminUserId, "ADMIN")));
     assert.equal(await limitOf(customerId), 0, "the limit must not change without its audit row");
     assert.equal((await prisma.customerCreditLimitRequest.findUniqueOrThrow({ where: { id: requested.requestId } })).status, "PENDING");
   } finally {
@@ -579,7 +660,7 @@ test("a failed audit insert at approval rolls back both the request and the limi
     await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_rc_reject_limit_audit();`);
   }
 
-  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "Guarantee received", companyWide(adminUserId, "ADMIN"))).status, "APPROVED");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "Guarantee received", person(adminUserId, "ADMIN"))).status, "APPROVED");
   const audits = await prisma.auditEvent.findMany({ where: { recordId: customerId, reasonCode: "CREDIT_LIMIT_INCREASE_APPROVED" } });
   assert.equal(audits.length, 1);
   assert.equal(audits[0].actorId, adminUserId);
@@ -598,11 +679,11 @@ test("end to end: limit 0 holds, a separately approved increase lets final appro
   const confirmedEarlier = await makeReservation(projectId);
   assert.equal((await releaseTicketForReservation(confirmedEarlier.id, 5, plantId, actor())).status, "CREDIT_HOLD", "an older CONFIRMED booking is rechecked at release");
 
-  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "1000", reason: REASON }, companyWide(accountantId, "ACCOUNTANT"));
+  const requested = await requestCreditLimitIncrease(customerId, { proposedLimit: "1000", reason: REASON }, person(accountantId, "ACCOUNTANT"));
   if (requested.status !== "OK") throw new Error(`request refused: ${requested.status}`);
   assert.equal((await approveReservationFinalForId(held.id, actor())).status, "CREDIT_HOLD", "a pending request lifts nothing");
 
-  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", companyWide(secondAdminId, "ADMIN"))).status, "APPROVED");
+  assert.equal((await decideCreditLimitRequest(requested.requestId, "APPROVE", "", person(secondAdminId, "ADMIN"))).status, "APPROVED");
   assert.equal((await approveReservationFinalForId(held.id, actor())).status, "OK");
   assert.equal((await prisma.reservation.findUniqueOrThrow({ where: { id: held.id } })).status, "CONFIRMED");
   assert.equal((await releaseTicketForReservation(confirmedEarlier.id, 5, plantId, actor())).status, "OK");

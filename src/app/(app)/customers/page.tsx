@@ -5,7 +5,7 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { createCustomer, updateCustomer, requestCreditLimitIncreaseAction, decideCreditLimitRequestAction } from "./actions";
 import { canPerformAction } from "@/lib/permissions";
-import { effectiveSiteId } from "@/lib/siteScope";
+import { CREDIT_LIMIT_DECIDER_ROLE } from "@/lib/creditLimitRequests";
 import { getDateFormatters } from "@/lib/displayTimeZone";
 import { describeCustomerResult } from "@/lib/customerResultText";
 import { createProject, updateProject } from "../projects/actions";
@@ -27,15 +27,11 @@ export default async function CustomersPage({
   const mp = dict.modules.projects;
   const { edit: editId, editProject: editProjectId, customerResult } = await searchParams;
   const resultBanner = describeCustomerResult(cl.result, customerResult);
-  // What this user may do with credit limit requests. Display only: every
-  // action re-checks its permission, and deciding also requires
-  // company-wide scope and a decider other than the requester.
-  const [canRequestLimit, canApproveLimit, canRejectLimit] = await Promise.all([
-    canPerformAction(user.role, "customers", "requestCreditLimitIncrease"),
-    canPerformAction(user.role, "customers", "approveCreditLimitIncrease"),
-    canPerformAction(user.role, "customers", "rejectCreditLimitIncrease"),
-  ]);
-  const companyWide = effectiveSiteId(user) === null;
+  // What this user may do with credit limit requests. Display only: each
+  // action re-checks on the server, and a decision re-reads the decider's
+  // role inside its transaction.
+  const canRequestLimit = await canPerformAction(user.role, "customers", "requestCreditLimitIncrease");
+  const canDecideLimit = user.role === CREDIT_LIMIT_DECIDER_ROLE;
 
   const [customers, projects] = await Promise.all([
     prisma.customer.findMany({
@@ -268,17 +264,13 @@ export default async function CustomersPage({
                     <td className={ui.td}>
                       {r.requestedById === user.id ? (
                         <span className="text-xs text-ink-muted">{cl.ownRequest}</span>
-                      ) : companyWide && (canApproveLimit || canRejectLimit) ? (
+                      ) : canDecideLimit ? (
                         <form action={decideCreditLimitRequestAction} className="flex flex-col gap-1">
                           <input type="hidden" name="requestId" value={r.id} />
                           <input name="decisionNote" placeholder={cl.decisionNote} aria-label={cl.decisionNote} className={`${ui.input} w-48`} />
                           <div className="flex gap-2">
-                            {canApproveLimit && (
-                              <button name="decision" value="APPROVE" className="text-xs font-medium text-good hover:underline">{cl.approve}</button>
-                            )}
-                            {canRejectLimit && (
-                              <button name="decision" value="REJECT" className="text-xs font-medium text-critical hover:underline">{cl.reject}</button>
-                            )}
+                            <button name="decision" value="APPROVE" className="text-xs font-medium text-good hover:underline">{cl.approve}</button>
+                            <button name="decision" value="REJECT" className="text-xs font-medium text-critical hover:underline">{cl.reject}</button>
                           </div>
                         </form>
                       ) : null}

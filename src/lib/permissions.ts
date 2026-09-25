@@ -286,13 +286,13 @@ export const ACTION_ROLES = {
     updateCustomer: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
     // The credit limit is a financial authorization and is not part of
     // updateCustomer (see src/lib/creditLimitRequests.ts). Proposing an
-    // increase authorizes nothing, so finance may do it; deciding is
-    // company-wide authority, so ADMIN only by default, and the decision
-    // additionally requires company-wide scope and a decider who is not
-    // the requester, whatever this table is edited to say.
+    // increase authorizes nothing, so finance may do it, and who may is
+    // editable here. Approving or rejecting one is deliberately NOT on this
+    // table: it is fixed to CREDIT_LIMIT_DECIDER_ROLE (ADMIN) and a person
+    // other than the requester. It used to be listed here as editable while
+    // the server also required a scope only ADMIN has, so granting it to
+    // any other role showed a permission that could never work.
     requestCreditLimitIncrease: ["ACCOUNTANT", "ADMIN"],
-    approveCreditLimitIncrease: ["ADMIN"],
-    rejectCreditLimitIncrease: ["ADMIN"],
     createProject: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
     updateProject: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
   },

@@ -69,7 +69,7 @@ test("the release refusal for credit has its own text on the production page, in
 test("every credit limit request outcome renders in both languages; only a request, approval or rejection reads as success", () => {
   const codes = Object.keys(en.modules.customers.creditLimitRequests.result);
   assert.deepEqual(Object.keys(ar.modules.customers.creditLimitRequests.result).sort(), [...codes].sort());
-  for (const code of ["REQUESTED", "APPROVED", "REJECTED", "STALE", "FORBIDDEN", "SELF_DECISION", "ALREADY_PENDING", "NOT_AN_INCREASE", "INVALID_AMOUNT"]) {
+  for (const code of ["REQUESTED", "APPROVED", "REJECTED", "STALE", "FORBIDDEN", "SELF_DECISION", "ALREADY_PENDING", "NOT_AN_INCREASE", "INVALID_AMOUNT", "NO_ELIGIBLE_APPROVER"]) {
     assert.ok(codes.includes(code), `${code} must have text`);
   }
   for (const dict of [ar, en]) {
