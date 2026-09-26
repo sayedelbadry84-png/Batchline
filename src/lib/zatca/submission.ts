@@ -11,6 +11,9 @@ function document(db: Prisma.TransactionClient, kind: Kind) {
     update: (where: Prisma.InvoiceWhereInput, data: Prisma.InvoiceUpdateManyMutationInput) => kind === "INVOICE"
       ? db.invoice.updateMany({ where, data })
       : db.creditNote.updateMany({ where: where as Prisma.CreditNoteWhereInput, data: data as Prisma.CreditNoteUpdateManyMutationInput }),
+    count: (where: Prisma.InvoiceWhereInput) => kind === "INVOICE"
+      ? db.invoice.count({ where })
+      : db.creditNote.count({ where: where as Prisma.CreditNoteWhereInput }),
   };
 }
 
@@ -36,10 +39,10 @@ export async function submitDocument(input: {
   });
   if (!claimed) return { ok: false, reason: "RECONCILIATION_REQUIRED" };
 
-  async function finish(state: "CLEARED" | "FAILED" | "UNKNOWN", status?: number, response?: string) {
+  async function finish(state: "CLEARED" | "FAILED" | "UNKNOWN", status?: number, response?: string, errorMessage?: string) {
     return prisma.$transaction(async tx => {
       const changed = await document(tx, kind).update({ id, zatcaAttemptId: attemptId, zatcaStatus: "SUBMITTING" }, {
-        zatcaStatus: state, zatcaErrorMessage: state === "CLEARED" ? null : `${state}: see submission attempt ${attemptId}`,
+        zatcaStatus: state, zatcaErrorMessage: state === "CLEARED" ? null : (errorMessage ?? `${state}: see submission attempt ${attemptId}`),
         ...(state === "CLEARED" ? { zatcaClearedAt: new Date() } : {}),
       });
       if (!changed.count) {
@@ -64,13 +67,30 @@ export async function submitDocument(input: {
     await finish("FAILED");
     return { ok: false, reason: "PREPARATION_FAILED" };
   }
+  // zatcaInvoiceHash is a link in the site's PIH chain: the next document
+  // generated at this site stored it as its previous hash. Signing hashes
+  // the XML with the signature and QR stripped, which is exactly what
+  // generation hashed, so the prepared hash must equal the stored one
+  // (tests/zatcaInvoiceHash.test.ts). This write takes no site lock, so it
+  // must never be the thing that changes a chain link: it only fills an
+  // empty hash or rewrites the same value. A different hash means the
+  // stored XML no longer matches the chain; nothing is sent, and the
+  // document is marked FAILED with the reason, before any network request.
+  const ours = { id, zatcaAttemptId: attemptId, zatcaStatus: "SUBMITTING" };
   const ready = await prisma.$transaction(async tx => {
-    const changed = await document(tx, kind).update({ id, zatcaAttemptId: attemptId, zatcaStatus: "SUBMITTING" }, { zatcaXml: prepared.signedXml, zatcaInvoiceHash: prepared.invoiceHash, zatcaQrCode: prepared.qrCode });
-    if (!changed.count) return false;
+    const changed = await document(tx, kind).update(
+      { ...ours, OR: [{ zatcaInvoiceHash: null }, { zatcaInvoiceHash: prepared.invoiceHash }] },
+      { zatcaXml: prepared.signedXml, zatcaInvoiceHash: prepared.invoiceHash, zatcaQrCode: prepared.qrCode },
+    );
+    if (!changed.count) return (await document(tx, kind).count(ours)) ? "HASH_MISMATCH" : "LOST";
     await tx.zatcaSubmissionAttempt.update({ where: { id: attemptId }, data: { invoiceHash: prepared.invoiceHash, signedXml: prepared.signedXml } });
-    return true;
+    return "READY";
   });
-  if (!ready) return { ok: false, reason: "RECONCILIATION_REQUIRED" };
+  if (ready === "HASH_MISMATCH") {
+    await finish("FAILED", undefined, undefined, `HASH_MISMATCH: the signed invoice hash differs from the hash stored at generation, which the PIH chain links to. Nothing was sent; see submission attempt ${attemptId}.`);
+    return { ok: false, reason: "PREPARATION_FAILED" };
+  }
+  if (ready === "LOST") return { ok: false, reason: "RECONCILIATION_REQUIRED" };
   let res: Response, body: string;
   try {
     res = await transport(prepared.url, {

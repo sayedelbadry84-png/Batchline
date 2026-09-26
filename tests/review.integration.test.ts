@@ -39,6 +39,8 @@ const scada = await import("../src/app/api/scada/silo-reading/route");
 const gps = await import("../src/app/api/telematics/ping/route");
 const { hashApiKey } = await import("../src/lib/apiKeys");
 const { submitDocument } = await import("../src/lib/zatca/submission");
+const { signInvoiceXml } = await import("../src/lib/zatca/sign");
+const { TEST_ONLY_CERTIFICATE_PEM, TEST_ONLY_PRIVATE_KEY_PEM } = await import("./setup/zatcaTestCredentials");
 const { reverseJournalEntry } = await import("../src/lib/ledger");
 
 const prefix = `REVIEW-${randomUUID()}`;
@@ -46,6 +48,7 @@ let siteId: string, otherSiteId: string, plantId: string, otherPlantId: string;
 let customerId: string, adminId: string, operatorId: string, hrId: string;
 let employeeId: string, otherEmployeeId: string, siloId: string;
 const invoiceIds: string[] = [];
+const extraSiteIds: string[] = [];
 let initialAccountIds: string[] = [];
 const apiKey = randomUUID(); // disposable test credential only
 
@@ -123,7 +126,7 @@ before(async () => {
 
 after(async () => {
   const users = [adminId, operatorId, hrId].filter(Boolean);
-  const sites = [siteId, otherSiteId].filter(Boolean);
+  const sites = [siteId, otherSiteId, ...extraSiteIds].filter(Boolean);
   const accounts = await prisma.journalLine.findMany({ where: { siteId: { in: sites } }, select: { accountId: true } });
   const credits = await prisma.creditNote.findMany({ where: { invoiceId: { in: invoiceIds } }, select: { id: true } });
   await deleteAuditEvents({ recordId: { in: [...invoiceIds, ...credits.map(c => c.id)] } });
@@ -165,6 +168,94 @@ test("concurrent invoice/credit-note generation has one unbroken chain and uniqu
     if (i) assert.equal(saved[i].zatcaPreviousHash, saved[i - 1].zatcaInvoiceHash);
   }
 });
+// The chain generators ran Serializable. A Serializable transaction takes
+// its snapshot at its first statement, which is the site-lock SELECT itself,
+// before the lock wait. A waiter therefore read the chain as it was before
+// the holder committed, and SSI aborted it; with more contenders than
+// withRetry's attempts, a generation failed outright. Four contenders did so
+// intermittently in CI; eight on a fresh site fail it reliably.
+test("eight concurrent generations at one site all succeed, with ICVs 1..8 and every PIH linked", async () => {
+  const site = await prisma.site.create({ data: { code: `${prefix}-C`, name: "Review C", city: "Test", country: "Test" } });
+  extraSiteIds.push(site.id);
+  const plant = await prisma.plant.create({ data: { name: "Review C", siteId: site.id } });
+  await prisma.zatcaSettings.create({ data: { siteId: site.id, sellerLegalName: "Review Seller", vatNumber: "300000000000003" } });
+  const docs = [];
+  for (let i = 0; i < 6; i++) {
+    const row = await prisma.invoice.create({ data: {
+      invoiceNumber: `${prefix}-${randomUUID()}`, customerId, plantId: plant.id, currency: "SAR",
+      subtotal: 100, taxAmount: 15, taxRatePct: 15, total: 115, dueDate: new Date(), status: "SENT",
+    } });
+    invoiceIds.push(row.id);
+    docs.push(row);
+  }
+  const credits = [];
+  for (let i = 0; i < 2; i++) {
+    credits.push(await prisma.creditNote.create({ data: { creditNoteNumber: `${prefix}-CN-${i}`, invoiceId: docs[i].id, amount: 10, reason: "OTHER", issuedById: adminId } }));
+  }
+  const results = await Promise.all([...docs.map(d => generateZatcaDocuments(d.id)), ...credits.map(c => generateZatcaCreditNoteDocuments(c.id))]);
+  assert.deepEqual(results, results.map(() => ({ ok: true })), "every concurrent generation must succeed");
+  const saved = [
+    ...await prisma.invoice.findMany({ where: { id: { in: docs.map(d => d.id) } } }),
+    ...await prisma.creditNote.findMany({ where: { id: { in: credits.map(c => c.id) } } }),
+  ].sort((a, b) => a.zatcaGeneratedAt!.getTime() - b.zatcaGeneratedAt!.getTime());
+  assert.equal(saved[0].zatcaPreviousHash, zatcaGenesisPreviousHash());
+  for (let i = 0; i < saved.length; i++) {
+    assert.match(saved[i].zatcaXml!, new RegExp(`<cbc:UUID>${i + 1}</cbc:UUID>`), `document ${i} carries ICV ${i + 1}`);
+    if (i) assert.equal(saved[i].zatcaPreviousHash, saved[i - 1].zatcaInvoiceHash, `document ${i} links to its predecessor`);
+  }
+});
+// Audit of PR #10, S1, end to end: submitting a predecessor with real
+// signing must leave every successor's PIH pointing at the predecessor's
+// hash. An invoice, a credit note on it and a second invoice are generated
+// in order on a fresh site; the first two are then submitted.
+test("submitting generated documents with real signing leaves the PIH chain linked", async () => {
+  const site = await prisma.site.create({ data: { code: `${prefix}-D`, name: "Review D", city: "Test", country: "Test" } });
+  extraSiteIds.push(site.id);
+  const plant = await prisma.plant.create({ data: { name: "Review D", siteId: site.id } });
+  await prisma.zatcaSettings.create({ data: { siteId: site.id, sellerLegalName: "Review Seller", vatNumber: "300000000000003" } });
+  const newInvoice = async () => {
+    const row = await prisma.invoice.create({ data: {
+      invoiceNumber: `${prefix}-${randomUUID()}`, customerId, plantId: plant.id, currency: "SAR",
+      subtotal: 100, taxAmount: 15, taxRatePct: 15, total: 115, dueDate: new Date(), status: "SENT",
+    } });
+    invoiceIds.push(row.id);
+    return row;
+  };
+  const first = await newInvoice();
+  assert.deepEqual(await generateZatcaDocuments(first.id), { ok: true });
+  const credit = await prisma.creditNote.create({ data: { creditNoteNumber: `${prefix}-CN-D`, invoiceId: first.id, amount: 10, reason: "OTHER", issuedById: adminId } });
+  assert.deepEqual(await generateZatcaCreditNoteDocuments(credit.id), { ok: true });
+  const last = await newInvoice();
+  assert.deepEqual(await generateZatcaDocuments(last.id), { ok: true });
+
+  const chain = async () => [
+    await prisma.invoice.findUniqueOrThrow({ where: { id: first.id } }),
+    await prisma.creditNote.findUniqueOrThrow({ where: { id: credit.id } }),
+    await prisma.invoice.findUniqueOrThrow({ where: { id: last.id } }),
+  ];
+  const before = await chain();
+  assert.equal(before[1].zatcaPreviousHash, before[0].zatcaInvoiceHash);
+  assert.equal(before[2].zatcaPreviousHash, before[1].zatcaInvoiceHash);
+
+  const qrFields = { sellerName: "Review Seller", vatNumber: "300000000000003", timestampIso: "2026-09-26T10:00:00", invoiceTotal: 115, vatTotal: 15 };
+  for (const [kind, doc] of [["INVOICE", before[0]], ["CREDIT_NOTE", before[1]]] as const) {
+    const prepareSigned = async () => {
+      // As submit.ts does: sign whatever XML is stored now.
+      const stored = kind === "INVOICE" ? await prisma.invoice.findUniqueOrThrow({ where: { id: doc.id } }) : await prisma.creditNote.findUniqueOrThrow({ where: { id: doc.id } });
+      const signed = signInvoiceXml({ xml: stored.zatcaXml!, certificatePem: TEST_ONLY_CERTIFICATE_PEM, privateKeyPem: TEST_ONLY_PRIVATE_KEY_PEM, qrFields });
+      return { ...signed, url: "https://example.invalid/clearance", authorization: "test-only" };
+    };
+    const result = await submitDocument({ kind, id: doc.id, uuid: doc.zatcaUuid!, actor: null, prepare: prepareSigned }, async () => Response.json({ clearanceStatus: "CLEARED" }));
+    assert.deepEqual(result, { ok: true }, `${kind} submits`);
+  }
+
+  const after = await chain();
+  assert.notEqual(after[0].zatcaXml, before[0].zatcaXml, "submission stored the signed XML");
+  for (let i = 0; i < 3; i++) assert.equal(after[i].zatcaInvoiceHash, before[i].zatcaInvoiceHash, `document ${i} keeps its chain hash`);
+  assert.equal(after[1].zatcaPreviousHash, after[0].zatcaInvoiceHash);
+  assert.equal(after[2].zatcaPreviousHash, after[1].zatcaInvoiceHash);
+});
+
 test("double generation only succeeds once and preserves the saved document", async () => {
   const d = await invoice();
   const results = await Promise.all([generateZatcaDocuments(d.id), generateZatcaDocuments(d.id)]);
@@ -317,7 +408,7 @@ async function blockedBy(pid: number) {
 for (const kind of ["INVOICE", "CREDIT_NOTE"] as const) {
   // The two delegates share these fields, but their call signatures are not
   // mutually assignable, so branch per call instead of holding a union.
-  function patch(id: string, data: { zatcaStatus?: string; zatcaUuid?: string; zatcaSubmittedAt?: Date }) {
+  function patch(id: string, data: { zatcaStatus?: string; zatcaUuid?: string; zatcaSubmittedAt?: Date; zatcaInvoiceHash?: string }) {
     return kind === "INVOICE"
       ? prisma.invoice.updateMany({ where: { id }, data })
       : prisma.creditNote.updateMany({ where: { id }, data });
@@ -368,6 +459,25 @@ for (const kind of ["INVOICE", "CREDIT_NOTE"] as const) {
     assert.deepEqual(attempts.map(a => a.state), ["FAILED", "UNKNOWN"]);
     assert.equal(attempts[1].uuid, d.uuid);
     assert.equal(attempts[1].signedXml, "<Invoice/>");
+  });
+
+  // Audit of PR #10, S1: submission writes zatcaInvoiceHash outside the
+  // site lock. It may fill an empty hash or rewrite the same value, never
+  // replace a different one that a successor's PIH already links to.
+  test(`${kind}: a prepared hash that differs from the stored chain hash is refused before anything is sent`, async () => {
+    const d = await document(); let calls = 0;
+    await patch(d.id, { zatcaInvoiceHash: "stored-chain-hash" });
+    const transport: typeof fetch = async () => { calls++; return Response.json({ clearanceStatus: "CLEARED" }); };
+    const input = { kind, id: d.id, uuid: d.uuid, actor: null, prepare };
+    assert.deepEqual(await submitDocument(input, transport), { ok: false, reason: "PREPARATION_FAILED" });
+    assert.equal(calls, 0, "nothing reaches ZATCA");
+    const row = kind === "INVOICE" ? await prisma.invoice.findFirstOrThrow({ where: { id: d.id } }) : await prisma.creditNote.findFirstOrThrow({ where: { id: d.id } });
+    assert.equal(row.zatcaInvoiceHash, "stored-chain-hash", "the chain link is untouched");
+    assert.equal(row.zatcaStatus, "FAILED");
+    assert.match(row.zatcaErrorMessage ?? "", /^HASH_MISMATCH/);
+    // The same hash goes through, and still leaves the stored value as it was.
+    assert.deepEqual(await submitDocument({ ...input, prepare: async () => ({ ...(await prepare()), invoiceHash: "stored-chain-hash" }) }, transport), { ok: true });
+    assert.equal(calls, 1);
   });
 
   test(`${kind}: stale submission and late response require reconciliation without resending`, async () => {

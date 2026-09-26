@@ -96,7 +96,8 @@ export async function generateZatcaCreditNoteDocuments(creditNoteId: string, act
 
     await writeAudit(tx, actor, { module: "Billing", recordId: creditNoteId, reasonCode: "ZATCA_CREDIT_NOTE_GENERATED" });
     return { ok: true };
-  }, { timeout: 15000, isolationLevel: "Serializable" }));
+    // ReadCommitted, not Serializable: see lockSiteChain in chain.ts.
+  }, { timeout: 15000, isolationLevel: "ReadCommitted" }));
 }
 
 const DEFAULT_SANDBOX_URL = "https://gw-fatoora.zatca.gov.sa/e-invoicing/developer-portal/invoices/clearance/single";
