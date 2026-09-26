@@ -16,7 +16,10 @@ import { zatcaGenesisPreviousHash } from "./invoiceXml";
 // outright (review.integration.test.ts, "eight concurrent generations").
 // Under ReadCommitted every statement after the lock sees the holder's
 // commit, and the lock alone serializes the chain: these two functions are
-// its only writers, and both take it before reading the chain.
+// the only code that appends to it (assigns an ICV and a PIH), and both
+// take the lock before reading it. submission.ts also writes
+// zatcaInvoiceHash, outside this lock, but only ever the value already
+// stored (it refuses a different one), so it never changes a link.
 export async function lockSiteChain(tx: Prisma.TransactionClient, siteId: string): Promise<void> {
   await tx.$queryRaw`SELECT "id" FROM "Site" WHERE "id" = ${siteId} FOR UPDATE`;
 }
