@@ -7,9 +7,16 @@ import { zatcaGenesisPreviousHash } from "./invoiceXml";
 // chain per document type. Both generateZatcaDocuments (invoices) and
 // generateZatcaCreditNoteDocuments (credit notes) call this so neither
 // type can silently form its own separate chain.
-// Both document types must hold this same lock until their XML is saved.
-// Use ReadCommitted so a waiter reads the predecessor that just committed,
-// not a Serializable snapshot taken before it acquired the lock.
+// Both document types must hold this same lock until their XML is saved,
+// and must run ReadCommitted. A Serializable (or RepeatableRead)
+// transaction takes its snapshot at its first statement, which is this
+// SELECT, BEFORE it waits for the lock. The waiter then reads the chain as
+// it was before the holder committed, and SSI aborts it; with more
+// concurrent documents than withRetry's attempts, a generation failed
+// outright (review.integration.test.ts, "eight concurrent generations").
+// Under ReadCommitted every statement after the lock sees the holder's
+// commit, and the lock alone serializes the chain: these two functions are
+// its only writers, and both take it before reading the chain.
 export async function lockSiteChain(tx: Prisma.TransactionClient, siteId: string): Promise<void> {
   await tx.$queryRaw`SELECT "id" FROM "Site" WHERE "id" = ${siteId} FOR UPDATE`;
 }

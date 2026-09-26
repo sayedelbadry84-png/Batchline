@@ -46,6 +46,7 @@ let siteId: string, otherSiteId: string, plantId: string, otherPlantId: string;
 let customerId: string, adminId: string, operatorId: string, hrId: string;
 let employeeId: string, otherEmployeeId: string, siloId: string;
 const invoiceIds: string[] = [];
+const extraSiteIds: string[] = [];
 let initialAccountIds: string[] = [];
 const apiKey = randomUUID(); // disposable test credential only
 
@@ -123,7 +124,7 @@ before(async () => {
 
 after(async () => {
   const users = [adminId, operatorId, hrId].filter(Boolean);
-  const sites = [siteId, otherSiteId].filter(Boolean);
+  const sites = [siteId, otherSiteId, ...extraSiteIds].filter(Boolean);
   const accounts = await prisma.journalLine.findMany({ where: { siteId: { in: sites } }, select: { accountId: true } });
   const credits = await prisma.creditNote.findMany({ where: { invoiceId: { in: invoiceIds } }, select: { id: true } });
   await deleteAuditEvents({ recordId: { in: [...invoiceIds, ...credits.map(c => c.id)] } });
@@ -163,6 +164,42 @@ test("concurrent invoice/credit-note generation has one unbroken chain and uniqu
   for (let i = 0; i < saved.length; i++) {
     assert.match(saved[i].zatcaXml!, new RegExp(`<cbc:UUID>${i + 1}</cbc:UUID>`));
     if (i) assert.equal(saved[i].zatcaPreviousHash, saved[i - 1].zatcaInvoiceHash);
+  }
+});
+// The chain generators ran Serializable. A Serializable transaction takes
+// its snapshot at its first statement, which is the site-lock SELECT itself,
+// before the lock wait. A waiter therefore read the chain as it was before
+// the holder committed, and SSI aborted it; with more contenders than
+// withRetry's attempts, a generation failed outright. Four contenders did so
+// intermittently in CI; eight on a fresh site fail it reliably.
+test("eight concurrent generations at one site all succeed, with ICVs 1..8 and every PIH linked", async () => {
+  const site = await prisma.site.create({ data: { code: `${prefix}-C`, name: "Review C", city: "Test", country: "Test" } });
+  extraSiteIds.push(site.id);
+  const plant = await prisma.plant.create({ data: { name: "Review C", siteId: site.id } });
+  await prisma.zatcaSettings.create({ data: { siteId: site.id, sellerLegalName: "Review Seller", vatNumber: "300000000000003" } });
+  const docs = [];
+  for (let i = 0; i < 6; i++) {
+    const row = await prisma.invoice.create({ data: {
+      invoiceNumber: `${prefix}-${randomUUID()}`, customerId, plantId: plant.id, currency: "SAR",
+      subtotal: 100, taxAmount: 15, taxRatePct: 15, total: 115, dueDate: new Date(), status: "SENT",
+    } });
+    invoiceIds.push(row.id);
+    docs.push(row);
+  }
+  const credits = [];
+  for (let i = 0; i < 2; i++) {
+    credits.push(await prisma.creditNote.create({ data: { creditNoteNumber: `${prefix}-CN-${i}`, invoiceId: docs[i].id, amount: 10, reason: "OTHER", issuedById: adminId } }));
+  }
+  const results = await Promise.all([...docs.map(d => generateZatcaDocuments(d.id)), ...credits.map(c => generateZatcaCreditNoteDocuments(c.id))]);
+  assert.deepEqual(results, results.map(() => ({ ok: true })), "every concurrent generation must succeed");
+  const saved = [
+    ...await prisma.invoice.findMany({ where: { id: { in: docs.map(d => d.id) } } }),
+    ...await prisma.creditNote.findMany({ where: { id: { in: credits.map(c => c.id) } } }),
+  ].sort((a, b) => a.zatcaGeneratedAt!.getTime() - b.zatcaGeneratedAt!.getTime());
+  assert.equal(saved[0].zatcaPreviousHash, zatcaGenesisPreviousHash());
+  for (let i = 0; i < saved.length; i++) {
+    assert.match(saved[i].zatcaXml!, new RegExp(`<cbc:UUID>${i + 1}</cbc:UUID>`), `document ${i} carries ICV ${i + 1}`);
+    if (i) assert.equal(saved[i].zatcaPreviousHash, saved[i - 1].zatcaInvoiceHash, `document ${i} links to its predecessor`);
   }
 });
 test("double generation only succeeds once and preserves the saved document", async () => {

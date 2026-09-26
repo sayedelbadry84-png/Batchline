@@ -169,6 +169,12 @@ The ZATCA hash chain (ICV + PIH) is shared across invoices **and** credit notes 
 site, in issuance order. Two documents generated concurrently must never receive the
 same ICV — that forks the chain and ZATCA rejects everything after it.
 
+The one exception to Serializable is ZATCA chain generation (`src/lib/zatca/generate.ts`,
+`creditNote.ts`). It runs ReadCommitted under the `Site FOR UPDATE` lock in `chain.ts`:
+a Serializable snapshot is taken before the lock wait, so a waiter reads a stale chain
+and is aborted, and enough concurrent documents exhausted the retries. See the comment
+on `lockSiteChain`.
+
 ## Database
 
 PostgreSQL does **not** auto-index foreign keys, and Prisma only indexes `@id` and
@@ -278,7 +284,7 @@ right.
      green result could be obtained by re-running.
 
 Fixed since earlier revisions of this list — **do not re-report**: ZATCA
-chain generation (now Serializable with a site row lock), invoice
+chain generation (a site row lock, ReadCommitted; see above), invoice
 numbering (now uses `withSequentialNumber`), `getClientIp` (see
 `src/lib/clientIp.ts`), `parseNetDays`, `anomaly.ts` detection,
 `incentives/actions.ts` and `employees/actions.ts` site scoping, and TOTP
