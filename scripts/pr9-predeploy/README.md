@@ -56,8 +56,18 @@ Run them in this order. Step 6 does not start until steps 2 to 5 are complete an
      (3) instead of ending in a harmless-looking `ROLLBACK`.
    - The first block prints the database, server and time. Keep that with the
      results.
-   - Q0 lists the limits that would stop the first migration. Q1 to Q5 list
-     the items the policy holds. Q6 counts the customers at a limit of 0.
+   - **Q0 is a real blocker.** It lists the limits that stop the first
+     migration, and each row needs the owner's decision before step 6.
+   - **Q1 to Q5 are candidates to examine, not a list of broken customers or
+     rows to fix.** They are deliberately broad:
+     - Q1 and Q3 can include a booking that has already been released in
+       full, which no longer counts.
+     - Q2 can include a price that no booking or ticket uses.
+     - Q4 over-reports: it counts settled invoices, which the policy ignores.
+     - Q5 includes inactive bookings.
+
+     Step 4 settles which of them the policy would actually hold.
+   - Q6 counts the customers at a limit of 0.
    - The output carries ids and codes, not names. Keep it out of public CI logs.
 
 3. **Restore a separate copy of each database, and migrate the copy.**
@@ -89,8 +99,13 @@ Run them in this order. Step 6 does not start until steps 2 to 5 are complete an
    - It does lock `Customer` rows `FOR UPDATE`, like a real decision. That is
      why it exits 1 without touching a row unless the marker names the
      connected database.
-   - Record a remediation decision by the owner for every row from steps 2
-     and 4. Do not repair prices or limits silently.
+   - The report, not Q1 to Q5, says who would be held. For each flagged
+     customer, record the owner's decision based on the actual exposure and
+     the operational state of the items behind it.
+   - A row that appears only in Q1 to Q5, but that the report does not flag
+     and that nothing active depends on, needs no change. Do not alter sound
+     historical data because a broad query listed it.
+   - Never repair prices or limits silently.
 
 5. **Sign-off.** The following are recorded before step 6:
    - the owner's remediation decisions;
@@ -98,7 +113,8 @@ Run them in this order. Step 6 does not start until steps 2 to 5 are complete an
      owner's documented exception with its reason;
    - the time window;
    - the rollback plan below;
-   - who runs step 6.
+   - who runs step 6;
+   - who runs the step 7 check, and whether a test customer exists for it.
 
 6. **Migrate each production database identified in step 1.**
    - First apply any Q0 corrections the owner decided, through a reviewed and
@@ -112,8 +128,18 @@ Run them in this order. Step 6 does not start until steps 2 to 5 are complete an
 
 7. **Merge #9.**
    - Watch both production deployments until they are ready.
-   - Then load the Customers page and try one booking on each project that
-     serves users.
+   - Then run a controlled post-deploy check on each project that serves
+     users. **Do not create a test booking in production** unless an
+     authorized test customer and project have been agreed in step 5 with
+     their cleanup: a real booking consumes credit headroom, can reserve
+     equipment, and writes audit rows that cannot be deleted.
+   - By default the check is read-only or harmless:
+     - the Customers page loads;
+     - the request queue renders for an ADMIN;
+     - a known over-limit customer from the step 4 report shows as held.
+   - A real operational booking is then watched with the operations team's
+     agreement.
+   - Step 5 names who runs this check and how any effect of it is reversed.
 
 ## Rollback
 
@@ -139,11 +165,19 @@ While the application is rolled back:
 `destructive_schema_rollback_pr9.sql` is **not** part of a rollback. It drops
 the table and the CHECK, and deletes the two migration records:
 
-- It is for the owner's separate decision only, after the application has
-  been rolled back.
+- It is for the owner's separate decision only.
+- It runs only after **both** Vercel production projects (`batchline` and
+  `batchline-g7p3`) are rolled back to a build that does not use the table,
+  and no request from #9's build is still in flight.
 - It refuses to run while `CustomerCreditLimitRequest` holds any row.
   Dropping real requests and decisions is not a rollback. Keeping them would
   need its own reviewed and rehearsed plan.
+- The check and the drop are atomic:
+  - it takes `LOCK TABLE … IN ACCESS EXCLUSIVE MODE` before counting, so a
+    request inserted concurrently is either counted or kept out until the
+    drop has committed;
+  - `lock_timeout` is 10 s: rather than queue behind live traffic, it stops
+    with exit 3 and changes nothing.
 
 ## Rehearsals (local PostgreSQL 16, 2026-09-27)
 
@@ -185,6 +219,18 @@ and a new request was accepted.
 - **Preflight:** it exited 0 on `main`'s schema. It exited 3 at Q2 on a
   database whose `pricePerM3` column was renamed, when run **without** the
   `-v ON_ERROR_STOP=1` flag.
-- **Destructive rollback:** it exited 3 and dropped nothing while the table
-  held three requests. On an empty table it removed the table and both
-  records, leaving 51 migrations.
+- **Destructive rollback:**
+  - It exited 3 and dropped nothing while the table held three requests.
+  - On an empty table it removed the table and both records, leaving 51
+    migrations.
+- **Destructive rollback, concurrent insert.** A request `INSERT` was open,
+  not yet committed, when the script started, and committed about 2 s later
+  while the script ran.
+  - The version before the lock (`5f7912d`) counted zero, then its
+    `DROP TABLE` waited for the insert and dropped it with the table. The
+    request was lost: exit 0, table gone, 51 migrations.
+  - The fixed version's `LOCK TABLE` waited for the insert, counted 1 row
+    and refused: exit 3, the table and its row kept, 53 migrations.
+- **Destructive rollback, table held by live traffic.** A transaction that
+  read the table and stayed open for 14 s made the script stop at
+  `lock_timeout` with exit 3, changing nothing.

@@ -5,6 +5,12 @@
 -- differs from main's) stops the run with a non-zero exit, so a final
 -- ROLLBACK is never mistaken for success. The ON_ERROR_STOP below makes
 -- that hold even when the flag is forgotten.
+--
+-- Q0 is a blocker for migration 20260925120000. Q1 to Q5 are deliberately
+-- broad CANDIDATE lists (a fully released booking, an unused price, a
+-- settled invoice, an inactive booking can all appear); the exposure report
+-- on a restored copy decides who is actually held. Do not change sound
+-- historical rows just because they are listed here.
 \set ON_ERROR_STOP on
 BEGIN TRANSACTION READ ONLY;
 \echo '== target (record this with the results)'
