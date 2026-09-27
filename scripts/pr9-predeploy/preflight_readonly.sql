@@ -1,7 +1,16 @@
--- Batchline PR #9 pre-deploy checks. READ ONLY: run inside a read-only transaction.
+-- Batchline PR #9 pre-deploy checks. READ ONLY: everything runs inside a
+-- READ ONLY transaction that is rolled back. Run with
+--   psql -X -v ON_ERROR_STOP=1 -f scripts/pr9-predeploy/preflight_readonly.sql
+-- and check the exit code: any failed query (a permission, a schema that
+-- differs from main's) stops the run with a non-zero exit, so a final
+-- ROLLBACK is never mistaken for success. The ON_ERROR_STOP below makes
+-- that hold even when the flag is forgotten.
+\set ON_ERROR_STOP on
 BEGIN TRANSACTION READ ONLY;
+\echo '== target (record this with the results)'
+SELECT current_database() AS database, inet_server_addr() AS server, now() AS checked_at, pg_is_in_recovery() AS is_replica;
 \echo '== Q0 invalid Customer.creditLimit (blocks migration 20260925120000)'
-SELECT "id", "code", "legalName", "creditLimit" FROM "Customer"
+SELECT "id", "code", "creditLimit" FROM "Customer"
 WHERE NOT ("creditLimit" >= 0 AND "creditLimit" < 'Infinity'::float8);
 \echo '== Q1 confirmed/in-production bookings with no price for the customer'
 SELECT r."reservationNumber", pj."customerId", r."mixId"
