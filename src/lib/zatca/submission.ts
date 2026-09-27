@@ -39,25 +39,28 @@ export async function submitDocument(input: {
   });
   if (!claimed) return { ok: false, reason: "RECONCILIATION_REQUIRED" };
 
-  async function finish(state: "CLEARED" | "FAILED" | "UNKNOWN", status?: number, response?: string, errorMessage?: string) {
-    return prisma.$transaction(async tx => {
-      const changed = await document(tx, kind).update({ id, zatcaAttemptId: attemptId, zatcaStatus: "SUBMITTING" }, {
-        zatcaStatus: state, zatcaErrorMessage: state === "CLEARED" ? null : (errorMessage ?? `${state}: see submission attempt ${attemptId}`),
-        ...(state === "CLEARED" ? { zatcaClearedAt: new Date() } : {}),
-      });
-      if (!changed.count) {
-        // Keep late transport evidence on the original UNKNOWN attempt,
-        // without changing the document or any terminal CLEARED state.
-        if (response !== undefined) await tx.zatcaSubmissionAttempt.updateMany({
-          where: { id: attemptId, state: "UNKNOWN" },
-          data: { httpStatus: status, response: response.slice(0, 16000) },
-        });
-        return false;
-      }
-      await tx.zatcaSubmissionAttempt.update({ where: { id: attemptId }, data: { state, httpStatus: status, response: response?.slice(0, 16000), finishedAt: new Date() } });
-      await writeAudit(tx, actor, { module: "Billing", recordId: id, reasonCode: `ZATCA_${state}`, afterValue: attemptId });
-      return true;
+  // Takes the caller's transaction so a decision and the state it records
+  // can commit together (see the hash-mismatch branch below).
+  async function finishIn(tx: Prisma.TransactionClient, state: "CLEARED" | "FAILED" | "UNKNOWN", status?: number, response?: string, errorMessage?: string) {
+    const changed = await document(tx, kind).update({ id, zatcaAttemptId: attemptId, zatcaStatus: "SUBMITTING" }, {
+      zatcaStatus: state, zatcaErrorMessage: state === "CLEARED" ? null : (errorMessage ?? `${state}: see submission attempt ${attemptId}`),
+      ...(state === "CLEARED" ? { zatcaClearedAt: new Date() } : {}),
     });
+    if (!changed.count) {
+      // Keep late transport evidence on the original UNKNOWN attempt,
+      // without changing the document or any terminal CLEARED state.
+      if (response !== undefined) await tx.zatcaSubmissionAttempt.updateMany({
+        where: { id: attemptId, state: "UNKNOWN" },
+        data: { httpStatus: status, response: response.slice(0, 16000) },
+      });
+      return false;
+    }
+    await tx.zatcaSubmissionAttempt.update({ where: { id: attemptId }, data: { state, httpStatus: status, response: response?.slice(0, 16000), finishedAt: new Date() } });
+    await writeAudit(tx, actor, { module: "Billing", recordId: id, reasonCode: `ZATCA_${state}`, afterValue: attemptId });
+    return true;
+  }
+  function finish(state: "CLEARED" | "FAILED" | "UNKNOWN", status?: number, response?: string) {
+    return prisma.$transaction(tx => finishIn(tx, state, status, response));
   }
 
   let prepared: Prepared;
@@ -76,20 +79,25 @@ export async function submitDocument(input: {
   // empty hash or rewrites the same value. A different hash means the
   // stored XML no longer matches the chain; nothing is sent, and the
   // document is marked FAILED with the reason, before any network request.
+  // The FAILED state is recorded in the same transaction that detects the
+  // mismatch: as two transactions, a crash between them left the document
+  // SUBMITTING, which the stale sweep later turns into UNKNOWN and a manual
+  // reconciliation for a request that was never sent (audit of 3e1760f, A1).
   const ours = { id, zatcaAttemptId: attemptId, zatcaStatus: "SUBMITTING" };
   const ready = await prisma.$transaction(async tx => {
     const changed = await document(tx, kind).update(
       { ...ours, OR: [{ zatcaInvoiceHash: null }, { zatcaInvoiceHash: prepared.invoiceHash }] },
       { zatcaXml: prepared.signedXml, zatcaInvoiceHash: prepared.invoiceHash, zatcaQrCode: prepared.qrCode },
     );
-    if (!changed.count) return (await document(tx, kind).count(ours)) ? "HASH_MISMATCH" : "LOST";
+    if (!changed.count) {
+      if (!(await document(tx, kind).count(ours))) return "LOST";
+      await finishIn(tx, "FAILED", undefined, undefined, `HASH_MISMATCH: the signed invoice hash differs from the hash stored at generation, which the PIH chain links to. Nothing was sent; see submission attempt ${attemptId}.`);
+      return "HASH_MISMATCH";
+    }
     await tx.zatcaSubmissionAttempt.update({ where: { id: attemptId }, data: { invoiceHash: prepared.invoiceHash, signedXml: prepared.signedXml } });
     return "READY";
   });
-  if (ready === "HASH_MISMATCH") {
-    await finish("FAILED", undefined, undefined, `HASH_MISMATCH: the signed invoice hash differs from the hash stored at generation, which the PIH chain links to. Nothing was sent; see submission attempt ${attemptId}.`);
-    return { ok: false, reason: "PREPARATION_FAILED" };
-  }
+  if (ready === "HASH_MISMATCH") return { ok: false, reason: "PREPARATION_FAILED" };
   if (ready === "LOST") return { ok: false, reason: "RECONCILIATION_REQUIRED" };
   let res: Response, body: string;
   try {

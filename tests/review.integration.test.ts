@@ -480,6 +480,40 @@ for (const kind of ["INVOICE", "CREDIT_NOTE"] as const) {
     assert.equal(calls, 1);
   });
 
+  // Audit of 3e1760f, A1: detecting the mismatch and recording FAILED used
+  // to be two transactions, so a crash between them left the document
+  // SUBMITTING (and later UNKNOWN) for a request that was never sent. The
+  // crash is simulated by failing every transaction after the claim and the
+  // preparation write; the old code needed a third one to record FAILED.
+  test(`${kind}: a hash mismatch is recorded FAILED in the transaction that detects it`, async () => {
+    const d = await document(); let calls = 0;
+    await patch(d.id, { zatcaInvoiceHash: "stored-chain-hash" });
+    const transport: typeof fetch = async () => { calls++; return Response.json({ clearanceStatus: "CLEARED" }); };
+    const original = prisma.$transaction.bind(prisma);
+    let transactions = 0;
+    Object.assign(prisma, { $transaction: (...args: Parameters<typeof prisma.$transaction>) => {
+      if (++transactions > 2) return Promise.reject(new Error("simulated crash after mismatch detection"));
+      return (original as (...a: typeof args) => ReturnType<typeof prisma.$transaction>)(...args);
+    } });
+    let result: Awaited<ReturnType<typeof submitDocument>>;
+    try {
+      result = await submitDocument({ kind, id: d.id, uuid: d.uuid, actor: null, prepare }, transport);
+    } finally {
+      Object.assign(prisma, { $transaction: original });
+    }
+    assert.deepEqual(result, { ok: false, reason: "PREPARATION_FAILED" });
+    assert.equal(transactions, 2, "claim and preparation only");
+    assert.equal(calls, 0, "nothing reaches ZATCA");
+    const row = kind === "INVOICE" ? await prisma.invoice.findFirstOrThrow({ where: { id: d.id } }) : await prisma.creditNote.findFirstOrThrow({ where: { id: d.id } });
+    assert.equal(row.zatcaStatus, "FAILED");
+    assert.equal(row.zatcaInvoiceHash, "stored-chain-hash");
+    assert.match(row.zatcaErrorMessage ?? "", /^HASH_MISMATCH/);
+    const attempts = await prisma.zatcaSubmissionAttempt.findMany({ where: { documentId: d.id } });
+    assert.deepEqual(attempts.map(a => a.state), ["FAILED"]);
+    assert.ok(attempts[0].finishedAt);
+    assert.equal(await prisma.auditEvent.count({ where: { recordId: d.id, reasonCode: "ZATCA_FAILED" } }), 1);
+  });
+
   test(`${kind}: stale submission and late response require reconciliation without resending`, async () => {
     const d = await document(), entered = latch(), release = latch(); let calls = 0;
     const input = { kind, id: d.id, uuid: d.uuid, actor: null, prepare };
