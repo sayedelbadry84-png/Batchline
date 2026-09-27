@@ -1,0 +1,32 @@
+-- Batchline PR #9 pre-deploy checks. READ ONLY: run inside a read-only transaction.
+BEGIN TRANSACTION READ ONLY;
+\echo '== Q0 invalid Customer.creditLimit (blocks migration 20260925120000)'
+SELECT "id", "code", "legalName", "creditLimit" FROM "Customer"
+WHERE NOT ("creditLimit" >= 0 AND "creditLimit" < 'Infinity'::float8);
+\echo '== Q1 confirmed/in-production bookings with no price for the customer'
+SELECT r."reservationNumber", pj."customerId", r."mixId"
+FROM "Reservation" r JOIN "Project" pj ON pj."id" = r."projectId"
+LEFT JOIN "PriceListEntry" e ON e."customerId" = pj."customerId" AND e."mixId" = r."mixId"
+WHERE r."status" IN ('CONFIRMED', 'IN_PRODUCTION') AND e."id" IS NULL;
+\echo '== Q2 stored prices that cannot be valued'
+SELECT "customerId", "mixId", "pricePerM3" FROM "PriceListEntry"
+WHERE NOT ("pricePerM3" > 0 AND "pricePerM3" < 'Infinity');
+\echo '== Q3 sites with confirmed bookings but no ACTIVE station'
+SELECT DISTINCT r."siteId" FROM "Reservation" r
+WHERE r."status" IN ('CONFIRMED', 'IN_PRODUCTION')
+  AND NOT EXISTS (SELECT 1 FROM "Plant" p WHERE p."siteId" = r."siteId" AND p."status" = 'ACTIVE');
+\echo '== Q4 customers spanning more than one currency (over-reports settled invoices)'
+SELECT c."id", array_agg(DISTINCT x.cur) AS currencies FROM "Customer" c JOIN (
+  SELECT i."customerId" AS cid, i."currency" AS cur FROM "Invoice" i WHERE i."status" NOT IN ('DRAFT', 'CANCELLED')
+  UNION SELECT pj."customerId", pl."currency" FROM "Reservation" r JOIN "Project" pj ON pj."id" = r."projectId" JOIN "Plant" pl ON pl."siteId" = r."siteId" AND pl."status" = 'ACTIVE'
+  WHERE r."status" IN ('CONFIRMED', 'IN_PRODUCTION')
+) x ON x.cid = c."id" GROUP BY c."id" HAVING COUNT(DISTINCT x.cur) > 1;
+\echo '== Q5 reservations with a non-finite or non-positive volume'
+SELECT "id", "reservationNumber", "status", "requestedVolumeM3" FROM "Reservation"
+WHERE NOT ("requestedVolumeM3" > 0 AND "requestedVolumeM3" < 'Infinity');
+\echo '== Q6 customers at limit 0 (every new booking of theirs holds after deploy)'
+SELECT COUNT(*) AS customers_at_zero,
+       COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM "Project" pj JOIN "Reservation" r ON r."projectId" = pj."id"
+                                      WHERE pj."customerId" = c."id" AND r."createdAt" > now() - interval '90 days')) AS booked_last_90_days
+FROM "Customer" c WHERE c."creditLimit" = 0;
+ROLLBACK;
