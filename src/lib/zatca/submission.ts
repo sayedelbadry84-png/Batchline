@@ -91,8 +91,11 @@ export async function submitDocument(input: {
     );
     if (!changed.count) {
       if (!(await document(tx, kind).count(ours))) return "LOST";
-      await finishIn(tx, "FAILED", undefined, undefined, `HASH_MISMATCH: the signed invoice hash differs from the hash stored at generation, which the PIH chain links to. Nothing was sent; see submission attempt ${attemptId}.`);
-      return "HASH_MISMATCH";
+      // The count takes no lock: the claim can still move (the stale sweep,
+      // say) before finishIn's conditional update. Then this call did not
+      // record FAILED and must not report it (audit of 968b374, A2).
+      const failed = await finishIn(tx, "FAILED", undefined, undefined, `HASH_MISMATCH: the signed invoice hash differs from the hash stored at generation, which the PIH chain links to. Nothing was sent; see submission attempt ${attemptId}.`);
+      return failed ? "HASH_MISMATCH" : "LOST";
     }
     await tx.zatcaSubmissionAttempt.update({ where: { id: attemptId }, data: { invoiceHash: prepared.invoiceHash, signedXml: prepared.signedXml } });
     return "READY";

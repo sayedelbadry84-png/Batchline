@@ -514,6 +514,52 @@ for (const kind of ["INVOICE", "CREDIT_NOTE"] as const) {
     assert.equal(await prisma.auditEvent.count({ where: { recordId: d.id, reasonCode: "ZATCA_FAILED" } }), 1);
   });
 
+  // Audit of 968b374, A2: the mismatch count takes no lock, so the claim can
+  // be withdrawn (here as the stale sweep would, to UNKNOWN) before the
+  // FAILED update. That call recorded nothing and must say so rather than
+  // report a mismatch it did not record.
+  test(`${kind}: a claim withdrawn between the mismatch check and FAILED is reported as lost`, async () => {
+    const d = await document(); let calls = 0;
+    await patch(d.id, { zatcaInvoiceHash: "stored-chain-hash" });
+    const transport: typeof fetch = async () => { calls++; return Response.json({ clearanceStatus: "CLEARED" }); };
+    const model = kind === "INVOICE" ? "invoice" : "creditNote";
+    const original = prisma.$transaction.bind(prisma);
+    let transactions = 0;
+    Object.assign(prisma, { $transaction: (...args: Parameters<typeof prisma.$transaction>) => {
+      const [fn, ...rest] = args as unknown as [(tx: object) => Promise<unknown>, ...unknown[]];
+      if (++transactions !== 2 || typeof fn !== "function") return (original as (...a: unknown[]) => Promise<unknown>)(...args);
+      // Inside the preparation transaction: after the count, withdraw the
+      // claim from a separate connection, which commits at once.
+      return (original as (...a: unknown[]) => Promise<unknown>)((tx: Record<string, unknown>) => fn(new Proxy(tx, {
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (prop !== model) return value;
+          const delegate = value as { count: (a: unknown) => Promise<number> };
+          return new Proxy(delegate, { get(t, p, r) {
+            if (p !== "count") return Reflect.get(t, p, r);
+            return async (a: unknown) => {
+              const n = await t.count(a);
+              await patch(d.id, { zatcaStatus: "UNKNOWN" });
+              return n;
+            };
+          } });
+        },
+      })), ...rest);
+    } });
+    let result: Awaited<ReturnType<typeof submitDocument>>;
+    try {
+      result = await submitDocument({ kind, id: d.id, uuid: d.uuid, actor: null, prepare }, transport);
+    } finally {
+      Object.assign(prisma, { $transaction: original });
+    }
+    assert.deepEqual(result, { ok: false, reason: "RECONCILIATION_REQUIRED" });
+    assert.equal(calls, 0, "nothing reaches ZATCA");
+    const row = kind === "INVOICE" ? await prisma.invoice.findFirstOrThrow({ where: { id: d.id } }) : await prisma.creditNote.findFirstOrThrow({ where: { id: d.id } });
+    assert.equal(row.zatcaStatus, "UNKNOWN", "the withdrawing transaction's state stands");
+    assert.equal(row.zatcaInvoiceHash, "stored-chain-hash");
+    assert.equal(await prisma.auditEvent.count({ where: { recordId: d.id, reasonCode: "ZATCA_FAILED" } }), 0, "this call recorded no FAILED");
+  });
+
   test(`${kind}: stale submission and late response require reconciliation without resending`, async () => {
     const d = await document(), entered = latch(), release = latch(); let calls = 0;
     const input = { kind, id: d.id, uuid: d.uuid, actor: null, prepare };
