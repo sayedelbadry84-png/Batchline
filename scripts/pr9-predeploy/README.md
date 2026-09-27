@@ -133,12 +133,32 @@ Run them in this order. Step 6 does not start until steps 2 to 5 are complete an
      authorized test customer and project have been agreed in step 5 with
      their cleanup: a real booking consumes credit headroom, can reserve
      equipment, and writes audit rows that cannot be deleted.
-   - By default the check is read-only or harmless:
+   - By default the check is read-only, and covers only what the UI actually
+     shows:
      - the Customers page loads;
-     - the request queue renders for an ADMIN;
-     - a known over-limit customer from the step 4 report shows as held.
-   - A real operational booking is then watched with the operations team's
-     agreement.
+     - each customer's approved limit is shown, unchanged from before the
+       deploy;
+     - the request queue renders for an ADMIN, with the request form for an
+       ACCOUNTANT;
+     - the Reservations page loads.
+   - **No page shows a computed credit hold.** The Customers page renders the
+     stored limit and the requests; it never calls `evaluateCustomerCredit`.
+     The Reservations page renders each booking's stored status: a CONFIRMED
+     booking stays CONFIRMED when its customer goes over the limit, and only
+     its next release is refused. So "an over-limit customer shows as held" is
+     not a production check.
+   - The `CREDIT_HOLD` decision itself is verified away from production:
+     - it is covered by `tests/reservationCredit.test.ts` in CI;
+     - the step 4 report on the restored copy names the customers it will
+       apply to.
+   - In production it is observed only on real operational activity, with
+     the operations team's agreement. Examples:
+     - a booking for a customer the report flagged is stored ON_HOLD;
+     - a release for such a customer is refused with the `CREDIT_HOLD`
+       banner.
+   - Nothing is created for the purpose. A live exposure indicator on the
+     Customers page would be a separate feature, with its own design and
+     tests; it is not part of this deploy.
    - Step 5 names who runs this check and how any effect of it is reversed.
 
 ## Rollback
