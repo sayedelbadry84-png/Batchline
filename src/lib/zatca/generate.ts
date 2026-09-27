@@ -92,5 +92,6 @@ export async function generateZatcaDocuments(invoiceId: string, actor: Generatio
 
     await writeAudit(tx, actor, { module: "Billing", recordId: invoiceId, reasonCode: "ZATCA_GENERATED" });
     return { ok: true };
-  }, { timeout: 15000, isolationLevel: "Serializable" }));
+    // ReadCommitted, not Serializable: see lockSiteChain in chain.ts.
+  }, { timeout: 15000, isolationLevel: "ReadCommitted" }));
 }
