@@ -42,3 +42,24 @@ export function parseMoneyInput(raw: FormDataEntryValue | null): number | null {
 export function toMinorUnits(amount: number): number {
   return Math.round(amount * 100);
 }
+
+// Signed amount from an imported bank statement, as exact integer minor
+// units. Separate from parseMoneyInput because a statement line carries
+// its direction in the sign, and banks export thousands separators.
+//
+// The previous parse was `Number(raw.replace(/,/g, ""))`, which accepted
+// "1e3", "Infinity" and "100.004", and stripped commas wherever they
+// appeared, so "1,23" read as 123. The result was compared against
+// payments with a 0.01 tolerance, so a 10.00 line auto-reconciled a 10.01
+// payment. Parsing the digits into minor units, with no float
+// multiplication, is what lets the matcher compare with plain equality.
+const SIGNED_MONEY_INPUT = /^(-?)(\d+|\d{1,3}(?:,\d{3})+)(?:\.(\d{1,2}))?$/;
+
+export function parseSignedMoneyToMinor(raw: string): number | null {
+  const match = SIGNED_MONEY_INPUT.exec(raw.trim());
+  if (!match) return null;
+  const [, sign, whole, fraction = ""] = match;
+  const minor = Number(whole.replace(/,/g, "")) * 100 + Number(fraction.padEnd(2, "0"));
+  if (!Number.isSafeInteger(minor)) return null;
+  return sign === "-" ? -minor : minor;
+}

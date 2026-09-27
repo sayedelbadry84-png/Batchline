@@ -9,7 +9,7 @@ import { getCurrentUser, requireActionPermission } from "@/lib/session";
 import { effectiveSiteId, isSiteInScope } from "@/lib/siteScope";
 import { withSequentialNumber } from "@/lib/sequence";
 import { postSupplierBill, postSupplierPayment, postCashTransaction, reverseJournalEntry } from "@/lib/ledger";
-import { parseBankStatementCsv, matchBankStatementLines, type ReconciliationCandidate } from "@/lib/bankReconciliation";
+import { parseBankStatementCsv, matchBankStatementLines, type ReconciliationCandidate, type BankStatementParseError } from "@/lib/bankReconciliation";
 import { parseMoneyInput, toMinorUnits } from "@/lib/money";
 import { revalidatePath } from "next/cache";
 
@@ -395,23 +395,69 @@ export async function reconcileMovement(formData: FormData) {
   revalidatePath("/finance");
 }
 
+export type BankStatementRowError = BankStatementParseError;
+
+// What happened to an uploaded statement, for the import form to show.
+// importBankStatement used to return void for every outcome, so a repeat
+// upload, a file with nothing importable in it, and a successful import
+// all looked the same: the page reloaded.
+//
+// - IMPORTED: lines recorded; rowErrors are the rows skipped.
+// - ALREADY_IMPORTED: these exact bytes were imported for this site before
+//   (both sides hashed as raw bytes). Nothing written.
+// - NEEDS_REVIEW: an earlier import for this site has the same decoded
+//   content, but it cannot be shown to be the same file. Nothing written;
+//   see textDigest on BankStatementImport. `earlierIdentity` says which
+//   case: LEGACY_TEXT is an import from before raw-byte digests, whose
+//   bytes are unknown; DIFFERENT_BYTES is a raw-byte import proven to be a
+//   different file with identical content.
+// - NO_LINES: the file parsed but no row was importable.
+// - INVALID_REQUEST: no site, a site outside the caller's scope, or no
+//   file. One code for all three, so it confirms nothing about the site.
+// - FAILED: the import did not commit, for a reason other than the ones
+//   above. Nothing was written; the error is logged on the server.
+//
+// rowErrors is capped so a garbage file cannot produce a huge response;
+// rowErrorCount is the true total.
+export type ImportBankStatementState =
+  | { status: "IMPORTED"; lineCount: number; matchedCount: number; rowErrors: BankStatementRowError[]; rowErrorCount: number }
+  | { status: "ALREADY_IMPORTED"; importedAt: string }
+  | { status: "NEEDS_REVIEW"; importedAt: string; earlierIdentity: "LEGACY_TEXT" | "DIFFERENT_BYTES" }
+  | { status: "NO_LINES"; rowErrors: BankStatementRowError[]; rowErrorCount: number }
+  | { status: "INVALID_REQUEST" }
+  | { status: "FAILED" }
+  | null;
+
+const ROW_ERROR_LIMIT = 20;
+
 // Imports a bank statement CSV, records every line (matched or not — an
 // unmatched line is itself useful information, see BankStatementLine's
 // schema comment), and auto-reconciles whichever lines have exactly one
 // unambiguous candidate (see src/lib/bankReconciliation.ts for the
 // matching rule). Everything else is left for reconcileMovement's
 // existing manual flow.
-export async function importBankStatement(formData: FormData) {
+export async function importBankStatement(_prev: ImportBankStatementState, formData: FormData): Promise<ImportBankStatementState> {
   const actor = await getCurrentUser();
   await requireActionPermission(actor, "finance", "importBankStatement");
 
   const siteId = String(formData.get("siteId") ?? "");
   const file = formData.get("file");
-  if (!siteId || !isSiteInScope(siteId, effectiveSiteId(actor)) || !(file instanceof File) || file.size === 0) return;
+  if (!siteId || !isSiteInScope(siteId, effectiveSiteId(actor)) || !(file instanceof File)) return { status: "INVALID_REQUEST" };
 
-  const text = await file.text();
+  // Read once as bytes: the import's identity is the digest of these
+  // exact bytes, and the parser reads the same bytes decoded.
+  //
+  // The decode is deliberately the one the old identity used:
+  // `file.text()` is a UTF-8 decode that strips one leading BOM and
+  // replaces each invalid sequence with U+FFFD, and TextDecoder("utf-8")
+  // with default options does exactly that. textDigest below therefore
+  // reproduces, for any file, the digest an import before 2026-09-25
+  // would have stored for it.
+  const bytes = Buffer.from(await file.arrayBuffer());
+  const text = new TextDecoder("utf-8").decode(bytes);
   const { lines, errors } = parseBankStatementCsv(text);
-  if (lines.length === 0) return;
+  const rowErrors = errors.slice(0, ROW_ERROR_LIMIT);
+  if (lines.length === 0) return { status: "NO_LINES", rowErrors, rowErrorCount: errors.length };
 
   const [payments, supplierPayments, cashTransactions] = await Promise.all([
     prisma.payment.findMany({ where: { reconciled: false, invoice: { plant: { siteId } } }, select: { id: true, amount: true, paidAt: true } }),
@@ -446,19 +492,27 @@ export async function importBankStatement(formData: FormData) {
   // The digest is computed here from the file's own bytes rather than
   // taken from the request, so the identity cannot be omitted or forged,
   // and its uniqueness is per site — the same statement legitimately
-  // belongs to one factory. A second attempt hits that unique index and
-  // this returns silently, which is what makes a retry safe.
+  // belongs to one factory. A second attempt hits that unique index,
+  // writes nothing, and is reported as ALREADY_IMPORTED, which is what
+  // makes a retry safe.
   //
   // A movement whose claim is lost still produces a statement line, filed
   // as UNMATCHED. That is deliberate: the line is real bank data and must
   // appear for a human to reconcile, but it must not assert a claim the
   // database already gave to someone else.
-  const fileDigest = createHash("sha256").update(text, "utf8").digest("hex");
+  //
+  // Two digests, because imports before 2026-09-25 stored only a digest of
+  // the decoded text (see BankStatementImport.digestKind). Both are
+  // unique per site, so any second import of the same content fails on
+  // the insert below, including one racing this one; importConflict then
+  // decides which of the two it was.
+  const fileDigest = createHash("sha256").update(bytes).digest("hex");
+  const textDigest = createHash("sha256").update(text, "utf8").digest("hex");
 
-  const imported = await prisma
-    .$transaction(async (tx) => {
+  try {
+    const claimedCount = await prisma.$transaction(async (tx) => {
       const batch = await tx.bankStatementImport.create({
-        data: { siteId, fileDigest, lineCount: lines.length, matchedCount: 0, importedById: actor!.id },
+        data: { siteId, digestKind: "RAW_BYTES", fileDigest, textDigest, lineCount: lines.length, matchedCount: 0, importedById: actor!.id },
       });
 
       let claimedCount = 0;
@@ -502,16 +556,56 @@ export async function importBankStatement(formData: FormData) {
         afterValue: `Imported ${lines.length} bank statement lines, ${claimedCount} auto-matched, ${lines.length - claimedCount} unmatched, ${errors.length} rows skipped`,
         reasonCode: "BANK_STATEMENT_IMPORTED",
       });
-      return true;
-    }, TX_OPTIONS)
-    .catch((e) => {
-      // A repeat of a file this site has already imported. Silent by
-      // design, like every other refusal here — and nothing was written,
-      // because the unique index rejected the very first statement.
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") return false;
-      throw e;
-    });
-  if (!imported) return;
+      return claimedCount;
+    }, TX_OPTIONS);
 
-  revalidatePath("/finance");
+    revalidatePath("/finance");
+    return { status: "IMPORTED", lineCount: lines.length, matchedCount: claimedCount, rowErrors, rowErrorCount: errors.length };
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      const conflict = await importConflict(siteId, fileDigest, textDigest);
+      if (conflict) return conflict;
+    }
+    // Not a repeat of an earlier import: an audit failure, a constraint
+    // elsewhere in the transaction, a lost connection. The transaction
+    // rolled back, so nothing is on file and the same file can be retried.
+    // Logged in full here; the uploader is told it failed, never that it
+    // was a duplicate or that it worked.
+    console.error("importBankStatement failed", e);
+    return { status: "FAILED" };
+  }
+}
+
+// Classifies a unique violation on the import insert by asking the
+// database what now exists, not by parsing Prisma's meta.target (see
+// materialRequisition.ts for why that string proved unreliable). A unique
+// conflict is reported only once the other transaction has committed, so
+// this read sees it. Returns null for a P2002 that is not about this
+// file's identity, which the caller reports as a failure.
+async function importConflict(siteId: string, fileDigest: string, textDigest: string): Promise<ImportBankStatementState> {
+  const sameBytes = await prisma.bankStatementImport.findUnique({
+    where: { siteId_digestKind_fileDigest: { siteId, digestKind: "RAW_BYTES", fileDigest } },
+    select: { createdAt: true },
+  });
+  if (sameBytes) return { status: "ALREADY_IMPORTED", importedAt: sameBytes.createdAt.toISOString() };
+
+  // Same decoded content, so importing would add the same lines again —
+  // but not provably the same file. A TEXT_UTF8 row recorded only the
+  // text digest: the file behind it may have had a BOM this one lacks, or
+  // the reverse, or different bytes where U+FFFD now stands. A RAW_BYTES
+  // row with a different fileDigest is a different file. Neither is
+  // skipped as a duplicate nor imported: a person has to compare it with
+  // the earlier import.
+  const sameContent = await prisma.bankStatementImport.findUnique({
+    where: { siteId_textDigest: { siteId, textDigest } },
+    select: { createdAt: true, digestKind: true },
+  });
+  if (sameContent) {
+    return {
+      status: "NEEDS_REVIEW",
+      importedAt: sameContent.createdAt.toISOString(),
+      earlierIdentity: sameContent.digestKind === "TEXT_UTF8" ? "LEGACY_TEXT" : "DIFFERENT_BYTES",
+    };
+  }
+  return null;
 }

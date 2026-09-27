@@ -20,7 +20,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 const require = createRequire(import.meta.url);
 require("./setup/stubServerOnly.cjs");
 if (!process.env.TEST_DATABASE_URL || process.env.TEST_DATABASE_URL === process.env.DATABASE_URL) {
@@ -1126,15 +1126,34 @@ test("a failed audit insert rolls back the reconciliation flag itself", async ()
 // response — inserted every line again.
 // Column order is the parser's own: date, description, reference, amount
 // (see parseBankStatementCsv). The header row is skipped.
-function statementForm(siteId: string, rows: { date: string; description: string; amount: string; reference?: string }[]) {
-  const body = ["date,description,reference,amount", ...rows.map((r) => `${r.date},${r.description},${r.reference ?? ""},${r.amount}`)].join(String.fromCharCode(10));
+function statementBody(rows: { date: string; description: string; amount: string; reference?: string }[]) {
+  return ["date,description,reference,amount", ...rows.map((r) => `${r.date},${r.description},${r.reference ?? ""},${r.amount}`)].join(String.fromCharCode(10));
+}
+
+function fileForm(siteId: string, parts: BlobPart[]) {
   const data = new FormData();
   data.set("siteId", siteId);
-  data.set("file", new File([body], "statement.csv", { type: "text/csv" }));
+  data.set("file", new File(parts, "statement.csv", { type: "text/csv" }));
   return data;
 }
 
-test("the same statement file cannot be imported twice", async () => {
+function statementForm(siteId: string, rows: { date: string; description: string; amount: string; reference?: string }[]) {
+  return fileForm(siteId, [statementBody(rows)]);
+}
+
+// The action is a useActionState action now: (previous state, form data).
+function importStatement(data: FormData) {
+  return finance.importBankStatement(null, data);
+}
+
+async function importCounts(siteId: string, descriptionPrefix: string) {
+  return {
+    imports: await prisma.bankStatementImport.count({ where: { siteId } }),
+    lines: await prisma.bankStatementLine.count({ where: { siteId, description: { startsWith: descriptionPrefix } } }),
+  };
+}
+
+test("the same statement file cannot be imported twice, and the repeat says so", async () => {
   const bill = await makeSupplierBill(siteA, 500);
   await asUser(accountantId);
   await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "500" }));
@@ -1142,20 +1161,21 @@ test("the same statement file cannot be imported twice", async () => {
   const day = payment.paidAt.toISOString().slice(0, 10);
 
   const rows = [{ date: day, amount: "-500", description: `${prefix}-STMT-1` }];
-  await finance.importBankStatement(statementForm(siteA, rows));
-
-  const afterFirst = await prisma.bankStatementLine.count({ where: { siteId: siteA } });
-  assert.ok(afterFirst >= 1, "the first import brings the line in");
-  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), 1);
+  const first = await importStatement(statementForm(siteA, rows));
+  assert.equal(first?.status, "IMPORTED");
+  assert.deepEqual(first?.status === "IMPORTED" ? [first.lineCount, first.matchedCount, first.rowErrorCount] : null, [1, 1, 0]);
+  const afterFirst = await importCounts(siteA, `${prefix}-STMT-`);
+  assert.equal(afterFirst.lines, 1);
 
   // The identical file again — the ordinary "did that go through?" retry.
-  await finance.importBankStatement(statementForm(siteA, rows));
-  assert.equal(await prisma.bankStatementLine.count({ where: { siteId: siteA } }), afterFirst, "a repeat of the same file must add nothing");
-  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), 1, "and must not record a second import");
+  const repeat = await importStatement(statementForm(siteA, rows));
+  assert.equal(repeat?.status, "ALREADY_IMPORTED", "a repeat must be reported, not silently reloaded");
+  assert.deepEqual(await importCounts(siteA, `${prefix}-STMT-`), afterFirst, "and must add nothing");
 
   // A genuinely different statement still imports.
-  await finance.importBankStatement(statementForm(siteA, [{ date: day, amount: "-12.34", description: `${prefix}-STMT-2` }]));
-  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), 2, "a different file is not blocked by the first one's digest");
+  const other = await importStatement(statementForm(siteA, [{ date: day, amount: "-12.34", description: `${prefix}-STMT-2` }]));
+  assert.equal(other?.status, "IMPORTED", "a different file is not blocked by the first one's digest");
+  assert.equal((await importCounts(siteA, `${prefix}-STMT-`)).imports, afterFirst.imports + 1);
 });
 
 test("two concurrent imports cannot both claim the same payment", async () => {
@@ -1165,13 +1185,14 @@ test("two concurrent imports cannot both claim the same payment", async () => {
   const payment = await prisma.supplierPayment.findFirstOrThrow({ where: { supplierBillId: bill.id } });
   const day = payment.paidAt.toISOString().slice(0, 10);
 
-  // Two DIFFERENT files (different digests, so neither is refused as a
+  // Two DIFFERENT files (different content, so neither is refused as a
   // repeat) that describe the same bank movement — exactly the race: both
   // read the payment as unreconciled and both pick it.
-  await Promise.all([
-    finance.importBankStatement(statementForm(siteA, [{ date: day, amount: "-321", description: `${prefix}-RACE-A` }])),
-    finance.importBankStatement(statementForm(siteA, [{ date: day, amount: "-321", description: `${prefix}-RACE-B` }])),
+  const results = await Promise.all([
+    importStatement(statementForm(siteA, [{ date: day, amount: "-321", description: `${prefix}-RACE-A` }])),
+    importStatement(statementForm(siteA, [{ date: day, amount: "-321", description: `${prefix}-RACE-B` }])),
   ]);
+  assert.deepEqual(results.map((r) => r?.status), ["IMPORTED", "IMPORTED"]);
 
   const claiming = await prisma.bankStatementLine.findMany({ where: { matchedKind: "supplierPayment", matchedId: payment.id } });
   assert.equal(claiming.length, 1, "exactly one statement line may claim a financial movement");
@@ -1183,7 +1204,7 @@ test("two concurrent imports cannot both claim the same payment", async () => {
   assert.equal((await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled, true);
 });
 
-test("a failed audit insert rolls back the whole statement import", async () => {
+test("a failed audit insert rolls back the whole statement import and reports FAILED, not a duplicate", async () => {
   const bill = await makeSupplierBill(siteA, 77);
   await asUser(accountantId);
   await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "77" }));
@@ -1208,8 +1229,8 @@ test("a failed audit insert rolls back the whole statement import", async () => 
   `);
   const rows = [{ date: day, amount: "-77", description: `${prefix}-ROLLBACK` }];
   try {
-    const failing = statementForm(siteA, rows);
-    await assert.rejects(() => finance.importBankStatement(failing));
+    const failed = await importStatement(statementForm(siteA, rows));
+    assert.equal(failed?.status, "FAILED", "a failure must be reported as a failure");
     assert.equal(await prisma.bankStatementLine.count({ where: { siteId: siteA } }), linesBefore, "no statement line may survive");
     assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore, "and no import identity either");
     assert.equal(
@@ -1224,9 +1245,204 @@ test("a failed audit insert rolls back the whole statement import", async () => 
 
   // The rolled-back digest was never recorded, so the clean retry of the
   // very same file is accepted — which is the whole point of rolling back.
-  await finance.importBankStatement(statementForm(siteA, rows));
+  const retry = await importStatement(statementForm(siteA, rows));
+  assert.equal(retry?.status, "IMPORTED");
   assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore + 1);
   assert.equal((await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled, true);
+});
+
+// Any P2002 inside the import used to be read as "this file was already
+// imported" and swallowed, so a uniqueness failure on anything else rolled
+// the import back and reported nothing at all.
+test("a unique violation that is not about the file's identity is reported as FAILED, never as a duplicate", async () => {
+  await asUser(accountantId);
+  const importsBefore = await prisma.bankStatementImport.count({ where: { siteId: siteA } });
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_xs_unique_on_line() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."description" LIKE '%-UNRELATED-UNIQUE' THEN
+        RAISE EXCEPTION 'injected unrelated unique violation' USING ERRCODE = 'unique_violation';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE TRIGGER test_xs_unique_on_line_trigger BEFORE INSERT ON "BankStatementLine"
+    FOR EACH ROW EXECUTE FUNCTION test_xs_unique_on_line();
+  `);
+  const rows = [{ date: "2026-09-02", amount: "-8.90", description: `${prefix}-UNRELATED-UNIQUE` }];
+  try {
+    const result = await importStatement(statementForm(siteA, rows));
+    assert.equal(result?.status, "FAILED", "an unrelated uniqueness failure must not read as ALREADY_IMPORTED or NEEDS_REVIEW");
+    assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore, "and nothing from the failed import may remain");
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_unique_on_line_trigger ON "BankStatementLine";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_unique_on_line();`);
+  }
+
+  // With the fault gone, the same file imports: it was never recorded.
+  assert.equal((await importStatement(statementForm(siteA, rows)))?.status, "IMPORTED");
+  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteA } }), importsBefore + 1);
+});
+
+test("a file with no readable rows reports NO_LINES with each row's reason, and writes nothing", async () => {
+  await asUser(accountantId);
+  const before = await importCounts(siteA, `${prefix}-NOLINES-`);
+  const result = await importStatement(
+    statementForm(siteA, [
+      { date: "not-a-date", amount: "-1.00", description: `${prefix}-NOLINES-1` },
+      { date: "2026-09-03", amount: "1e3", description: `${prefix}-NOLINES-2` },
+    ]),
+  );
+  assert.deepEqual(result, {
+    status: "NO_LINES",
+    rowErrors: [
+      { row: 2, code: "BAD_DATE", value: "not-a-date" },
+      { row: 3, code: "BAD_AMOUNT", value: "1e3" },
+    ],
+    rowErrorCount: 2,
+  });
+  assert.deepEqual(await importCounts(siteA, `${prefix}-NOLINES-`), before);
+
+  assert.equal((await importStatement(fileForm(siteA, [""])))?.status, "NO_LINES", "an empty file is a file with nothing to import");
+});
+
+test("an import with some bad rows imports the good ones and reports the skipped rows", async () => {
+  await asUser(accountantId);
+  const result = await importStatement(
+    statementForm(siteA, [
+      { date: "2026-09-04", amount: "-3.21", description: `${prefix}-PARTIAL-OK` },
+      { date: "2026-09-04", amount: "100.004", description: `${prefix}-PARTIAL-BAD` },
+    ]),
+  );
+  assert.equal(result?.status, "IMPORTED");
+  if (result?.status !== "IMPORTED") throw new Error("unreachable");
+  assert.equal(result.lineCount, 1);
+  assert.deepEqual(result.rowErrors, [{ row: 3, code: "BAD_AMOUNT", value: "100.004" }]);
+  assert.equal(await prisma.bankStatementLine.count({ where: { description: { startsWith: `${prefix}-PARTIAL-` } } }), 1);
+});
+
+test("an import naming a site outside the caller's scope is refused without writing anything", async () => {
+  await asUser(accountantId);
+  const before = await prisma.bankStatementImport.count({ where: { siteId: siteB } });
+  const result = await importStatement(statementForm(siteB, [{ date: "2026-09-05", amount: "-1.00", description: `${prefix}-OTHER-SITE` }]));
+  assert.equal(result?.status, "INVALID_REQUEST");
+  assert.equal(await prisma.bankStatementImport.count({ where: { siteId: siteB } }), before);
+});
+
+// The import's identity is the SHA-256 of the uploaded BYTES. It used to
+// hash the decoded text, and every invalid UTF-8 sequence decodes to the
+// same U+FFFD, so two different files that differed only in such bytes
+// shared one digest and the second was silently dropped as a replay. They
+// are provably different files — but with identical content, so importing
+// the second would add the same lines again. It is refused for review.
+function invalidByteFile(siteId: string, marker: string, invalidByte: number) {
+  const head = new TextEncoder().encode(`date,description,reference,amount\n2026-09-01,${prefix}-${marker}-`);
+  const tail = new TextEncoder().encode(",,-4.56\n");
+  return fileForm(siteId, [head, new Uint8Array([invalidByte]), tail]);
+}
+
+test("a different file whose content decodes identically needs review; the identical bytes are a replay", async () => {
+  await asUser(accountantId);
+  const before = await importCounts(siteA, `${prefix}-BYTES-`);
+
+  assert.equal((await importStatement(invalidByteFile(siteA, "BYTES", 0xff)))?.status, "IMPORTED");
+  const second = await importStatement(invalidByteFile(siteA, "BYTES", 0xfe));
+  assert.equal(second?.status, "NEEDS_REVIEW", "different bytes, same content: neither silently dropped nor imported");
+  assert.equal(second?.status === "NEEDS_REVIEW" ? second.earlierIdentity : null, "DIFFERENT_BYTES");
+
+  const repeat = await importStatement(invalidByteFile(siteA, "BYTES", 0xff));
+  assert.equal(repeat?.status, "ALREADY_IMPORTED");
+  assert.deepEqual(await importCounts(siteA, `${prefix}-BYTES-`), { imports: before.imports + 1, lines: before.lines + 1 });
+});
+
+// Transition from the old text digest. Every import before this change
+// stored SHA-256 of `await file.text()` re-encoded as UTF-8, and the
+// migration labelled those rows TEXT_UTF8 with textDigest = fileDigest.
+// This reproduces such a row the way the OLD code computed it.
+async function insertLegacyImport(siteId: string, bytes: Uint8Array<ArrayBuffer>, lineDescription: string) {
+  const legacyDigest = createHash("sha256").update(await new File([bytes], "old.csv").text(), "utf8").digest("hex");
+  const row = await prisma.bankStatementImport.create({
+    data: { siteId, digestKind: "TEXT_UTF8", fileDigest: legacyDigest, textDigest: legacyDigest, lineCount: 1, matchedCount: 0, importedById: accountantId },
+  });
+  await prisma.bankStatementLine.create({
+    data: { siteId, statementDate: new Date("2026-08-01T00:00:00Z"), direction: "OUT", amount: 9.87, description: lineDescription, importedById: accountantId, importId: row.id },
+  });
+  return { row, legacyDigest };
+}
+
+test("a historical BOM file imported under the old text digest is not imported again; it needs review", async () => {
+  await asUser(accountantId);
+  const description = `${prefix}-LEGACY-BOM`;
+  const body = new TextEncoder().encode(statementBody([{ date: "2026-08-01", amount: "-9.87", description }]));
+  const withBom = new Uint8Array([0xef, 0xbb, 0xbf, ...body]);
+
+  // The old digest ignored the BOM: the file with it and without it had
+  // one identity. This is what makes the historical row ambiguous.
+  const { legacyDigest } = await insertLegacyImport(siteA, withBom, description);
+  assert.equal(legacyDigest, createHash("sha256").update(body).digest("hex"), "the old algorithm hashed the text after stripping the BOM");
+  assert.notEqual(legacyDigest, createHash("sha256").update(withBom).digest("hex"));
+  const before = await importCounts(siteA, description);
+
+  for (const bytes of [withBom, body]) {
+    const result = await importStatement(fileForm(siteA, [bytes]));
+    assert.equal(result?.status, "NEEDS_REVIEW", "a legacy text-digest match is not proof of the same file, and must not import");
+    assert.equal(result?.status === "NEEDS_REVIEW" ? result.earlierIdentity : null, "LEGACY_TEXT");
+  }
+  assert.deepEqual(await importCounts(siteA, description), before, "the historical file's line must not be added a second time");
+});
+
+test("a legacy import does not block a statement with different content", async () => {
+  await asUser(accountantId);
+  const legacyBody = new TextEncoder().encode(statementBody([{ date: "2026-08-02", amount: "-1.11", description: `${prefix}-LEGACY-OTHER-A` }]));
+  await insertLegacyImport(siteA, legacyBody, `${prefix}-LEGACY-OTHER-A`);
+  const result = await importStatement(statementForm(siteA, [{ date: "2026-08-02", amount: "-1.12", description: `${prefix}-LEGACY-OTHER-B` }]));
+  assert.equal(result?.status, "IMPORTED");
+});
+
+test("concurrent retries: one import wins, the rest are reported as replays or for review, and lines are written once", async () => {
+  await asUser(accountantId);
+
+  // The same file submitted twice at once (a double click, a retried request).
+  const sameRows = [{ date: "2026-09-06", amount: "-6.54", description: `${prefix}-CONCURRENT-SAME` }];
+  const same = await Promise.all([importStatement(statementForm(siteA, sameRows)), importStatement(statementForm(siteA, sameRows))]);
+  assert.deepEqual(same.map((r) => r?.status).sort(), ["ALREADY_IMPORTED", "IMPORTED"]);
+  assert.equal(await prisma.bankStatementLine.count({ where: { description: `${prefix}-CONCURRENT-SAME` } }), 1, "the lines are written once");
+
+  // Two byte-different files with the same content, at once.
+  const different = await Promise.all([importStatement(invalidByteFile(siteA, "CONCURRENT-BYTES", 0xff)), importStatement(invalidByteFile(siteA, "CONCURRENT-BYTES", 0xfe))]);
+  assert.deepEqual(different.map((r) => r?.status).sort(), ["IMPORTED", "NEEDS_REVIEW"]);
+  assert.equal(await prisma.bankStatementLine.count({ where: { description: { startsWith: `${prefix}-CONCURRENT-BYTES-` } } }), 1);
+
+  // A historical file re-uploaded twice at once: neither may import.
+  const description = `${prefix}-CONCURRENT-LEGACY`;
+  const body = new TextEncoder().encode(statementBody([{ date: "2026-08-03", amount: "-2.22", description }]));
+  const withBom = new Uint8Array([0xef, 0xbb, 0xbf, ...body]);
+  await insertLegacyImport(siteA, withBom, description);
+  const legacy = await Promise.all([importStatement(fileForm(siteA, [withBom])), importStatement(fileForm(siteA, [withBom]))]);
+  assert.deepEqual(legacy.map((r) => r?.status), ["NEEDS_REVIEW", "NEEDS_REVIEW"]);
+  assert.equal(await prisma.bankStatementLine.count({ where: { description } }), 1, "only the historical line exists");
+});
+
+// A statement line one halala off a payment is left for a human. The
+// matcher used to allow a 0.01 float difference.
+test("a statement line one minor unit off a payment imports unmatched and leaves the payment unreconciled", async () => {
+  const bill = await makeSupplierBill(siteA, 210.01);
+  await asUser(accountantId);
+  await finance.recordSupplierPayment(form({ supplierBillId: bill.id, amount: "210.01" }));
+  const payment = await prisma.supplierPayment.findFirstOrThrow({ where: { supplierBillId: bill.id } });
+  const day = payment.paidAt.toISOString().slice(0, 10);
+
+  await importStatement(statementForm(siteA, [{ date: day, amount: "-210.00", description: `${prefix}-OFF-BY-ONE` }]));
+
+  const line = await prisma.bankStatementLine.findFirstOrThrow({ where: { description: `${prefix}-OFF-BY-ONE` } });
+  assert.equal(line.matchedId, null, "210.00 must not auto-reconcile a 210.01 payment");
+  assert.equal((await prisma.supplierPayment.findUniqueOrThrow({ where: { id: payment.id } })).reconciled, false);
+
+  await importStatement(statementForm(siteA, [{ date: day, amount: "-210.01", description: `${prefix}-EXACT` }]));
+  const exact = await prisma.bankStatementLine.findFirstOrThrow({ where: { description: `${prefix}-EXACT` } });
+  assert.equal(exact.matchedId, payment.id, "the exact amount still matches");
 });
 
 // Integration audit (2026-09-12): a SCADA reading delayed in transit must

@@ -7,7 +7,19 @@
 // server-derived allow-list.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseReturnTarget, releaseSuccessPath, releaseFailurePath, parseTripReturnTarget, tripReturnPath } from "../src/lib/releaseRouting";
+import { parseReturnTarget, releaseSuccessPath, releaseFailurePath, parseTripReturnTarget, tripReturnPath, describeReleaseError } from "../src/lib/releaseRouting";
+import arModule from "../src/lib/i18n/dictionaries/ar";
+import enModule from "../src/lib/i18n/dictionaries/en";
+
+// Under `tsx --test` these dictionary files load as CommonJS, so the
+// default import arrives as the whole exports object ({ default: ... });
+// under Next's bundler it is the dictionary itself. Unwrap either shape
+// instead of depending on which loader ran this file.
+function unwrapDefault<T>(m: T): T {
+  return (m as { default?: T }).default ?? m;
+}
+const ar = unwrapDefault(arModule);
+const en = unwrapDefault(enModule);
 
 test("parseReturnTarget only ever returns 'operator' for the exact literal value the operator form sends", () => {
   assert.equal(parseReturnTarget("operator"), "operator");
@@ -57,4 +69,30 @@ test("parseTripReturnTarget falls back to 'trips' for anything else, including a
 test("tripReturnPath builds a fixed, known route for each target — never an arbitrary one", () => {
   assert.equal(tripReturnPath("trips"), "/trips");
   assert.equal(tripReturnPath("operator"), "/operator");
+});
+
+// describeReleaseError is the one mapping both the production page and the
+// operator home page render. Asserted against the real dictionaries so a
+// refusal reason with no text in either language fails here rather than
+// rendering an empty banner, which reads to an operator as "nothing
+// happened".
+test("describeReleaseError names an unapproved mix design in both languages, distinct from the generic state change", () => {
+  for (const dict of [ar, en]) {
+    const messages = dict.modules.production.releaseError;
+    const text = describeReleaseError(messages, "MIX_NOT_APPROVED", undefined);
+    assert.equal(text, messages.MIX_NOT_APPROVED);
+    assert.ok(text && text.length > 0);
+    assert.notEqual(text, messages.INVALID_STATE, "an unapproved recipe must not read as a transient state change the operator should just retry");
+  }
+});
+
+test("describeReleaseError maps every release refusal the domain returns, and renders nothing for an unknown code", () => {
+  const messages = en.modules.production.releaseError;
+  assert.equal(describeReleaseError(messages, "INVALID_STATE", undefined), messages.INVALID_STATE);
+  assert.equal(describeReleaseError(messages, "NOT_FOUND", undefined), messages.NOT_FOUND);
+  assert.equal(describeReleaseError(messages, "NO_REMAINING_VOLUME", undefined), messages.NO_REMAINING_VOLUME);
+  assert.equal(describeReleaseError(messages, "STORAGE_NOT_CONFIGURED", "Cement"), messages.STORAGE_NOT_CONFIGURED("Cement"));
+  assert.equal(describeReleaseError(messages, undefined, undefined), null);
+  assert.equal(describeReleaseError(messages, "SOMETHING_ELSE", undefined), null);
+  assert.equal(describeReleaseError(messages, "toString", undefined), null, "a prototype key in a hand-edited URL must not resolve to anything");
 });

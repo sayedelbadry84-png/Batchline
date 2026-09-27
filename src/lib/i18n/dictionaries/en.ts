@@ -557,6 +557,7 @@ const en: typeof ar = {
       releaseError: {
         STORAGE_NOT_CONFIGURED: (material: string) => `Couldn't release the ticket: no storage is configured for "${material}" at this station.`,
         INVALID_STATE: "Couldn't release the ticket: the reservation or station's state changed before the release finished — please try again.",
+        MIX_NOT_APPROVED: "Couldn't release the ticket: this reservation's mix design is not approved. A quality supervisor must approve it before it can be batched.",
         NOT_FOUND: "Couldn't release the ticket: the reservation or station no longer exists.",
         NO_REMAINING_VOLUME: "Couldn't release the ticket: this reservation has no remaining volume left.",
         manualBookingKeptNote: "The manual booking was saved — retry the release from the ready-to-release list below once the reason above is resolved.",
@@ -2449,6 +2450,20 @@ const en: typeof ar = {
         unmatchedTitle: "Imported lines still needing a match",
         unmatchedHint: "These appeared in an imported bank statement but nothing in the books matched them unambiguously — either the matching record hasn't been entered yet, or reconcile it by hand from the list above.",
         unmatchedEmpty: "No unmatched imported lines.",
+        importResult: {
+          pending: "Importing…",
+          imported: "Imported {lines} statement lines; {matched} matched automatically.",
+          alreadyImported: "This exact file was already imported for this site on {date}. Nothing was added.",
+          needsReviewLegacy: "Not imported: needs review. A statement with identical content was imported for this site on {date}, before files were identified by their exact bytes, so it cannot be confirmed that this is the same file. Importing it would add the same lines again. Compare it with the lines from that import. Nothing was added.",
+          needsReviewDifferentBytes: "Not imported: needs review. A different file with identical content was imported for this site on {date}. Importing this one would add the same lines again. Compare the two files. Nothing was added.",
+          noLines: "Nothing imported: no row in this file could be read.",
+          invalidRequest: "Choose a site and a statement file.",
+          failed: "The import failed and nothing was saved. You can retry the same file.",
+          rowErrorsTitle: "{count} rows skipped:",
+          rowErrorsMore: "…and {count} more.",
+          rowBadDate: "Row {row}: unrecognized date \"{value}\"",
+          rowBadAmount: "Row {row}: unrecognized or zero amount \"{value}\"",
+        },
       },
       ledger: {
         intro: "A double-entry journal posted automatically behind every invoice, payment, credit note, supplier bill, and cash movement — never entered by hand. Debits and credits always balance, one currency at a time.",

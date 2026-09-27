@@ -125,6 +125,9 @@ before(async () => {
       grade: "C25",
       slumpTargetMm: 100,
       wcRatio: WATER_PER_M3 / CEMENT_PER_M3,
+      // Release refuses a mix design in any status but APPROVED; the
+      // tests that exercise that refusal flip this and restore it.
+      status: "APPROVED",
       components: { create: [{ materialId: cementMaterialId, designMassKgPerM3: CEMENT_PER_M3 }, { materialId: waterMaterialId, designMassKgPerM3: WATER_PER_M3 }] },
     },
   });
@@ -504,6 +507,116 @@ test("release refuses a station that was deactivated, or that doesn't belong to 
   assert.equal(wrongSiteResult.status, "INVALID_STATE");
   await cleanupPlant(otherSitePlant.id);
   await cleanupDelete(() => prisma.site.delete({ where: { id: otherSite.id } }));
+});
+
+// ---- Release refuses a mix design that is not APPROVED --------------
+// The reservation's two sign-offs approve the order; MixDesign.status is
+// what approves the recipe. It used to be filtered only by the dropdowns
+// that offer a mix when a reservation is created, so a design moved back
+// to DRAFT or RETIRED after booking still went to the mixer.
+
+// The fixture mix is shared by every test in this file, so a test that
+// changes its status must put it back even when an assertion fails.
+async function withMixStatus(status: string, fn: () => Promise<void>): Promise<void> {
+  await prisma.mixDesign.update({ where: { id: mixId }, data: { status } });
+  try {
+    await fn();
+  } finally {
+    await prisma.mixDesign.update({ where: { id: mixId }, data: { status: "APPROVED" } });
+  }
+}
+
+async function assertNothingReleased(reservationId: string, expectedStatus: string) {
+  const tickets = await prisma.batchTicket.findMany({ where: { reservationId } });
+  assert.equal(tickets.length, 0, "a refused release must not create a ticket");
+  const reservation = await prisma.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+  assert.equal(reservation.status, expectedStatus, "a refused release must not move the reservation to IN_PRODUCTION");
+}
+
+for (const status of ["DRAFT", "PENDING_APPROVAL", "RETIRED"]) {
+  test(`release refuses an approved reservation whose mix design is ${status}, and creates no ticket`, async () => {
+    const reservationId = await makeReservation();
+    await withMixStatus(status, async () => {
+      const result = await releaseTicketForReservation(reservationId, 5, plantId, testActor());
+      assert.equal(result.status, "MIX_NOT_APPROVED");
+      await assertNothingReleased(reservationId, "CONFIRMED");
+    });
+  });
+}
+
+test("release refuses an unapproved mix design even when the reservation carries an ACTIVE revision of it", async () => {
+  const reservationId = await makeReservation();
+  const saved = await saveReservationMixRevision(reservationId, { reason: "revision on a design later withdrawn", actorId: adminUserId, components: revisedComponents() });
+  assert.equal(saved.status, "OK");
+
+  await withMixStatus("RETIRED", async () => {
+    const result = await releaseTicketForReservation(reservationId, 5, plantId, testActor());
+    assert.equal(result.status, "MIX_NOT_APPROVED", "a revision is an edit OF the design; withdrawing the design's approval withdraws the revision's basis too");
+    await assertNothingReleased(reservationId, "CONFIRMED");
+  });
+
+  // Once the design is approved again, the same reservation releases
+  // against its revision as before; the gate did not disturb it.
+  const ticket = await expectReleaseOk(reservationId, 5);
+  assert.equal(ticket.reservationMixRevisionId, saved.status === "OK" ? saved.revisionId : null);
+});
+
+test("a mix design retired while release waits on its row lock is seen as retired: release refuses and creates no ticket", async () => {
+  const reservationId = await makeReservation();
+
+  let retireHasLockResolve: () => void;
+  const retireHasLock = new Promise<void>((resolve) => {
+    retireHasLockResolve = resolve;
+  });
+  let letRetireCommitResolve: () => void;
+  const letRetireCommit = new Promise<void>((resolve) => {
+    letRetireCommitResolve = resolve;
+  });
+
+  // Stands in for setMixStatus, paused before its commit so the release
+  // is genuinely waiting on the MixDesign row when the retirement lands.
+  const retireHolder = prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "MixDesign" WHERE "id" = ${mixId} FOR UPDATE`;
+      await tx.mixDesign.update({ where: { id: mixId }, data: { status: "RETIRED" } });
+      retireHasLockResolve();
+      await letRetireCommit;
+    },
+    { timeout: 20000 },
+  );
+
+  try {
+    await retireHasLock;
+
+    let releaseSettled = false;
+    const releasePromise = releaseTicketForReservation(reservationId, 5, plantId, testActor()).then((r) => {
+      releaseSettled = true;
+      return r;
+    });
+
+    const deadline = Date.now() + 10000;
+    for (;;) {
+      const rows = await prisma.$queryRaw<{ pid: number }[]>`
+        SELECT pid FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND query ILIKE '%"MixDesign"%FOR SHARE%' AND pid <> pg_backend_pid()
+      `;
+      if (rows.length > 0) break;
+      if (Date.now() > deadline) throw new Error("Timed out waiting for release to block on the MixDesign row lock");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(releaseSettled, false, "release must be waiting on the mix design row while the retirement is uncommitted");
+
+    letRetireCommitResolve!();
+    await retireHolder;
+
+    const result = await releasePromise;
+    assert.equal(result.status, "MIX_NOT_APPROVED");
+    await assertNothingReleased(reservationId, "CONFIRMED");
+  } finally {
+    letRetireCommitResolve!();
+    await retireHolder.catch(() => undefined);
+    await prisma.mixDesign.update({ where: { id: mixId }, data: { status: "APPROVED" } });
+  }
 });
 
 // RMR-R5-P1-01, defense in depth on the release side too: the caller's

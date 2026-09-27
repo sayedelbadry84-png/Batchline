@@ -1,4 +1,5 @@
 import "server-only";
+import { parseSignedMoneyToMinor, toMinorUnits } from "@/lib/money";
 
 // Parses a bank statement CSV a user exports from their own bank/online
 // banking portal and hand-arranges into a fixed 4-column shape (no bank
@@ -16,9 +17,15 @@ export type ParsedBankStatementLine = {
   description: string;
   reference: string;
   amount: number; // signed: positive = IN, negative = OUT
+  // The same amount as exact integer minor units, parsed from the
+  // statement's text. Matching compares this, never `amount`.
+  amountMinor: number;
 };
 
-export type BankStatementParseError = { row: number; message: string };
+// A code, not a sentence: the refusal is shown to the person who uploaded
+// the file, in their language, by the import form. `value` is the cell as
+// it appeared in the file.
+export type BankStatementParseError = { row: number; code: "BAD_DATE" | "BAD_AMOUNT"; value: string };
 
 export type BankStatementParseResult = {
   lines: ParsedBankStatementLine[];
@@ -77,17 +84,17 @@ export function parseBankStatementCsv(text: string): BankStatementParseResult {
     const rowNumber = i + 1; // 1-based, matching what a spreadsheet shows
     const [dateRaw, description, reference, amountRaw] = rows[i];
     const date = dateRaw ? new Date(dateRaw) : null;
-    const amount = amountRaw !== undefined ? Number(amountRaw.replace(/,/g, "")) : NaN;
+    const amountMinor = amountRaw !== undefined ? parseSignedMoneyToMinor(amountRaw) : null;
 
     if (!date || Number.isNaN(date.getTime())) {
-      errors.push({ row: rowNumber, message: `Unrecognized date: "${dateRaw ?? ""}"` });
+      errors.push({ row: rowNumber, code: "BAD_DATE", value: dateRaw ?? "" });
       continue;
     }
-    if (Number.isNaN(amount) || amount === 0) {
-      errors.push({ row: rowNumber, message: `Unrecognized or zero amount: "${amountRaw ?? ""}"` });
+    if (amountMinor === null || amountMinor === 0) {
+      errors.push({ row: rowNumber, code: "BAD_AMOUNT", value: amountRaw ?? "" });
       continue;
     }
-    lines.push({ date, description: (description ?? "").trim(), reference: (reference ?? "").trim(), amount });
+    lines.push({ date, description: (description ?? "").trim(), reference: (reference ?? "").trim(), amount: amountMinor / 100, amountMinor });
   }
 
   return { lines, errors };
@@ -104,7 +111,6 @@ export type ReconciliationCandidate = {
   amount: number;
 };
 
-const AMOUNT_TOLERANCE = 0.01;
 const DATE_WINDOW_DAYS = 3;
 
 function withinWindow(a: Date, b: Date, days: number): boolean {
@@ -113,7 +119,7 @@ function withinWindow(a: Date, b: Date, days: number): boolean {
 
 // Greedy exact-amount + date-window matching: a statement line matches a
 // candidate only when it's the SINGLE unambiguous fit (same direction,
-// amount within a cent, date within +/-3 days) — two or more equally
+// identical amount in minor units, date within +/-3 days) — two or more equally
 // plausible candidates are left for a human to sort out rather than
 // guessed at, same caution as every other "don't fabricate, disclose it"
 // spot in this app. Matched candidates are removed from the pool so two
@@ -124,9 +130,16 @@ export function matchBankStatementLines(
 ): { line: ParsedBankStatementLine; match: ReconciliationCandidate | null }[] {
   const pool = [...candidates];
   return statementLines.map((line) => {
-    const direction: "IN" | "OUT" = line.amount >= 0 ? "IN" : "OUT";
-    const absAmount = Math.abs(line.amount);
-    const fits = pool.filter((c) => c.direction === direction && Math.abs(c.amount - absAmount) <= AMOUNT_TOLERANCE && withinWindow(c.date, line.date, DATE_WINDOW_DAYS));
+    const direction: "IN" | "OUT" = line.amountMinor >= 0 ? "IN" : "OUT";
+    const absMinor = Math.abs(line.amountMinor);
+    // Exact equality in minor units. The previous rule accepted any float
+    // difference up to 0.01, so a 10.00 statement line auto-reconciled a
+    // 10.01 payment. There is no tolerance policy for auto-matching; a
+    // line that differs by a halala is left for a human, like an ambiguous
+    // one. toMinorUnits rounds the stored Float, which money writes already
+    // round to two places, so float dust such as 0.1 + 0.2 still compares
+    // as 30.
+    const fits = pool.filter((c) => c.direction === direction && toMinorUnits(c.amount) === absMinor && withinWindow(c.date, line.date, DATE_WINDOW_DAYS));
     if (fits.length !== 1) return { line, match: null };
     const match = fits[0];
     pool.splice(pool.indexOf(match), 1);

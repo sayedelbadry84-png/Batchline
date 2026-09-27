@@ -16,10 +16,10 @@ import {
   cancelSupplierBill,
   createCashTransaction,
   reconcileMovement,
-  importBankStatement,
 } from "./actions";
 import { generateInvoiceForProject } from "../billing/actions";
 import { getDateFormatters } from "@/lib/displayTimeZone";
+import { BankStatementImportForm } from "@/components/BankStatementImportForm";
 
 const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation", "ledger", "vat"] as const;
 type FinanceTab = (typeof FINANCE_TABS)[number];
@@ -789,22 +789,17 @@ async function ReconciliationTab({
       <div className={ui.card}>
         <h2 className="mb-1 font-display text-lg font-semibold">{m.reconciliation.importTitle}</h2>
         <p className="mb-3 max-w-2xl text-xs text-ink-muted">{m.reconciliation.importHint}</p>
-        <form action={importBankStatement} encType="multipart/form-data" className="flex flex-wrap items-end gap-3">
-          <div>
-            <label className={ui.label}>{m.reconciliation.importSite}</label>
-            <select name="siteId" required className={ui.select} defaultValue={sites.length === 1 ? sites[0].id : ""}>
-              <option value="" disabled>—</option>
-              {sites.map((s) => (
-                <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={ui.label}>{m.reconciliation.importFile}</label>
-            <input name="file" type="file" accept=".csv,text/csv" required className={ui.input} />
-          </div>
-          <button type="submit" className={ui.button}>{m.reconciliation.importButton}</button>
-        </form>
+        <BankStatementImportForm
+          sites={sites}
+          timeZone={dt.timeZone}
+          messages={{
+            site: m.reconciliation.importSite,
+            file: m.reconciliation.importFile,
+            button: m.reconciliation.importButton,
+            ...m.reconciliation.importResult,
+          }}
+          classNames={{ label: ui.label, select: ui.select, input: ui.input, button: ui.button }}
+        />
       </div>
 
       <div className={ui.card}>

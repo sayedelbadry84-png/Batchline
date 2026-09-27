@@ -112,8 +112,9 @@ before(async () => {
   customerId = customer.id;
   const project = await prisma.project.create({ data: { name: "TEST-SUITE-PL-PROJECT", customerId, siteAddress: "Test Address" } });
   projectId = project.id;
+  // APPROVED: release refuses any other mix status (MIX_NOT_APPROVED).
   const mix = await prisma.mixDesign.create({
-    data: { code: `TEST-SUITE-PL-MIX-${Date.now()}`, grade: "C25", slumpTargetMm: 100, wcRatio: 0.5, components: { create: [{ materialId, designMassKgPerM3: 300 }] } },
+    data: { code: `TEST-SUITE-PL-MIX-${Date.now()}`, grade: "C25", slumpTargetMm: 100, wcRatio: 0.5, status: "APPROVED", components: { create: [{ materialId, designMassKgPerM3: 300 }] } },
   });
   mixId = mix.id;
 

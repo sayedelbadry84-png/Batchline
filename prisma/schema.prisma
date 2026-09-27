@@ -2999,8 +2999,22 @@ model BankStatementImport {
   id           String   @id @default(cuid())
   siteId       String
   site         Site     @relation(fields: [siteId], references: [id])
-  // SHA-256 of the uploaded file's exact contents.
+  // What fileDigest was computed from. TEXT_UTF8: every import before
+  // 2026-09-25, which hashed `await file.text()` re-encoded as UTF-8 — a
+  // leading BOM already stripped and every invalid byte sequence already
+  // replaced by U+FFFD, so it identifies the decoded CONTENT, not the
+  // bytes. RAW_BYTES: SHA-256 of the uploaded bytes themselves. A CHECK in
+  // the migration limits it to these two values.
+  digestKind   String
   fileDigest   String
+  // SHA-256 of the decoded text re-encoded as UTF-8 — the TEXT_UTF8
+  // algorithm, kept for every import. For a TEXT_UTF8 row it equals
+  // fileDigest (enforced by CHECK). Unique per site: two files with the
+  // same decoded content yield the same parsed lines, so the second must
+  // never be imported automatically. Whether it is the SAME file can only
+  // be decided when both sides have a RAW_BYTES digest; otherwise the
+  // import is refused as needing human review (see importBankStatement).
+  textDigest   String
   lineCount    Int
   matchedCount Int
   importedById String
@@ -3009,7 +3023,8 @@ model BankStatementImport {
 
   lines BankStatementLine[]
 
-  @@unique([siteId, fileDigest])
+  @@unique([siteId, digestKind, fileDigest])
+  @@unique([siteId, textDigest])
 }
 
 model BankStatementLine {

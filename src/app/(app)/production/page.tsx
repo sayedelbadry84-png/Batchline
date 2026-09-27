@@ -8,6 +8,7 @@ import { releaseBatchTicket, createManualRelease } from "./actions";
 import { closeReservation } from "../reservations/actions";
 import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
+import { describeReleaseError } from "@/lib/releaseRouting";
 import { SitePlantSelect } from "@/components/SitePlantSelect";
 import { Modal } from "@/components/Modal";
 import { PrintButton } from "@/components/PrintButton";
@@ -51,16 +52,7 @@ export default async function ProductionPage({
   const { dict } = await getDictionary();
   const m = dict.modules.production;
   const { manualBooking, date: dateRaw, dateTo: dateToRaw, releaseError, releaseErrorMaterial, manualBookingKept } = await searchParams;
-  const releaseErrorText =
-    releaseError === "STORAGE_NOT_CONFIGURED"
-      ? m.releaseError.STORAGE_NOT_CONFIGURED(releaseErrorMaterial ?? "")
-      : releaseError === "INVALID_STATE"
-        ? m.releaseError.INVALID_STATE
-        : releaseError === "NOT_FOUND"
-          ? m.releaseError.NOT_FOUND
-          : releaseError === "NO_REMAINING_VOLUME"
-            ? m.releaseError.NO_REMAINING_VOLUME
-            : null;
+  const releaseErrorText = describeReleaseError(m.releaseError, releaseError, releaseErrorMaterial);
   const siteId = await getActiveSiteId(user);
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
   const selectedDate = isDateParam(dateRaw) ? dateRaw : toDateParam(new Date());

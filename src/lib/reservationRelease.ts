@@ -24,6 +24,7 @@ export type ReleaseTicketResult =
   | { status: "OK"; ticket: BatchTicket }
   | { status: "NOT_FOUND" }
   | { status: "INVALID_STATE" }
+  | { status: "MIX_NOT_APPROVED" }
   | { status: "NO_REMAINING_VOLUME" }
   | { status: "STORAGE_NOT_CONFIGURED"; material: string };
 
@@ -103,6 +104,30 @@ export async function releaseTicketForReservation(reservationId: string, request
           if (!isApproved || !RELEASABLE_RESERVATION_STATUSES.has(reservation.status)) {
             throw new ReleaseAbort({ status: "INVALID_STATE" });
           }
+
+          // The reservation's two sign-offs above approve the ORDER, not
+          // the RECIPE. MixDesign.status used to be enforced only by the
+          // dropdowns that offer a mix when a reservation is created, so a
+          // design moved back to DRAFT, or RETIRED, after the booking was
+          // made still went to the mixer. Checked here, inside the release
+          // transaction, because this is the last point before the targets
+          // are frozen into BatchComponentActual.
+          //
+          // No exception for a reservation that carries an ACTIVE
+          // ReservationMixRevision: a revision is a per-reservation edit
+          // OF this design, so withdrawing the design's approval withdraws
+          // the basis the revision was made on too.
+          //
+          // FOR SHARE, not a plain read: setMixStatus writes outside any
+          // Serializable transaction, so SSI alone would not see the two
+          // as conflicting. The row lock makes a concurrent status change
+          // either wait for this release to commit (the ticket was issued
+          // while the design was approved), or, if it committed first,
+          // raise a serialization failure here that withRetry turns into
+          // a re-run which reads the new status.
+          const mixRows = await tx.$queryRaw<{ status: string }[]>`SELECT "status" FROM "MixDesign" WHERE "id" = ${reservation.mixId} FOR SHARE`;
+          if (mixRows.length === 0) throw new ReleaseAbort({ status: "NOT_FOUND" });
+          if (mixRows[0].status !== "APPROVED") throw new ReleaseAbort({ status: "MIX_NOT_APPROVED" });
 
           const plant = await tx.plant.findUnique({ where: { id: plantId }, select: { siteId: true, status: true } });
           if (!plant) throw new ReleaseAbort({ status: "NOT_FOUND" });
