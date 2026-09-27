@@ -560,6 +560,26 @@ for (const kind of ["INVOICE", "CREDIT_NOTE"] as const) {
     assert.equal(await prisma.auditEvent.count({ where: { recordId: d.id, reasonCode: "ZATCA_FAILED" } }), 0, "this call recorded no FAILED");
   });
 
+  // Audit of c4e6fc3, B1: the same race on the preparation-error path. A
+  // prepare slow enough for its claim to be withdrawn, then failing, must
+  // not report the retryable PREPARATION_FAILED it never recorded.
+  test(`${kind}: a preparation failure after the claim was withdrawn is reported as lost`, async () => {
+    const d = await document(); let calls = 0;
+    const transport: typeof fetch = async () => { calls++; return Response.json({ clearanceStatus: "CLEARED" }); };
+    const result = await submitDocument({ kind, id: d.id, uuid: d.uuid, actor: null, prepare: async () => {
+      await patch(d.id, { zatcaStatus: "UNKNOWN" });
+      throw new Error("signing failed after the claim was withdrawn");
+    } }, transport);
+    assert.deepEqual(result, { ok: false, reason: "RECONCILIATION_REQUIRED" });
+    assert.equal(calls, 0, "nothing reaches ZATCA");
+    assert.equal(await statusOf(d.id), "UNKNOWN", "the withdrawing transaction's state stands");
+    assert.equal(await prisma.auditEvent.count({ where: { recordId: d.id, reasonCode: "ZATCA_FAILED" } }), 0, "this call recorded no FAILED");
+    // Control: an ordinary preparation failure is still recorded and retryable.
+    const e = await document();
+    assert.deepEqual(await submitDocument({ kind, id: e.id, uuid: e.uuid, actor: null, prepare: async () => { throw new Error("signing failed"); } }, transport), { ok: false, reason: "PREPARATION_FAILED" });
+    assert.equal(await statusOf(e.id), "FAILED");
+  });
+
   test(`${kind}: stale submission and late response require reconciliation without resending`, async () => {
     const d = await document(), entered = latch(), release = latch(); let calls = 0;
     const input = { kind, id: d.id, uuid: d.uuid, actor: null, prepare };

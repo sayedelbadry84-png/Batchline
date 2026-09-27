@@ -67,8 +67,13 @@ export async function submitDocument(input: {
   try { prepared = await input.prepare(); }
   catch {
     // No network request happened. This is the only safely retryable failure.
-    await finish("FAILED");
-    return { ok: false, reason: "PREPARATION_FAILED" };
+    // A slow prepare can outlive its claim (the stale sweep moves it to
+    // UNKNOWN); then nothing was recorded FAILED here and the document needs
+    // reconciliation, not a retry (audit of c4e6fc3, B1). A throw from the
+    // transaction itself still propagates.
+    return (await finish("FAILED"))
+      ? { ok: false, reason: "PREPARATION_FAILED" }
+      : { ok: false, reason: "RECONCILIATION_REQUIRED" };
   }
   // zatcaInvoiceHash is a link in the site's PIH chain: the next document
   // generated at this site stored it as its previous hash. Signing hashes
