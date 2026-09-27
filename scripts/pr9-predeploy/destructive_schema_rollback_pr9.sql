@@ -15,9 +15,25 @@
 -- is not a rollback, and preserving them needs its own reviewed and
 -- rehearsed plan, not this file.
 --
+-- Preconditions: BOTH Vercel production projects (batchline and
+-- batchline-g7p3) are rolled back to a build that does not use the table,
+-- and no request from #9's build is still in flight.
+--
+-- The emptiness check must hold until the DROP. A plain count(*) does not:
+-- it takes only ACCESS SHARE, so an INSERT committed after the count saw
+-- zero is waited for by DROP TABLE and then dropped with the table
+-- (reproduced: a request committed mid-script was lost). The table is
+-- therefore locked ACCESS EXCLUSIVE first, which waits for any open writer
+-- to finish and blocks new ones until COMMIT, so the count sees every row
+-- that can ever exist before the drop. lock_timeout bounds the wait: a
+-- queued ACCESS EXCLUSIVE request blocks every later reader of the table,
+-- so failing fast (and retrying once traffic is gone) beats stalling it.
+--
 --   psql -X -v ON_ERROR_STOP=1 -f scripts/pr9-predeploy/destructive_schema_rollback_pr9.sql
 \set ON_ERROR_STOP on
 BEGIN;
+SET LOCAL lock_timeout = '10s';
+LOCK TABLE "CustomerCreditLimitRequest" IN ACCESS EXCLUSIVE MODE;
 DO $$
 DECLARE
   n BIGINT;
