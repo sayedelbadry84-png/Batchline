@@ -1,11 +1,13 @@
 "use server";
 
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { logAudit, writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
-import { getReleasedVolumeM3, closeReservationForId } from "@/lib/reservations";
+import { closeReservationForId } from "@/lib/reservations";
 import { effectiveSiteId, isSiteInScope, reservationSiteScopeWhere } from "@/lib/siteScope";
-import { getCustomerOutstandingBalance } from "@/lib/billing";
+import { evaluateCustomerCredit } from "@/lib/creditPolicy";
+import { updateReservationForId, approveReservationFinalForId, cancelReservationForId } from "@/lib/reservationEdits";
+import { redirect } from "next/navigation";
 import { isPumpAvailable } from "@/lib/pumpSchedule";
 import { withSequentialNumber } from "@/lib/sequence";
 import { revalidatePath } from "next/cache";
@@ -56,19 +58,15 @@ export async function createReservation(formData: FormData) {
   const pourWindowStartRaw = String(formData.get("pourWindowStart") ?? "");
   const notes = String(formData.get("notes") ?? "").trim() || null;
 
-  if (!projectId || !siteId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw) return;
+  if (!projectId || !siteId || !mixId || !pourWindowStartRaw) return;
+  // `!requestedVolumeM3` let -1 and Infinity through (audit of f955650,
+  // N1): a negative booking was stored CONFIRMED and consumed no credit.
+  if (!Number.isFinite(requestedVolumeM3) || requestedVolumeM3 <= 0) return;
   if (!isSiteInScope(siteId, effectiveSiteId(user))) return;
 
-  // Credit check: the customer's real outstanding balance (unpaid invoice
-  // total, see getCustomerOutstandingBalance) must still be under their
-  // credit limit — a reservation booked while already over goes ON_HOLD
-  // instead of straight to CONFIRMED, same shape as the "no balance"
-  // cancel-pending state seen in the Dynamics comparison data.
   const project = await prisma.project.findUnique({ where: { id: projectId }, include: { customer: true } });
   if (!project) return;
   if (!(await hasPriceOnFile(project.customer.id, mixId))) return;
-  const outstandingBalance = await getCustomerOutstandingBalance(project.customer.id);
-  const overCreditLimit = outstandingBalance >= project.customer.creditLimit;
 
   const pourWindowStart = new Date(pourWindowStartRaw);
 
@@ -108,14 +106,22 @@ export async function createReservation(formData: FormData) {
   // double-booking it. Under Serializable, Postgres detects the
   // read-write conflict and aborts one with P2034, which falls through to
   // the silent-return below like every other rejected submission here.
-  let reservation;
+  //
+  // Credit is decided in the same transaction (creditPolicy.ts): a
+  // booking that does not fit under the customer's limit, counting
+  // everything already committed, gets an ON_HOLD reservation, which
+  // only final approval, re-checking credit, can clear. The audit row
+  // commits with the reservation; it used to be written afterwards.
   try {
-    reservation = await prisma.$transaction(
+    await prisma.$transaction(
       async (tx) => {
         for (const row of pumpRows) {
           if (!(await isPumpAvailable(tx, row.pumpId, pourWindowStart))) throw new Error("PUMP_UNAVAILABLE");
         }
-        return withSequentialNumber(
+        const credit = await evaluateCustomerCredit(tx, project.customer.id, { kind: "NEW_BOOKING", mixId, siteId, volumeM3: requestedVolumeM3 });
+        if (!credit) throw new Error("CUSTOMER_NOT_FOUND");
+        const overCreditLimit = credit.status === "OVER_LIMIT";
+        const reservation = await withSequentialNumber(
           "RES",
           (yr) => tx.reservation.count({ where: { createdAt: yr } }),
           (reservationNumber) =>
@@ -137,6 +143,12 @@ export async function createReservation(formData: FormData) {
               },
             }),
         );
+        await writeAudit(tx, { id: user!.id, role: user!.role }, {
+          module: "Reservations",
+          recordId: reservation.id,
+          afterValue: `${requestedVolumeM3} m3`,
+          reasonCode: overCreditLimit ? "CREDIT_HOLD" : "RESERVATION_CREATED",
+        });
       },
       { isolationLevel: "Serializable" },
     );
@@ -144,23 +156,25 @@ export async function createReservation(formData: FormData) {
     return;
   }
 
-  await logAudit({
-    module: "Reservations",
-    recordId: reservation.id,
-    afterValue: `${requestedVolumeM3} m3`,
-    reasonCode: overCreditLimit ? "CREDIT_HOLD" : "RESERVATION_CREATED",
-  });
-
   revalidatePath("/reservations");
 }
 
 // Editable at any point in the delivery lifecycle short of CANCELLED —
 // including after partial release, so a site's actual pour can be scaled
 // up or down mid-job, AND after DELIVERED, so a detail can still be fixed
-// after the fact (e.g. from the grouped delivery log in Production). The
-// one hard rule: requested volume can never drop below what's already
-// gone out as a batch ticket, since that concrete is already real and
-// can't un-happen.
+// after the fact. What the edit may NOT do is change the status, except to
+// place a hold: see allowedEditStatuses and updateReservationForId in
+// src/lib/reservationEdits.ts, which also carries the rule that requested
+// volume never drops below what has been released and that a released
+// reservation's project, mix and site are frozen, all checked under the
+// Reservation row lock release takes.
+//
+// A refusal used to reload the page as if it had worked. Each result now
+// comes back as a banner on the reservations page.
+function reservationsResultPath(code: string) {
+  return `/reservations?${new URLSearchParams({ reservationResult: code }).toString()}`;
+}
+
 export async function updateReservation(formData: FormData) {
   const user = await getCurrentUser();
   await requireActionPermission(user, "reservations", "edit");
@@ -171,83 +185,41 @@ export async function updateReservation(formData: FormData) {
   const mixId = String(formData.get("mixId") ?? "");
   const requestedVolumeM3 = Number(formData.get("requestedVolumeM3") ?? 0);
   const pourWindowStartRaw = String(formData.get("pourWindowStart") ?? "");
-  const status = String(formData.get("status") ?? "");
+  const statusRaw = formData.get("status");
+  if (!id || !projectId || !siteId || !mixId || !pourWindowStartRaw) redirect(reservationsResultPath("INVALID_INPUT"));
 
-  if (!id || !projectId || !siteId || !mixId || !requestedVolumeM3 || !pourWindowStartRaw || !status) return;
-
-  const reservation = await prisma.reservation.findUnique({ where: { id } });
-  if (!reservation) return;
-  if (reservation.status === "CANCELLED") return;
-  const effSiteId = effectiveSiteId(user);
-  if (!isSiteInScope(reservation.siteId, effSiteId) || !isSiteInScope(siteId, effSiteId)) return;
-
-  const project = await prisma.project.findUnique({ where: { id: projectId }, select: { customerId: true } });
-  if (!project) return;
-  // Grandfather in a reservation's existing customer+mix pair (it may
-  // predate the price-on-file rule, or its PriceListEntry may since have
-  // been removed) — only a pair actually being changed to has to clear
-  // the gate; editing volume/status/dates on an old booking must never
-  // get silently blocked by a rule that didn't exist when it was made.
-  const currentProject = reservation.projectId === projectId ? project : await prisma.project.findUnique({ where: { id: reservation.projectId }, select: { customerId: true } });
-  const isSamePair = reservation.mixId === mixId && currentProject?.customerId === project.customerId;
-  if (!isSamePair && !(await hasPriceOnFile(project.customerId, mixId))) return;
-
-  const released = await getReleasedVolumeM3(id);
-  if (requestedVolumeM3 < released) return; // can't shrink below what's already gone out
-
-  // Once any concrete has actually been produced against this booking, its
-  // project/mix/site are no longer just booking details — they're what a
-  // real batch ticket already says it was made for. Changing them here
-  // would silently rewrite that ticket's own meaning after the fact
-  // (mix design retroactively "was" a different recipe, say) instead of
-  // being the amendment/new-booking it actually is.
-  if (released > 0 && (projectId !== reservation.projectId || mixId !== reservation.mixId || siteId !== reservation.siteId)) {
-    return;
-  }
-
-  // A meaningful change to what was already signed off on — the identity
-  // fields above, or the volume itself — means the sign-off no longer
-  // covers what this booking now says. Clearing it forces a fresh
-  // approval rather than letting an edited booking keep riding on
-  // clearance that was given for something else.
-  const identityChanged = projectId !== reservation.projectId || mixId !== reservation.mixId || siteId !== reservation.siteId;
-  const volumeChanged = requestedVolumeM3 !== reservation.requestedVolumeM3;
-  const approvalsInvalidated = (identityChanged || volumeChanged) && (reservation.initialApprovedAt || reservation.finalApprovedAt);
-
-  await prisma.reservation.update({
-    where: { id },
-    data: {
+  const result = await updateReservationForId(
+    id,
+    {
       projectId,
       siteId,
       mixId,
       requestedVolumeM3,
       pourWindowStart: new Date(pourWindowStartRaw),
-      status,
-      ...readPourDetails(formData),
-      ...(approvalsInvalidated
-        ? { initialApprovedAt: null, initialApprovedById: null, finalApprovedAt: null, finalApprovedById: null }
-        : {}),
+      status: typeof statusRaw === "string" && statusRaw !== "" ? statusRaw : undefined,
+      pourDetails: readPourDetails(formData),
     },
-  });
-
-  if (approvalsInvalidated) {
-    await logAudit({
-      module: "Reservations",
-      recordId: id,
-      field: "approvals",
-      reasonCode: "RESERVATION_APPROVALS_INVALIDATED_ON_EDIT",
-    });
-  }
-
-  await logAudit({
-    module: "Reservations",
-    recordId: id,
-    afterValue: `${requestedVolumeM3} m3, ${status}`,
-    reasonCode: "RESERVATION_UPDATED",
-  });
+    { id: user!.id, role: user!.role, allowedSiteId: effectiveSiteId(user) },
+  );
 
   revalidatePath("/reservations");
   revalidatePath("/production");
+  if (result.status !== "OK") redirect(reservationsResultPath(result.status));
+}
+
+// The only way to cancel a booking. It used to be "pick CANCELLED in the
+// edit form", with nothing checking that no concrete had been released.
+export async function cancelReservation(formData: FormData) {
+  const user = await getCurrentUser();
+  await requireActionPermission(user, "reservations", "cancel");
+
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
+  const result = await cancelReservationForId(id, { id: user!.id, role: user!.role, allowedSiteId: effectiveSiteId(user) });
+
+  revalidatePath("/reservations");
+  revalidatePath("/production");
+  redirect(reservationsResultPath(result.status === "OK" ? "CANCELLED" : result.status));
 }
 
 // One-click "end this reservation now" for a booking that's done in
@@ -324,44 +296,19 @@ export async function approveReservationFinal(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   if (!id) return;
 
-  const reservation = await prisma.reservation.findUnique({ where: { id }, include: { project: { include: { customer: true } } } });
-  if (!reservation || !reservation.initialApprovedAt || reservation.finalApprovedAt) return;
-  if (!isSiteInScope(reservation.siteId, effectiveSiteId(user))) return;
+  // ON_HOLD is a "needs review" marker, set when the customer was at or
+  // over their credit limit at booking, or placed by hand. Final approval
+  // IS that review, so it clears the hold, but only after deciding credit
+  // again, unconditionally and inside its own transaction: a reservation
+  // that started CONFIRMED has never had its credit re-checked since, and
+  // the balance can only have grown. A real payment recorded in Finance is
+  // what unblocks an over-limit customer, not a click here. See
+  // approveReservationFinalForId (src/lib/reservationEdits.ts).
+  const result = await approveReservationFinalForId(id, { id: user!.id, role: user!.role, allowedSiteId: effectiveSiteId(user) });
 
-  // ON_HOLD is an automatic flag set at creation (see createReservation's
-  // credit-limit check) — it's a "needs review" marker, not a separate
-  // veto that survives review. Final approval IS that review completing
-  // successfully, so it clears the hold too; otherwise an approved
-  // reservation would sit invisible to Production forever; the listing
-  // there only ever shows CONFIRMED/IN_PRODUCTION (see readyReservationsRaw
-  // in production/page.tsx).
-  //
-  // The credit check itself used to only re-run when status was already
-  // ON_HOLD — but a reservation that started CONFIRMED (under the limit
-  // at creation) has never had its credit re-checked since, and the
-  // customer's balance can only have grown in the meantime (or stayed the
-  // same; it never falls without a real payment being recorded). Final
-  // approval is the last gate before Production can release against this
-  // booking, so it re-checks the limit unconditionally, not just for the
-  // ON_HOLD case — if they're over limit, refuse regardless of how this
-  // reservation got here, rather than silently rubber-stamping past a
-  // still-real credit problem. A real payment recorded in Finance is what
-  // should unblock this, not a click here.
-  const outstandingBalance = await getCustomerOutstandingBalance(reservation.project.customer.id);
-  if (outstandingBalance >= reservation.project.customer.creditLimit) return;
-
-  await prisma.reservation.update({
-    where: { id },
-    data: {
-      finalApprovedAt: new Date(),
-      finalApprovedById: user!.id,
-      status: reservation.status === "ON_HOLD" ? "CONFIRMED" : reservation.status,
-    },
-  });
-
-  await logAudit({ module: "Reservations", recordId: id, reasonCode: "RESERVATION_FINAL_APPROVED" });
   revalidatePath("/reservations");
   revalidatePath("/production");
+  if (result.status !== "OK") redirect(reservationsResultPath(result.status));
 }
 
 // Fired from the "due for reminder" panel's send button — the WhatsApp

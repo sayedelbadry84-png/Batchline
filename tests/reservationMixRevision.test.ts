@@ -129,6 +129,11 @@ before(async () => {
     },
   });
   mixId = mix.id;
+  // The credit limit caps total exposure, valued at the customer's price
+  // list (creditPolicy.ts); a commitment with no price cannot be valued
+  // and holds. A nominal price keeps this fixture's releases well inside
+  // its limit.
+  await prisma.priceListEntry.create({ data: { customerId, mixId, pricePerM3: 1 } });
 
   const admin = await prisma.user.create({
     data: { email: `test-suite-rmr-admin-${Date.now()}@example.invalid`, name: "TEST-SUITE-RMR-ADMIN", passwordHash: "not-a-real-hash", role: "ADMIN" },
@@ -248,6 +253,7 @@ after(async () => {
   // CASCADE, so deleting the mix here removes those rows first; deleting
   // the materials themselves before this (the previous order) left them
   // still referenced, tripping MixComponent_materialId_fkey.
+  await cleanupDelete(() => prisma.priceListEntry.deleteMany({ where: { customerId } }));
   await cleanupDelete(() => prisma.mixDesign.delete({ where: { id: mixId } }));
 
   await deleteMovements({ storageId: { in: siloIds.concat(hopperIds) } });

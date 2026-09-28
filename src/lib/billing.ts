@@ -1,5 +1,3 @@
-import { prisma } from "@/lib/prisma";
-
 const DEFAULT_NET_DAYS = 30;
 
 // Discount terms contain several numbers: "2/10 Net 30" is due in 30
@@ -26,18 +24,3 @@ export function invoiceAmountDue(invoice: { total: number; payments: { amount: n
   return Math.max(0, invoice.total - paid - credited);
 }
 
-// What the customer actually owes right now — every non-cancelled,
-// non-draft invoice's amount due (payments AND credit notes already
-// applied), summed. DRAFT is excluded because it hasn't been sent yet (not
-// a real receivable yet); CANCELLED never was one. This replaces the
-// Phase 1 stub credit check (creditLimit <= 0) with the real thing it
-// always meant to become (see createReservation's own comment) — same
-// shape as the "Sales Agreement balance" that gates bookings in the
-// Dynamics data this was compared against.
-export async function getCustomerOutstandingBalance(customerId: string): Promise<number> {
-  const invoices = await prisma.invoice.findMany({
-    where: { customerId, status: { notIn: ["DRAFT", "CANCELLED"] } },
-    select: { total: true, payments: { select: { amount: true } }, creditNotes: { select: { amount: true } } },
-  });
-  return invoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
-}

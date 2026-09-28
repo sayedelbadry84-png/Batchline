@@ -51,6 +51,7 @@ const DeliveryNoteSupplementPage = (await import("../src/app/(app)/production/[i
 const PurchaseOrderDetailPage = (await import("../src/app/(app)/purchasing/orders/[id]/page")).default;
 const QuoteDetailPage = (await import("../src/app/(app)/sales/quotes/[id]/page")).default;
 const CustomerStatementPage = (await import("../src/app/(app)/finance/customers/[id]/statement/page")).default;
+const CustomersPage = (await import("../src/app/(app)/customers/page")).default;
 const sales = await import("../src/app/(app)/sales/actions");
 const finance = await import("../src/app/(app)/finance/actions");
 const plants = await import("../src/app/(app)/plants/actions");
@@ -133,8 +134,13 @@ before(async () => {
   const b = await prisma.site.create({ data: { code: `${prefix}-B`, name: `${prefix} B`, city: "Test", country: "Test" } });
   siteA = a.id;
   siteB = b.id;
-  plantA = (await prisma.plant.create({ data: { name: `${prefix} A`, siteId: siteA } })).id;
-  plantB = (await prisma.plant.create({ data: { name: `${prefix} B`, siteId: siteB } })).id;
+  // SAR, like every invoice, bill and order this suite creates for them:
+  // in the application an invoice takes its station's currency, and the
+  // credit decision holds a customer whose items span two currencies
+  // (creditPolicy.ts). Left at the EGP default, the fixture itself was
+  // such a customer.
+  plantA = (await prisma.plant.create({ data: { name: `${prefix} A`, siteId: siteA, currency: "SAR" } })).id;
+  plantB = (await prisma.plant.create({ data: { name: `${prefix} B`, siteId: siteB, currency: "SAR" } })).id;
 
   // Every non-admin reader lives at site A. ADMIN's effectiveSiteId is
   // null (unrestricted), which is the other half of the contract: the
@@ -695,6 +701,210 @@ test("a quote line from another site cannot be converted into a reservation", as
   const before = await prisma.reservation.count();
   await sales.convertQuoteLineToReservation(form({ quoteLineId: line.id }));
   assert.equal(await prisma.reservation.count(), before, "another site's accepted quote must not book production here");
+});
+
+// FR-RES-002: converting an accepted quote used to book a CONFIRMED,
+// fully signed-off reservation whatever the customer owed. It now makes
+// the same credit decision as every other reservation path. This suite's
+// customer has the default limit of 0 (no credit), so it is over it.
+async function acceptedQuoteLine() {
+  const quote = await makeQuote(siteA);
+  const project = await prisma.project.create({ data: { name: `${prefix}-PROJ-CREDIT-${randomUUID().slice(0, 6)}`, customerId, siteAddress: "Test" } });
+  projectIds.push(project.id);
+  await prisma.quote.update({ where: { id: quote.id }, data: { status: "ACCEPTED", projectId: project.id } });
+  return prisma.quoteLine.create({ data: { quoteId: quote.id, mixId, estimatedVolumeM3: 10, unitPrice: 100, lineTotal: 1000 } });
+}
+
+test("converting a quote for a customer at or over the credit limit books the reservation ON_HOLD, not release-ready", async () => {
+  await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 0 } });
+  const line = await acceptedQuoteLine();
+  await asUser(salesId);
+  await sales.convertQuoteLineToReservation(form({ quoteLineId: line.id }));
+
+  const reservation = await prisma.reservation.findUniqueOrThrow({ where: { quoteLineId: line.id } });
+  assert.equal(reservation.status, "ON_HOLD");
+  assert.notEqual(reservation.initialApprovedAt, null, "the quote's acceptance still counts as the initial sign-off");
+  assert.equal(reservation.finalApprovedAt, null, "final approval, which re-checks credit, is what makes it releasable");
+  assert.equal(await prisma.auditEvent.count({ where: { recordId: reservation.id, reasonCode: "RESERVATION_CREATED_FROM_QUOTE_CREDIT_HOLD" } }), 1);
+});
+
+test("converting a quote for a customer within the limit still books a confirmed, signed-off reservation", async () => {
+  await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 1_000_000 } });
+  // The limit caps total exposure valued at the customer's price list
+  // (creditPolicy.ts). In the real flow, sending the quote writes that
+  // price (markQuoteSent); this fixture accepts the quote directly, so it
+  // writes the price itself. Without one the booking cannot be valued and
+  // holds.
+  await prisma.priceListEntry.upsert({
+    where: { customerId_mixId: { customerId, mixId } },
+    create: { customerId, mixId, pricePerM3: 100 },
+    update: { pricePerM3: 100 },
+  });
+  try {
+    const line = await acceptedQuoteLine();
+    await asUser(salesId);
+    await sales.convertQuoteLineToReservation(form({ quoteLineId: line.id }));
+    const reservation = await prisma.reservation.findUniqueOrThrow({ where: { quoteLineId: line.id } });
+    assert.equal(reservation.status, "CONFIRMED");
+    assert.notEqual(reservation.finalApprovedAt, null);
+  } finally {
+    await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 0 } });
+    await prisma.priceListEntry.deleteMany({ where: { customerId, mixId } });
+  }
+});
+
+// N1 (audit of f955650): createReservation checked `!requestedVolumeM3`,
+// which lets -1 and Infinity through, and a negative booking consumed no
+// credit, so it was stored CONFIRMED. Quote conversion trusted the line.
+test("a booking or quote conversion of zero, negative or non-finite volume writes no reservation; a fractional one still books", async () => {
+  await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 1_000_000 } });
+  await prisma.priceListEntry.upsert({
+    where: { customerId_mixId: { customerId, mixId } },
+    create: { customerId, mixId, pricePerM3: 100 },
+    update: { pricePerM3: 100 },
+  });
+  try {
+    const project = await prisma.project.create({ data: { name: `${prefix}-PROJ-N1-${randomUUID().slice(0, 6)}`, customerId, siteAddress: "Test" } });
+    projectIds.push(project.id);
+    await asUser(adminId);
+    const book = (requestedVolumeM3: string) =>
+      reservations.createReservation(form({ projectId: project.id, siteId: siteA, mixId, requestedVolumeM3, pourWindowStart: "2026-10-01T08:00" }));
+    for (const volume of ["-1", "0", "-0.5", "NaN", "Infinity", "-Infinity", "abc"]) {
+      await book(volume);
+      assert.equal(await prisma.reservation.count({ where: { projectId: project.id } }), 0, `volume ${volume} must not be booked`);
+    }
+    await book("0.5");
+    const booked = await prisma.reservation.findMany({ where: { projectId: project.id } });
+    reservationIds.push(...booked.map((r) => r.id));
+    assert.deepEqual(booked.map((r) => r.requestedVolumeM3), [0.5], "a positive fractional volume still books");
+
+    for (const estimatedVolumeM3 of [-1, 0]) {
+      const line = await acceptedQuoteLine();
+      await prisma.quoteLine.update({ where: { id: line.id }, data: { estimatedVolumeM3 } });
+      await asUser(salesId);
+      await sales.convertQuoteLineToReservation(form({ quoteLineId: line.id }));
+      assert.equal(await prisma.reservation.count({ where: { quoteLineId: line.id } }), 0, `a quote line of ${estimatedVolumeM3} m3 must not become a booking`);
+    }
+  } finally {
+    await prisma.customer.update({ where: { id: customerId }, data: { creditLimit: 0 } });
+    await prisma.priceListEntry.deleteMany({ where: { customerId, mixId } });
+  }
+});
+
+// CL-1 (credit-limit approval audit): the customer forms used to write
+// Customer.creditLimit for every role with createCustomer/updateCustomer,
+// PLANT_OPERATOR included, so an operator could raise a financial
+// authorization in one submit. The forms no longer write it at all; the
+// only way up is an approved request (src/lib/creditLimitRequests.ts,
+// tested in reservationCredit.test.ts).
+test("a crafted creditLimit in either customer form never changes the approved limit, and ordinary edits still work", async () => {
+  const customers = await import("../src/app/(app)/customers/actions");
+
+  await asUser(operatorId);
+  await customers.createCustomer(form({ legalName: `${prefix}-CUST-LIMIT-NEW`, creditLimit: "5000000" }));
+  const created = await prisma.customer.findFirstOrThrow({ where: { legalName: `${prefix}-CUST-LIMIT-NEW` } });
+  assert.equal(created.creditLimit, 0, "a new customer starts with no credit, whatever the form posted");
+
+  for (const userId of [operatorId, accountantId, adminId]) {
+    await asUser(userId);
+    await customers.updateCustomer(form({ id: created.id, legalName: `${prefix}-CUST-LIMIT-NEW`, paymentTerms: "Net 45", creditLimit: "9999999" }));
+    const row = await prisma.customer.findUniqueOrThrow({ where: { id: created.id } });
+    assert.equal(row.creditLimit, 0, `updateCustomer as ${userId} must not write the limit`);
+    assert.equal(row.paymentTerms, "Net 45", "the ordinary fields are still saved");
+  }
+  assert.equal(await prisma.auditEvent.count({ where: { recordId: created.id, reasonCode: "CUSTOMER_UPDATED" } }), 3, "each edit commits with its audit row");
+});
+
+// F3 (PR #9 follow-up audit): the Customers page is open to plant
+// operators, and it listed every pending credit limit request with its
+// commercial reason, amounts and people, and every recent decision with
+// its note. Which requests a user may read is now decided in the query:
+// the decider sees the queue, a requester sees their own, anyone else
+// sees none. Proved by rendering the real page as each of them.
+test("the Customers page shows credit limit requests only to the decider and to their own requester", async () => {
+  const { requestCreditLimitIncrease } = await import("../src/lib/creditLimitRequests");
+  const mine = await prisma.customer.create({ data: { legalName: `${prefix}-CUST-LIMIT-READ-OWN` } });
+  const theirs = await prisma.customer.create({ data: { legalName: `${prefix}-CUST-LIMIT-READ-ADMIN` } });
+  const ownReason = `${prefix} own reason: bank guarantee on file`;
+  const adminReason = `${prefix} admin reason: parent company guarantee`;
+  const adminNote = `${prefix} admin decision note`;
+  const own = await requestCreditLimitIncrease(mine.id, { proposedLimit: "7000", reason: ownReason }, { id: accountantId, role: "ACCOUNTANT" });
+  assert.equal(own.status, "OK");
+  // Rows by someone else, written directly: one pending, one decided.
+  await prisma.customerCreditLimitRequest.create({
+    data: { customerId: theirs.id, previousLimitMinor: BigInt(0), proposedLimitMinor: BigInt(900000), reason: adminReason, requestedById: adminId },
+  });
+  await prisma.customerCreditLimitRequest.create({
+    data: {
+      customerId: theirs.id, previousLimitMinor: BigInt(0), proposedLimitMinor: BigInt(500000), reason: `${adminReason} (earlier)`, requestedById: adminId,
+      status: "REJECTED", decidedById: accountantId, decidedAt: new Date(), decisionNote: adminNote,
+    },
+  });
+
+  const pageText = async (userId: string) => {
+    await asUser(userId);
+    return renderedText(await CustomersPage({ searchParams: Promise.resolve({}) }));
+  };
+
+  const asOperator = await pageText(operatorId);
+  assert.ok(asOperator.includes(`${prefix}-CUST-LIMIT-READ-OWN`), "positive control: the operator still sees the customer list");
+  for (const secret of [ownReason, adminReason, adminNote]) {
+    assert.ok(!asOperator.includes(secret), `a plant operator must not read "${secret}"`);
+  }
+
+  const asAccountant = await pageText(accountantId);
+  assert.ok(asAccountant.includes(ownReason), "a requester sees their own request");
+  assert.ok(!asAccountant.includes(adminReason), "but not someone else's");
+  assert.ok(!asAccountant.includes(adminNote), "nor a decision on someone else's request");
+
+  const asAdmin = await pageText(adminId);
+  for (const text of [ownReason, adminReason, adminNote]) {
+    assert.ok(asAdmin.includes(text), `the decider sees the whole queue: "${text}"`);
+  }
+});
+
+// F2 (PR #9 follow-up audit), at the action: a real failure is shown as a
+// failure, never as a business outcome like ALREADY_PENDING.
+test("a failure inside a credit limit request is shown as FAILED, and only an ADMIN reaches the decision action", async () => {
+  const customers = await import("../src/app/(app)/customers/actions");
+  const target = await prisma.customer.create({ data: { legalName: `${prefix}-CUST-LIMIT-FAIL` } });
+  const redirectOf = (e: unknown) => String((e as { digest?: string }).digest ?? e);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE OR REPLACE FUNCTION test_xs_unique_on_limit_audit() RETURNS trigger AS $fn$
+    BEGIN
+      IF NEW."reasonCode" = 'CREDIT_LIMIT_INCREASE_REQUESTED' THEN
+        RAISE EXCEPTION 'injected unrelated unique violation' USING ERRCODE = 'unique_violation';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$ LANGUAGE plpgsql;
+  `);
+  await prisma.$executeRawUnsafe(`CREATE TRIGGER test_xs_unique_on_limit_audit_trigger BEFORE INSERT ON "AuditEvent" FOR EACH ROW EXECUTE FUNCTION test_xs_unique_on_limit_audit();`);
+  const originalError = console.error;
+  try {
+    await asUser(accountantId);
+    console.error = () => {};
+    const outcome = await customers
+      .requestCreditLimitIncreaseAction(form({ customerId: target.id, proposedLimit: "3000", reason: "Guarantee received from the bank" }))
+      .then(() => "no redirect", redirectOf);
+    assert.match(outcome, /customerResult=FAILED/);
+  } finally {
+    console.error = originalError;
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_xs_unique_on_limit_audit_trigger ON "AuditEvent";`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_xs_unique_on_limit_audit();`);
+  }
+  assert.equal(await prisma.customerCreditLimitRequest.count({ where: { customerId: target.id } }), 0);
+
+  const retried = await customers
+    .requestCreditLimitIncreaseAction(form({ customerId: target.id, proposedLimit: "3000", reason: "Guarantee received from the bank" }))
+    .then(() => "no redirect", redirectOf);
+  assert.match(retried, /customerResult=REQUESTED/, "nothing was pending, so the retry is accepted");
+
+  const pending = await prisma.customerCreditLimitRequest.findFirstOrThrow({ where: { customerId: target.id, status: "PENDING" } });
+  await asUser(accountantId);
+  await assert.rejects(() => customers.decideCreditLimitRequestAction(form({ requestId: pending.id, decision: "APPROVE" })), /not permitted/);
+  assert.equal((await prisma.customer.findUniqueOrThrow({ where: { id: target.id } })).creditLimit, 0);
 });
 
 // PR4-R1-P1-03 — the audit write is inside the money transaction, proved
@@ -1356,9 +1566,11 @@ after(async () => {
   await prisma.purchaseOrder.deleteMany({ where: { id: { in: purchaseOrderIds } } });
   await prisma.reservation.deleteMany({ where: { id: { in: reservationIds } } });
   await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
+  await prisma.customerCreditLimitRequest.deleteMany({ where: { customer: { legalName: { startsWith: `${prefix}-CUST-LIMIT-` } } } });
   await prisma.user.deleteMany({ where: { id: { in: users } } });
   await prisma.user.deleteMany({ where: { name: prefix } });
   await prisma.customer.deleteMany({ where: { id: customerId } });
+  await prisma.customer.deleteMany({ where: { legalName: { startsWith: `${prefix}-CUST-LIMIT-` } } });
   await prisma.mixDesign.deleteMany({ where: { id: mixId } });
   await prisma.supplier.deleteMany({ where: { id: supplierId } });
   await prisma.plant.deleteMany({ where: { id: { in: [plantA, plantB].filter(Boolean) } } });

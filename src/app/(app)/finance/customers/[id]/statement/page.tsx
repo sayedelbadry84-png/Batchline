@@ -20,7 +20,7 @@ type LedgerEntry = {
 // A statement is meant to be handed straight to the customer (or used for
 // collections) — it has to be the complete, real picture of what they owe
 // across every plant, never filtered down to whichever plant the caller
-// happens to be viewing. Same reasoning as getCustomerOutstandingBalance
+// happens to be viewing. Same reasoning as evaluateCustomerCredit (src/lib/creditPolicy.ts)
 // (the credit-limit gate) already being company-wide, not site-scoped.
 export default async function CustomerStatementPage({
   params,
@@ -41,7 +41,7 @@ export default async function CustomerStatementPage({
   if (!customer) notFound();
 
   // Real receivables only — DRAFT never went out, CANCELLED never was one
-  // (same filter getCustomerOutstandingBalance uses).
+  // (same filter evaluateCustomerCredit (src/lib/creditPolicy.ts) uses).
   //
   // BL-CR-P1-01, external-review validation: Customer itself is a
   // company-wide record (no site column), but its INVOICES are not — and

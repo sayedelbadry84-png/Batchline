@@ -47,6 +47,8 @@ export default async function OperatorHomePage({
       ? m.releaseError.STORAGE_NOT_CONFIGURED(releaseErrorMaterial ?? "")
       : releaseError === "INVALID_STATE"
         ? m.releaseError.INVALID_STATE
+        : releaseError === "CREDIT_HOLD"
+        ? m.releaseError.CREDIT_HOLD
         : releaseError === "NOT_FOUND"
           ? m.releaseError.NOT_FOUND
           : releaseError === "NO_REMAINING_VOLUME"

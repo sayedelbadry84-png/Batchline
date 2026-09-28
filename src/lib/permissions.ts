@@ -207,6 +207,9 @@ export const ACTION_ROLES = {
   reservations: {
     create: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
     edit: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
+    // Cancelling used to happen through the edit form's free status field,
+    // so it defaults to exactly the roles that could do it that way.
+    cancel: ["PLANT_OPERATOR", "ACCOUNTANT", "ADMIN"],
     approveInitial: ["PLANT_OPERATOR", "ADMIN"],
     approveFinal: ["ADMIN"],
   },
@@ -281,6 +284,15 @@ export const ACTION_ROLES = {
   customers: {
     createCustomer: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
     updateCustomer: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
+    // The credit limit is a financial authorization and is not part of
+    // updateCustomer (see src/lib/creditLimitRequests.ts). Proposing an
+    // increase authorizes nothing, so finance may do it, and who may is
+    // editable here. Approving or rejecting one is deliberately NOT on this
+    // table: it is fixed to CREDIT_LIMIT_DECIDER_ROLE (ADMIN) and a person
+    // other than the requester. It used to be listed here as editable while
+    // the server also required a scope only ADMIN has, so granting it to
+    // any other role showed a permission that could never work.
+    requestCreditLimitIncrease: ["ACCOUNTANT", "ADMIN"],
     createProject: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
     updateProject: ["ACCOUNTANT", "PLANT_OPERATOR", "ADMIN"],
   },
