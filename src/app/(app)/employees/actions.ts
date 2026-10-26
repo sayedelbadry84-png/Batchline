@@ -10,6 +10,7 @@ import { logTransferIfChanged } from "@/lib/transferAudit";
 import { OTHER_ROLE_SENTINEL } from "@/lib/employeeRole";
 import { withSequentialNumber } from "@/lib/sequence";
 import { postCashTransaction } from "@/lib/ledger";
+import { roundMoney } from "@/lib/money";
 import { calculateEndOfServiceEntitlement, TERMINATION_TYPES, type TerminationType } from "@/lib/endOfService";
 import { revalidatePath } from "next/cache";
 
@@ -560,6 +561,11 @@ export async function markEndOfServiceSettlementPaid(formData: FormData) {
 
   const plant = settlement.employee.plant;
   const description = `End of service — ${settlement.employee.name} (${settlement.settlementNumber})`;
+  // Audit 2026-10-26 P1-B: a settlement computed before payableAmount was
+  // rounded can hold 1/3 or 2/3 of a salary to many decimals. The cash
+  // movement and its journal entry carry the amount actually paid, rounded
+  // once to the minor unit; the settlement row keeps what was computed.
+  const paidAmount = roundMoney(settlement.payableAmount);
 
   await prisma.$transaction(async (tx) => {
     const txn = await withSequentialNumber(
@@ -572,7 +578,7 @@ export async function markEndOfServiceSettlementPaid(formData: FormData) {
             siteId: plant.siteId,
             direction: "OUT",
             category: "END_OF_SERVICE",
-            amount: settlement.payableAmount,
+            amount: paidAmount,
             currency: plant.currency,
             description,
             occurredAt: new Date(),
@@ -580,7 +586,7 @@ export async function markEndOfServiceSettlementPaid(formData: FormData) {
           },
         }),
     );
-    await postCashTransaction(tx, { siteId: plant.siteId, currency: plant.currency, txnId: txn.id, direction: "OUT", category: "END_OF_SERVICE", amount: settlement.payableAmount, description });
+    await postCashTransaction(tx, { siteId: plant.siteId, currency: plant.currency, txnId: txn.id, direction: "OUT", category: "END_OF_SERVICE", amount: paidAmount, description });
     await tx.endOfServiceSettlement.update({ where: { id }, data: { status: "PAID", paidAt: new Date() } });
     await tx.employee.update({ where: { id: settlement.employeeId }, data: { status: "REMOVED" } });
   }, TX_OPTIONS);

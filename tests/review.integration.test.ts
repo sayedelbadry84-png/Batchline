@@ -327,6 +327,67 @@ test("concurrent invoice generation bills a closed trip only once", async () => 
     await prisma.truck.delete({ where: { id: truck.id } });
   }
 });
+// Audit 2026-10-26 P1-B: a fractional volume at 100.01 with 15% tax used
+// to store 110.011 on the line and post it to the journal as-is. Lines are
+// now rounded first, the subtotal is their exact sum, tax is rounded once,
+// and the invoice, its lines and its journal entry carry the same amounts.
+test("invoice amounts are whole minor units and match their journal entry", async () => {
+  await asUser(adminId);
+  const plant = await prisma.plant.create({ data: { name: `${prefix} rounding`, siteId, taxRatePct: 15, currency: "SAR" } });
+  const project = await prisma.project.create({ data: { customerId, name: `${prefix} rounding`, siteAddress: "Test" } });
+  const mix = await prisma.mixDesign.create({ data: { code: `${prefix}-R`, grade: "C25", slumpTargetMm: 100, wcRatio: .5 } });
+  const reservation = await prisma.reservation.create({ data: { reservationNumber: `${prefix}-R`, projectId: project.id, siteId, mixId: mix.id, requestedVolumeM3: 3.4, originalVolumeM3: 3.4, pourWindowStart: new Date() } });
+  const truck = await prisma.truck.create({ data: { plantId: plant.id, code: `${prefix}-R`, drumCapacityM3: 8 } });
+  const tickets = await Promise.all([1.1, 2.3].map((volumeM3, i) => prisma.batchTicket.create({ data: { reservationId: reservation.id, mixId: mix.id, plantId: plant.id, ticketNumber: `${prefix}-R${i}`, volumeM3, status: "COMPLETE" } })));
+  const trips = await Promise.all(tickets.map((ticket) => prisma.trip.create({ data: { batchTicketId: ticket.id, truckId: truck.id, driverId: employeeId, status: "CLOSED", volumeDeliveredM3: ticket.volumeM3 } })));
+  await prisma.priceListEntry.create({ data: { customerId, mixId: mix.id, pricePerM3: 100.01 } });
+  try {
+    try { await billing.generateInvoiceForProject(form({ projectId: project.id })); }
+    catch (error) {
+      if (!(error instanceof Error) || !("digest" in error) || !String(error.digest).startsWith("NEXT_REDIRECT")) throw error;
+    }
+    const saved = await prisma.invoice.findFirstOrThrow({ where: { projectId: project.id }, include: { lines: true } });
+    // 1.1 × 100.01 = 110.011 → 110.01; 2.3 × 100.01 = 230.023 → 230.02.
+    assert.deepEqual(saved.lines.map((l) => l.lineTotal).sort((a, b) => a - b), [110.01, 230.02]);
+    assert.equal(saved.subtotal, 340.03);
+    // 15% of 340.03 is 51.0045, rounded once to 51.00.
+    assert.equal(saved.taxAmount, 51);
+    assert.equal(saved.total, 391.03);
+    const entry = await prisma.journalEntry.findFirstOrThrow({ where: { sourceModule: "Billing", sourceRecordId: saved.id }, include: { lines: { include: { account: true } } } });
+    const byCode = new Map(entry.lines.map((l) => [l.account.code, l]));
+    assert.equal(byCode.get("1100")?.debit, 391.03);
+    assert.equal(byCode.get("4000")?.credit, 340.03);
+    assert.equal(byCode.get("2100")?.credit, 51);
+    for (const value of [...saved.lines.map((l) => l.lineTotal), saved.subtotal, saved.taxAmount, saved.total, ...entry.lines.flatMap((l) => [l.debit, l.credit])]) {
+      assert.equal(Math.round(value * 100) / 100, value, `${value} is not a whole number of minor units`);
+    }
+  } finally {
+    await prisma.invoice.deleteMany({ where: { projectId: project.id } });
+    await prisma.trip.deleteMany({ where: { id: { in: trips.map((t) => t.id) } } });
+    await prisma.batchTicket.deleteMany({ where: { id: { in: tickets.map((t) => t.id) } } });
+    await prisma.reservation.delete({ where: { id: reservation.id } });
+    await prisma.priceListEntry.deleteMany({ where: { customerId, mixId: mix.id } });
+    await prisma.mixDesign.delete({ where: { id: mix.id } });
+    await prisma.project.delete({ where: { id: project.id } });
+    await prisma.truck.delete({ where: { id: truck.id } });
+  }
+});
+test("payments and credit notes refuse a fraction of a minor unit", async () => {
+  await asUser(adminId);
+  const d = await invoice(100);
+  assert.deepEqual(await billing.recordPayment(form({ invoiceId: d.id, amount: "10.004" })), { ok: false, code: "INVALID_INPUT" });
+  assert.deepEqual(await billing.issueCreditNote(form({ invoiceId: d.id, amount: "10.004", reason: "PRICE_ADJUSTMENT" })), { ok: false, code: "INVALID_INPUT" });
+  assert.equal(await prisma.payment.count({ where: { invoiceId: d.id } }), 0);
+  assert.equal(await prisma.creditNote.count({ where: { invoiceId: d.id } }), 0);
+});
+test("the journal refuses an amount that is not a whole minor unit", async () => {
+  const d = await invoice();
+  await assert.rejects(
+    prisma.$transaction(tx => postInvoice(tx, { siteId, currency: "SAR", invoiceId: d.id, subtotal: 110.011, taxAmount: 0, total: 110.011 }), { timeout: 15000 }),
+    /whole minor units/,
+  );
+  assert.equal(await prisma.journalEntry.count({ where: { sourceRecordId: d.id } }), 0);
+});
 test("HR actions reject another site's employee and all leave transitions", async () => {
   await asUser(hrId);
   await hr.recordAttendance(form({ employeeId: otherEmployeeId, date: "2026-09-09" }));

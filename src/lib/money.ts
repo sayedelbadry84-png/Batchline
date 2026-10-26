@@ -42,3 +42,37 @@ export function parseMoneyInput(raw: FormDataEntryValue | null): number | null {
 export function toMinorUnits(amount: number): number {
   return Math.round(amount * 100);
 }
+
+// Audit 2026-10-26 P1-B: the rounding policy for amounts the system
+// DERIVES (volume × price, subtotal × tax rate, an end-of-service
+// multiplier of 1/3), as opposed to amounts an operator types, which
+// parseMoneyInput refuses rather than rounds.
+//
+// One rule, applied at the point the amount is persisted: round to the
+// nearest minor unit, half away from zero. For an invoice that means each
+// line first, then the subtotal is the sum of the rounded lines, the tax
+// is the rounded subtotal × rate, and the total is subtotal + tax — so the
+// document, its lines and its journal entry are the same numbers.
+//
+// `toPrecision(15)` strips binary noise before the half-up decision:
+// 1.005 * 100 is 100.49999999999999 in floating point, which Math.round
+// alone would take down to 1.00.
+export function roundMoneyMinor(amount: number): number {
+  if (!Number.isFinite(amount)) throw new RangeError(`Money amount must be finite, got ${amount}`);
+  const scaled = Number((Math.abs(amount) * 100).toPrecision(15));
+  const minor = Math.sign(amount) * Math.round(scaled);
+  if (!Number.isSafeInteger(minor)) throw new RangeError(`Money amount ${amount} is too large to hold exactly in minor units`);
+  return minor === 0 ? 0 : minor;
+}
+
+export function roundMoney(amount: number): number {
+  return roundMoneyMinor(amount) / 100;
+}
+
+// True when the value is already a whole number of minor units (within
+// float noise). The journal refuses anything else — see postJournalEntry.
+export function isWholeMinorUnits(amount: number): boolean {
+  if (!Number.isFinite(amount)) return false;
+  const scaled = amount * 100;
+  return Number.isSafeInteger(Math.round(scaled)) && Math.abs(scaled - Math.round(scaled)) < 1e-6;
+}

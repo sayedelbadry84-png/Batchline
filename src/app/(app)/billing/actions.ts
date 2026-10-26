@@ -4,9 +4,10 @@ import { BillingRejection, billingFailure, type BillingResult } from "@/lib/bill
 import { prisma } from "@/lib/prisma";
 import { writeAudit } from "@/lib/audit";
 import { getCurrentUser, requireActionPermission } from "@/lib/session";
-import { parseNetDays, invoiceAmountDue } from "@/lib/billing";
+import { parseNetDays, invoiceAmountDue, priceInvoice } from "@/lib/billing";
 import { postInvoice, postPayment, postCreditNote, reverseJournalEntry } from "@/lib/ledger";
 import { generateZatcaDocuments } from "@/lib/zatca/generate";
+import { parseMoneyInput } from "@/lib/money";
 import { submitInvoiceForClearance } from "@/lib/zatca/submit";
 import { generateZatcaCreditNoteDocuments, submitCreditNoteForClearance } from "@/lib/zatca/creditNote";
 import { effectiveSiteId, isPlantInScope } from "@/lib/siteScope";
@@ -92,7 +93,6 @@ export async function generateInvoiceForProject(formData: FormData) {
           description: `${trip.batchTicket.ticketNumber} — ${mix.code}`,
           volumeM3,
           unitPrice,
-          lineTotal: volumeM3 * unitPrice,
         };
       })
       .filter((l): l is NonNullable<typeof l> => l !== null);
@@ -122,9 +122,10 @@ export async function generateInvoiceForProject(formData: FormData) {
         const billedIds = new Set(billed.map(l => l.tripId));
         const availableLines = lines.filter(l => !billedIds.has(l.tripId));
         if (availableLines.length === 0) return null;
-        const subtotal = availableLines.reduce((sum, l) => sum + l.lineTotal, 0);
-        const taxAmount = subtotal * (taxRatePct / 100);
-        const total = subtotal + taxAmount;
+        // Rounded per line, then summed exactly, then taxed once (audit
+        // 2026-10-26 P1-B, see priceInvoice): 1.1 m3 at 100.01 is stored as
+        // 110.01, the amount the printed line and the ZATCA document show.
+        const { lines: pricedLines, subtotal, taxAmount, total } = priceInvoice(availableLines, taxRatePct);
         const invoice = await tx.invoice.create({
           data: {
             invoiceNumber,
@@ -138,7 +139,7 @@ export async function generateInvoiceForProject(formData: FormData) {
             taxAmount,
             total,
             currency: plant.currency,
-            lines: { create: availableLines },
+            lines: { create: pricedLines },
           },
         });
 
@@ -240,10 +241,12 @@ export async function recordPayment(formData: FormData): Promise<BillingResult> 
   await requireActionPermission(user, "finance", "recordPayment");
 
   const invoiceId = String(formData.get("invoiceId") ?? "");
-  const amount = Number(formData.get("amount") ?? 0);
+  // Audit 2026-10-26 P1-B: the same money boundary supplier payments use —
+  // 100.004 is refused with INVALID_INPUT, never stored or posted.
+  const amount = parseMoneyInput(formData.get("amount"));
   const method = String(formData.get("method") ?? "") || null;
   const reference = String(formData.get("reference") ?? "").trim() || null;
-  if (!invoiceId || !Number.isFinite(amount) || amount <= 0) return { ok: false, code: "INVALID_INPUT" };
+  if (!invoiceId || amount === null || amount <= 0) return { ok: false, code: "INVALID_INPUT" };
 
   const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { plant: true } });
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return { ok: false, code: "INVOICE_NOT_PAYABLE" };
@@ -311,10 +314,12 @@ export async function issueCreditNote(formData: FormData): Promise<BillingResult
   await requireActionPermission(user, "finance", "issueCreditNote");
 
   const invoiceId = String(formData.get("invoiceId") ?? "");
-  const amount = Number(formData.get("amount") ?? 0);
+  // Audit 2026-10-26 P1-B: the same money boundary supplier payments use —
+  // 100.004 is refused with INVALID_INPUT, never stored or posted.
+  const amount = parseMoneyInput(formData.get("amount"));
   const reason = String(formData.get("reason") ?? "");
   const notes = String(formData.get("notes") ?? "").trim() || null;
-  if (!invoiceId || !Number.isFinite(amount) || amount <= 0 || !reason) return { ok: false, code: "INVALID_INPUT" };
+  if (!invoiceId || amount === null || amount <= 0 || !reason) return { ok: false, code: "INVALID_INPUT" };
 
   const invoice = await prisma.invoice.findUnique({ where: { id: invoiceId }, include: { plant: true } });
   if (!invoice || invoice.status === "CANCELLED" || invoice.status === "PAID") return { ok: false, code: "INVOICE_NOT_PAYABLE" };
