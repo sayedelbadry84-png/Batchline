@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { writeAudit } from "@/lib/audit";
 import { safeEqual } from "@/lib/integration-auth";
 import { retryPendingBlobDeletions } from "@/lib/blob";
 import { retryPendingAutoRequisitions } from "@/lib/materialRequisition";
@@ -59,16 +59,33 @@ export async function GET(request: NextRequest) {
   ]);
 
   // One audit event per quote, same as every other status change in Sales
-  // (markQuoteSent, recordQuoteResponse) — logAudit resolves to actor
-  // "SYSTEM" on its own here since a cron request carries no user session.
+  // (markQuoteSent, recordQuoteResponse), written by the SYSTEM actor (a
+  // cron request carries no user session).
+  //
+  // Audit 2026-10-26 P2-D: the claim and its audit row commit together, one
+  // transaction per quote. The audit used to be a separate write after the
+  // claim, so a failed insert left the quote EXPIRED with no record of why,
+  // and the throw ended the whole sweep before the queues below ran. Now a
+  // failed audit rolls its own claim back (the quote stays SENT and the next
+  // run retries it), it is counted in quotesExpiryFailed, and the other
+  // quotes and sweeps still run.
   let quotesExpired = 0;
+  let quotesExpiryFailed = 0;
   for (const q of staleQuotes) {
-    // A response may have accepted this quote since the scan. Never
-    // overwrite a terminal status or audit an expiration that lost.
-    const claim = await prisma.quote.updateMany({ where: { id: q.id, status: "SENT", validUntil: { lt: now } }, data: { status: "EXPIRED" } });
-    if (claim.count === 0) continue;
-    quotesExpired++;
-    await logAudit({ module: "Sales", recordId: q.id, afterValue: "EXPIRED", reasonCode: "QUOTE_AUTO_EXPIRED" });
+    try {
+      const won = await prisma.$transaction(async (tx) => {
+        // A response may have accepted this quote since the scan. Never
+        // overwrite a terminal status or audit an expiration that lost.
+        const claim = await tx.quote.updateMany({ where: { id: q.id, status: "SENT", validUntil: { lt: now } }, data: { status: "EXPIRED" } });
+        if (claim.count === 0) return false;
+        await writeAudit(tx, null, { module: "Sales", recordId: q.id, field: "status", beforeValue: "SENT", afterValue: "EXPIRED", reasonCode: "QUOTE_AUTO_EXPIRED" });
+        return true;
+      });
+      if (won) quotesExpired++;
+    } catch (error) {
+      quotesExpiryFailed++;
+      console.error("[cron/cleanup] quote expiry rolled back", { quoteId: q.id, error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   // PL-R9-P2-02, ninth production-lifecycle review: durable retry for a
@@ -98,6 +115,9 @@ export async function GET(request: NextRequest) {
     // "count what committed, never what was attempted" rule the two
     // queue sweeps below report by (see QueueSweepCounts).
     quotesExpired,
+    // Expirations whose transaction failed and rolled back; non-zero means
+    // an operator should read the logs. Those quotes are still SENT.
+    quotesExpiryFailed,
     pendingBlobDeletions: blobDeletions,
     pendingAutoRequisitions: autoRequisitions,
   });
