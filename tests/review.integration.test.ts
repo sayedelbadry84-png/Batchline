@@ -85,10 +85,14 @@ async function asUser(userId: string) {
   await prisma.session.create({ data: { userId, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + 60_000) } });
   cookieValues.set("batchline_session", token);
 }
+// Stored as whole minor units, as the application itself now stores every
+// invoice (audit 2026-10-26 P1-B): 100 splits into 86.96 + 13.04, not
+// 86.9565… + 13.0434…, which the journal would rightly refuse to post.
 async function invoice(total = 115) {
+  const subtotal = Math.round((total / 1.15) * 100) / 100;
   const row = await prisma.invoice.create({ data: {
     invoiceNumber: `${prefix}-${randomUUID()}`, customerId, plantId, currency: "SAR",
-    subtotal: total / 1.15, taxAmount: total - total / 1.15, taxRatePct: 15, total,
+    subtotal, taxAmount: Math.round((total - subtotal) * 100) / 100, taxRatePct: 15, total,
     dueDate: new Date(), status: "SENT",
   } });
   invoiceIds.push(row.id);
