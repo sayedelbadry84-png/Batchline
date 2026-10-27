@@ -2057,7 +2057,8 @@ const en: typeof ar = {
       equipmentReport: {
         trucksTitle: "Mixer trucks",
         pumpsTitle: "Pumps",
-        col: { code: "Code", trips: "Trips", volume: "Volume delivered" },
+        col: { code: "Code", trips: "Trips", volume: "Volume delivered", byPlant: "By plant" },
+        byPlantNote: "The total is the asset's work at every plant combined. Each trip counts at the plant that released its ticket, on that plant's local day.",
       },
       qualityReport: {
         intro: "Every cylinder break result within the selected period — the same data behind Overview's pass-rate figure, shown row by row and exportable.",

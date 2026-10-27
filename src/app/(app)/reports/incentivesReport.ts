@@ -13,8 +13,18 @@ import {
   isReachBasedRole,
 } from "@/lib/incentives";
 
+export type CurrencyAmount = { currency: string; amount: number };
+
+// Audit 2026-10-26 P1-A: a payout is kept per currency. Summing SAR and
+// EGP into one number, as this used to, produced a total that is neither.
+function addByCurrency(into: Map<string, number>, items: CurrencyAmount[]) {
+  for (const p of items) into.set(p.currency, (into.get(p.currency) ?? 0) + p.amount);
+}
+const sortedAmounts = (m: Map<string, number>): CurrencyAmount[] =>
+  [...m].map(([currency, amount]) => ({ currency, amount })).sort((a, b) => a.currency.localeCompare(b.currency));
+
 // fromDay/toDay are calendar days; each trip counts on the local day of the
-// plant it was batched at (audit 2026-10-26 P1-C, see activityForRole).
+// plant it was batched at (audit P1-C, see activityForRole).
 export async function getIncentivesReport(fromDay: string, toDay: string) {
   // Delegates to the exact same functions the Incentives module
   // itself uses (src/lib/incentives.ts) — this used to be a
@@ -46,12 +56,15 @@ export async function getIncentivesReport(fromDay: string, toDay: string) {
           tripCount: r.tripCount,
           volumeM3: r.volumeM3,
           siteCount: r.siteNames.length,
-          payout: r.payoutByCurrency.reduce((sum, p) => sum + p.amount, 0),
+          payoutByCurrency: r.payoutByCurrency.filter((p) => p.amount !== 0),
         }))
-        .sort((a, b) => b.payout - a.payout);
+        // Sorted by the largest single-currency amount; amounts in two
+        // currencies are never added to rank them.
+        .sort((a, b) => Math.max(0, ...b.payoutByCurrency.map((p) => p.amount)) - Math.max(0, ...a.payoutByCurrency.map((p) => p.amount)));
       return { role, volumeBased: isReachBasedRole(role), rows };
     }),
   );
-  const totalPayout = byRole.reduce((sum, g) => sum + g.rows.reduce((s, r) => s + r.payout, 0), 0);
-  return { byRole, totalPayout };
+  const total = new Map<string, number>();
+  for (const g of byRole) for (const r of g.rows) addByCurrency(total, r.payoutByCurrency);
+  return { byRole, totalPayoutByCurrency: sortedAmounts(total) };
 }

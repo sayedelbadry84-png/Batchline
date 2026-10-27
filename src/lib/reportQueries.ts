@@ -327,17 +327,27 @@ export async function getTripsReport(filter: ReportFilter) {
   return { rows: trips, totalDeliveredM3, tripCount: trips.length, avgCycleTimeMin, byProject };
 }
 
-// Deliberately ignores the siteId/plantId scope every other report here
-// takes — a truck or pump is grouped by its own CODE (below), and that
-// code's productivity is meant to read as one number for the asset across
-// wherever it actually worked, not fragmented by whichever plant a filter
-// happens to be narrowed to. Each trip counts on the local day of the
-// plant that released its ticket (audit 2026-10-26 P1-C).
-export async function getEquipmentProductivityReport({ fromDay, toDay }: ReportFilter) {
-  const w = await reportWindows({ fromDay, toDay });
+// A truck or pump is grouped by its own CODE (below), and that code's
+// productivity reads as one number for the asset across every plant it
+// worked at that day (owner decision, 2026-10-26: mixers and pumps move
+// between plants, sometimes within one day, and their totals are the sum
+// of all of it). Each trip counts at the plant that released its batch
+// ticket, on that plant's local day (audit P1-C); `byPlant` shows those
+// contributions and always sums to the asset's total.
+//
+// Audit 2026-10-26 P1-A: the filter's site/plant scope is honoured when it
+// is given. A caller that must show the company-wide total (the Reports
+// page, for now, pending the owner's viewing decision) passes no scope; a
+// caller bound to one site (a site-scoped REPORTS API key) passes its site
+// and gets only that site's contributions, never the company total.
+export type EquipmentPlantContribution = { plantId: string; plantName: string; tripCount: number; volumeM3: number };
+export type EquipmentProductivityRow = { code: string; tripCount: number; volumeM3: number; byPlant: EquipmentPlantContribution[] };
+
+export async function getEquipmentProductivityReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const trips = await prisma.trip.findMany({
     where: { status: "CLOSED", ...onTripPlant(w, "dischargeEnd") },
-    include: { truck: true, pump: true },
+    include: { truck: true, pump: true, batchTicket: { select: { plantId: true, plant: { select: { name: true } } } } },
   });
 
   // Grouped by equipment CODE, not the underlying row id — a truck/pump
@@ -347,27 +357,32 @@ export async function getEquipmentProductivityReport({ fromDay, toDay }: ReportF
   // treats it as one thing. No unique constraint on Truck/Pump.code today,
   // so this is a deliberate merge-by-business-identity, not a DB-enforced
   // one.
-  const byTruck = new Map<string, { code: string; tripCount: number; volumeM3: number }>();
-  const byPump = new Map<string, { code: string; tripCount: number; volumeM3: number }>();
-  for (const t of trips) {
+  const add = (map: Map<string, EquipmentProductivityRow>, code: string, t: (typeof trips)[number]) => {
     const vol = t.volumeDeliveredM3 ?? 0;
-    const truckEntry = byTruck.get(t.truck.code) ?? { code: t.truck.code, tripCount: 0, volumeM3: 0 };
-    truckEntry.tripCount += 1;
-    truckEntry.volumeM3 += vol;
-    byTruck.set(t.truck.code, truckEntry);
-
-    if (t.pumpId && t.pump) {
-      const pumpEntry = byPump.get(t.pump.code) ?? { code: t.pump.code, tripCount: 0, volumeM3: 0 };
-      pumpEntry.tripCount += 1;
-      pumpEntry.volumeM3 += vol;
-      byPump.set(t.pump.code, pumpEntry);
+    const entry = map.get(code) ?? { code, tripCount: 0, volumeM3: 0, byPlant: [] };
+    entry.tripCount += 1;
+    entry.volumeM3 += vol;
+    let plant = entry.byPlant.find((c) => c.plantId === t.batchTicket.plantId);
+    if (!plant) {
+      plant = { plantId: t.batchTicket.plantId, plantName: t.batchTicket.plant.name, tripCount: 0, volumeM3: 0 };
+      entry.byPlant.push(plant);
     }
-  }
-
-  return {
-    trucks: Array.from(byTruck.values()).sort((a, b) => b.volumeM3 - a.volumeM3),
-    pumps: Array.from(byPump.values()).sort((a, b) => b.volumeM3 - a.volumeM3),
+    plant.tripCount += 1;
+    plant.volumeM3 += vol;
+    map.set(code, entry);
   };
+  const byTruck = new Map<string, EquipmentProductivityRow>();
+  const byPump = new Map<string, EquipmentProductivityRow>();
+  for (const t of trips) {
+    add(byTruck, t.truck.code, t);
+    if (t.pumpId && t.pump) add(byPump, t.pump.code, t);
+  }
+  const sorted = (map: Map<string, EquipmentProductivityRow>) =>
+    Array.from(map.values())
+      .map((r) => ({ ...r, byPlant: r.byPlant.sort((a, b) => b.volumeM3 - a.volumeM3) }))
+      .sort((a, b) => b.volumeM3 - a.volumeM3);
+
+  return { trucks: sorted(byTruck), pumps: sorted(byPump) };
 }
 
 // Every role that physically moves material, in one activity report — not

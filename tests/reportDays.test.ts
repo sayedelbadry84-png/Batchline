@@ -1,8 +1,10 @@
-// Audit 2026-10-26 P1-C, against a real PostgreSQL database.
+// Audit 2026-10-26 P1-A and P1-C, against a real PostgreSQL database.
 //
 // One mixer code and one driver work at two plants in different zones
 // (Riyadh, UTC+3; Cairo, UTC+2 in December) on the same local day. Reports
-// must count each trip once, on its own plant's local day.
+// must count each trip once, on its own plant's local day; the asset's
+// total must be the sum of its per-plant contributions; and a REPORTS key
+// bound to one site must never receive the other site's work.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -81,6 +83,7 @@ after(async () => {
 
 const expected = (plant?: "ruh" | "cai") => tripsAt.filter((t) => t.inDay && (!plant || t.plant === plant));
 const sum = (rows: { volumeM3: number }[]) => rows.reduce((s, r) => s + r.volumeM3, 0);
+const mine = <T extends { code: string }>(rows: T[]) => rows.filter((r) => r.code === `${prefix}-M1`);
 
 test("each trip counts on its own plant's local day, once", async () => {
   const both = await reports.getTripsReport({ fromDay: DAY, toDay: DAY, siteId: undefined });
@@ -95,12 +98,50 @@ test("each trip counts on its own plant's local day, once", async () => {
   assert.equal(r.rows.length + c.rows.length, ours.length, "the company total is the sum of the plants");
 });
 
+test("an asset's total is the sum of its per-plant contributions", async () => {
+  const report = await reports.getEquipmentProductivityReport({ fromDay: DAY, toDay: DAY });
+  const [truck] = mine(report.trucks);
+  assert.ok(truck, "the mixer appears once, merged across both plants");
+  assert.equal(mine(report.trucks).length, 1);
+  assert.equal(truck.tripCount, expected().length);
+  assert.equal(truck.volumeM3, sum(expected()));
+  assert.deepEqual(new Set(truck.byPlant.map((p) => p.plantId)), new Set([ruh, cai]));
+  assert.equal(truck.byPlant.reduce((s, p) => s + p.tripCount, 0), truck.tripCount);
+  assert.equal(truck.byPlant.reduce((s, p) => s + p.volumeM3, 0), truck.volumeM3);
+  assert.equal(truck.byPlant.find((p) => p.plantId === ruh)!.volumeM3, sum(expected("ruh")));
+});
+
 test("the driver's activity across both plants is counted once each", async () => {
   const { rows } = await reports.getWorkerProductivityReport({ fromDay: DAY, toDay: DAY });
   const driver = rows.filter((r) => r.key === `MIXER_DRIVER:${prefix}-D`);
   assert.equal(driver.length, 1);
   assert.equal(driver[0].count, expected().length);
   assert.equal(driver[0].volumeM3, sum(expected()));
+});
+
+const get = (report: string, key: string, query = "") =>
+  reportsRoute.GET(new NextRequest(`http://test.local/api/reports/${report}?from=${DAY}&to=${DAY}${query}`, { headers: { authorization: `Bearer ${key}` } }), { params: Promise.resolve({ report }) });
+
+test("a site-scoped REPORTS key never receives another site's equipment work", async () => {
+  const res = await get("equipment", siteKey);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.scope, "site");
+  const [truck] = mine(body.trucks as { code: string; tripCount: number; volumeM3: number; byPlant: { plantId: string }[] }[]);
+  assert.equal(truck.tripCount, expected("ruh").length);
+  assert.equal(truck.volumeM3, sum(expected("ruh")));
+  assert.deepEqual(truck.byPlant.map((p) => p.plantId), [ruh]);
+  assert.equal((await get("equipment", siteKey, `&site=${caiSite}`)).status, 403);
+  assert.equal((await get("equipment", siteKey, `&plant=${cai}`)).status, 403);
+});
+
+test("a global REPORTS key sees the company-wide total", async () => {
+  const body = await (await get("equipment", globalKey)).json();
+  assert.equal(body.scope, "company");
+  const [truck] = mine(body.trucks as { code: string; volumeM3: number }[]);
+  assert.equal(truck.volumeM3, sum(expected()));
+  const cairoOnly = await (await get("equipment", globalKey, `&site=${caiSite}`)).json();
+  assert.equal(mine(cairoOnly.trucks as { code: string; volumeM3: number }[])[0].volumeM3, sum(expected("cai")));
 });
 
 test("the API refuses a day that is not a calendar day", async () => {

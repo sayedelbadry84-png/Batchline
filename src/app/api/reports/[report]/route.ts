@@ -73,6 +73,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({ error: "Plant not permitted." }, { status: 403 });
   }
 
+  // Audit 2026-10-26 P1-A: every report, the equipment one included, runs
+  // on the key's scope. A site-scoped key used to receive the company-wide
+  // equipment total because getEquipmentProductivityReport ignored scope;
+  // it now receives its site's contributions only. A global key without
+  // ?site= still gets the company-wide total, with each asset's per-plant
+  // breakdown.
   const data = await REPORTS[report]({ fromDay, toDay, siteId, plantId });
-  return NextResponse.json({ report, from: fromDay, to: toDay, siteId: siteId ?? null, plantId: plantId ?? null, ...data });
+  return NextResponse.json({ report, from: fromDay, to: toDay, scope: siteId || plantId ? "site" : "company", siteId: siteId ?? null, plantId: plantId ?? null, ...data });
 }
