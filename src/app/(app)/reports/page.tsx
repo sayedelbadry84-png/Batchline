@@ -32,7 +32,7 @@ import {
   INCENTIVE_ROLE_KEYS,
   type IncentiveRoleKey,
 } from "@/lib/incentives";
-import { getActiveSiteId } from "@/lib/siteScope";
+import { effectiveSiteId, getActiveSiteId } from "@/lib/siteScope";
 import { REPORT_TABS, type ReportTab } from "./reportUi";
 import { getIncentivesReport } from "./incentivesReport";
 import { getOverviewReport } from "./overviewReport";
@@ -63,6 +63,7 @@ import { IncentivesTab } from "./tabs/IncentivesTab";
 import { OverviewTab } from "./tabs/OverviewTab";
 import { getDateFormatters, getDisplayTimeZone } from "@/lib/displayTimeZone";
 import { isIsoDay, zonedIsoDay } from "@/lib/plantDay";
+import { incentiveVisibility } from "@/lib/incentives";
 
 export default async function ReportsPage({
   searchParams,
@@ -121,9 +122,13 @@ export default async function ReportsPage({
   const consumption = tab === "consumption" ? await getConsumptionReport({ ...days, ...scope }) : null;
   const returnsData = tab === "returns" ? await getReturnsReport({ ...days, ...scope }) : null;
   const tripsData = tab === "trips" ? await getTripsReport({ ...days, ...scope }) : null;
-  // Deliberately company-wide regardless of the site/plant filter above —
-  // see the comment on getEquipmentProductivityReport itself.
-  const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport(days) : null;
+  // PM review 2026-10-27 P1-2: an unrestricted viewer (ADMIN) sees each
+  // asset's full cross-plant total with its per-plant breakdown; a
+  // site-pinned role sees only its own site's contribution, and the tab
+  // labels it as such. Same rule for incentives below.
+  const siteRestricted = effectiveSiteId(user);
+  const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport(siteRestricted === null ? days : { ...days, siteId: siteRestricted }) : null;
+  const equipmentScope = siteRestricted === null ? "company" : "site";
   const workersData = tab === "workers" ? await getWorkerProductivityReport({ ...days, ...scope }) : null;
   const profitability = tab === "profitability" ? await getProfitabilityReport({ ...days, ...scope }) : null;
   const qualityData = tab === "quality" ? await getQualityReport({ ...days, ...scope }) : null;
@@ -148,7 +153,7 @@ export default async function ReportsPage({
   const finishedGoodsData = tab === "finishedGoods" ? await getFinishedGoodsReport({ ...days, siteId }) : null;
   const factoryPerformanceData = tab === "factoryPerformance" ? await getFactoryPerformanceReport({ ...days, ...scope }) : null;
 
-  const incentivesData = tab === "incentives" ? await getIncentivesReport(rangeFrom, rangeTo) : null;
+  const incentivesData = tab === "incentives" ? await getIncentivesReport(rangeFrom, rangeTo, incentiveVisibility(siteRestricted)) : null;
 
   // Everything a tab needs beyond its own data. Built once and handed to
   // each of them, so a new shared value is added here rather than at
@@ -295,7 +300,7 @@ export default async function ReportsPage({
 
       {tab === "trips" && tripsData && <TripsTab tripsData={tripsData} ctx={ctx} />}
 
-      {tab === "equipment" && equipmentData && <EquipmentTab equipmentData={equipmentData} ctx={ctx} />}
+      {tab === "equipment" && equipmentData && <EquipmentTab equipmentData={equipmentData} scope={equipmentScope} ctx={ctx} />}
 
       {tab === "workers" && workersData && <WorkersTab workersData={workersData} ctx={ctx} workerRole={workerRole} siteId={siteId} plantId={plantId} fromRaw={fromRaw} toRaw={toRaw} />}
 

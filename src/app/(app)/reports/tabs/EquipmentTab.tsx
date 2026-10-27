@@ -21,8 +21,11 @@ function PlantBreakdown({ rows }: { rows: { plantId: string; plantName: string; 
   );
 }
 
-export function EquipmentTab({ equipmentData, ctx }: {
+export function EquipmentTab({ equipmentData, scope, ctx }: {
   equipmentData: NonNullable<Awaited<ReturnType<typeof getEquipmentProductivityReport>>>;
+  // "site": a site-pinned viewer sees only their site's contribution
+  // (PM review 2026-10-27 P1-2); the totals are not the asset's totals.
+  scope: "company" | "site";
   ctx: ReportTabContext;
 }) {
   const { dict, rangeFrom, rangeTo } = ctx;
@@ -36,15 +39,15 @@ export function EquipmentTab({ equipmentData, ctx }: {
           to={rangeTo}
           message={`${m.tabs.equipment} ${rangeFrom} → ${rangeTo}\n${equipmentData.trucks.map((t) => `${t.code}: ${t.tripCount} trips, ${t.volumeM3.toFixed(1)} m³`).join("\n")}`}
           filenameBase={`equipment-${rangeFrom}-${rangeTo}`}
-          headers={["From", "To", "Type", "Code", "Plant", "Trips", "Volume m3"]}
+          headers={["From", "To", "Scope", "Type", "Code", "Plant", "Trips", "Volume m3"]}
           // One "All plants" total row per asset, then one row per plant it
           // worked at; the plant rows sum to the total row.
           rows={[
-            ...equipmentData.trucks.flatMap((t) => [[rangeFrom, rangeTo, "Truck", t.code, "All plants", t.tripCount, t.volumeM3], ...t.byPlant.map((c) => [rangeFrom, rangeTo, "Truck", t.code, c.plantName, c.tripCount, c.volumeM3])]),
-            ...equipmentData.pumps.flatMap((p) => [[rangeFrom, rangeTo, "Pump", p.code, "All plants", p.tripCount, p.volumeM3], ...p.byPlant.map((c) => [rangeFrom, rangeTo, "Pump", p.code, c.plantName, c.tripCount, c.volumeM3])]),
+            ...equipmentData.trucks.flatMap((t) => [[rangeFrom, rangeTo, scope === "site" ? "This site only" : "Company", "Truck", t.code, scope === "site" ? "Site total" : "All plants", t.tripCount, t.volumeM3], ...t.byPlant.map((c) => [rangeFrom, rangeTo, scope === "site" ? "This site only" : "Company", "Truck", t.code, c.plantName, c.tripCount, c.volumeM3])]),
+            ...equipmentData.pumps.flatMap((p) => [[rangeFrom, rangeTo, scope === "site" ? "This site only" : "Company", "Pump", p.code, scope === "site" ? "Site total" : "All plants", p.tripCount, p.volumeM3], ...p.byPlant.map((c) => [rangeFrom, rangeTo, scope === "site" ? "This site only" : "Company", "Pump", p.code, c.plantName, c.tripCount, c.volumeM3])]),
           ]}
         />
-        <p className="text-sm text-ink-muted">{m.equipmentReport.byPlantNote}</p>
+        <p className="text-sm text-ink-muted">{scope === "site" ? m.equipmentReport.siteScopeNote : m.equipmentReport.byPlantNote}</p>
         <div className="grid grid-cols-2 gap-6">
           <div className={ui.card}>
             <h2 className="mb-3 font-display text-base font-semibold">{m.equipmentReport.trucksTitle}</h2>

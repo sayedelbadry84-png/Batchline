@@ -2057,6 +2057,7 @@ const en: typeof ar = {
         byProjectCol: { customer: "Customer", project: "Project", trips: "Trips", transit: "Transit", wait: "On-site wait", pour: "Pour", cycle: "Full cycle" },
       },
       equipmentReport: {
+        siteScopeNote: "Your site only: trips and volume your site released. A truck or pump that also worked at other plants has more work than shown here.",
         trucksTitle: "Mixer trucks",
         pumpsTitle: "Pumps",
         col: { code: "Code", trips: "Trips", volume: "Volume delivered", byPlant: "By plant" },
@@ -2181,6 +2182,8 @@ const en: typeof ar = {
         },
       },
       incentivesReport: {
+        siteScopeNote: "Your site only. These are the trips and deliveries made at your site and the payout your site's policy gives for them. They are not anyone's full incentive: a person who also worked at other plants is paid for that work too, which only payroll (ADMIN) can see.",
+        sitePayoutLabel: "Payout for work at this site",
         intro: "Payout by person for the selected range, split by job — see the Incentives module to change tier policies.",
         col: { name: "Name", role: "Role", trips: "Trips", volume: "Volume poured", sites: "Sites worked", payout: "Payout" },
         volumeBasedNote: "Priced by volume poured (m³), not trip or site count.",

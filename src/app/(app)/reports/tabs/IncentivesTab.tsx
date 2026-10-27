@@ -29,21 +29,22 @@ export function IncentivesTab({ incentivesData, ctx }: {
             .flatMap((g) => g.rows.map((r) => `${r.name} (${dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role}): ${formatAmounts(r.payoutByCurrency)}`))
             .join("\n")}`}
           filenameBase={`incentives-${rangeFrom}-${rangeTo}`}
-          headers={["From", "To", "Name", "Role", "Trips", "Volume m3", "Sites", "Payout", "Currency"]}
+          headers={["From", "To", "Scope", "Name", "Role", "Trips", "Volume m3", "Sites", incentivesData.scope === "site" ? "Payout at this site" : "Payout", "Currency"]}
           rows={incentivesData.byRole.flatMap((g) =>
             g.rows.flatMap((r) => {
               const role = dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role;
               // One CSV row per currency: amounts in different currencies
               // are never summed into one cell.
               const amounts = r.payoutByCurrency.length ? r.payoutByCurrency : [{ currency: "", amount: 0 }];
-              return amounts.map((p) => [rangeFrom, rangeTo, r.name, role, r.tripCount, r.volumeM3, r.siteCount, p.amount, p.currency]);
+              return amounts.map((p) => [rangeFrom, rangeTo, incentivesData.scope === "site" ? "This site only" : "All plants", r.name, role, r.tripCount, r.volumeM3, r.siteCount, p.amount, p.currency]);
             }),
           )}
         />
         <p className="text-sm text-ink-muted">{m.incentivesReport.intro}</p>
+        {incentivesData.scope === "site" && <p className={`${ui.card} text-sm text-warn`}>{m.incentivesReport.siteScopeNote}</p>}
         <div className={ui.card}>
           <div className="font-mono text-2xl tabular" dir="ltr">{formatAmounts(incentivesData.totalPayoutByCurrency)}</div>
-          <div className="mt-1 text-sm text-ink-muted">{m.incentivesReport.col.payout}</div>
+          <div className="mt-1 text-sm text-ink-muted">{incentivesData.scope === "site" ? m.incentivesReport.sitePayoutLabel : m.incentivesReport.col.payout}</div>
         </div>
         {incentivesData.byRole.map((group) => (
           <div key={group.role} className={ui.card}>
@@ -61,7 +62,7 @@ export function IncentivesTab({ incentivesData, ctx }: {
                   ) : (
                     <th className={ui.th}>{m.incentivesReport.col.trips}</th>
                   )}
-                  <th className={ui.th}>{m.incentivesReport.col.payout}</th>
+                  <th className={ui.th}>{incentivesData.scope === "site" ? m.incentivesReport.sitePayoutLabel : m.incentivesReport.col.payout}</th>
                 </tr>
               </thead>
               <tbody>

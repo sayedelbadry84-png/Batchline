@@ -355,6 +355,26 @@ async function materialReceiptEntries(period: ActivityPeriod, materialType: stri
     .filter((e): e is ActivityEntry => e !== null);
 }
 
+// PM review 2026-10-27 P1-2: who may see which incentive figures.
+//
+// The entitlement itself is always computed from a person's work at every
+// plant (each site's piece priced by that site's own policy, then kept per
+// currency). Viewing is narrower: only a role unrestricted by site
+// (effectiveSiteId === null, i.e. ADMIN, who also runs payroll) sees each
+// person's full entitlement. A site-pinned role sees the work done AT ITS
+// SITE and the payout that site's policy prices for it, labelled as that,
+// never as the person's total, and sees nothing of what they earned
+// elsewhere.
+export type IncentiveVisibility = { kind: "company" } | { kind: "site"; siteId: string };
+
+export function incentiveVisibility(restrictedSiteId: string | null): IncentiveVisibility {
+  return restrictedSiteId === null ? { kind: "company" } : { kind: "site", siteId: restrictedSiteId };
+}
+
+export function entriesVisibleTo(entries: ActivityEntry[], visibility: IncentiveVisibility): ActivityEntry[] {
+  return visibility.kind === "company" ? entries : entries.filter((e) => e.siteId === visibility.siteId);
+}
+
 export async function activityForRole(role: string, period: ActivityPeriod): Promise<ActivityEntry[]> {
   if (role === "MIXER_DRIVER") return mixerDriverTrips(period);
   if (role === "PUMP_OPERATOR") return pumpCrewTrips(period, "pumpOperatorId");

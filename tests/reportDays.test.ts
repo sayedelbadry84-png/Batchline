@@ -191,3 +191,37 @@ test("money is reported per currency on every report that adds it up", async () 
   // No representation carries the added-up number.
   for (const body of [ar, prof, cash].map((r) => JSON.stringify({ ...r, rows: undefined }))) assert.doesNotMatch(body, crossSum);
 });
+
+// PM review 2026-10-27 P1-2: the entitlement is computed from all plants;
+// a site-pinned viewer sees only their site's contribution, labelled so.
+test("incentives: ADMIN sees the full cross-plant figures, a site-pinned role only its site's", async () => {
+  const { effectiveSiteId } = await import("../src/lib/siteScope");
+  const { incentiveVisibility } = await import("../src/lib/incentives");
+  const { getIncentivesReport } = await import("../src/app/(app)/reports/incentivesReport");
+  const admin = { id: userId, role: "ADMIN", plant: { siteId: ruhSite } } as unknown as Parameters<typeof effectiveSiteId>[0];
+  const operator = { id: userId, role: "PLANT_OPERATOR", plant: { siteId: ruhSite } } as unknown as Parameters<typeof effectiveSiteId>[0];
+  assert.deepEqual(incentiveVisibility(effectiveSiteId(admin)), { kind: "company" });
+  assert.deepEqual(incentiveVisibility(effectiveSiteId(operator)), { kind: "site", siteId: ruhSite });
+
+  // Incentives count each trip by its batchTime on the batching plant's day.
+  const company = await getIncentivesReport(DAY, DAY, incentiveVisibility(effectiveSiteId(admin)));
+  const site = await getIncentivesReport(DAY, DAY, incentiveVisibility(effectiveSiteId(operator)));
+  const driverIn = (r: typeof company) => r.byRole.find((g) => g.role === "MIXER_DRIVER")!.rows.find((x) => x.key === `MIXER_DRIVER:${driverId}`);
+  assert.equal(company.scope, "company");
+  assert.equal(site.scope, "site");
+  assert.equal(driverIn(company)!.tripCount, expected().length, "the full entitlement counts both plants");
+  assert.equal(driverIn(company)!.siteCount, 2);
+  assert.equal(driverIn(site)!.tripCount, expected("ruh").length, "the site view counts only Riyadh's trips");
+  assert.equal(driverIn(site)!.siteCount, 1);
+  // Nothing priced in Cairo's currency reaches the Riyadh-only view.
+  assert.ok(site.totalPayoutByCurrency.every((p) => p.currency !== "EGP"));
+});
+
+test("equipment: a site-pinned role's report is its site's contribution only", async () => {
+  const company = await reports.getEquipmentProductivityReport({ fromDay: DAY, toDay: DAY });
+  const site = await reports.getEquipmentProductivityReport({ fromDay: DAY, toDay: DAY, siteId: ruhSite });
+  const truck = (r: typeof company) => r.trucks.find((t) => t.code === `${prefix}-M1`)!;
+  assert.equal(truck(company).tripCount, expected().length);
+  assert.equal(truck(site).tripCount, expected("ruh").length);
+  assert.deepEqual(truck(site).byPlant.map((p) => p.plantId), [ruh], "no other plant's work in the site view");
+});

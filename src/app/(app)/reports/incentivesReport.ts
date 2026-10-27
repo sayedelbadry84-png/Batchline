@@ -9,11 +9,12 @@ import {
   activityForRole,
   aggregateIncentiveResults,
   buildSitePricingMap,
+  entriesVisibleTo,
   getIncentiveSiteData,
   isReachBasedRole,
+  type IncentiveVisibility,
 } from "@/lib/incentives";
-
-export type CurrencyAmount = { currency: string; amount: number };
+import type { CurrencyAmount } from "@/lib/currencyTotals";
 
 // Audit 2026-10-26 P1-A: a payout is kept per currency. Summing SAR and
 // EGP into one number, as this used to, produced a total that is neither.
@@ -25,7 +26,12 @@ const sortedAmounts = (m: Map<string, number>): CurrencyAmount[] =>
 
 // fromDay/toDay are calendar days; each trip counts on the local day of the
 // plant it was batched at (audit P1-C, see activityForRole).
-export async function getIncentivesReport(fromDay: string, toDay: string) {
+//
+// visibility (PM review 2026-10-27 P1-2, see incentiveVisibility): the full
+// cross-plant entitlement for an unrestricted viewer, or one site's
+// contribution for a site-pinned one. The returned `scope` tells the tab
+// which it is, so a site contribution is never labelled as a total.
+export async function getIncentivesReport(fromDay: string, toDay: string, visibility: IncentiveVisibility) {
   // Delegates to the exact same functions the Incentives module
   // itself uses (src/lib/incentives.ts) — this used to be a
   // separate, hand-rolled computation here that had drifted out
@@ -46,7 +52,7 @@ export async function getIncentivesReport(fromDay: string, toDay: string) {
   const siteData = await getIncentiveSiteData();
   const byRole = await Promise.all(
     INCENTIVE_ROLE_KEYS.map(async (role) => {
-      const entries = await activityForRole(role, { fromDay, toDay });
+      const entries = entriesVisibleTo(await activityForRole(role, { fromDay, toDay }), visibility);
       const sitePricing = buildSitePricingMap(siteData, role);
       const results = aggregateIncentiveResults(entries, sitePricing);
       const rows = results
@@ -66,5 +72,5 @@ export async function getIncentivesReport(fromDay: string, toDay: string) {
   );
   const total = new Map<string, number>();
   for (const g of byRole) for (const r of g.rows) addByCurrency(total, r.payoutByCurrency);
-  return { byRole, totalPayoutByCurrency: sortedAmounts(total) };
+  return { byRole, totalPayoutByCurrency: sortedAmounts(total), scope: visibility.kind };
 }
