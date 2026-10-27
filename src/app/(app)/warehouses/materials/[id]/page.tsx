@@ -6,7 +6,8 @@ import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
 import { buildStockLedger } from "@/lib/stock-ledger";
 import { getActiveSiteId } from "@/lib/siteScope";
-import { getDateFormatters } from "@/lib/displayTimeZone";
+import { getDateFormatters, getDisplayTimeZone } from "@/lib/displayTimeZone";
+import { isIsoDay, zonedDayRange, zonedIsoDay } from "@/lib/plantDay";
 
 export default async function MaterialLedgerDetailPage({
   params,
@@ -32,16 +33,14 @@ export default async function MaterialLedgerDetailPage({
   // material's full receive/consume history only ever grows, so showing
   // it unbounded by default would mean this page's query keeps getting
   // slower for as long as the plant stays in business.
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const defaultFrom = (() => {
-    const d = new Date();
-    d.setDate(1);
-    return d.toISOString().slice(0, 10);
-  })();
-  const rangeFrom = fromRaw || defaultFrom;
-  const rangeTo = toRaw || todayIso;
-  const rangeStart = new Date(`${rangeFrom}T00:00:00`);
-  const rangeEnd = new Date(`${rangeTo}T23:59:59`);
+  // Calendar days on the page's plant clock, half-open (PM review
+  // 2026-10-27 P2-2): it used the server's UTC day and ended at 23:59:59.
+  const zone = await getDisplayTimeZone();
+  const todayIso = zonedIsoDay(new Date(), zone);
+  const defaultFrom = `${todayIso.slice(0, 8)}01`;
+  const rangeFrom = isIsoDay(fromRaw) ? fromRaw : defaultFrom;
+  const rangeTo = isIsoDay(toRaw) ? toRaw : todayIso;
+  const { start: rangeStart, end: rangeEnd } = zonedDayRange(rangeFrom, rangeTo, zone);
 
   const siteWhere = filterSiteId ? { plant: { siteId: filterSiteId } } : {};
   const batchTicketSiteWhere = filterSiteId ? { plant: { siteId: filterSiteId } } : {};
@@ -53,14 +52,14 @@ export default async function MaterialLedgerDetailPage({
   const beforeRangeTicketDate = { OR: [{ batchCompletedAt: { lt: rangeStart } }, { batchCompletedAt: null, releasedAt: { lt: rangeStart } }] };
   const inRangeTicketDate = {
     OR: [
-      { batchCompletedAt: { gte: rangeStart, lte: rangeEnd } },
-      { batchCompletedAt: null, releasedAt: { gte: rangeStart, lte: rangeEnd } },
+      { batchCompletedAt: { gte: rangeStart, lt: rangeEnd } },
+      { batchCompletedAt: null, releasedAt: { gte: rangeStart, lt: rangeEnd } },
     ],
   };
 
   const [receipts, actuals, openingReceipts, openingActualWeighed, openingActualUnweighed] = await Promise.all([
     prisma.materialReceipt.findMany({
-      where: { materialId: id, postedToInventory: true, receivedAt: { gte: rangeStart, lte: rangeEnd }, ...siteWhere },
+      where: { materialId: id, postedToInventory: true, receivedAt: { gte: rangeStart, lt: rangeEnd }, ...siteWhere },
       include: { supplier: true },
       orderBy: { receivedAt: "asc" },
     }),

@@ -23,7 +23,8 @@ import { generatePayrollRun } from "./payroll/actions";
 import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { RoleSelect } from "@/components/RoleSelect";
 import { TERMINATION_TYPES } from "@/lib/endOfService";
-import { getDateFormatters } from "@/lib/displayTimeZone";
+import { getDateFormatters, getDisplayTimeZone } from "@/lib/displayTimeZone";
+import { zonedIsoDay } from "@/lib/plantDay";
 
 const ADMIN_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DISPATCHER", "ADMIN"] as const;
 const EMPLOYEE_STATUSES = ["ACTIVE", "FROZEN", "REMOVED"] as const;
@@ -92,7 +93,9 @@ export default async function EmployeesPage({
   const isHrTab = isAttendanceTab || isLeaveTab;
   const fixedRole = EMPLOYEE_TAB_ROLE[tab];
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
-  const selectedDate = isDateParam(dateRaw) ? dateRaw : new Date().toISOString().slice(0, 10);
+  // Default day: the plant's local date (PM review 2026-10-27 P2-2).
+  // AttendanceRecord.date itself is a date key, not an instant.
+  const selectedDate = isDateParam(dateRaw) ? dateRaw : zonedIsoDay(new Date(), await getDisplayTimeZone());
 
   // Registration picks a Site by its code, not a specific production line —
   // a person can work either line at a site interchangeably (both share

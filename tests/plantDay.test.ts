@@ -69,3 +69,16 @@ test("only real calendar days are accepted", () => {
   for (const bad of ["2026-02-30", "2026-13-01", "26-10-26", "2026-10-26T00:00", "", null, undefined]) assert.equal(isIsoDay(bad), false, String(bad));
   assert.throws(() => zonedDayStart("2026-02-30", "Asia/Riyadh"), RangeError);
 });
+
+// PM review 2026-10-27 P2-2: pour windows are stored as plant wall-clock time.
+test("a pour window's day is the UTC day of its stored wall-clock value", async () => {
+  const { wallClockDayStart } = await import("../src/lib/plantDay");
+  const { groupReservationsByDay } = await import("../src/lib/demand");
+  // "2026-12-01T23:00" typed at a Riyadh plant is stored as 23:00Z.
+  const stored = new Date(Date.UTC(2026, 11, 1, 23, 0)); // what a UTC server stores
+  assert.equal(iso(wallClockDayStart("2026-12-01")), "2026-12-01T00:00:00.000Z");
+  const buckets = groupReservationsByDay([{ pourWindowStart: stored, remainingVolumeM3: 10 }], 2, wallClockDayStart("2026-12-01"), undefined, "UTC");
+  assert.equal(buckets.find((b) => b.dateKey === "2026-12-01")!.volumeM3, 10, "stays on Dec 1, its wall-clock day");
+  // Bucketing it by the Riyadh zone would have moved it to Dec 2.
+  assert.equal(zonedIsoDay(stored, "Asia/Riyadh"), "2026-12-02");
+});

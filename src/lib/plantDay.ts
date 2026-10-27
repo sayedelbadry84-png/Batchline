@@ -79,3 +79,18 @@ export function coveringRange(windows: UtcRange[]): UtcRange | null {
     end: new Date(Math.max(...windows.map((w) => w.end.getTime()))),
   };
 }
+
+// PM review 2026-10-27 P2-2: Reservation.pourWindowStart is NOT an instant
+// in this sense. It is entered with <input type="datetime-local"> and
+// parsed by `new Date(raw)` on the server, whose zone is UTC on Vercel, so
+// the stored value is the plant's wall-clock time labelled as UTC (a 23:00
+// Riyadh pour is stored as 23:00Z). Its calendar day is therefore the UTC
+// day of the stored value, and a day window over it is UTC midnight to UTC
+// midnight of the plant's local date. Applying a zone to it shifts it by
+// the plant's offset. Use these helpers for that field only, until the
+// input is parsed in the plant's zone and history is migrated (an owner
+// decision: it changes stored data).
+export function wallClockDayStart(isoDay: string): Date {
+  if (!isIsoDay(isoDay)) throw new RangeError(`Not a calendar day: ${isoDay}`);
+  return new Date(`${isoDay}T00:00:00.000Z`);
+}

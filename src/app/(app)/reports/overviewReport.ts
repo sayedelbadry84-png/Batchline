@@ -13,7 +13,7 @@ import { plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from 
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { invoiceAmountDue } from "@/lib/billing";
 import { sumByCurrency } from "@/lib/currencyTotals";
-import { addDays, zonedDayStart, zonedIsoDay } from "@/lib/plantDay";
+import { addDays, wallClockDayStart, zonedDayStart, zonedIsoDay } from "@/lib/plantDay";
 import { resolveTimeZone } from "@/lib/datetime";
 
 export const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -77,7 +77,12 @@ export async function getOverviewReport({ siteId, plantId }: { siteId?: string; 
   const todayStartByPlant = new Map(scopePlants.map((p) => [p.id, localTodayStart(p.timezone)]));
   const monthStartByPlant = new Map(scopePlants.map((p) => [p.id, localMonthStart(p.timezone)]));
   const todayStart = localTodayStart(scopeZone);
-  const outlookEnd = zonedDayStart(addDays(zonedIsoDay(now, scopeZone), OUTLOOK_DAYS), scopeZone);
+  // The outlook filters and buckets pourWindowStart, which is stored as
+  // plant wall-clock time (see wallClockDayStart): its window is the scope's
+  // local date as UTC midnights, and its buckets are its UTC days.
+  const todayIso = zonedIsoDay(now, scopeZone);
+  const pourTodayStart = wallClockDayStart(todayIso);
+  const pourOutlookEnd = wallClockDayStart(addDays(todayIso, OUTLOOK_DAYS));
 
   // --- Demand outlook: the confirmed reservation pipeline for the next 7
   // days — real committed demand, not a statistical guess (there isn't
@@ -87,7 +92,7 @@ export async function getOverviewReport({ siteId, plantId }: { siteId?: string; 
   const upcomingReservations = await prisma.reservation.findMany({
     where: {
       status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] },
-      pourWindowStart: { gte: todayStart, lt: outlookEnd },
+      pourWindowStart: { gte: pourTodayStart, lt: pourOutlookEnd },
       ...reservationSiteScopeWhere(siteId),
     },
     include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true, trip: { select: { volumeDeliveredM3: true } } } } },
@@ -104,9 +109,9 @@ export async function getOverviewReport({ siteId, plantId }: { siteId?: string; 
       remainingVolumeM3: r.requestedVolumeM3 - sumAcceptedVolumeM3(r.batchTickets),
     })),
     OUTLOOK_DAYS,
-    todayStart,
+    pourTodayStart,
     weekdayAverages,
-    scopeZone,
+    "UTC",
   );
   const producedToday = completedTickets
     .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= (todayStartByPlant.get(t.plantId) ?? todayStart))

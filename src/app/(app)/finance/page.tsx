@@ -21,7 +21,7 @@ import {
 import { generateInvoiceForProject } from "../billing/actions";
 import { getDateFormatters, getDisplayTimeZone } from "@/lib/displayTimeZone";
 import { formatByCurrency, mergeByCurrency, negateByCurrency, sumByCurrency } from "@/lib/currencyTotals";
-import { zonedDayStart, zonedIsoDay } from "@/lib/plantDay";
+import { isIsoDay, zonedDayRange, zonedDayStart, zonedIsoDay } from "@/lib/plantDay";
 
 const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation", "ledger", "vat"] as const;
 type FinanceTab = (typeof FINANCE_TABS)[number];
@@ -1134,29 +1134,27 @@ async function VatReturnTab({
   fromRaw?: string;
   toRaw?: string;
 }) {
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const defaultFrom = (() => {
-    const d = new Date();
-    d.setDate(1);
-    return d.toISOString().slice(0, 10);
-  })();
-  const rangeFrom = fromRaw || defaultFrom;
-  const rangeTo = toRaw || todayIso;
-  const rangeStart = new Date(`${rangeFrom}T00:00:00`);
-  const rangeEnd = new Date(`${rangeTo}T23:59:59`);
+  // Calendar days on the page's plant clock, half-open (PM review
+  // 2026-10-27 P2-2).
+  const zone = await getDisplayTimeZone();
+  const todayIso = zonedIsoDay(new Date(), zone);
+  const defaultFrom = `${todayIso.slice(0, 8)}01`;
+  const rangeFrom = isIsoDay(fromRaw) ? fromRaw : defaultFrom;
+  const rangeTo = isIsoDay(toRaw) ? toRaw : todayIso;
+  const { start: rangeStart, end: rangeEnd } = zonedDayRange(rangeFrom, rangeTo, zone);
   const siteId = (siteScope as { siteId?: string }).siteId;
 
   const [invoices, creditNotes, bills] = await Promise.all([
     prisma.invoice.findMany({
-      where: { status: { not: "CANCELLED" }, issueDate: { gte: rangeStart, lte: rangeEnd }, ...(siteId ? { plant: { siteId } } : {}) },
+      where: { status: { not: "CANCELLED" }, issueDate: { gte: rangeStart, lt: rangeEnd }, ...(siteId ? { plant: { siteId } } : {}) },
       select: { subtotal: true, taxAmount: true, currency: true },
     }),
     prisma.creditNote.findMany({
-      where: { createdAt: { gte: rangeStart, lte: rangeEnd }, ...(siteId ? { invoice: { plant: { siteId } } } : {}) },
+      where: { createdAt: { gte: rangeStart, lt: rangeEnd }, ...(siteId ? { invoice: { plant: { siteId } } } : {}) },
       include: { invoice: { select: { taxRatePct: true, currency: true } } },
     }),
     prisma.supplierBill.findMany({
-      where: { status: { not: "CANCELLED" }, billDate: { gte: rangeStart, lte: rangeEnd }, ...(siteId ? { siteId } : {}) },
+      where: { status: { not: "CANCELLED" }, billDate: { gte: rangeStart, lt: rangeEnd }, ...(siteId ? { siteId } : {}) },
       select: { subtotal: true, taxAmount: true, currency: true },
     }),
   ]);
