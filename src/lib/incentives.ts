@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { addDays, zonedDayStart, type PlantWindow } from "@/lib/plantDay";
 
 // Fourth AI/decision-layer feature this session: a tiered per-trip driver
 // bonus, modeled on the reviewed competitor's "TripMaster" scheme. Nothing
@@ -259,11 +260,30 @@ export const DEFAULT_POLICY: IncentivePolicy = {
 // plantId filter) and each entry carries its own siteId, derived from
 // where the batch/receipt actually happened — never from a driver's own
 // current plant assignment, since a driver can load from more than one
-// plant in the same day (see the cross-plant aggregation note above). ---
+// plant in the same day (see the cross-plant aggregation note above).
+//
+// Audit 2026-10-26 P1-C: the period is a pair of calendar days, and each
+// trip or receipt counts on the local day of the plant where it happened
+// (Plant.timezone), so a person who worked two plants in different zones
+// is credited for each on that plant's own day, once. The open-ended form
+// (no toDay) is the Incentives module's "since the 1st, ongoing" view. ---
 
-async function mixerDriverTrips(from: Date, to?: Date): Promise<ActivityEntry[]> {
+export type ActivityPeriod = { fromDay: string; toDay?: string };
+
+async function activityWindows({ fromDay, toDay }: ActivityPeriod): Promise<PlantWindow[]> {
+  const plants = await prisma.plant.findMany({ select: { id: true, timezone: true } });
+  const OPEN_END = new Date(8.64e15);
+  return plants.map((p) => ({
+    plantId: p.id,
+    start: zonedDayStart(fromDay, p.timezone),
+    end: toDay ? zonedDayStart(addDays(toDay, 1), p.timezone) : OPEN_END,
+  }));
+}
+
+async function mixerDriverTrips(period: ActivityPeriod): Promise<ActivityEntry[]> {
+  const windows = await activityWindows(period);
   const trips = await prisma.trip.findMany({
-    where: { status: "CLOSED", batchTime: { gte: from, ...(to ? { lte: to } : {}) } },
+    where: { status: "CLOSED", OR: windows.map((w) => ({ batchTicket: { plantId: w.plantId }, batchTime: { gte: w.start, lt: w.end } })) },
     select: {
       driverId: true,
       driver: { select: { name: true } },
@@ -282,9 +302,10 @@ async function mixerDriverTrips(from: Date, to?: Date): Promise<ActivityEntry[]>
   );
 }
 
-async function pumpCrewTrips(from: Date, to: Date | undefined, crewField: "pumpOperatorId" | "pumpAssistantId"): Promise<ActivityEntry[]> {
+async function pumpCrewTrips(period: ActivityPeriod, crewField: "pumpOperatorId" | "pumpAssistantId"): Promise<ActivityEntry[]> {
+  const windows = await activityWindows(period);
   const trips = await prisma.trip.findMany({
-    where: { status: "CLOSED", batchTime: { gte: from, ...(to ? { lte: to } : {}) }, [crewField]: { not: null } },
+    where: { status: "CLOSED", [crewField]: { not: null }, OR: windows.map((w) => ({ batchTicket: { plantId: w.plantId }, batchTime: { gte: w.start, lt: w.end } })) },
     select: {
       pumpOperatorId: true,
       pumpAssistantId: true,
@@ -311,9 +332,10 @@ async function pumpCrewTrips(from: Date, to: Date | undefined, crewField: "pumpO
     .filter((e): e is ActivityEntry => e !== null);
 }
 
-async function materialReceiptEntries(from: Date, to: Date | undefined, materialType: string): Promise<ActivityEntry[]> {
+async function materialReceiptEntries(period: ActivityPeriod, materialType: string): Promise<ActivityEntry[]> {
+  const windows = await activityWindows(period);
   const receipts = await prisma.materialReceipt.findMany({
-    where: { receivedAt: { gte: from, ...(to ? { lte: to } : {}) }, material: { type: materialType } },
+    where: { material: { type: materialType }, OR: windows.map((w) => ({ plantId: w.plantId, receivedAt: { gte: w.start, lt: w.end } })) },
     select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true, plant: { select: { siteId: true } } },
   });
   return receipts
@@ -331,12 +353,12 @@ async function materialReceiptEntries(from: Date, to: Date | undefined, material
     .filter((e): e is ActivityEntry => e !== null);
 }
 
-export async function activityForRole(role: string, from: Date, to?: Date): Promise<ActivityEntry[]> {
-  if (role === "MIXER_DRIVER") return mixerDriverTrips(from, to);
-  if (role === "PUMP_OPERATOR") return pumpCrewTrips(from, to, "pumpOperatorId");
-  if (role === "PUMP_ASSISTANT") return pumpCrewTrips(from, to, "pumpAssistantId");
-  if (role === "BULKER_DRIVER") return materialReceiptEntries(from, to, "CEMENT");
-  if (role === "WATER_TANKER_DRIVER") return materialReceiptEntries(from, to, "WATER");
+export async function activityForRole(role: string, period: ActivityPeriod): Promise<ActivityEntry[]> {
+  if (role === "MIXER_DRIVER") return mixerDriverTrips(period);
+  if (role === "PUMP_OPERATOR") return pumpCrewTrips(period, "pumpOperatorId");
+  if (role === "PUMP_ASSISTANT") return pumpCrewTrips(period, "pumpAssistantId");
+  if (role === "BULKER_DRIVER") return materialReceiptEntries(period, "CEMENT");
+  if (role === "WATER_TANKER_DRIVER") return materialReceiptEntries(period, "WATER");
   return [];
 }
 

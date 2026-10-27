@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { getDisplayTimeZone } from "@/lib/displayTimeZone";
+import { zonedIsoDay } from "@/lib/plantDay";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
 import { getDictionary } from "@/lib/i18n";
@@ -89,9 +91,10 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
   // them.
   const siteData = await getIncentiveSiteData();
 
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
+  // Since the 1st of this month, ongoing. The 1st is a calendar day and each
+  // trip counts on its own plant's local day (audit 2026-10-26 P1-C); the
+  // month itself is read on the page's display clock.
+  const monthStartDay = `${zonedIsoDay(new Date(), await getDisplayTimeZone()).slice(0, 8)}01`;
 
   return (
     <div className="flex flex-col gap-8">
@@ -117,7 +120,7 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
       {tab === "results" &&
         (await Promise.all(
           INCENTIVE_ROLE_KEYS.map(async (role) => {
-            const entries = await activityForRole(role, monthStart);
+            const entries = await activityForRole(role, { fromDay: monthStartDay });
             const sitePricing = buildSitePricingMap(siteData, role);
             const results = aggregateIncentiveResults(entries, sitePricing);
             return <ResultCard key={role} m={m} role={role} results={results} />;

@@ -1,5 +1,6 @@
 "use server";
 
+import { isIsoDay } from "@/lib/plantDay";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 import { logAudit, writeAudit } from "@/lib/audit";
@@ -55,11 +56,13 @@ const PAYROLL_INCENTIVE_ROLE_MAP: Record<string, string> = {
 // of that role in this run — activityForRole/aggregateIncentiveResults are
 // company-wide per call, so calling them per-employee would refetch the
 // same data once per person for nothing.
-async function buildIncentiveLookup(periodStart: Date, periodEnd: Date) {
+async function buildIncentiveLookup(periodStartDay: string, periodEndDay: string) {
   const siteData = await getIncentiveSiteData();
   const byRole = new Map<string, Map<string, { currency: string; amount: number }[]>>();
   for (const role of new Set(Object.values(PAYROLL_INCENTIVE_ROLE_MAP))) {
-    const entries = await activityForRole(role, periodStart, periodEnd);
+    // Plant-local calendar days (audit 2026-10-26 P1-C), the same period
+    // the run is labelled with.
+    const entries = await activityForRole(role, { fromDay: periodStartDay, toDay: periodEndDay });
     const pricingMap = buildSitePricingMap(siteData, role);
     const results = aggregateIncentiveResults(entries, pricingMap);
     byRole.set(role, new Map(results.map((r) => [r.id, r.payoutByCurrency])));
@@ -92,7 +95,9 @@ export async function generatePayrollRun(formData: FormData) {
     where: { status: "ACTIVE", wageType: { not: null }, wageRate: { not: null } },
     include: { plant: true },
   });
-  const incentiveLookup = await buildIncentiveLookup(periodStart, periodEnd);
+  // isIsoDay: the plant-local incentive window needs real calendar days.
+  if (!isIsoDay(periodStartRaw) || !isIsoDay(periodEndRaw)) return;
+  const incentiveLookup = await buildIncentiveLookup(periodStartRaw, periodEndRaw);
 
   const run = await withSequentialNumber(
     "PYR",

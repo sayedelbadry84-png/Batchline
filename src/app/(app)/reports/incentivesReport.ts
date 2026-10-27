@@ -13,7 +13,9 @@ import {
   isReachBasedRole,
 } from "@/lib/incentives";
 
-export async function getIncentivesReport(rangeStart: Date, rangeEnd: Date) {
+// fromDay/toDay are calendar days; each trip counts on the local day of the
+// plant it was batched at (audit 2026-10-26 P1-C, see activityForRole).
+export async function getIncentivesReport(fromDay: string, toDay: string) {
   // Delegates to the exact same functions the Incentives module
   // itself uses (src/lib/incentives.ts) — this used to be a
   // separate, hand-rolled computation here that had drifted out
@@ -34,7 +36,7 @@ export async function getIncentivesReport(rangeStart: Date, rangeEnd: Date) {
   const siteData = await getIncentiveSiteData();
   const byRole = await Promise.all(
     INCENTIVE_ROLE_KEYS.map(async (role) => {
-      const entries = await activityForRole(role, rangeStart, rangeEnd);
+      const entries = await activityForRole(role, { fromDay, toDay });
       const sitePricing = buildSitePricingMap(siteData, role);
       const results = aggregateIncentiveResults(entries, sitePricing);
       const rows = results

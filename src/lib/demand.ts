@@ -1,3 +1,5 @@
+import { addDays, zonedDayStart, zonedIsoDay } from "@/lib/plantDay";
+
 // Fifth AI/decision-layer feature, from the strategic review's demand-
 // forecasting idea — but scoped to what's honestly knowable: the app has
 // no order history deep enough yet to fit a meaningful statistical
@@ -26,27 +28,28 @@ export type DayBucket = {
   typicalVolumeM3: number | null;
 };
 
+// Audit 2026-10-26 P1-C: days are calendar days in `timeZone` (the
+// plant's clock), not the server's. Both functions used setHours and
+// toISOString, i.e. UTC on Vercel, so a 00:30 Riyadh pour landed in the
+// previous day's bucket. `date` on a bucket is that day's local midnight.
 export function groupReservationsByDay(
   reservations: ReservationForOutlook[],
   days: number,
   startFrom: Date,
   weekdayAverages?: number[],
+  timeZone = "UTC",
 ): DayBucket[] {
   const buckets = new Map<string, DayBucket>();
-  const start = new Date(startFrom);
-  start.setHours(0, 0, 0, 0);
+  const firstDay = zonedIsoDay(startFrom, timeZone);
 
   for (let i = 0; i < days; i++) {
-    const d = new Date(start);
-    d.setDate(d.getDate() + i);
-    const key = d.toISOString().slice(0, 10);
-    buckets.set(key, { dateKey: key, date: d, volumeM3: 0, count: 0, typicalVolumeM3: weekdayAverages ? weekdayAverages[d.getDay()] : null });
+    const key = addDays(firstDay, i);
+    buckets.set(key, { dateKey: key, date: zonedDayStart(key, timeZone), volumeM3: 0, count: 0, typicalVolumeM3: weekdayAverages ? weekdayAverages[weekdayOf(key)] : null });
   }
 
   for (const r of reservations) {
     if (r.remainingVolumeM3 <= 0.001) continue;
-    const key = new Date(r.pourWindowStart).toISOString().slice(0, 10);
-    const bucket = buckets.get(key);
+    const bucket = buckets.get(zonedIsoDay(new Date(r.pourWindowStart), timeZone));
     if (bucket) {
       bucket.volumeM3 += r.remainingVolumeM3;
       bucket.count += 1;
@@ -58,27 +61,30 @@ export function groupReservationsByDay(
 
 export type HistoricalDelivery = { date: Date; volumeM3: number };
 
+// 0 = Sunday..6 = Saturday, for a YYYY-MM-DD calendar day.
+function weekdayOf(isoDay: string): number {
+  const [y, m, d] = isoDay.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
 // Average m³ actually produced on each weekday (0 = Sunday..6 = Saturday)
 // over the last `weeksBack` weeks — walks every calendar day in the
 // window, including ones with zero production, so a normally-quiet Friday
 // correctly pulls its own average down rather than being skipped.
-export function computeWeekdayAverages(deliveries: HistoricalDelivery[], weeksBack: number, asOf: Date): number[] {
-  const end = new Date(asOf);
-  end.setHours(0, 0, 0, 0);
-  const start = new Date(end);
-  start.setDate(start.getDate() - weeksBack * 7);
+export function computeWeekdayAverages(deliveries: HistoricalDelivery[], weeksBack: number, asOf: Date, timeZone = "UTC"): number[] {
+  const endDay = zonedIsoDay(asOf, timeZone);
+  const startDay = addDays(endDay, -weeksBack * 7);
 
   const byDateKey = new Map<string, number>();
   for (const d of deliveries) {
-    const key = d.date.toISOString().slice(0, 10);
+    const key = zonedIsoDay(d.date, timeZone);
     byDateKey.set(key, (byDateKey.get(key) ?? 0) + d.volumeM3);
   }
 
   const totals = new Array(7).fill(0);
   const occurrences = new Array(7).fill(0);
-  for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
-    const key = d.toISOString().slice(0, 10);
-    const weekday = d.getDay();
+  for (let key = startDay; key < endDay; key = addDays(key, 1)) {
+    const weekday = weekdayOf(key);
     totals[weekday] += byDateKey.get(key) ?? 0;
     occurrences[weekday] += 1;
   }

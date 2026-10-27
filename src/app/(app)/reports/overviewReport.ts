@@ -12,6 +12,8 @@ import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
 import { plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { invoiceAmountDue } from "@/lib/billing";
+import { addDays, zonedDayStart, zonedIsoDay } from "@/lib/plantDay";
+import { resolveTimeZone } from "@/lib/datetime";
 
 export const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 export const OUTLOOK_DAYS = 7;
@@ -58,10 +60,23 @@ export async function getOverviewReport({ siteId, plantId }: { siteId?: string; 
   ]);
 
   // --- Production ---
-  const todayStart = new Date(nowMs);
-  todayStart.setHours(0, 0, 0, 0);
-  const outlookEnd = new Date(todayStart);
-  outlookEnd.setDate(outlookEnd.getDate() + OUTLOOK_DAYS);
+  // Audit 2026-10-26 P1-C: "today" and "this month" are local to the plant
+  // where each record happened (Plant.timezone), not the server's UTC day.
+  // The demand outlook, a single calendar strip, uses the scope's first
+  // plant's zone, the same clock the page displays times in for that scope.
+  const scopePlants = await prisma.plant.findMany({
+    where: plantId ? { id: plantId } : siteId ? { siteId } : {},
+    select: { id: true, timezone: true },
+    orderBy: { name: "asc" },
+  });
+  const scopeZone = resolveTimeZone(scopePlants[0]?.timezone);
+  const now = new Date(nowMs);
+  const localTodayStart = (zone: string) => zonedDayStart(zonedIsoDay(now, zone), zone);
+  const localMonthStart = (zone: string) => zonedDayStart(`${zonedIsoDay(now, zone).slice(0, 8)}01`, zone);
+  const todayStartByPlant = new Map(scopePlants.map((p) => [p.id, localTodayStart(p.timezone)]));
+  const monthStartByPlant = new Map(scopePlants.map((p) => [p.id, localMonthStart(p.timezone)]));
+  const todayStart = localTodayStart(scopeZone);
+  const outlookEnd = zonedDayStart(addDays(zonedIsoDay(now, scopeZone), OUTLOOK_DAYS), scopeZone);
 
   // --- Demand outlook: the confirmed reservation pipeline for the next 7
   // days — real committed demand, not a statistical guess (there isn't
@@ -80,6 +95,7 @@ export async function getOverviewReport({ siteId, plantId }: { siteId?: string; 
     completedTickets.filter((t) => t.batchCompletedAt).map((t) => ({ date: t.batchCompletedAt!, volumeM3: t.volumeM3 })),
     WEEKS_BACK_FOR_WEEKDAY_AVG,
     todayStart,
+    scopeZone,
   );
   const demandOutlook = groupReservationsByDay(
     upcomingReservations.map((r) => ({
@@ -89,9 +105,10 @@ export async function getOverviewReport({ siteId, plantId }: { siteId?: string; 
     OUTLOOK_DAYS,
     todayStart,
     weekdayAverages,
+    scopeZone,
   );
   const producedToday = completedTickets
-    .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= todayStart)
+    .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= (todayStartByPlant.get(t.plantId) ?? todayStart))
     .reduce((sum, t) => sum + t.volumeM3, 0);
   const produced7d = completedTickets
     .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= since)
@@ -193,11 +210,9 @@ export async function getOverviewReport({ siteId, plantId }: { siteId?: string; 
   });
 
   // --- Billing (revenue currently invoiced, AR outstanding/overdue) ---
-  const monthStart = new Date(nowMs);
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
+  const monthStart = localMonthStart(scopeZone);
   const invoicedThisMonth = invoices
-    .filter((inv) => inv.issueDate >= monthStart)
+    .filter((inv) => inv.issueDate >= ((inv.plantId && monthStartByPlant.get(inv.plantId)) || monthStart))
     .reduce((sum, inv) => sum + inv.total, 0);
 
   const sentInvoices = invoices.filter((inv) => inv.status === "SENT");
