@@ -18,6 +18,10 @@ import { retryPendingAutoRequisitions } from "@/lib/materialRequisition";
 // when that env var is set — set CRON_SECRET in the Vercel project's
 // environment variables (same idea as INTEGRATION_API_KEY) so this fails
 // closed rather than being an open, unauthenticated endpoint.
+// The recordId every cleanup-run audit row carries, so the runs can be
+// listed with one query: reasonCode CRON_CLEANUP_RUN, recordId below.
+const CRON_RUN_RECORD_ID = "cron:cleanup";
+
 export async function GET(request: NextRequest) {
   const configuredSecret = process.env.CRON_SECRET;
   if (!configuredSecret) {
@@ -105,7 +109,7 @@ export async function GET(request: NextRequest) {
   // and deadLettered are the two an operator actually has to act on — a
   // sweep that resolved nothing and dead-lettered rows previously looked
   // identical here to a completely clean run.
-  return NextResponse.json({
+  const summary = {
     ranAt: now.toISOString(),
     expiredSessionsDeleted: expiredSessions.count,
     staleLoginAttemptsDeleted: staleLoginAttempts.count,
@@ -120,5 +124,19 @@ export async function GET(request: NextRequest) {
     quotesExpiryFailed,
     pendingBlobDeletions: blobDeletions,
     pendingAutoRequisitions: autoRequisitions,
-  });
+  };
+
+  // PM review 2026-10-27 P2-5: a durable trace of every run. Vercel's Hobby
+  // plan keeps runtime logs for one hour, so the 03:00 UTC run was not
+  // provable the same day. One SYSTEM audit row per run, carrying the same
+  // counters as the response, answers "did the cron run, and did anything
+  // fail or dead-letter?" from the database itself. Best effort: a failure
+  // here is logged and must not turn a completed sweep into a 500.
+  try {
+    await prisma.$transaction((tx) => writeAudit(tx, null, { module: "Cron", recordId: CRON_RUN_RECORD_ID, afterValue: JSON.stringify(summary), reasonCode: "CRON_CLEANUP_RUN" }));
+  } catch (error) {
+    console.error("[cron/cleanup] run audit failed", error instanceof Error ? error.message : String(error));
+  }
+
+  return NextResponse.json(summary);
 }

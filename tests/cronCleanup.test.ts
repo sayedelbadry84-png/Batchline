@@ -55,6 +55,7 @@ test("cron quote expiry commits with exactly one audit row, or not at all", asyn
     quoteNumber: `${prefix}-QT-${suffix}`, opportunityId: opportunity.id, customerId, siteId, currency: "SAR",
     subtotal: 100, total: 100, preparedById: adminId, status: "SENT", validUntil: new Date(Date.now() - 60_000),
   } });
+  const runsBefore = await prisma.auditEvent.count({ where: { recordId: "cron:cleanup", reasonCode: "CRON_CLEANUP_RUN" } });
   const ok = await makeQuote("OK");
   const failing = await makeQuote("FAIL");
   // A trigger that refuses this one quote's expiry audit, standing in for
@@ -78,10 +79,18 @@ test("cron quote expiry commits with exactly one audit row, or not at all", asyn
     assert.equal((await prisma.quote.findUniqueOrThrow({ where: { id: failing.id } })).status, "EXPIRED", "the next run retried it");
     assert.equal(await prisma.auditEvent.count({ where: { recordId: failing.id, reasonCode: "QUOTE_AUTO_EXPIRED" } }), 1);
     assert.equal(await prisma.auditEvent.count({ where: { recordId: ok.id, reasonCode: "QUOTE_AUTO_EXPIRED" } }), 1, "a repeat run does not audit again");
+    // PM review 2026-10-27 P2-5: every run leaves one durable SYSTEM row with
+    // its counters, so a run is provable without runtime logs.
+    const runs = await prisma.auditEvent.findMany({ where: { recordId: "cron:cleanup", reasonCode: "CRON_CLEANUP_RUN" }, orderBy: { createdAt: "asc" } });
+    assert.equal(runs.length - runsBefore, 3);
+    assert.equal(runs[runs.length - 1].role, "SYSTEM");
+    const counters = JSON.parse(runs[runs.length - 3].afterValue!);
+    assert.ok(counters.quotesExpiryFailed >= 1, "the first run's failure is on record");
+    assert.ok("deadLettered" in counters.pendingBlobDeletions);
   } finally {
     await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS test_refuse_quote_audit ON "AuditEvent"`);
     await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS test_refuse_quote_audit()`);
-    await deleteAuditEvents({ recordId: { in: [ok.id, failing.id] } });
+    await deleteAuditEvents({ recordId: { in: [ok.id, failing.id, "cron:cleanup"] } });
     await prisma.quote.deleteMany({ where: { id: { in: [ok.id, failing.id] } } });
     await prisma.opportunity.delete({ where: { id: opportunity.id } });
     if (previousSecret === undefined) delete process.env.CRON_SECRET; else process.env.CRON_SECRET = previousSecret;
