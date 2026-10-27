@@ -36,6 +36,10 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Audit 2026-10-26 P2-E: engines, this workflow and .nvmrc must name the
+      # same Node major (Vercel builds with engines.node when it is set).
+      - run: node scripts/check-node-version.mjs
+
       - run: npm ci
 
       - run: npm run lint
