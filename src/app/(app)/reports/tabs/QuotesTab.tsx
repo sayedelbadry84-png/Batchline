@@ -8,6 +8,7 @@
 import { ExportBar, fmt, type ReportTabContext } from "../reportUi";
 import { getQuotesReport } from "@/lib/reportQueries";
 import { ui } from "@/lib/ui";
+import { formatByCurrency } from "@/lib/currencyTotals";
 
 export function QuotesTab({ quotesData, ctx }: {
   quotesData: NonNullable<Awaited<ReturnType<typeof getQuotesReport>>>;
@@ -47,11 +48,11 @@ export function QuotesTab({ quotesData, ctx }: {
             <div className="mt-1 text-sm text-ink-muted">{m.quotesReport.conversionRateLabel}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{quotesData.totalValue.toFixed(2)}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(quotesData.totalValue)}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.quotesReport.totalValue}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{quotesData.acceptedValue.toFixed(2)}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(quotesData.acceptedValue)}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.quotesReport.acceptedValue}</div>
           </div>
         </div>

@@ -2028,6 +2028,8 @@ const en: typeof ar = {
         ticketCount: (n: number) => `across ${n} completed tickets`,
       },
       profitability: {
+        perCurrencyNote: "Shown per currency. Revenue, cost and margin are never added across currencies, because no conversion rate is defined.",
+        materialCurrencyNote: "Material standard costs have no currency of their own; each is counted in the currency of the plant that batched it.",
         revenue: "Revenue", totalCost: "Total cost", margin: "Margin", marginPct: "Margin %",
         costBreakdown: "Cost breakdown", category: "Category", amount: "Amount",
         materialCost: "Material", laborCost: "Labor (payroll)", maintenanceCost: "Maintenance", fuelCost: "Fuel", utilitiesCost: "Utilities", otherCost: "Other operating",
@@ -2144,6 +2146,7 @@ const en: typeof ar = {
         col: { employee: "Employee", type: "Type", start: "Start", end: "End", days: "Days", status: "Status" },
       },
       payrollCostReport: {
+        currencyNote: "Amounts are shown in each employee's plant currency as it is today; totals are kept per currency and never added across currencies.",
         intro: "Payroll lines from every run whose period starts within the selected window. Total cost is net pay plus the employer's own GOSI share — the real cash cost, same definition markPayrollRunPaid itself uses.",
         lineCount: (n: number) => `${n} payroll lines`,
         totalGross: "Total gross pay",

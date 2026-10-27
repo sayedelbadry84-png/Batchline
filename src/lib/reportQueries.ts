@@ -4,6 +4,14 @@ import { invoiceAmountDue } from "@/lib/billing";
 import { AGING_BUCKETS, agingBucket, type AgingBucketKey } from "@/lib/aging";
 import { coveringRange, isIsoDay, plantWindows, zonedDayRange, type PlantWindow, type UtcRange } from "@/lib/plantDay";
 import { FALLBACK_TIME_ZONE } from "@/lib/datetime";
+import { formatByCurrency, mergeByCurrency, negateByCurrency, sumByCurrency, type CurrencyAmount } from "@/lib/currencyTotals";
+
+// Plant.currency's own schema default, for a site with no plant.
+const DEFAULT_PLANT_CURRENCY = "EGP";
+const siteCurrencyOf = (w: ReportWindows) => {
+  const bySite = new Map(w.sites.map((x) => [x.siteId, x.currency]));
+  return (siteId: string) => bySite.get(siteId) ?? DEFAULT_PLANT_CURRENCY;
+};
 
 // One function per exportable report in the Reports module — each takes a
 // plain date range plus an optional scope: siteId rolls up every
@@ -35,13 +43,30 @@ function tripPlantScopeWhere(siteId?: string, plantId?: string) {
   return {};
 }
 
-type SiteWindow = UtcRange & { siteId: string };
-export type ReportWindows = { plants: PlantWindow[]; sites: SiteWindow[]; cover: UtcRange | null };
+type SiteWindow = UtcRange & { siteId: string; timeZone: string; currency: string };
+export type ReportWindows = {
+  plants: PlantWindow[];
+  sites: SiteWindow[];
+  cover: UtcRange | null;
+  // Sites whose plants disagree on time zone or currency. Their site-level
+  // records use the earliest plant's, and a report that touches one says so.
+  inconsistentSiteIds: string[];
+};
 
 // The windows for a filter: one per in-scope plant, and one per in-scope
 // site. A plant filter scopes site-level data to that plant's site, as
-// before. A site's zone is its first plant's (by name); a site with no
-// plant falls back to the schema default, Plant.timezone's own default.
+// before.
+//
+// PM review 2026-10-27 P2-2: Site has no time zone or currency of its own,
+// so site-level records (cash, purchasing, maintenance, warehouses) take
+// them from the site's EARLIEST-CREATED plant. That is stable: renaming a
+// plant no longer changes which day or currency a site's records fall in
+// (the first version picked the first plant by name). A site whose plants
+// disagree is reported in inconsistentSiteIds rather than silently
+// resolved; scripts/audit-2026-10/site_zone_currency_readonly.sql lists
+// them. A durable fix is a Site.timezone/currency column, which is a schema
+// change for the owner to decide. A site with no plant falls back to the
+// schema defaults.
 export async function reportWindows({ fromDay, toDay, siteId, plantId }: ReportFilter): Promise<ReportWindows> {
   if (!isIsoDay(fromDay) || !isIsoDay(toDay)) throw new RangeError(`Report days must be YYYY-MM-DD, got ${fromDay}..${toDay}`);
   const plantRows = await prisma.plant.findMany({
@@ -52,11 +77,18 @@ export async function reportWindows({ fromDay, toDay, siteId, plantId }: ReportF
   const siteIds = plantId ? [...new Set(plantRows.map((p) => p.siteId))] : siteId ? [siteId] : undefined;
   const siteRows = await prisma.site.findMany({
     where: siteIds ? { id: { in: siteIds } } : {},
-    select: { id: true, plants: { select: { timezone: true }, orderBy: { name: "asc" }, take: 1 } },
+    select: { id: true, plants: { select: { timezone: true, currency: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] } },
   });
   const plants = plantWindows(plantRows, fromDay, toDay);
-  const sites = siteRows.map((s) => ({ siteId: s.id, ...zonedDayRange(fromDay, toDay, s.plants[0]?.timezone ?? FALLBACK_TIME_ZONE) }));
-  return { plants, sites, cover: coveringRange([...plants, ...sites]) };
+  const sites = siteRows.map((s) => {
+    const timeZone = s.plants[0]?.timezone ?? FALLBACK_TIME_ZONE;
+    const currency = s.plants[0]?.currency ?? DEFAULT_PLANT_CURRENCY;
+    return { siteId: s.id, timeZone, currency, ...zonedDayRange(fromDay, toDay, timeZone) };
+  });
+  const inconsistentSiteIds = siteRows
+    .filter((s) => new Set(s.plants.map((p) => p.timezone)).size > 1 || new Set(s.plants.map((p) => p.currency)).size > 1)
+    .map((s) => s.id);
+  return { plants, sites, cover: coveringRange([...plants, ...sites]), inconsistentSiteIds };
 }
 
 type Range = { gte: Date; lt: Date };
@@ -127,31 +159,41 @@ export async function getProfitabilityReport(filter: ReportFilter) {
   const w = await reportWindows(filter);
   const tickets = await prisma.batchTicket.findMany({
     where: { status: "COMPLETE", ...onPlant(w, "batchCompletedAt") },
-    include: { components: { include: { material: true } } },
+    include: { components: { include: { material: true } }, plant: { select: { currency: true } } },
   });
   const totalVolumeM3 = tickets.reduce((sum, t) => sum + t.volumeM3, 0);
 
-  let materialCost = 0;
+  // PM review 2026-10-27 P1-1: everything below is kept per currency. A
+  // margin of EGP revenue against SAR cost would be meaningless without an
+  // approved conversion, which does not exist.
+  //
+  // Material.lastUnitCost carries no currency of its own (Material has no
+  // plant or site), so a component is priced in the currency of the plant
+  // that batched it. That is an assumption, surfaced to the screen as
+  // materialCostCurrencyAssumed, not a fact.
+  const materialRows: { currency: string; amount: number }[] = [];
   let pricedComponents = 0;
   let unpricedComponents = 0;
   for (const t of tickets) {
     for (const c of t.components) {
       const massKg = c.actualMassKg ?? c.targetMassKg;
       if (c.material.lastUnitCost != null) {
-        materialCost += massKg * c.material.lastUnitCost;
+        materialRows.push({ currency: t.plant.currency, amount: massKg * c.material.lastUnitCost });
         pricedComponents += 1;
       } else {
         unpricedComponents += 1;
       }
     }
   }
+  const materialCost = sumByCurrency(materialRows, (r) => r.amount, (r) => r.currency);
+  const volumeByCurrency = sumByCurrency(tickets, (t) => t.volumeM3, (t) => t.plant.currency);
 
   // Revenue — real issued invoices in the period, same filter shape as the
   // Overview tab's invoicedThisMonth (reports/page.tsx).
   const invoices = await prisma.invoice.findMany({
     where: { status: { notIn: ["DRAFT", "CANCELLED"] }, ...onPlant(w, "issueDate") },
   });
-  const revenue = invoices.reduce((sum, inv) => sum + inv.total, 0);
+  const revenue = sumByCurrency(invoices, (inv) => inv.total, (inv) => inv.currency);
 
   // CashTransaction has no plantId of its own (it's a site-level ledger) —
   // a plantId filter still resolves up to that plant's own site (the site
@@ -166,34 +208,50 @@ export async function getProfitabilityReport(filter: ReportFilter) {
     prisma.cashTransaction.findMany({ where: cashWhere("OPERATING_EXPENSE") }),
     prisma.cashTransaction.findMany({ where: cashWhere("OTHER") }),
   ]);
-  const sumAmount = (rows: { amount: number }[]) => rows.reduce((sum, r) => sum + r.amount, 0);
-  const laborCost = sumAmount(laborTxns);
-  const maintenanceCost = sumAmount(maintenanceTxns);
-  const fuelCost = sumAmount(fuelTxns);
-  const utilitiesCost = sumAmount(utilitiesTxns);
-  const otherCost = sumAmount(operatingTxns) + sumAmount(otherTxns);
+  const byTxnCurrency = (rows: { amount: number; currency: string }[]) => sumByCurrency(rows, (r) => r.amount, (r) => r.currency);
+  const laborCost = byTxnCurrency(laborTxns);
+  const maintenanceCost = byTxnCurrency(maintenanceTxns);
+  const fuelCost = byTxnCurrency(fuelTxns);
+  const utilitiesCost = byTxnCurrency(utilitiesTxns);
+  const otherCost = byTxnCurrency([...operatingTxns, ...otherTxns]);
+  const totalCost = mergeByCurrency(materialCost, laborCost, maintenanceCost, fuelCost, utilitiesCost, otherCost);
+  const margin = mergeByCurrency(revenue, negateByCurrency(totalCost));
 
-  const totalCost = materialCost + laborCost + maintenanceCost + fuelCost + utilitiesCost + otherCost;
-  const margin = revenue - totalCost;
-  const marginPct = revenue > 0 ? (margin / revenue) * 100 : null;
-
-  const perM3 = (n: number) => (totalVolumeM3 > 0 ? n / totalVolumeM3 : null);
+  // One section per currency. Per-m³ figures divide by the volume batched
+  // at plants that bill in that currency.
+  const currencies = [...new Set([...revenue, ...totalCost, ...volumeByCurrency].map((x) => x.currency))].sort();
+  const pick = (list: CurrencyAmount[], c: string) => list.find((x) => x.currency === c)?.amount ?? 0;
+  const byCurrency = currencies.map((currency) => {
+    const volumeM3 = pick(volumeByCurrency, currency);
+    const rev = pick(revenue, currency);
+    const cost = pick(totalCost, currency);
+    const perM3 = (n: number) => (volumeM3 > 0 ? n / volumeM3 : null);
+    return {
+      currency,
+      volumeM3,
+      revenue: rev,
+      materialCost: pick(materialCost, currency),
+      laborCost: pick(laborCost, currency),
+      maintenanceCost: pick(maintenanceCost, currency),
+      fuelCost: pick(fuelCost, currency),
+      utilitiesCost: pick(utilitiesCost, currency),
+      otherCost: pick(otherCost, currency),
+      totalCost: cost,
+      margin: rev - cost,
+      marginPct: rev > 0 ? ((rev - cost) / rev) * 100 : null,
+      revenuePerM3: perM3(rev),
+      costPerM3: perM3(cost),
+      marginPerM3: perM3(rev - cost),
+    };
+  });
 
   return {
     totalVolumeM3,
+    byCurrency,
     revenue,
-    materialCost,
-    laborCost,
-    maintenanceCost,
-    fuelCost,
-    utilitiesCost,
-    otherCost,
     totalCost,
     margin,
-    marginPct,
-    revenuePerM3: perM3(revenue),
-    costPerM3: perM3(totalCost),
-    marginPerM3: perM3(margin),
+    materialCostCurrencyAssumed: pricedComponents > 0,
     pricedComponents,
     unpricedComponents,
   };
@@ -562,9 +620,13 @@ export async function getMaintenanceReport(filter: ReportFilter) {
 
   const openCount = tickets.filter((t) => t.status === "OPEN" || t.status === "IN_PROGRESS").length;
   const totalDowntimeHours = tickets.reduce((sum, t) => sum + (t.downtimeHours ?? 0), 0);
-  const totalCost = tickets.reduce((sum, t) => sum + (t.laborCost ?? 0) + (t.partsCost ?? 0), 0);
+  // Ticket costs carry no currency; a site's tickets are costed in its
+  // site's currency (see reportWindows).
+  const siteCurrency = siteCurrencyOf(w);
+  const totalCost = sumByCurrency(tickets, (t) => (t.laborCost ?? 0) + (t.partsCost ?? 0), (t) => siteCurrency(t.siteId));
+  const rows = tickets.map((t) => ({ ...t, currency: siteCurrency(t.siteId) }));
 
-  return { rows: tickets, ticketCount: tickets.length, openCount, totalDowntimeHours, totalCost };
+  return { rows, ticketCount: tickets.length, openCount, totalDowntimeHours, totalCost };
 }
 
 // ---------------------------------------------------------------------------
@@ -576,8 +638,10 @@ export async function getMaintenanceReport(filter: ReportFilter) {
 // reports/page.tsx stays uniform.
 // ---------------------------------------------------------------------------
 
-function emptyBucketTotals(): Record<AgingBucketKey, number> {
-  return Object.fromEntries(AGING_BUCKETS.map((b) => [b.key, 0])) as Record<AgingBucketKey, number>;
+function bucketsByCurrency<T extends { bucket: AgingBucketKey; amountDue: number }>(rows: T[], currency: (r: T) => string): Record<AgingBucketKey, CurrencyAmount[]> {
+  return Object.fromEntries(
+    AGING_BUCKETS.map((b) => [b.key, sumByCurrency(rows.filter((r) => r.bucket === b.key), (r) => r.amountDue, currency)]),
+  ) as Record<AgingBucketKey, CurrencyAmount[]>;
 }
 
 // Every SENT invoice still owed anything, as of `to` — same amount-due math
@@ -601,9 +665,10 @@ export async function getArAgingReport(filter: ReportFilter) {
     .filter((inv) => inv.amountDue > 0.01)
     .sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
 
-  const byBucket = emptyBucketTotals();
-  for (const r of rows) byBucket[r.bucket] += r.amountDue;
-  const totalOutstanding = rows.reduce((sum, r) => sum + r.amountDue, 0);
+  // Per currency (PM review 2026-10-27 P1-1): an EGP and a SAR receivable
+  // are never one number.
+  const byBucket = bucketsByCurrency(rows, (r) => r.currency);
+  const totalOutstanding = sumByCurrency(rows, (r) => r.amountDue, (r) => r.currency);
 
   return { rows, byBucket, totalOutstanding, invoiceCount: rows.length };
 }
@@ -628,9 +693,8 @@ export async function getApAgingReport(filter: ReportFilter) {
     .filter((bill) => bill.amountDue > 0.01)
     .sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
 
-  const byBucket = emptyBucketTotals();
-  for (const r of rows) byBucket[r.bucket] += r.amountDue;
-  const totalOutstanding = rows.reduce((sum, r) => sum + r.amountDue, 0);
+  const byBucket = bucketsByCurrency(rows, (r) => r.currency);
+  const totalOutstanding = sumByCurrency(rows, (r) => r.amountDue, (r) => r.currency);
 
   return { rows, byBucket, totalOutstanding, billCount: rows.length };
 }
@@ -645,17 +709,19 @@ export async function getCashLedgerReport(filter: ReportFilter) {
     include: { site: { select: { name: true } }, createdBy: { select: { name: true } } },
     orderBy: { occurredAt: "asc" },
   });
-  const totalIn = rows.filter((t) => t.direction === "IN").reduce((sum, t) => sum + t.amount, 0);
-  const totalOut = rows.filter((t) => t.direction === "OUT").reduce((sum, t) => sum + t.amount, 0);
+  const totalIn = sumByCurrency(rows.filter((t) => t.direction === "IN"), (t) => t.amount, (t) => t.currency);
+  const totalOut = sumByCurrency(rows.filter((t) => t.direction === "OUT"), (t) => t.amount, (t) => t.currency);
 
-  const byCategory = new Map<string, { category: string; in: number; out: number }>();
+  // One row per (category, currency).
+  const byCategory = new Map<string, { category: string; currency: string; in: number; out: number }>();
   for (const t of rows) {
-    const entry = byCategory.get(t.category) ?? { category: t.category, in: 0, out: 0 };
+    const key = `${t.category}::${t.currency}`;
+    const entry = byCategory.get(key) ?? { category: t.category, currency: t.currency, in: 0, out: 0 };
     if (t.direction === "IN") entry.in += t.amount; else entry.out += t.amount;
-    byCategory.set(t.category, entry);
+    byCategory.set(key, entry);
   }
 
-  return { rows, totalIn, totalOut, net: totalIn - totalOut, byCategory: Array.from(byCategory.values()), txnCount: rows.length };
+  return { rows, totalIn, totalOut, net: mergeByCurrency(totalIn, negateByCurrency(totalOut)), byCategory: Array.from(byCategory.values()), txnCount: rows.length };
 }
 
 // The sales funnel for opportunities opened within the period — a period
@@ -706,8 +772,8 @@ export async function getQuotesReport(filter: ReportFilter) {
   const declinedCount = rows.filter((q) => q.status === "DECLINED").length;
   const respondedCount = acceptedCount + declinedCount;
   const conversionRate = respondedCount > 0 ? (acceptedCount / respondedCount) * 100 : null;
-  const totalValue = rows.reduce((sum, q) => sum + q.total, 0);
-  const acceptedValue = rows.filter((q) => q.status === "ACCEPTED").reduce((sum, q) => sum + q.total, 0);
+  const totalValue = sumByCurrency(rows, (q) => q.total, (q) => q.currency);
+  const acceptedValue = sumByCurrency(rows.filter((q) => q.status === "ACCEPTED"), (q) => q.total, (q) => q.currency);
 
   return { rows, quoteCount: rows.length, acceptedCount, declinedCount, conversionRate, totalValue, acceptedValue };
 }
@@ -724,19 +790,21 @@ export async function getPurchaseOrdersReport(filter: ReportFilter) {
     include: { supplier: true, createdBy: { select: { name: true } } },
     orderBy: { orderDate: "asc" },
   });
-  const totalValue = rows.reduce((sum, o) => sum + o.total, 0);
+  const totalValue = sumByCurrency(rows, (o) => o.total, (o) => o.currency);
   const openCount = rows.filter((o) => o.status === "SENT" || o.status === "PARTIALLY_RECEIVED").length;
   const nowMs = Date.now();
   const overdueCount = rows.filter(
     (o) => o.expectedDate && o.expectedDate.getTime() < nowMs && o.status !== "RECEIVED" && o.status !== "CANCELLED",
   ).length;
 
-  const bySupplierMap = new Map<string, { supplierName: string; orderCount: number; value: number }>();
+  // One row per (supplier, currency).
+  const bySupplierMap = new Map<string, { supplierName: string; currency: string; orderCount: number; value: number }>();
   for (const o of rows) {
-    const entry = bySupplierMap.get(o.supplierId) ?? { supplierName: o.supplier.name, orderCount: 0, value: 0 };
+    const key = `${o.supplierId}::${o.currency}`;
+    const entry = bySupplierMap.get(key) ?? { supplierName: o.supplier.name, currency: o.currency, orderCount: 0, value: 0 };
     entry.orderCount += 1;
     entry.value += o.total;
-    bySupplierMap.set(o.supplierId, entry);
+    bySupplierMap.set(key, entry);
   }
 
   return {
@@ -771,7 +839,7 @@ export async function getSupplierPerformanceReport(filter: ReportFilter) {
     leadTimeDaysOnFile: number | null;
     rejectionRatePct: number;
     orderCount: number;
-    totalValue: number;
+    totalValue: CurrencyAmount[];
     receivedCount: number;
     onTimeCount: number;
   };
@@ -785,12 +853,12 @@ export async function getSupplierPerformanceReport(filter: ReportFilter) {
         leadTimeDaysOnFile: o.supplier.leadTimeDays,
         rejectionRatePct: o.supplier.rejectionRatePct,
         orderCount: 0,
-        totalValue: 0,
+        totalValue: [],
         receivedCount: 0,
         onTimeCount: 0,
       } satisfies Row);
     entry.orderCount += 1;
-    entry.totalValue += o.total;
+    entry.totalValue = mergeByCurrency(entry.totalValue, [{ currency: o.currency, amount: o.total }]);
     if (o.status === "RECEIVED") {
       entry.receivedCount += 1;
       if (!o.expectedDate || o.updatedAt.getTime() <= o.expectedDate.getTime()) entry.onTimeCount += 1;
@@ -800,7 +868,8 @@ export async function getSupplierPerformanceReport(filter: ReportFilter) {
 
   const rows = Array.from(bySupplier.values())
     .map((e) => ({ ...e, onTimeRatePct: e.receivedCount > 0 ? (e.onTimeCount / e.receivedCount) * 100 : null }))
-    .sort((a, b) => b.totalValue - a.totalValue);
+    // Ranked by order count: values in different currencies are not compared.
+    .sort((a, b) => b.orderCount - a.orderCount);
 
   return { rows, supplierCount: rows.length };
 }
@@ -858,7 +927,7 @@ export async function getPayrollCostReport(filter: ReportFilter) {
     where: { periodStart: w.cover ? range(w.cover) : { lt: new Date(0) } },
     include: {
       lines: {
-        include: { employee: { select: { name: true, code: true, role: true, plantId: true, plant: { select: { siteId: true } } } } },
+        include: { employee: { select: { name: true, code: true, role: true, plantId: true, plant: { select: { siteId: true, currency: true } } } } },
       },
     },
     orderBy: { periodStart: "asc" },
@@ -870,16 +939,22 @@ export async function getPayrollCostReport(filter: ReportFilter) {
         const p = byPlant.get(l.employee.plantId);
         return !!p && run.periodStart >= p.start && run.periodStart < p.end;
       })
-      .map((l) => ({ ...l, runNumber: run.runNumber, runStatus: run.status, periodStart: run.periodStart, periodEnd: run.periodEnd })),
+      .map((l) => ({ ...l, currency: l.employee.plant.currency, runNumber: run.runNumber, runStatus: run.status, periodStart: run.periodStart, periodEnd: run.periodEnd })),
   );
 
-  const totalGross = rows.reduce((sum, l) => sum + l.grossPay, 0);
-  const totalNet = rows.reduce((sum, l) => sum + l.netPay, 0);
-  const totalEmployerGosi = rows.reduce((sum, l) => sum + l.employerGosi, 0);
-  const totalIncentives = rows.reduce((sum, l) => sum + l.incentiveAmount, 0);
-  const totalCost = totalNet + totalEmployerGosi;
+  // PayrollLine stores no currency: a line is shown in its employee's
+  // plant's currency AS OF NOW. markPayrollRunPaid posts per site in the
+  // site's currency, so this matches the ledger unless an employee changed
+  // plant or a plant changed currency after the run; a currency snapshot on
+  // PayrollLine would make it exact and is listed as a follow-up.
+  const by = (amount: (l: (typeof rows)[number]) => number) => sumByCurrency(rows, amount, (l) => l.currency);
+  const totalGross = by((l) => l.grossPay);
+  const totalNet = by((l) => l.netPay);
+  const totalEmployerGosi = by((l) => l.employerGosi);
+  const totalIncentives = by((l) => l.incentiveAmount);
+  const totalCost = by((l) => l.netPay + l.employerGosi);
 
-  return { rows, lineCount: rows.length, totalGross, totalNet, totalEmployerGosi, totalIncentives, totalCost };
+  return { rows, lineCount: rows.length, totalGross, totalNet, totalEmployerGosi, totalIncentives, totalCost, currencyFromCurrentPlant: true };
 }
 
 // Spare-parts receipts and issuances within the period, plus each touched
@@ -941,12 +1016,18 @@ export async function getSparePartsReport(filter: ReportFilter) {
     return { key, partCode: part?.code ?? sparePartId, partName: part?.name ?? "", balance: (inQty.get(key) ?? 0) - (outQty.get(key) ?? 0) };
   }).sort((a, b) => a.partCode.localeCompare(b.partCode));
 
-  const totalReceivedValue = receipts.reduce((sum, r) => sum + r.quantity * r.unitCost, 0);
-  const totalIssuedValue = orderIssuancesInScope.reduce((sum, i) => sum + i.lineTotal, 0) + directIssuances.reduce((sum, i) => sum + i.quantity * i.unitCost, 0);
+  // Spare-part costs carry no currency; a site's warehouse is valued in its
+  // site's currency (see reportWindows).
+  const siteCurrency = siteCurrencyOf(w);
+  const totalReceivedValue = sumByCurrency(receipts, (r) => r.quantity * r.unitCost, (r) => siteCurrency(r.siteId));
+  const totalIssuedValue = mergeByCurrency(
+    sumByCurrency(orderIssuancesInScope, (i) => i.lineTotal, (i) => siteCurrency(i.order.ticket.siteId)),
+    sumByCurrency(directIssuances, (i) => i.quantity * i.unitCost, (i) => siteCurrency(i.siteId)),
+  );
   const issuanceCount = orderIssuancesInScope.length + directIssuances.length;
   const lowStockCount = balances.filter((b) => b.balance <= 0).length;
 
-  return { receipts, issuances: orderIssuancesInScope, directIssuances, balances, receiptCount: receipts.length, issuanceCount, totalReceivedValue, totalIssuedValue, lowStockCount };
+  return { receipts, issuances: orderIssuancesInScope, directIssuances, balances, receiptCount: receipts.length, issuanceCount, totalReceivedValue, totalIssuedValue, lowStockCount, siteCurrencyById: Object.fromEntries(w.sites.map((x) => [x.siteId, x.currency])) };
 }
 
 // The Finished Goods equivalent of the Spare Parts report above — IN
@@ -1026,6 +1107,7 @@ export async function getFactoryPerformanceReport({ fromDay, toDay, siteId, plan
       return {
         label: q.label,
         productionCost: profitability.totalCost,
+        productionCostLabel: formatByCurrency(profitability.totalCost),
         concreteVolumeM3: production.totalVolumeM3,
         finishedGoodsShippedQty: finishedGoods.shippedQty,
         returnedVolumeM3: returns.totalReturnedM3,

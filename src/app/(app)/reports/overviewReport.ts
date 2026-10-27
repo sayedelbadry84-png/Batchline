@@ -12,6 +12,7 @@ import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
 import { plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { invoiceAmountDue } from "@/lib/billing";
+import { sumByCurrency } from "@/lib/currencyTotals";
 import { addDays, zonedDayStart, zonedIsoDay } from "@/lib/plantDay";
 import { resolveTimeZone } from "@/lib/datetime";
 
@@ -211,15 +212,17 @@ export async function getOverviewReport({ siteId, plantId }: { siteId?: string; 
 
   // --- Billing (revenue currently invoiced, AR outstanding/overdue) ---
   const monthStart = localMonthStart(scopeZone);
-  const invoicedThisMonth = invoices
-    .filter((inv) => inv.issueDate >= ((inv.plantId && monthStartByPlant.get(inv.plantId)) || monthStart))
-    .reduce((sum, inv) => sum + inv.total, 0);
+  // Per currency (PM review 2026-10-27 P1-1): never one number across SAR
+  // and EGP invoices.
+  const invoicedThisMonth = sumByCurrency(
+    invoices.filter((inv) => inv.issueDate >= ((inv.plantId && monthStartByPlant.get(inv.plantId)) || monthStart)),
+    (inv) => inv.total,
+    (inv) => inv.currency,
+  );
 
   const sentInvoices = invoices.filter((inv) => inv.status === "SENT");
-  const arOutstanding = sentInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
-  const arOverdue = sentInvoices
-    .filter((inv) => inv.dueDate.getTime() < nowMs)
-    .reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
+  const arOutstanding = sumByCurrency(sentInvoices, (inv) => invoiceAmountDue(inv), (inv) => inv.currency);
+  const arOverdue = sumByCurrency(sentInvoices.filter((inv) => inv.dueDate.getTime() < nowMs), (inv) => invoiceAmountDue(inv), (inv) => inv.currency);
 
   return {
     anomalies,

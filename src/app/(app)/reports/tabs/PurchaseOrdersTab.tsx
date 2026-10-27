@@ -8,6 +8,7 @@
 import { ExportBar, type ReportTabContext } from "../reportUi";
 import { getPurchaseOrdersReport } from "@/lib/reportQueries";
 import { ui } from "@/lib/ui";
+import { formatByCurrency } from "@/lib/currencyTotals";
 
 export function PurchaseOrdersTab({ purchaseOrdersData, ctx }: {
   purchaseOrdersData: NonNullable<Awaited<ReturnType<typeof getPurchaseOrdersReport>>>;
@@ -22,7 +23,7 @@ export function PurchaseOrdersTab({ purchaseOrdersData, ctx }: {
           tab="purchaseOrders"
           from={rangeFrom}
           to={rangeTo}
-          message={`${m.tabs.purchaseOrders} ${rangeFrom} → ${rangeTo}\n${m.purchaseOrdersReport.orderCount(purchaseOrdersData.orderCount)}\n${m.purchaseOrdersReport.totalValue}: ${purchaseOrdersData.totalValue.toFixed(2)}`}
+          message={`${m.tabs.purchaseOrders} ${rangeFrom} → ${rangeTo}\n${m.purchaseOrdersReport.orderCount(purchaseOrdersData.orderCount)}\n${m.purchaseOrdersReport.totalValue}: ${formatByCurrency(purchaseOrdersData.totalValue)}`}
           filenameBase={`purchase-orders-${rangeFrom}-${rangeTo}`}
           headers={["Number", "Supplier", "Status", "Total", "Currency", "Order date", "Expected date", "Created by"]}
           rows={purchaseOrdersData.rows.map((o) => [
@@ -43,7 +44,7 @@ export function PurchaseOrdersTab({ purchaseOrdersData, ctx }: {
             <div className="mt-1 text-sm text-ink-muted">{m.purchaseOrdersReport.orderCount(purchaseOrdersData.orderCount)}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{purchaseOrdersData.totalValue.toFixed(2)}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(purchaseOrdersData.totalValue)}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.purchaseOrdersReport.totalValue}</div>
           </div>
           <div className={ui.card}>
@@ -67,10 +68,10 @@ export function PurchaseOrdersTab({ purchaseOrdersData, ctx }: {
             </thead>
             <tbody>
               {purchaseOrdersData.bySupplier.map((s) => (
-                <tr key={s.supplierName}>
+                <tr key={`${s.supplierName}::${s.currency}`}>
                   <td className={ui.td}>{s.supplierName}</td>
                   <td className={`${ui.td} font-mono tabular`}>{s.orderCount}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{s.value.toFixed(2)}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{s.value.toFixed(2)} {s.currency}</td>
                 </tr>
               ))}
             </tbody>

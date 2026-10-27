@@ -90,3 +90,17 @@ test("end-of-service payable is a whole minor unit", async () => {
   });
   assert.equal(Math.round(result.payableAmount * 100) / 100, result.payableAmount);
 });
+
+// PM review 2026-10-27 P1-1: money is added up within one currency only.
+test("per-currency totals never add SAR to EGP", async () => {
+  const { sumByCurrency, mergeByCurrency, negateByCurrency, formatByCurrency, amountIn } = await import("../src/lib/currencyTotals");
+  const rows = [{ c: "SAR", a: 100 }, { c: "EGP", a: 250 }, { c: "SAR", a: 50.5 }];
+  const totals = sumByCurrency(rows, (r) => r.a, (r) => r.c);
+  assert.deepEqual(totals, [{ currency: "EGP", amount: 250 }, { currency: "SAR", amount: 150.5 }]);
+  assert.equal(amountIn(totals, "SAR"), 150.5);
+  const net = mergeByCurrency(totals, negateByCurrency([{ currency: "SAR", amount: 200 }]));
+  assert.deepEqual(net, [{ currency: "EGP", amount: 250 }, { currency: "SAR", amount: -49.5 }]);
+  assert.equal(formatByCurrency(totals), "250.00 EGP + 150.50 SAR");
+  assert.equal(formatByCurrency([]), "0");
+  assert.ok(!formatByCurrency(totals).includes("400.5"), "the cross-currency sum appears nowhere");
+});

@@ -224,8 +224,10 @@ export function aggregateIncentiveResults(
   }
 
   return results.sort((a, b) => {
-    const totalA = a.payoutByCurrency.reduce((s, p) => s + p.amount, 0);
-    const totalB = b.payoutByCurrency.reduce((s, p) => s + p.amount, 0);
+    // Ordered by the largest single-currency amount: SAR and EGP are never
+    // added, even only to rank people.
+    const totalA = Math.max(0, ...a.payoutByCurrency.map((p) => p.amount));
+    const totalB = Math.max(0, ...b.payoutByCurrency.map((p) => p.amount));
     return totalB - totalA || b.tripCount - a.tripCount;
   });
 }

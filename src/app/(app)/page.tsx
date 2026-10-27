@@ -6,6 +6,7 @@ import { canAccessModule } from "@/lib/permissions";
 import { getDictionary } from "@/lib/i18n";
 import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
 import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
+import { formatByCurrency, sumByCurrency } from "@/lib/currencyTotals";
 import { flagMaintenanceDue } from "@/lib/maintenance";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { DrumTimer } from "@/components/DrumTimer";
@@ -237,9 +238,10 @@ export default async function DashboardPage() {
       ])
     : [[], []];
 
+  // Per currency (PM review 2026-10-27 P1-1).
   const arOutstanding = canSeeBilling
-    ? sentInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0)
-    : 0;
+    ? sumByCurrency(sentInvoices, (inv) => invoiceAmountDue(inv), (inv) => inv.currency)
+    : [];
   const overdueInvoiceCount = canSeeBilling ? sentInvoices.filter((inv) => inv.dueDate.getTime() < nowMs).length : 0;
 
   // --- Unified alert feed: every warning scattered across Silos, Trips,
@@ -373,7 +375,7 @@ export default async function DashboardPage() {
           </Link>
           {canSeeBilling && (
             <Link href="/finance?tab=billing" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--critical)" } as React.CSSProperties}>
-              <div className="font-mono text-2xl tabular" dir="ltr">{arOutstanding.toLocaleString()}</div>
+              <div className="font-mono text-2xl tabular" dir="ltr">{formatByCurrency(arOutstanding, 0)}</div>
               <div className="mt-1 text-sm text-ink-muted">{d.kpiArOutstanding}</div>
               {overdueInvoiceCount > 0 && <div className="mt-1 text-xs text-critical">{r.arOverdue}: {overdueInvoiceCount}</div>}
             </Link>

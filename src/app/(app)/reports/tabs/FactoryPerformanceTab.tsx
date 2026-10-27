@@ -27,7 +27,7 @@ export function FactoryPerformanceTab({ factoryPerformanceData, ctx }: {
           headers={["Quarter", "Production cost", "Concrete volume (m³)", "Finished goods shipped", "Returns (m³)", "Customers", "Workers"]}
           rows={factoryPerformanceData.rows.map((r) => [
             r.label,
-            r.productionCost,
+            r.productionCostLabel,
             r.concreteVolumeM3,
             r.finishedGoodsShippedQty,
             r.returnedVolumeM3,
@@ -53,7 +53,7 @@ export function FactoryPerformanceTab({ factoryPerformanceData, ctx }: {
               {factoryPerformanceData.rows.map((r) => (
                 <tr key={r.label}>
                   <td className={`${ui.td} font-medium`}>{r.label}</td>
-                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.productionCost.toFixed(2)}</td>
+                  <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.productionCostLabel}</td>
                   <td className={`${ui.td} font-mono tabular`}>{r.concreteVolumeM3.toFixed(1)}</td>
                   <td className={`${ui.td} font-mono tabular`}>{r.finishedGoodsShippedQty}</td>
                   <td className={`${ui.td} font-mono tabular`}>{r.returnedVolumeM3.toFixed(1)}</td>

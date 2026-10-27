@@ -8,6 +8,7 @@
 import { ExportBar, type ReportTabContext } from "../reportUi";
 import { getSparePartsReport } from "@/lib/reportQueries";
 import { ui } from "@/lib/ui";
+import { formatByCurrency } from "@/lib/currencyTotals";
 
 export function SparePartsTab({ sparePartsData, ctx }: {
   sparePartsData: NonNullable<Awaited<ReturnType<typeof getSparePartsReport>>>;
@@ -24,10 +25,10 @@ export function SparePartsTab({ sparePartsData, ctx }: {
           to={rangeTo}
           message={`${m.tabs.spareParts} ${rangeFrom} → ${rangeTo}\n${m.sparePartsReport.receiptCount(sparePartsData.receiptCount)}\n${m.sparePartsReport.issuanceCount(sparePartsData.issuanceCount)}`}
           filenameBase={`spare-parts-${rangeFrom}-${rangeTo}`}
-          headers={["Date", "Direction", "Part code", "Part name", "Quantity", "Value", "By"]}
+          headers={["Date", "Direction", "Part code", "Part name", "Quantity", "Value", "Currency", "By"]}
           rows={[
-            ...sparePartsData.receipts.map((r) => [new Date(r.receivedAt).toISOString(), "IN", r.sparePart.code, r.sparePart.name, r.quantity, r.quantity * r.unitCost, r.receivedBy.name]),
-            ...sparePartsData.issuances.map((i) => [new Date(i.issuedAt).toISOString(), "OUT", i.sparePart.code, i.sparePart.name, i.quantity, i.lineTotal, i.issuedBy.name]),
+            ...sparePartsData.receipts.map((r) => [new Date(r.receivedAt).toISOString(), "IN", r.sparePart.code, r.sparePart.name, r.quantity, r.quantity * r.unitCost, sparePartsData.siteCurrencyById[r.siteId] ?? "", r.receivedBy.name]),
+            ...sparePartsData.issuances.map((i) => [new Date(i.issuedAt).toISOString(), "OUT", i.sparePart.code, i.sparePart.name, i.quantity, i.lineTotal, sparePartsData.siteCurrencyById[i.order.ticket.siteId] ?? "", i.issuedBy.name]),
           ]}
         />
         <p className="text-sm text-ink-muted">{m.sparePartsReport.intro}</p>
@@ -41,11 +42,11 @@ export function SparePartsTab({ sparePartsData, ctx }: {
             <div className="mt-1 text-sm text-ink-muted">{m.sparePartsReport.issuanceCount(sparePartsData.issuanceCount)}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{sparePartsData.totalReceivedValue.toFixed(2)}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(sparePartsData.totalReceivedValue)}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.sparePartsReport.totalReceivedValue}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{sparePartsData.totalIssuedValue.toFixed(2)}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(sparePartsData.totalIssuedValue)}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.sparePartsReport.totalIssuedValue}</div>
           </div>
           <div className={ui.card}>

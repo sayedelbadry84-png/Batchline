@@ -8,6 +8,7 @@
 import { ExportBar, fmt, type ReportTabContext } from "../reportUi";
 import { getMaintenanceReport } from "@/lib/reportQueries";
 import { ui } from "@/lib/ui";
+import { formatByCurrency } from "@/lib/currencyTotals";
 
 export function MaintenanceTab({ maintenanceData, ctx }: {
   maintenanceData: NonNullable<Awaited<ReturnType<typeof getMaintenanceReport>>>;
@@ -22,9 +23,9 @@ export function MaintenanceTab({ maintenanceData, ctx }: {
           tab="maintenance"
           from={rangeFrom}
           to={rangeTo}
-          message={`${m.tabs.maintenance} ${rangeFrom} → ${rangeTo}\n${m.maintenanceReport.ticketCount(maintenanceData.ticketCount)}\n${m.maintenanceReport.totalCost(maintenanceData.totalCost.toFixed(0))}`}
+          message={`${m.tabs.maintenance} ${rangeFrom} → ${rangeTo}\n${m.maintenanceReport.ticketCount(maintenanceData.ticketCount)}\n${m.maintenanceReport.totalCost(formatByCurrency(maintenanceData.totalCost, 0))}`}
           filenameBase={`maintenance-${rangeFrom}-${rangeTo}`}
-          headers={["Ticket", "Equipment", "Type", "Priority", "Status", "Reported", "Completed", "Assigned to", "Downtime hours", "Labor cost", "Parts cost"]}
+          headers={["Ticket", "Equipment", "Type", "Priority", "Status", "Reported", "Completed", "Assigned to", "Downtime hours", "Labor cost", "Parts cost", "Currency"]}
           rows={maintenanceData.rows.map((t) => [
             t.ticketNumber,
             t.equipmentLabel,
@@ -37,6 +38,7 @@ export function MaintenanceTab({ maintenanceData, ctx }: {
             t.downtimeHours ?? 0,
             t.laborCost ?? 0,
             t.partsCost ?? 0,
+            t.currency,
           ])}
         />
         <p className="text-sm text-ink-muted">{m.maintenanceReport.intro}</p>
@@ -54,8 +56,8 @@ export function MaintenanceTab({ maintenanceData, ctx }: {
             <div className="mt-1 text-sm text-ink-muted">{m.maintenanceReport.totalDowntime(maintenanceData.totalDowntimeHours.toFixed(1))}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{maintenanceData.totalCost.toFixed(0)}</div>
-            <div className="mt-1 text-sm text-ink-muted">{m.maintenanceReport.totalCost(maintenanceData.totalCost.toFixed(0))}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(maintenanceData.totalCost, 0)}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.maintenanceReport.totalCost(formatByCurrency(maintenanceData.totalCost, 0))}</div>
           </div>
         </div>
         <div className={ui.card}>
@@ -88,7 +90,7 @@ export function MaintenanceTab({ maintenanceData, ctx }: {
                   <td className={`${ui.td} font-mono text-xs tabular`}>{dt.date(t.createdAt)}</td>
                   <td className={ui.td}>{t.assignedTo?.name ?? "—"}</td>
                   <td className={`${ui.td} font-mono tabular`}>{fmt(t.downtimeHours, 1)}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{fmt((t.laborCost ?? 0) + (t.partsCost ?? 0), 0)}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{fmt((t.laborCost ?? 0) + (t.partsCost ?? 0), 0)} {t.currency}</td>
                 </tr>
               ))}
               {maintenanceData.rows.length === 0 && (

@@ -8,6 +8,7 @@
 import { ExportBar, fmt, type ReportTabContext } from "../reportUi";
 import { getSupplierPerformanceReport } from "@/lib/reportQueries";
 import { ui } from "@/lib/ui";
+import { formatByCurrency } from "@/lib/currencyTotals";
 
 export function SupplierPerformanceTab({ supplierPerformanceData, ctx }: {
   supplierPerformanceData: NonNullable<Awaited<ReturnType<typeof getSupplierPerformanceReport>>>;
@@ -28,7 +29,7 @@ export function SupplierPerformanceTab({ supplierPerformanceData, ctx }: {
           rows={supplierPerformanceData.rows.map((s) => [
             s.supplierName,
             s.orderCount,
-            s.totalValue,
+            formatByCurrency(s.totalValue),
             s.receivedCount,
             s.onTimeRatePct ?? "",
             s.leadTimeDaysOnFile ?? "",
@@ -57,7 +58,7 @@ export function SupplierPerformanceTab({ supplierPerformanceData, ctx }: {
                 <tr key={s.supplierId}>
                   <td className={ui.td}>{s.supplierName}</td>
                   <td className={`${ui.td} font-mono tabular`}>{s.orderCount}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{s.totalValue.toFixed(2)}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{formatByCurrency(s.totalValue)}</td>
                   <td className={`${ui.td} font-mono tabular`}>{fmt(s.onTimeRatePct, 0, "%")}</td>
                   <td className={`${ui.td} font-mono tabular`}>{s.leadTimeDaysOnFile ?? "—"}</td>
                   <td className={`${ui.td} font-mono tabular`}>{s.rejectionRatePct.toFixed(1)}%</td>

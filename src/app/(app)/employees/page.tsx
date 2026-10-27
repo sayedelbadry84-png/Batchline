@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { formatByCurrency, sumByCurrency } from "@/lib/currencyTotals";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
@@ -177,7 +178,7 @@ export default async function EmployeesPage({
   const payrollRuns = isPayrollTab
     ? await prisma.payrollRun.findMany({
         orderBy: { createdAt: "desc" },
-        include: { lines: { select: { netPay: true } } },
+        include: { lines: { select: { netPay: true, employee: { select: { plant: { select: { currency: true } } } } } } },
       })
     : [];
 
@@ -581,7 +582,8 @@ export default async function EmployeesPage({
                 </thead>
                 <tbody>
                   {payrollRuns.map((r) => {
-                    const total = r.lines.reduce((sum, l) => sum + l.netPay, 0);
+                    // Per currency: a run spans plants in different currencies.
+                    const total = sumByCurrency(r.lines, (l) => l.netPay, (l) => l.employee.plant.currency);
                     return (
                       <tr key={r.id}>
                         <td className={`${ui.td} font-mono text-xs`}>{r.runNumber}</td>
@@ -593,7 +595,7 @@ export default async function EmployeesPage({
                             {m.payroll.statusLabel[r.status as keyof typeof m.payroll.statusLabel] ?? r.status}
                           </span>
                         </td>
-                        <td className={`${ui.td} font-mono tabular`} dir="ltr">{total.toLocaleString()}</td>
+                        <td className={`${ui.td} font-mono tabular`} dir="ltr">{formatByCurrency(total)}</td>
                         <td className={ui.td}>
                           <Link href={`/employees/payroll/${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
                             {m.payroll.view}

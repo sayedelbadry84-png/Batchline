@@ -8,6 +8,7 @@
 import { ExportBar, type ReportTabContext } from "../reportUi";
 import { getCashLedgerReport } from "@/lib/reportQueries";
 import { ui } from "@/lib/ui";
+import { formatByCurrency } from "@/lib/currencyTotals";
 
 export function CashLedgerTab({ cashLedgerData, ctx }: {
   cashLedgerData: NonNullable<Awaited<ReturnType<typeof getCashLedgerReport>>>;
@@ -22,7 +23,7 @@ export function CashLedgerTab({ cashLedgerData, ctx }: {
           tab="cashLedger"
           from={rangeFrom}
           to={rangeTo}
-          message={`${m.tabs.cashLedger} ${rangeFrom} → ${rangeTo}\n${m.cashLedgerReport.totalIn(cashLedgerData.totalIn.toFixed(2))}\n${m.cashLedgerReport.totalOut(cashLedgerData.totalOut.toFixed(2))}\n${m.cashLedgerReport.net(cashLedgerData.net.toFixed(2))}`}
+          message={`${m.tabs.cashLedger} ${rangeFrom} → ${rangeTo}\n${m.cashLedgerReport.totalIn(formatByCurrency(cashLedgerData.totalIn))}\n${m.cashLedgerReport.totalOut(formatByCurrency(cashLedgerData.totalOut))}\n${m.cashLedgerReport.net(formatByCurrency(cashLedgerData.net))}`}
           filenameBase={`cash-ledger-${rangeFrom}-${rangeTo}`}
           headers={["Date", "Number", "Direction", "Category", "Description", "Amount", "Currency", "By", "Reconciled"]}
           rows={cashLedgerData.rows.map((t) => [
@@ -40,16 +41,16 @@ export function CashLedgerTab({ cashLedgerData, ctx }: {
         <p className="text-sm text-ink-muted">{m.cashLedgerReport.intro}</p>
         <div className="flex flex-wrap gap-4">
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular text-good">{cashLedgerData.totalIn.toFixed(2)}</div>
-            <div className="mt-1 text-sm text-ink-muted">{m.cashLedgerReport.totalIn(cashLedgerData.totalIn.toFixed(2))}</div>
+            <div className="font-mono text-2xl tabular text-good">{formatByCurrency(cashLedgerData.totalIn)}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.cashLedgerReport.totalIn(formatByCurrency(cashLedgerData.totalIn))}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular text-critical">{cashLedgerData.totalOut.toFixed(2)}</div>
-            <div className="mt-1 text-sm text-ink-muted">{m.cashLedgerReport.totalOut(cashLedgerData.totalOut.toFixed(2))}</div>
+            <div className="font-mono text-2xl tabular text-critical">{formatByCurrency(cashLedgerData.totalOut)}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.cashLedgerReport.totalOut(formatByCurrency(cashLedgerData.totalOut))}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{cashLedgerData.net.toFixed(2)}</div>
-            <div className="mt-1 text-sm text-ink-muted">{m.cashLedgerReport.net(cashLedgerData.net.toFixed(2))}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(cashLedgerData.net)}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.cashLedgerReport.net(formatByCurrency(cashLedgerData.net))}</div>
           </div>
         </div>
         <div className={ui.card}>
@@ -64,10 +65,10 @@ export function CashLedgerTab({ cashLedgerData, ctx }: {
             </thead>
             <tbody>
               {cashLedgerData.byCategory.map((c) => (
-                <tr key={c.category}>
+                <tr key={`${c.category}::${c.currency}`}>
                   <td className={ui.td}>{dict.modules.finance.cash.categoryLabel[c.category as keyof typeof dict.modules.finance.cash.categoryLabel] ?? c.category}</td>
-                  <td className={`${ui.td} font-mono tabular text-good`}>{c.in.toFixed(2)}</td>
-                  <td className={`${ui.td} font-mono tabular text-critical`}>{c.out.toFixed(2)}</td>
+                  <td className={`${ui.td} font-mono tabular text-good`}>{c.in.toFixed(2)} {c.currency}</td>
+                  <td className={`${ui.td} font-mono tabular text-critical`}>{c.out.toFixed(2)} {c.currency}</td>
                 </tr>
               ))}
             </tbody>

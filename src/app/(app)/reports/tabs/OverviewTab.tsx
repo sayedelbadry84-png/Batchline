@@ -5,6 +5,7 @@
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { ui } from "@/lib/ui";
 import { fmt, type ReportTabContext } from "../reportUi";
+import { formatByCurrency } from "@/lib/currencyTotals";
 import { SLUMP_TOLERANCE_MM, getOverviewReport } from "../overviewReport";
 
 export function OverviewTab({ overview, ctx }: {
@@ -196,16 +197,16 @@ export function OverviewTab({ overview, ctx }: {
       <h2 className="mb-3 font-display text-lg font-semibold">{m.billingTitle}</h2>
       <div className="grid grid-cols-3 gap-4">
         <div className={ui.card}>
-          <div className="font-mono text-2xl tabular" dir="ltr">{invoicedThisMonth.toLocaleString()}</div>
+          <div className="font-mono text-2xl tabular" dir="ltr">{formatByCurrency(invoicedThisMonth, 0)}</div>
           <div className="mt-1 text-sm text-ink-muted">{m.revenueThisMonth}</div>
           <div className="mt-1 text-xs text-ink-faint">{m.invoiceCount(invoices.filter((inv) => inv.issueDate >= monthStart).length)}</div>
         </div>
         <div className={ui.card}>
-          <div className="font-mono text-2xl tabular" dir="ltr">{arOutstanding.toLocaleString()}</div>
+          <div className="font-mono text-2xl tabular" dir="ltr">{formatByCurrency(arOutstanding, 0)}</div>
           <div className="mt-1 text-sm text-ink-muted">{m.arOutstanding}</div>
         </div>
         <div className={ui.card}>
-          <div className={`font-mono text-2xl tabular ${arOverdue > 0 ? "text-critical" : ""}`} dir="ltr">{arOverdue.toLocaleString()}</div>
+          <div className={`font-mono text-2xl tabular ${arOverdue.some((p) => p.amount > 0) ? "text-critical" : ""}`} dir="ltr">{formatByCurrency(arOverdue, 0)}</div>
           <div className="mt-1 text-sm text-ink-muted">{m.arOverdue}</div>
         </div>
       </div>

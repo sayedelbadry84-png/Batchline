@@ -26,7 +26,7 @@ const prefix = `DAYS-${randomUUID().slice(0, 8)}`;
 const DAY = "2026-12-01";
 const siteKey = randomUUID(); // disposable test credentials only
 const globalKey = randomUUID();
-const ids = { sites: [] as string[], plants: [] as string[], trucks: [] as string[], trips: [] as string[], tickets: [] as string[] };
+const ids = { sites: [] as string[], plants: [] as string[], trucks: [] as string[], trips: [] as string[], tickets: [] as string[], invoices: [] as string[], cash: [] as string[] };
 let ruh = "", cai = "", ruhSite = "", caiSite = "", customerId = "", projectId = "", mixId = "", reservationId = "", driverId = "", userId = "";
 
 // 0.5 m3 steps keep every expected volume exact.
@@ -61,12 +61,23 @@ before(async () => {
     const trip = await prisma.trip.create({ data: { batchTicketId: ticket.id, truckId: truckAt[t.plant], driverId, status: "CLOSED", volumeDeliveredM3: t.volumeM3, batchTime: new Date(t.dischargeEnd), dischargeEnd: new Date(t.dischargeEnd) } });
     ids.trips.push(trip.id);
   }
+  // Money in both currencies on the same local day (PM review 2026-10-27
+  // P1-1): 1,000 SAR at Riyadh and 7,000 EGP at Cairo must never be 8,000.
+  const issued = new Date("2026-12-01T09:00:00Z");
+  for (const [plantId, currency, total] of [[ruh, "SAR", 1000], [cai, "EGP", 7000]] as const) {
+    ids.invoices.push((await prisma.invoice.create({ data: { invoiceNumber: `${prefix}-${currency}`, customerId, plantId, currency, subtotal: total, total, status: "SENT", issueDate: issued, dueDate: new Date("2026-11-15T00:00:00Z") } })).id);
+  }
+  for (const [siteId, currency, amount, n] of [[ruhSite, "SAR", 300, 1], [caiSite, "EGP", 2000, 2]] as const) {
+    ids.cash.push((await prisma.cashTransaction.create({ data: { txnNumber: `${prefix}-T${n}`, siteId, direction: "OUT", category: "FUEL", amount, currency, description: prefix, occurredAt: issued, createdById: userId } })).id);
+  }
   await prisma.apiKey.create({ data: { siteId: ruhSite, label: prefix, keyHash: hashApiKey(siteKey), keyPrefix: "test", scope: "REPORTS", createdById: userId } });
   await prisma.apiKey.create({ data: { global: true, label: prefix, keyHash: hashApiKey(globalKey), keyPrefix: "test", scope: "REPORTS", createdById: userId } });
 });
 
 after(async () => {
   await prisma.apiKey.deleteMany({ where: { label: prefix } });
+  await prisma.cashTransaction.deleteMany({ where: { id: { in: ids.cash } } });
+  await prisma.invoice.deleteMany({ where: { id: { in: ids.invoices } } });
   await prisma.trip.deleteMany({ where: { id: { in: ids.trips } } });
   await prisma.batchTicket.deleteMany({ where: { id: { in: ids.tickets } } });
   await prisma.truck.deleteMany({ where: { id: { in: ids.trucks } } });
@@ -147,4 +158,36 @@ test("a global REPORTS key sees the company-wide total", async () => {
 test("the API refuses a day that is not a calendar day", async () => {
   const res = await reportsRoute.GET(new NextRequest(`http://test.local/api/reports/trips?from=2026-02-30&to=${DAY}`, { headers: { authorization: `Bearer ${globalKey}` } }), { params: Promise.resolve({ report: "trips" }) });
   assert.equal(res.status, 400);
+});
+
+test("money is reported per currency on every report that adds it up", async () => {
+  const days = { fromDay: DAY, toDay: DAY };
+  const crossSum = /8,?000(.0+)?/; // 1,000 SAR + 7,000 EGP, added: must not exist
+  const mineOnly = <T extends { currency: string; amount: number }>(list: T[]) => Object.fromEntries(list.map((x) => [x.currency, x.amount]));
+
+  const ar = await reports.getArAgingReport(days);
+  const arOurs = ar.rows.filter((r) => ids.invoices.includes(r.id));
+  assert.equal(arOurs.length, 2);
+  for (const c of ["SAR", "EGP"]) assert.ok(ar.totalOutstanding.some((t) => t.currency === c), `AR keeps ${c}`);
+  assert.ok(Array.isArray(ar.totalOutstanding) && ar.totalOutstanding.every((t) => typeof t.currency === "string"));
+
+  const prof = await reports.getProfitabilityReport(days);
+  const sar = prof.byCurrency.find((c) => c.currency === "SAR")!;
+  const egp = prof.byCurrency.find((c) => c.currency === "EGP")!;
+  assert.ok(sar.revenue >= 1000 && egp.revenue >= 7000);
+  assert.ok(sar.fuelCost >= 300 && egp.fuelCost >= 2000);
+  assert.equal(sar.margin, sar.revenue - sar.totalCost, "a margin is only ever within one currency");
+  assert.ok(!("margin" in prof && typeof (prof as { margin: unknown }).margin === "number"), "no single-number margin");
+
+  const cash = await reports.getCashLedgerReport(days);
+  const out = mineOnly(cash.totalOut);
+  assert.ok(out.SAR >= 300 && out.EGP >= 2000);
+  assert.ok(cash.byCategory.every((c) => typeof c.currency === "string"));
+
+  // Narrowed to one site, only that site's currency appears.
+  const ruhAr = await reports.getArAgingReport({ ...days, siteId: ruhSite });
+  assert.deepEqual(ruhAr.totalOutstanding.map((t) => t.currency), ["SAR"]);
+
+  // No representation carries the added-up number.
+  for (const body of [ar, prof, cash].map((r) => JSON.stringify({ ...r, rows: undefined }))) assert.doesNotMatch(body, crossSum);
 });
