@@ -760,6 +760,57 @@ for (const operation of ["recordPayment", "issueCreditNote", "markInvoiceSent", 
   });
 }
 
+// PM review 2026-10-27 P2-1: paying an end-of-service settlement is one
+// unit — claim, cash movement, journal entry, employee removal and audit.
+async function eosSettlement(label: string) {
+  const employee = await prisma.employee.create({ data: { plantId, name: `${prefix} EOS ${label}`, role: "DRIVER" } });
+  const settlement = await prisma.endOfServiceSettlement.create({ data: {
+    settlementNumber: `${prefix}-EOS-${label}`, employeeId: employee.id, hireDate: new Date("2020-01-01T00:00:00Z"), terminationDate: new Date("2026-01-01T00:00:00Z"),
+    terminationType: "END_OF_CONTRACT", yearsOfService: 6, basicMonthlySalary: 3000, grossEntitlement: 10500, payableAmount: 10500, calculatedById: adminId,
+  } });
+  return { employee, settlement };
+}
+async function cleanupEos(employeeIds: string[], settlementIds: string[]) {
+  const txns = await prisma.cashTransaction.findMany({ where: { category: "END_OF_SERVICE", description: { contains: prefix } }, select: { id: true } });
+  await prisma.journalEntry.deleteMany({ where: { sourceRecordId: { in: txns.map((t) => t.id) } } });
+  await prisma.cashTransaction.deleteMany({ where: { id: { in: txns.map((t) => t.id) } } });
+  await deleteAuditEvents({ recordId: { in: settlementIds } });
+  await prisma.endOfServiceSettlement.deleteMany({ where: { id: { in: settlementIds } } });
+  await prisma.employee.deleteMany({ where: { id: { in: employeeIds } } });
+}
+test("end-of-service payment: two concurrent submissions pay once, with one audit row", async () => {
+  await asUser(adminId);
+  const { employee, settlement } = await eosSettlement("RACE");
+  try {
+    await Promise.allSettled([hr.markEndOfServiceSettlementPaid(form({ id: settlement.id })), hr.markEndOfServiceSettlementPaid(form({ id: settlement.id }))]);
+    assert.equal((await prisma.endOfServiceSettlement.findUniqueOrThrow({ where: { id: settlement.id } })).status, "PAID");
+    const txns = await prisma.cashTransaction.findMany({ where: { category: "END_OF_SERVICE", description: { contains: settlement.settlementNumber } } });
+    assert.equal(txns.length, 1, "paid once");
+    assert.equal(txns[0].amount, 10500);
+    assert.equal(await prisma.journalEntry.count({ where: { sourceRecordId: txns[0].id } }), 1);
+    assert.equal(await prisma.auditEvent.count({ where: { recordId: settlement.id, reasonCode: "END_OF_SERVICE_PAID" } }), 1);
+    assert.equal((await prisma.employee.findUniqueOrThrow({ where: { id: employee.id } })).status, "REMOVED");
+  } finally {
+    await cleanupEos([employee.id], [settlement.id]);
+  }
+});
+test("end-of-service payment: an audit failure leaves no cash, no journal and the settlement unpaid", async () => {
+  await asUser(adminId);
+  const { employee, settlement } = await eosSettlement("AUDIT");
+  const name = `audit_fail_${randomUUID().replaceAll("-", "")}`;
+  try {
+    await prisma.$executeRawUnsafe(`CREATE FUNCTION "${name}"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW."recordId" = '${settlement.id}' AND NEW."reasonCode" = 'END_OF_SERVICE_PAID' THEN RAISE EXCEPTION 'Injected audit failure'; END IF; RETURN NEW; END $$`);
+    await prisma.$executeRawUnsafe(`CREATE TRIGGER "${name}" BEFORE INSERT ON "AuditEvent" FOR EACH ROW EXECUTE FUNCTION "${name}"()`);
+    await assert.rejects(hr.markEndOfServiceSettlementPaid(form({ id: settlement.id })));
+    assert.equal((await prisma.endOfServiceSettlement.findUniqueOrThrow({ where: { id: settlement.id } })).status, "CALCULATED");
+    assert.equal(await prisma.cashTransaction.count({ where: { category: "END_OF_SERVICE", description: { contains: settlement.settlementNumber } } }), 0);
+    assert.notEqual((await prisma.employee.findUniqueOrThrow({ where: { id: employee.id } })).status, "REMOVED");
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${name}" ON "AuditEvent"`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${name}"()`);
+    await cleanupEos([employee.id], [settlement.id]);
+  }
+});
 test("reversal waits for uncommitted global JE allocation", async () => {
   const original = await invoice();
   await prisma.$transaction(tx => postInvoice(tx, { siteId, currency: "SAR", invoiceId: original.id, subtotal: 100, taxAmount: 15, total: 115 }));
