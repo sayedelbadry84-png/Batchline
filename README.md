@@ -148,6 +148,12 @@ driver app (`/driver`) automatically instead of the back office.
   dashboard override) — real endpoints, tested directly with `curl`, not
   mocked UI. Results surface on the Fleet and Silos screens (last position,
   "sensor 9:47 PM" vs "no sensor feed").
+- **Report export API** — `GET /api/reports/<production|incoming|consumption|returns|trips|equipment|workers>?from=YYYY-MM-DD&to=YYYY-MM-DD`
+  with a REPORTS-scoped key. `from` and `to` are both required (400 otherwise):
+  each is a calendar day applied as the local day of each plant in scope,
+  `[local midnight, next local midnight)`, so there is no single "today" to
+  default to across plants in different zones. A site-scoped key gets only its
+  site's data; the response carries `scope` ("site" or "company").
 - **Reports & KPIs** (`/reports`) — daily/7-day production volume, average
   batch deviation, cylinder pass rate, slump conformance, return rate,
   average truck cycle time, and silo days-of-cover, all computed live from

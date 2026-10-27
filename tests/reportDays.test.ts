@@ -225,3 +225,16 @@ test("equipment: a site-pinned role's report is its site's contribution only", a
   assert.equal(truck(site).tripCount, expected("ruh").length);
   assert.deepEqual(truck(site).byPlant.map((p) => p.plantId), [ruh], "no other plant's work in the site view");
 });
+
+// PM review 2026-10-27 P1-3: no implicit "today" on the API.
+test("the reports API requires both days and applies each plant's local day near midnight", async () => {
+  const call = (q: string) => reportsRoute.GET(new NextRequest(`http://test.local/api/reports/trips${q}`, { headers: { authorization: `Bearer ${globalKey}` } }), { params: Promise.resolve({ report: "trips" }) });
+  assert.equal((await call("")).status, 400);
+  assert.equal((await call(`?from=${DAY}`)).status, 400);
+  assert.equal((await call(`?to=${DAY}`)).status, 400);
+  const body = await (await call(`?from=${DAY}&to=${DAY}`)).json();
+  const ours = (body.rows as { id: string; dischargeEnd: string }[]).filter((t) => ids.trips.includes(t.id));
+  // 00:30 Riyadh (21:30 UTC on Nov 30) is in; 23:30 Cairo on Nov 30 is out;
+  // 23:59:59.999 Cairo is in; 00:00 Riyadh on Dec 2 is out.
+  assert.deepEqual(ours.map((t) => t.dischargeEnd).sort(), expected().map((t) => t.dischargeEnd).sort());
+});

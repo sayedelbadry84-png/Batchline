@@ -20,6 +20,7 @@ import {
 // matching reportQueries.ts function, return it as JSON.
 //
 // Example: GET /api/reports/production?from=2026-08-01&to=2026-08-31
+// (both required; each day is the local day of each plant in scope)
 // Authorization: Bearer <REPORTS-scoped API key>
 const REPORTS = {
   production: getProductionReport,
@@ -50,16 +51,21 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const fromRaw = url.searchParams.get("from");
   const toRaw = url.searchParams.get("to");
 
-  // Audit 2026-10-26 P1-C: from/to are calendar days, applied as each
-  // plant's own local day (see reportWindows). They used to be parsed as
-  // server-zone instants, and "to" ended at 23:59:59. Defaults: today and
-  // the 1st of this month, in UTC — an API caller has no display clock, so
-  // it should pass both days explicitly.
-  if ((fromRaw && !isIsoDay(fromRaw)) || (toRaw && !isIsoDay(toRaw))) {
+  // Audit 2026-10-26 P1-C / PM review 2026-10-27 P1-3: from and to are
+  // both REQUIRED calendar days. Each is applied as the local day of the
+  // plant where each record happened, half-open [local midnight, next local
+  // midnight) (see reportWindows). There is no default: "today" differs
+  // between a Riyadh and a Cairo plant around midnight, and a multi-plant
+  // report has no single today; the UTC default this replaced picked the
+  // previous day at 00:30 in Riyadh.
+  if (!fromRaw || !toRaw) {
+    return NextResponse.json({ error: "from and to are required calendar days (YYYY-MM-DD), applied as each plant's local day." }, { status: 400 });
+  }
+  if (!isIsoDay(fromRaw) || !isIsoDay(toRaw)) {
     return NextResponse.json({ error: "from/to must be valid calendar days (YYYY-MM-DD)." }, { status: 400 });
   }
-  const toDay = toRaw ?? new Date().toISOString().slice(0, 10);
-  const fromDay = fromRaw ?? `${toDay.slice(0, 8)}01`;
+  const toDay = toRaw;
+  const fromDay = fromRaw;
   if (fromDay > toDay) return NextResponse.json({ error: "from must not be after to." }, { status: 400 });
 
   // Optional scope — a site rolls up every production line at that site
