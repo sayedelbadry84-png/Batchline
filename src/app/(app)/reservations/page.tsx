@@ -16,7 +16,8 @@ import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
 import { ReservationReminderButton } from "@/components/ReservationReminderButton";
 import { ReservationMixSelect } from "@/components/ReservationMixSelect";
-import { getDateFormatters } from "@/lib/displayTimeZone";
+import { getDateFormatters, getDisplayTimeZone } from "@/lib/displayTimeZone";
+import { zonedIsoDay } from "@/lib/plantDay";
 
 const statusChip: Record<string, string> = {
   REQUESTED: "bg-surface-alt text-ink-muted",
@@ -55,7 +56,10 @@ export default async function ReservationsPage({
   const resultBanner = describeReservationResult(m.result, reservationResult);
   const siteId = await getActiveSiteId(user);
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
-  const selectedDate = isDateParam(dateRaw) ? dateRaw : toDateParam(new Date());
+  // The default day is the plant's local date (PM review 2026-10-27 P2-2).
+  // The pourWindowStart filter below deliberately stays on UTC midnights:
+  // that field is stored as plant wall-clock time (see wallClockDayStart).
+  const selectedDate = isDateParam(dateRaw) ? dateRaw : zonedIsoDay(new Date(), await getDisplayTimeZone());
   // A plain single date input defaulting to "today" plus an optional
   // second (end) date — when both are set and differ, the board covers
   // that whole range instead of one day (RhinoMaster itself has no range

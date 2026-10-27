@@ -8,6 +8,7 @@
 import { ExportBar, type ReportTabContext } from "../reportUi";
 import { getPayrollCostReport } from "@/lib/reportQueries";
 import { ui } from "@/lib/ui";
+import { formatByCurrency } from "@/lib/currencyTotals";
 
 export function PayrollCostTab({ payrollCostData, ctx }: {
   payrollCostData: NonNullable<Awaited<ReturnType<typeof getPayrollCostReport>>>;
@@ -22,9 +23,9 @@ export function PayrollCostTab({ payrollCostData, ctx }: {
           tab="payrollCost"
           from={rangeFrom}
           to={rangeTo}
-          message={`${m.tabs.payrollCost} ${rangeFrom} → ${rangeTo}\n${m.payrollCostReport.lineCount(payrollCostData.lineCount)}\n${m.payrollCostReport.totalCost(payrollCostData.totalCost.toFixed(2))}`}
+          message={`${m.tabs.payrollCost} ${rangeFrom} → ${rangeTo}\n${m.payrollCostReport.lineCount(payrollCostData.lineCount)}\n${m.payrollCostReport.totalCost(formatByCurrency(payrollCostData.totalCost))}`}
           filenameBase={`payroll-cost-${rangeFrom}-${rangeTo}`}
-          headers={["Run", "Employee", "Role", "Wage type", "Wage rate", "Unpaid days", "Gross pay", "Incentive", "Employer GOSI", "Net pay"]}
+          headers={["Run", "Employee", "Role", "Wage type", "Wage rate", "Unpaid days", "Gross pay", "Incentive", "Employer GOSI", "Net pay", "Currency"]}
           rows={payrollCostData.rows.map((l) => [
             l.runNumber,
             l.employee.name,
@@ -36,29 +37,31 @@ export function PayrollCostTab({ payrollCostData, ctx }: {
             l.incentiveAmount,
             l.employerGosi,
             l.netPay,
+            l.currency,
           ])}
         />
         <p className="text-sm text-ink-muted">{m.payrollCostReport.intro}</p>
+        <p className="text-xs text-ink-muted">{m.payrollCostReport.currencyNote}</p>
         <div className="flex flex-wrap gap-4">
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{payrollCostData.lineCount}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.lineCount(payrollCostData.lineCount)}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{payrollCostData.totalGross.toFixed(2)}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(payrollCostData.totalGross)}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.totalGross}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{payrollCostData.totalIncentives.toFixed(2)}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(payrollCostData.totalIncentives)}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.totalIncentives}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{payrollCostData.totalEmployerGosi.toFixed(2)}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(payrollCostData.totalEmployerGosi)}</div>
             <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.totalEmployerGosi}</div>
           </div>
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular font-semibold">{payrollCostData.totalCost.toFixed(2)}</div>
-            <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.totalCost(payrollCostData.totalCost.toFixed(2))}</div>
+            <div className="font-mono text-2xl tabular font-semibold">{formatByCurrency(payrollCostData.totalCost)}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.payrollCostReport.totalCost(formatByCurrency(payrollCostData.totalCost))}</div>
           </div>
         </div>
         <div className={ui.card}>
@@ -80,10 +83,10 @@ export function PayrollCostTab({ payrollCostData, ctx }: {
                   <td className={`${ui.td} font-mono text-xs`} dir="ltr">{l.runNumber}</td>
                   <td className={ui.td}>{l.employee.name}</td>
                   <td className={ui.td}>{l.employee.role}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{l.grossPay.toFixed(2)}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{l.incentiveAmount.toFixed(2)}</td>
-                  <td className={`${ui.td} font-mono tabular`}>{l.employerGosi.toFixed(2)}</td>
-                  <td className={`${ui.td} font-mono tabular font-semibold`}>{l.netPay.toFixed(2)}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{l.grossPay.toFixed(2)} {l.currency}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{l.incentiveAmount.toFixed(2)} {l.currency}</td>
+                  <td className={`${ui.td} font-mono tabular`}>{l.employerGosi.toFixed(2)} {l.currency}</td>
+                  <td className={`${ui.td} font-mono tabular font-semibold`}>{l.netPay.toFixed(2)} {l.currency}</td>
                 </tr>
               ))}
               {payrollCostData.rows.length === 0 && (

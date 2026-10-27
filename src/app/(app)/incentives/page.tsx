@@ -1,6 +1,9 @@
 import Link from "next/link";
+import { getDisplayTimeZone } from "@/lib/displayTimeZone";
+import { zonedIsoDay } from "@/lib/plantDay";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
+import { effectiveSiteId } from "@/lib/siteScope";
 import { getDictionary } from "@/lib/i18n";
 import {
   aggregateIncentiveResults,
@@ -11,6 +14,8 @@ import {
   DEFAULT_POLICY,
   INCENTIVE_ROLE_KEYS,
   type IncentivePolicy,
+  entriesVisibleTo,
+  incentiveVisibility,
 } from "@/lib/incentives";
 import {
   updateIncentivePolicy,
@@ -77,7 +82,11 @@ function ResultCard({
 }
 
 export default async function IncentivesPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
-  await requirePageAccess("incentives");
+  const user = await requirePageAccess("incentives");
+  // PM review 2026-10-27 P1-2: ADMIN (unrestricted, and the payroll role)
+  // sees each person's full cross-plant entitlement; any site-pinned role
+  // sees only the work done at its own site and that site's payout for it.
+  const visibility = incentiveVisibility(effectiveSiteId(user));
   const { dict } = await getDictionary();
   const m = dict.modules.incentives;
   const { tab: tabRaw } = await searchParams;
@@ -89,9 +98,10 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
   // them.
   const siteData = await getIncentiveSiteData();
 
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
+  // Since the 1st of this month, ongoing. The 1st is a calendar day and each
+  // trip counts on its own plant's local day (audit 2026-10-26 P1-C); the
+  // month itself is read on the page's display clock.
+  const monthStartDay = `${zonedIsoDay(new Date(), await getDisplayTimeZone()).slice(0, 8)}01`;
 
   return (
     <div className="flex flex-col gap-8">
@@ -114,10 +124,11 @@ export default async function IncentivesPage({ searchParams }: { searchParams: P
         ))}
       </div>
 
+      {tab === "results" && visibility.kind === "site" && <p className={`${ui.card} text-sm text-warn`}>{dict.modules.reports.incentivesReport.siteScopeNote}</p>}
       {tab === "results" &&
         (await Promise.all(
           INCENTIVE_ROLE_KEYS.map(async (role) => {
-            const entries = await activityForRole(role, monthStart);
+            const entries = entriesVisibleTo(await activityForRole(role, { fromDay: monthStartDay }), visibility);
             const sitePricing = buildSitePricingMap(siteData, role);
             const results = aggregateIncentiveResults(entries, sitePricing);
             return <ResultCard key={role} m={m} role={role} results={results} />;

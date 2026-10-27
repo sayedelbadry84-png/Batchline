@@ -9,8 +9,23 @@ import { ExportBar, type ReportTabContext } from "../reportUi";
 import { getEquipmentProductivityReport } from "@/lib/reportQueries";
 import { ui } from "@/lib/ui";
 
-export function EquipmentTab({ equipmentData, ctx }: {
+// One line per plant the asset worked at, e.g. "Riyadh 1: 4 / 31.5 m³".
+// The parts always add up to the row's total (see getEquipmentProductivityReport).
+function PlantBreakdown({ rows }: { rows: { plantId: string; plantName: string; tripCount: number; volumeM3: number }[] }) {
+  return (
+    <ul className="text-xs text-ink-muted">
+      {rows.map((r) => (
+        <li key={r.plantId}>{r.plantName}: <span className="font-mono tabular" dir="ltr">{r.tripCount} / {r.volumeM3.toFixed(1)} m³</span></li>
+      ))}
+    </ul>
+  );
+}
+
+export function EquipmentTab({ equipmentData, scope, ctx }: {
   equipmentData: NonNullable<Awaited<ReturnType<typeof getEquipmentProductivityReport>>>;
+  // "site": a site-pinned viewer sees only their site's contribution
+  // (PM review 2026-10-27 P1-2); the totals are not the asset's totals.
+  scope: "company" | "site";
   ctx: ReportTabContext;
 }) {
   const { dict, rangeFrom, rangeTo } = ctx;
@@ -24,12 +39,15 @@ export function EquipmentTab({ equipmentData, ctx }: {
           to={rangeTo}
           message={`${m.tabs.equipment} ${rangeFrom} → ${rangeTo}\n${equipmentData.trucks.map((t) => `${t.code}: ${t.tripCount} trips, ${t.volumeM3.toFixed(1)} m³`).join("\n")}`}
           filenameBase={`equipment-${rangeFrom}-${rangeTo}`}
-          headers={["From", "To", "Type", "Code", "Trips", "Volume m3"]}
+          headers={["From", "To", "Scope", "Type", "Code", "Plant", "Trips", "Volume m3"]}
+          // One "All plants" total row per asset, then one row per plant it
+          // worked at; the plant rows sum to the total row.
           rows={[
-            ...equipmentData.trucks.map((t) => [rangeFrom, rangeTo, "Truck", t.code, t.tripCount, t.volumeM3]),
-            ...equipmentData.pumps.map((p) => [rangeFrom, rangeTo, "Pump", p.code, p.tripCount, p.volumeM3]),
+            ...equipmentData.trucks.flatMap((t) => [[rangeFrom, rangeTo, scope === "site" ? "This site only" : "Company", "Truck", t.code, scope === "site" ? "Site total" : "All plants", t.tripCount, t.volumeM3], ...t.byPlant.map((c) => [rangeFrom, rangeTo, scope === "site" ? "This site only" : "Company", "Truck", t.code, c.plantName, c.tripCount, c.volumeM3])]),
+            ...equipmentData.pumps.flatMap((p) => [[rangeFrom, rangeTo, scope === "site" ? "This site only" : "Company", "Pump", p.code, scope === "site" ? "Site total" : "All plants", p.tripCount, p.volumeM3], ...p.byPlant.map((c) => [rangeFrom, rangeTo, scope === "site" ? "This site only" : "Company", "Pump", p.code, c.plantName, c.tripCount, c.volumeM3])]),
           ]}
         />
+        <p className="text-sm text-ink-muted">{scope === "site" ? m.equipmentReport.siteScopeNote : m.equipmentReport.byPlantNote}</p>
         <div className="grid grid-cols-2 gap-6">
           <div className={ui.card}>
             <h2 className="mb-3 font-display text-base font-semibold">{m.equipmentReport.trucksTitle}</h2>
@@ -39,6 +57,7 @@ export function EquipmentTab({ equipmentData, ctx }: {
                   <th className={ui.th}>{m.equipmentReport.col.code}</th>
                   <th className={ui.th}>{m.equipmentReport.col.trips}</th>
                   <th className={ui.th}>{m.equipmentReport.col.volume}</th>
+                  <th className={ui.th}>{m.equipmentReport.col.byPlant}</th>
                 </tr>
               </thead>
               <tbody>
@@ -47,10 +66,11 @@ export function EquipmentTab({ equipmentData, ctx }: {
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{t.code}</td>
                     <td className={`${ui.td} font-mono tabular`}>{t.tripCount}</td>
                     <td className={`${ui.td} font-mono tabular`}>{t.volumeM3.toFixed(1)} m³</td>
+                    <td className={ui.td}><PlantBreakdown rows={t.byPlant} /></td>
                   </tr>
                 ))}
                 {equipmentData.trucks.length === 0 && (
-                  <tr><td className={ui.td} colSpan={3}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                  <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.noRows}</span></td></tr>
                 )}
               </tbody>
             </table>
@@ -63,6 +83,7 @@ export function EquipmentTab({ equipmentData, ctx }: {
                   <th className={ui.th}>{m.equipmentReport.col.code}</th>
                   <th className={ui.th}>{m.equipmentReport.col.trips}</th>
                   <th className={ui.th}>{m.equipmentReport.col.volume}</th>
+                  <th className={ui.th}>{m.equipmentReport.col.byPlant}</th>
                 </tr>
               </thead>
               <tbody>
@@ -71,10 +92,11 @@ export function EquipmentTab({ equipmentData, ctx }: {
                     <td className={`${ui.td} font-mono text-xs`} dir="ltr">{p.code}</td>
                     <td className={`${ui.td} font-mono tabular`}>{p.tripCount}</td>
                     <td className={`${ui.td} font-mono tabular`}>{p.volumeM3.toFixed(1)} m³</td>
+                    <td className={ui.td}><PlantBreakdown rows={p.byPlant} /></td>
                   </tr>
                 ))}
                 {equipmentData.pumps.length === 0 && (
-                  <tr><td className={ui.td} colSpan={3}><span className="text-ink-muted">{m.noRows}</span></td></tr>
+                  <tr><td className={ui.td} colSpan={4}><span className="text-ink-muted">{m.noRows}</span></td></tr>
                 )}
               </tbody>
             </table>

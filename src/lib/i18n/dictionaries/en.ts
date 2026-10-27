@@ -2028,6 +2028,8 @@ const en: typeof ar = {
         ticketCount: (n: number) => `across ${n} completed tickets`,
       },
       profitability: {
+        perCurrencyNote: "Shown per currency. Revenue, cost and margin are never added across currencies, because no conversion rate is defined.",
+        materialCurrencyNote: "Material standard costs have no currency of their own; each is counted in the currency of the plant that batched it.",
         revenue: "Revenue", totalCost: "Total cost", margin: "Margin", marginPct: "Margin %",
         costBreakdown: "Cost breakdown", category: "Category", amount: "Amount",
         materialCost: "Material", laborCost: "Labor (payroll)", maintenanceCost: "Maintenance", fuelCost: "Fuel", utilitiesCost: "Utilities", otherCost: "Other operating",
@@ -2055,9 +2057,11 @@ const en: typeof ar = {
         byProjectCol: { customer: "Customer", project: "Project", trips: "Trips", transit: "Transit", wait: "On-site wait", pour: "Pour", cycle: "Full cycle" },
       },
       equipmentReport: {
+        siteScopeNote: "Your site only: trips and volume your site released. A truck or pump that also worked at other plants has more work than shown here.",
         trucksTitle: "Mixer trucks",
         pumpsTitle: "Pumps",
-        col: { code: "Code", trips: "Trips", volume: "Volume delivered" },
+        col: { code: "Code", trips: "Trips", volume: "Volume delivered", byPlant: "By plant" },
+        byPlantNote: "The total is the asset's work at every plant combined. Each trip counts at the plant that released its ticket, on that plant's local day.",
       },
       qualityReport: {
         intro: "Every cylinder break result within the selected period — the same data behind Overview's pass-rate figure, shown row by row and exportable.",
@@ -2143,6 +2147,7 @@ const en: typeof ar = {
         col: { employee: "Employee", type: "Type", start: "Start", end: "End", days: "Days", status: "Status" },
       },
       payrollCostReport: {
+        currencyNote: "Amounts are shown in each employee's plant currency as it is today; totals are kept per currency and never added across currencies.",
         intro: "Payroll lines from every run whose period starts within the selected window. Total cost is net pay plus the employer's own GOSI share — the real cash cost, same definition markPayrollRunPaid itself uses.",
         lineCount: (n: number) => `${n} payroll lines`,
         totalGross: "Total gross pay",
@@ -2177,6 +2182,8 @@ const en: typeof ar = {
         },
       },
       incentivesReport: {
+        siteScopeNote: "Your site only. These are the trips and deliveries made at your site and the payout your site's policy gives for them. They are not anyone's full incentive: a person who also worked at other plants is paid for that work too, which only payroll (ADMIN) can see.",
+        sitePayoutLabel: "Payout for work at this site",
         intro: "Payout by person for the selected range, split by job — see the Incentives module to change tier policies.",
         col: { name: "Name", role: "Role", trips: "Trips", volume: "Volume poured", sites: "Sites worked", payout: "Payout" },
         volumeBasedNote: "Priced by volume poured (m³), not trip or site count.",

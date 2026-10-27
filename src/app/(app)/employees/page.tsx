@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { formatByCurrency, sumByCurrency } from "@/lib/currencyTotals";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
 import { requirePageAccess } from "@/lib/session";
@@ -22,7 +23,8 @@ import { generatePayrollRun } from "./payroll/actions";
 import { getActiveSiteId, plantScopeWhere } from "@/lib/siteScope";
 import { RoleSelect } from "@/components/RoleSelect";
 import { TERMINATION_TYPES } from "@/lib/endOfService";
-import { getDateFormatters } from "@/lib/displayTimeZone";
+import { getDateFormatters, getDisplayTimeZone } from "@/lib/displayTimeZone";
+import { zonedIsoDay } from "@/lib/plantDay";
 
 const ADMIN_ROLES = ["PLANT_OPERATOR", "QUALITY_SUPERVISOR", "ACCOUNTANT", "DISPATCHER", "ADMIN"] as const;
 const EMPLOYEE_STATUSES = ["ACTIVE", "FROZEN", "REMOVED"] as const;
@@ -91,7 +93,9 @@ export default async function EmployeesPage({
   const isHrTab = isAttendanceTab || isLeaveTab;
   const fixedRole = EMPLOYEE_TAB_ROLE[tab];
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
-  const selectedDate = isDateParam(dateRaw) ? dateRaw : new Date().toISOString().slice(0, 10);
+  // Default day: the plant's local date (PM review 2026-10-27 P2-2).
+  // AttendanceRecord.date itself is a date key, not an instant.
+  const selectedDate = isDateParam(dateRaw) ? dateRaw : zonedIsoDay(new Date(), await getDisplayTimeZone());
 
   // Registration picks a Site by its code, not a specific production line —
   // a person can work either line at a site interchangeably (both share
@@ -177,7 +181,7 @@ export default async function EmployeesPage({
   const payrollRuns = isPayrollTab
     ? await prisma.payrollRun.findMany({
         orderBy: { createdAt: "desc" },
-        include: { lines: { select: { netPay: true } } },
+        include: { lines: { select: { netPay: true, employee: { select: { plant: { select: { currency: true } } } } } } },
       })
     : [];
 
@@ -581,7 +585,8 @@ export default async function EmployeesPage({
                 </thead>
                 <tbody>
                   {payrollRuns.map((r) => {
-                    const total = r.lines.reduce((sum, l) => sum + l.netPay, 0);
+                    // Per currency: a run spans plants in different currencies.
+                    const total = sumByCurrency(r.lines, (l) => l.netPay, (l) => l.employee.plant.currency);
                     return (
                       <tr key={r.id}>
                         <td className={`${ui.td} font-mono text-xs`}>{r.runNumber}</td>
@@ -593,7 +598,7 @@ export default async function EmployeesPage({
                             {m.payroll.statusLabel[r.status as keyof typeof m.payroll.statusLabel] ?? r.status}
                           </span>
                         </td>
-                        <td className={`${ui.td} font-mono tabular`} dir="ltr">{total.toLocaleString()}</td>
+                        <td className={`${ui.td} font-mono tabular`} dir="ltr">{formatByCurrency(total)}</td>
                         <td className={ui.td}>
                           <Link href={`/employees/payroll/${r.id}`} className="text-xs font-medium text-accent-strong hover:underline">
                             {m.payroll.view}

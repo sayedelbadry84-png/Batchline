@@ -85,10 +85,14 @@ async function asUser(userId: string) {
   await prisma.session.create({ data: { userId, tokenHash: hashSessionToken(token), expiresAt: new Date(Date.now() + 60_000) } });
   cookieValues.set("batchline_session", token);
 }
+// Stored as whole minor units, as the application itself now stores every
+// invoice (audit 2026-10-26 P1-B): 100 splits into 86.96 + 13.04, not
+// 86.9565… + 13.0434…, which the journal would rightly refuse to post.
 async function invoice(total = 115) {
+  const subtotal = Math.round((total / 1.15) * 100) / 100;
   const row = await prisma.invoice.create({ data: {
     invoiceNumber: `${prefix}-${randomUUID()}`, customerId, plantId, currency: "SAR",
-    subtotal: total / 1.15, taxAmount: total - total / 1.15, taxRatePct: 15, total,
+    subtotal, taxAmount: Math.round((total - subtotal) * 100) / 100, taxRatePct: 15, total,
     dueDate: new Date(), status: "SENT",
   } });
   invoiceIds.push(row.id);
@@ -326,6 +330,67 @@ test("concurrent invoice generation bills a closed trip only once", async () => 
     await prisma.project.delete({ where: { id: project.id } });
     await prisma.truck.delete({ where: { id: truck.id } });
   }
+});
+// Audit 2026-10-26 P1-B: a fractional volume at 100.01 with 15% tax used
+// to store 110.011 on the line and post it to the journal as-is. Lines are
+// now rounded first, the subtotal is their exact sum, tax is rounded once,
+// and the invoice, its lines and its journal entry carry the same amounts.
+test("invoice amounts are whole minor units and match their journal entry", async () => {
+  await asUser(adminId);
+  const plant = await prisma.plant.create({ data: { name: `${prefix} rounding`, siteId, taxRatePct: 15, currency: "SAR" } });
+  const project = await prisma.project.create({ data: { customerId, name: `${prefix} rounding`, siteAddress: "Test" } });
+  const mix = await prisma.mixDesign.create({ data: { code: `${prefix}-R`, grade: "C25", slumpTargetMm: 100, wcRatio: .5 } });
+  const reservation = await prisma.reservation.create({ data: { reservationNumber: `${prefix}-R`, projectId: project.id, siteId, mixId: mix.id, requestedVolumeM3: 3.4, originalVolumeM3: 3.4, pourWindowStart: new Date() } });
+  const truck = await prisma.truck.create({ data: { plantId: plant.id, code: `${prefix}-R`, drumCapacityM3: 8 } });
+  const tickets = await Promise.all([1.1, 2.3].map((volumeM3, i) => prisma.batchTicket.create({ data: { reservationId: reservation.id, mixId: mix.id, plantId: plant.id, ticketNumber: `${prefix}-R${i}`, volumeM3, status: "COMPLETE" } })));
+  const trips = await Promise.all(tickets.map((ticket) => prisma.trip.create({ data: { batchTicketId: ticket.id, truckId: truck.id, driverId: employeeId, status: "CLOSED", volumeDeliveredM3: ticket.volumeM3 } })));
+  await prisma.priceListEntry.create({ data: { customerId, mixId: mix.id, pricePerM3: 100.01 } });
+  try {
+    try { await billing.generateInvoiceForProject(form({ projectId: project.id })); }
+    catch (error) {
+      if (!(error instanceof Error) || !("digest" in error) || !String(error.digest).startsWith("NEXT_REDIRECT")) throw error;
+    }
+    const saved = await prisma.invoice.findFirstOrThrow({ where: { projectId: project.id }, include: { lines: true } });
+    // 1.1 × 100.01 = 110.011 → 110.01; 2.3 × 100.01 = 230.023 → 230.02.
+    assert.deepEqual(saved.lines.map((l) => l.lineTotal).sort((a, b) => a - b), [110.01, 230.02]);
+    assert.equal(saved.subtotal, 340.03);
+    // 15% of 340.03 is 51.0045, rounded once to 51.00.
+    assert.equal(saved.taxAmount, 51);
+    assert.equal(saved.total, 391.03);
+    const entry = await prisma.journalEntry.findFirstOrThrow({ where: { sourceModule: "Billing", sourceRecordId: saved.id }, include: { lines: { include: { account: true } } } });
+    const byCode = new Map(entry.lines.map((l) => [l.account.code, l]));
+    assert.equal(byCode.get("1100")?.debit, 391.03);
+    assert.equal(byCode.get("4000")?.credit, 340.03);
+    assert.equal(byCode.get("2100")?.credit, 51);
+    for (const value of [...saved.lines.map((l) => l.lineTotal), saved.subtotal, saved.taxAmount, saved.total, ...entry.lines.flatMap((l) => [l.debit, l.credit])]) {
+      assert.equal(Math.round(value * 100) / 100, value, `${value} is not a whole number of minor units`);
+    }
+  } finally {
+    await prisma.invoice.deleteMany({ where: { projectId: project.id } });
+    await prisma.trip.deleteMany({ where: { id: { in: trips.map((t) => t.id) } } });
+    await prisma.batchTicket.deleteMany({ where: { id: { in: tickets.map((t) => t.id) } } });
+    await prisma.reservation.delete({ where: { id: reservation.id } });
+    await prisma.priceListEntry.deleteMany({ where: { customerId, mixId: mix.id } });
+    await prisma.mixDesign.delete({ where: { id: mix.id } });
+    await prisma.project.delete({ where: { id: project.id } });
+    await prisma.truck.delete({ where: { id: truck.id } });
+  }
+});
+test("payments and credit notes refuse a fraction of a minor unit", async () => {
+  await asUser(adminId);
+  const d = await invoice(100);
+  assert.deepEqual(await billing.recordPayment(form({ invoiceId: d.id, amount: "10.004" })), { ok: false, code: "INVALID_INPUT" });
+  assert.deepEqual(await billing.issueCreditNote(form({ invoiceId: d.id, amount: "10.004", reason: "PRICE_ADJUSTMENT" })), { ok: false, code: "INVALID_INPUT" });
+  assert.equal(await prisma.payment.count({ where: { invoiceId: d.id } }), 0);
+  assert.equal(await prisma.creditNote.count({ where: { invoiceId: d.id } }), 0);
+});
+test("the journal refuses an amount that is not a whole minor unit", async () => {
+  const d = await invoice();
+  await assert.rejects(
+    prisma.$transaction(tx => postInvoice(tx, { siteId, currency: "SAR", invoiceId: d.id, subtotal: 110.011, taxAmount: 0, total: 110.011 }), { timeout: 15000 }),
+    /whole minor units/,
+  );
+  assert.equal(await prisma.journalEntry.count({ where: { sourceRecordId: d.id } }), 0);
 });
 test("HR actions reject another site's employee and all leave transitions", async () => {
   await asUser(hrId);
@@ -695,6 +760,57 @@ for (const operation of ["recordPayment", "issueCreditNote", "markInvoiceSent", 
   });
 }
 
+// PM review 2026-10-27 P2-1: paying an end-of-service settlement is one
+// unit — claim, cash movement, journal entry, employee removal and audit.
+async function eosSettlement(label: string) {
+  const employee = await prisma.employee.create({ data: { plantId, name: `${prefix} EOS ${label}`, role: "DRIVER" } });
+  const settlement = await prisma.endOfServiceSettlement.create({ data: {
+    settlementNumber: `${prefix}-EOS-${label}`, employeeId: employee.id, hireDate: new Date("2020-01-01T00:00:00Z"), terminationDate: new Date("2026-01-01T00:00:00Z"),
+    terminationType: "END_OF_CONTRACT", yearsOfService: 6, basicMonthlySalary: 3000, grossEntitlement: 10500, payableAmount: 10500, calculatedById: adminId,
+  } });
+  return { employee, settlement };
+}
+async function cleanupEos(employeeIds: string[], settlementIds: string[]) {
+  const txns = await prisma.cashTransaction.findMany({ where: { category: "END_OF_SERVICE", description: { contains: prefix } }, select: { id: true } });
+  await prisma.journalEntry.deleteMany({ where: { sourceRecordId: { in: txns.map((t) => t.id) } } });
+  await prisma.cashTransaction.deleteMany({ where: { id: { in: txns.map((t) => t.id) } } });
+  await deleteAuditEvents({ recordId: { in: settlementIds } });
+  await prisma.endOfServiceSettlement.deleteMany({ where: { id: { in: settlementIds } } });
+  await prisma.employee.deleteMany({ where: { id: { in: employeeIds } } });
+}
+test("end-of-service payment: two concurrent submissions pay once, with one audit row", async () => {
+  await asUser(adminId);
+  const { employee, settlement } = await eosSettlement("RACE");
+  try {
+    await Promise.allSettled([hr.markEndOfServiceSettlementPaid(form({ id: settlement.id })), hr.markEndOfServiceSettlementPaid(form({ id: settlement.id }))]);
+    assert.equal((await prisma.endOfServiceSettlement.findUniqueOrThrow({ where: { id: settlement.id } })).status, "PAID");
+    const txns = await prisma.cashTransaction.findMany({ where: { category: "END_OF_SERVICE", description: { contains: settlement.settlementNumber } } });
+    assert.equal(txns.length, 1, "paid once");
+    assert.equal(txns[0].amount, 10500);
+    assert.equal(await prisma.journalEntry.count({ where: { sourceRecordId: txns[0].id } }), 1);
+    assert.equal(await prisma.auditEvent.count({ where: { recordId: settlement.id, reasonCode: "END_OF_SERVICE_PAID" } }), 1);
+    assert.equal((await prisma.employee.findUniqueOrThrow({ where: { id: employee.id } })).status, "REMOVED");
+  } finally {
+    await cleanupEos([employee.id], [settlement.id]);
+  }
+});
+test("end-of-service payment: an audit failure leaves no cash, no journal and the settlement unpaid", async () => {
+  await asUser(adminId);
+  const { employee, settlement } = await eosSettlement("AUDIT");
+  const name = `audit_fail_${randomUUID().replaceAll("-", "")}`;
+  try {
+    await prisma.$executeRawUnsafe(`CREATE FUNCTION "${name}"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW."recordId" = '${settlement.id}' AND NEW."reasonCode" = 'END_OF_SERVICE_PAID' THEN RAISE EXCEPTION 'Injected audit failure'; END IF; RETURN NEW; END $$`);
+    await prisma.$executeRawUnsafe(`CREATE TRIGGER "${name}" BEFORE INSERT ON "AuditEvent" FOR EACH ROW EXECUTE FUNCTION "${name}"()`);
+    await assert.rejects(hr.markEndOfServiceSettlementPaid(form({ id: settlement.id })));
+    assert.equal((await prisma.endOfServiceSettlement.findUniqueOrThrow({ where: { id: settlement.id } })).status, "CALCULATED");
+    assert.equal(await prisma.cashTransaction.count({ where: { category: "END_OF_SERVICE", description: { contains: settlement.settlementNumber } } }), 0);
+    assert.notEqual((await prisma.employee.findUniqueOrThrow({ where: { id: employee.id } })).status, "REMOVED");
+  } finally {
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${name}" ON "AuditEvent"`);
+    await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${name}"()`);
+    await cleanupEos([employee.id], [settlement.id]);
+  }
+});
 test("reversal waits for uncommitted global JE allocation", async () => {
   const original = await invoice();
   await prisma.$transaction(tx => postInvoice(tx, { siteId, currency: "SAR", invoiceId: original.id, subtotal: 100, taxAmount: 15, total: 115 }));

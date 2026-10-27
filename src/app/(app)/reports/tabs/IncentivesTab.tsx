@@ -9,6 +9,9 @@ import { getIncentivesReport } from "../incentivesReport";
 import { ExportBar, type ReportTabContext } from "../reportUi";
 import { ui } from "@/lib/ui";
 
+const formatAmounts = (items: { currency: string; amount: number }[]) =>
+  items.length ? items.map((p) => `${p.amount.toLocaleString()} ${p.currency}`).join(" + ") : "0";
+
 export function IncentivesTab({ incentivesData, ctx }: {
   incentivesData: NonNullable<Awaited<ReturnType<typeof getIncentivesReport>>>;
   ctx: ReportTabContext;
@@ -23,18 +26,25 @@ export function IncentivesTab({ incentivesData, ctx }: {
           from={rangeFrom}
           to={rangeTo}
           message={`${m.tabs.incentives} ${rangeFrom} → ${rangeTo}\n${incentivesData.byRole
-            .flatMap((g) => g.rows.map((r) => `${r.name} (${dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role}): ${r.payout.toFixed(0)}`))
+            .flatMap((g) => g.rows.map((r) => `${r.name} (${dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role}): ${formatAmounts(r.payoutByCurrency)}`))
             .join("\n")}`}
           filenameBase={`incentives-${rangeFrom}-${rangeTo}`}
-          headers={["From", "To", "Name", "Role", "Trips", "Volume m3", "Sites", "Payout"]}
+          headers={["From", "To", "Scope", "Name", "Role", "Trips", "Volume m3", "Sites", incentivesData.scope === "site" ? "Payout at this site" : "Payout", "Currency"]}
           rows={incentivesData.byRole.flatMap((g) =>
-            g.rows.map((r) => [rangeFrom, rangeTo, r.name, dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role, r.tripCount, r.volumeM3, r.siteCount, r.payout]),
+            g.rows.flatMap((r) => {
+              const role = dict.modules.incentives.roleLabel[g.role as keyof typeof dict.modules.incentives.roleLabel] ?? g.role;
+              // One CSV row per currency: amounts in different currencies
+              // are never summed into one cell.
+              const amounts = r.payoutByCurrency.length ? r.payoutByCurrency : [{ currency: "", amount: 0 }];
+              return amounts.map((p) => [rangeFrom, rangeTo, incentivesData.scope === "site" ? "This site only" : "All plants", r.name, role, r.tripCount, r.volumeM3, r.siteCount, p.amount, p.currency]);
+            }),
           )}
         />
         <p className="text-sm text-ink-muted">{m.incentivesReport.intro}</p>
+        {incentivesData.scope === "site" && <p className={`${ui.card} text-sm text-warn`}>{m.incentivesReport.siteScopeNote}</p>}
         <div className={ui.card}>
-          <div className="font-mono text-2xl tabular" dir="ltr">{incentivesData.totalPayout.toLocaleString()}</div>
-          <div className="mt-1 text-sm text-ink-muted">{m.incentivesReport.col.payout}</div>
+          <div className="font-mono text-2xl tabular" dir="ltr">{formatAmounts(incentivesData.totalPayoutByCurrency)}</div>
+          <div className="mt-1 text-sm text-ink-muted">{incentivesData.scope === "site" ? m.incentivesReport.sitePayoutLabel : m.incentivesReport.col.payout}</div>
         </div>
         {incentivesData.byRole.map((group) => (
           <div key={group.role} className={ui.card}>
@@ -52,7 +62,7 @@ export function IncentivesTab({ incentivesData, ctx }: {
                   ) : (
                     <th className={ui.th}>{m.incentivesReport.col.trips}</th>
                   )}
-                  <th className={ui.th}>{m.incentivesReport.col.payout}</th>
+                  <th className={ui.th}>{incentivesData.scope === "site" ? m.incentivesReport.sitePayoutLabel : m.incentivesReport.col.payout}</th>
                 </tr>
               </thead>
               <tbody>
@@ -67,7 +77,7 @@ export function IncentivesTab({ incentivesData, ctx }: {
                     ) : (
                       <td className={`${ui.td} font-mono tabular`}>{r.tripCount}</td>
                     )}
-                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{r.payout.toLocaleString()}</td>
+                    <td className={`${ui.td} font-mono tabular`} dir="ltr">{formatAmounts(r.payoutByCurrency)}</td>
                   </tr>
                 ))}
                 {group.rows.length === 0 && (

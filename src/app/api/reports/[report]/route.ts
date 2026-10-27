@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyIntegrationRequest } from "@/lib/integration-auth";
 import { prisma } from "@/lib/prisma";
+import { isIsoDay } from "@/lib/plantDay";
 import {
   getProductionReport,
   getIncomingReport,
@@ -19,6 +20,7 @@ import {
 // matching reportQueries.ts function, return it as JSON.
 //
 // Example: GET /api/reports/production?from=2026-08-01&to=2026-08-31
+// (both required; each day is the local day of each plant in scope)
 // Authorization: Bearer <REPORTS-scoped API key>
 const REPORTS = {
   production: getProductionReport,
@@ -49,17 +51,22 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const fromRaw = url.searchParams.get("from");
   const toRaw = url.searchParams.get("to");
 
-  const to = toRaw ? new Date(`${toRaw}T23:59:59`) : new Date();
-  const from = fromRaw ? new Date(`${fromRaw}T00:00:00`) : (() => {
-    const d = new Date(to);
-    d.setDate(1);
-    d.setHours(0, 0, 0, 0);
-    return d;
-  })();
-
-  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
-    return NextResponse.json({ error: "from/to must be valid dates (YYYY-MM-DD)." }, { status: 400 });
+  // Audit 2026-10-26 P1-C / PM review 2026-10-27 P1-3: from and to are
+  // both REQUIRED calendar days. Each is applied as the local day of the
+  // plant where each record happened, half-open [local midnight, next local
+  // midnight) (see reportWindows). There is no default: "today" differs
+  // between a Riyadh and a Cairo plant around midnight, and a multi-plant
+  // report has no single today; the UTC default this replaced picked the
+  // previous day at 00:30 in Riyadh.
+  if (!fromRaw || !toRaw) {
+    return NextResponse.json({ error: "from and to are required calendar days (YYYY-MM-DD), applied as each plant's local day." }, { status: 400 });
   }
+  if (!isIsoDay(fromRaw) || !isIsoDay(toRaw)) {
+    return NextResponse.json({ error: "from/to must be valid calendar days (YYYY-MM-DD)." }, { status: 400 });
+  }
+  const toDay = toRaw;
+  const fromDay = fromRaw;
+  if (fromDay > toDay) return NextResponse.json({ error: "from must not be after to." }, { status: 400 });
 
   // Optional scope — a site rolls up every production line at that site
   // combined, a plant (line) id narrows to just one line's own numbers.
@@ -72,6 +79,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({ error: "Plant not permitted." }, { status: 403 });
   }
 
-  const data = await REPORTS[report]({ from, to, siteId, plantId });
-  return NextResponse.json({ report, from: from.toISOString(), to: to.toISOString(), siteId: siteId ?? null, plantId: plantId ?? null, ...data });
+  // Audit 2026-10-26 P1-A: every report, the equipment one included, runs
+  // on the key's scope. A site-scoped key used to receive the company-wide
+  // equipment total because getEquipmentProductivityReport ignored scope;
+  // it now receives its site's contributions only. A global key without
+  // ?site= still gets the company-wide total, with each asset's per-plant
+  // breakdown.
+  const data = await REPORTS[report]({ fromDay, toDay, siteId, plantId });
+  return NextResponse.json({ report, from: fromDay, to: toDay, scope: siteId || plantId ? "site" : "company", siteId: siteId ?? null, plantId: plantId ?? null, ...data });
 }

@@ -13,7 +13,8 @@ import { Modal } from "@/components/Modal";
 import { PrintButton } from "@/components/PrintButton";
 import { WhatsAppShareButton } from "@/components/WhatsAppShareButton";
 import { DeliveryGroupRow } from "./DeliveryGroupRow";
-import { getDateFormatters } from "@/lib/displayTimeZone";
+import { getDateFormatters, getDisplayTimeZone } from "@/lib/displayTimeZone";
+import { zonedDayRange, zonedIsoDay } from "@/lib/plantDay";
 
 // A single mixer truck load — the same hard ceiling releaseBatchTicket
 // enforces server-side, so this is display/UX only, not the real gate.
@@ -65,16 +66,18 @@ export default async function ProductionPage({
             : null;
   const siteId = await getActiveSiteId(user);
   const isDateParam = (v: string | undefined): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
-  const selectedDate = isDateParam(dateRaw) ? dateRaw : toDateParam(new Date());
+  // "Today" is the plant's local date, not the server's UTC date, which at
+  // 00:30 in Riyadh is still yesterday (PM review 2026-10-27 P2-2).
+  const zone = await getDisplayTimeZone();
+  const selectedDate = isDateParam(dateRaw) ? dateRaw : zonedIsoDay(new Date(), zone);
   // Optional end date — when set and later than selectedDate, the delivery
   // log covers that whole range instead of one day (same from/to pattern
   // as Reservations and Reports). Never before selectedDate.
   const selectedDateTo = isDateParam(dateToRaw) && dateToRaw >= selectedDate ? dateToRaw : selectedDate;
   const isRange = selectedDate !== selectedDateTo;
-  // Local (no "Z") — matches how releasedAt/pourWindowStart are actually
-  // written elsewhere in this app (see the same note in reservations/page.tsx).
-  const dayStart = new Date(`${selectedDate}T00:00:00`);
-  const dayEnd = new Date(`${addDays(selectedDateTo, 1)}T00:00:00`);
+  // The delivery log filters releasedAt, a real instant (set by the server
+  // at release), so the day is the plant's local day, half-open.
+  const { start: dayStart, end: dayEnd } = zonedDayRange(selectedDate, selectedDateTo, zone);
   const baseUrl = `/production?date=${selectedDate}&dateTo=${selectedDateTo}`;
 
   const [readyReservationsRaw, allDeliveries, projects, approvedMixes, sitesForPicker] = await Promise.all([

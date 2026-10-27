@@ -1,4 +1,5 @@
 import { notFound, redirect } from "next/navigation";
+import { formatByCurrency, sumByCurrency } from "@/lib/currencyTotals";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { ui } from "@/lib/ui";
@@ -47,13 +48,18 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
         })
       : [];
 
-  const totalGross = run.lines.reduce((sum, l) => sum + l.grossPay, 0);
-  const totalIncentives = run.lines.reduce((sum, l) => sum + l.incentiveAmount, 0);
-  const totalAdjustment = run.lines.reduce((sum, l) => sum + l.adjustment, 0);
-  const totalNet = run.lines.reduce((sum, l) => sum + l.netPay, 0);
-  const totalEmployeeGosi = run.lines.reduce((sum, l) => sum + l.employeeGosi, 0);
-  const totalEmployerGosi = run.lines.reduce((sum, l) => sum + l.employerGosi, 0);
-  const totalEmployerCost = totalNet + totalEmployeeGosi + totalEmployerGosi;
+  // A run spans every plant, so its totals are per currency (each line in
+  // its employee's plant currency), the same split markPayrollRunPaid posts
+  // to the ledger (PM review 2026-10-27 P1-1).
+  const lines = run.lines;
+  const byCurrency = (amount: (l: (typeof lines)[number]) => number) => sumByCurrency(lines, amount, (l) => l.employee.plant.currency);
+  const totalGross = byCurrency((l) => l.grossPay);
+  const totalIncentives = byCurrency((l) => l.incentiveAmount);
+  const totalAdjustment = byCurrency((l) => l.adjustment);
+  const totalNet = byCurrency((l) => l.netPay);
+  const totalEmployeeGosi = byCurrency((l) => l.employeeGosi);
+  const totalEmployerGosi = byCurrency((l) => l.employerGosi);
+  const totalEmployerCost = byCurrency((l) => l.netPay + l.employeeGosi + l.employerGosi);
   const isDraft = run.status === "DRAFT";
 
   // WPS (Wage Protection System) salary file — one sheet per site/
@@ -179,31 +185,31 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
         </div>
         <div className={ui.card}>
           <div className="text-xs text-ink-muted">{p.totalGross}</div>
-          <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{totalGross.toLocaleString()}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{formatByCurrency(totalGross)}</div>
         </div>
         <div className={ui.card}>
           <div className="text-xs text-ink-muted">{p.totalIncentives}</div>
-          <div className="mt-1 font-mono text-2xl font-semibold text-good" dir="ltr">{totalIncentives.toLocaleString()}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold text-good" dir="ltr">{formatByCurrency(totalIncentives)}</div>
         </div>
         <div className={ui.card}>
           <div className="text-xs text-ink-muted">{p.totalAdjustment}</div>
-          <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{totalAdjustment.toLocaleString()}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{formatByCurrency(totalAdjustment)}</div>
         </div>
         <div className={ui.card}>
           <div className="text-xs text-ink-muted">{p.totalNet}</div>
-          <div className="mt-1 font-mono text-2xl font-semibold text-good" dir="ltr">{totalNet.toLocaleString()}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold text-good" dir="ltr">{formatByCurrency(totalNet)}</div>
         </div>
         <div className={ui.card}>
           <div className="text-xs text-ink-muted">{p.totalEmployeeGosi}</div>
-          <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{totalEmployeeGosi.toLocaleString()}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{formatByCurrency(totalEmployeeGosi)}</div>
         </div>
         <div className={ui.card}>
           <div className="text-xs text-ink-muted">{p.totalEmployerGosi}</div>
-          <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{totalEmployerGosi.toLocaleString()}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold" dir="ltr">{formatByCurrency(totalEmployerGosi)}</div>
         </div>
         <div className={ui.card}>
           <div className="text-xs text-ink-muted">{p.totalEmployerCost}</div>
-          <div className="mt-1 font-mono text-2xl font-semibold text-critical" dir="ltr">{totalEmployerCost.toLocaleString()}</div>
+          <div className="mt-1 font-mono text-2xl font-semibold text-critical" dir="ltr">{formatByCurrency(totalEmployerCost)}</div>
         </div>
       </div>
 

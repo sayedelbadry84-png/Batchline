@@ -32,7 +32,7 @@ import {
   INCENTIVE_ROLE_KEYS,
   type IncentiveRoleKey,
 } from "@/lib/incentives";
-import { getActiveSiteId } from "@/lib/siteScope";
+import { effectiveSiteId, getActiveSiteId } from "@/lib/siteScope";
 import { REPORT_TABS, type ReportTab } from "./reportUi";
 import { getIncentivesReport } from "./incentivesReport";
 import { getOverviewReport } from "./overviewReport";
@@ -61,7 +61,9 @@ import { EquipmentTab } from "./tabs/EquipmentTab";
 import { WorkersTab } from "./tabs/WorkersTab";
 import { IncentivesTab } from "./tabs/IncentivesTab";
 import { OverviewTab } from "./tabs/OverviewTab";
-import { getDateFormatters } from "@/lib/displayTimeZone";
+import { getDateFormatters, getDisplayTimeZone } from "@/lib/displayTimeZone";
+import { isIsoDay, zonedIsoDay } from "@/lib/plantDay";
+import { incentiveVisibility } from "@/lib/incentives";
 
 export default async function ReportsPage({
   searchParams,
@@ -99,54 +101,59 @@ export default async function ReportsPage({
   const plantId = siteId && sites.find((s) => s.id === siteId)?.plants.some((p) => p.id === plantIdRaw) ? plantIdRaw : undefined;
   const scope = { siteId, plantId };
 
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const defaultFrom = (() => {
-    const d = new Date();
-    d.setDate(1);
-    return d.toISOString().slice(0, 10);
-  })();
-  const rangeFrom = fromRaw || defaultFrom;
-  const rangeTo = toRaw || todayIso;
-  const rangeStart = new Date(`${rangeFrom}T00:00:00`);
-  const rangeEnd = new Date(`${rangeTo}T23:59:59`);
+  // Audit 2026-10-26 P1-C: the range is two calendar days. Each report
+  // applies each plant's own local day to them (see reportWindows in
+  // reportQueries.ts); "today" and "the 1st" default to the page's display
+  // zone, the plant clock every timestamp on this page is shown in. An
+  // invalid ?from/?to falls back to the default instead of becoming an
+  // Invalid Date.
+  const todayIso = zonedIsoDay(new Date(), await getDisplayTimeZone());
+  const defaultFrom = `${todayIso.slice(0, 8)}01`;
+  const rangeFrom = isIsoDay(fromRaw) ? fromRaw : defaultFrom;
+  const rangeTo = isIsoDay(toRaw) ? toRaw : todayIso;
+  const days = { fromDay: rangeFrom, toDay: rangeTo };
 
   const overview = tab === "overview" ? await getOverviewReport(scope) : null;
 
   // --- Data for the non-overview report tabs, only fetched for whichever
   // tab is actually open. ---
-  const production = tab === "production" ? await getProductionReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const incoming = tab === "incoming" ? await getIncomingReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const consumption = tab === "consumption" ? await getConsumptionReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const returnsData = tab === "returns" ? await getReturnsReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const tripsData = tab === "trips" ? await getTripsReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  // Deliberately company-wide regardless of the site/plant filter above —
-  // see the comment on getEquipmentProductivityReport itself.
-  const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport({ from: rangeStart, to: rangeEnd }) : null;
-  const workersData = tab === "workers" ? await getWorkerProductivityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const profitability = tab === "profitability" ? await getProfitabilityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const qualityData = tab === "quality" ? await getQualityReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const production = tab === "production" ? await getProductionReport({ ...days, ...scope }) : null;
+  const incoming = tab === "incoming" ? await getIncomingReport({ ...days, ...scope }) : null;
+  const consumption = tab === "consumption" ? await getConsumptionReport({ ...days, ...scope }) : null;
+  const returnsData = tab === "returns" ? await getReturnsReport({ ...days, ...scope }) : null;
+  const tripsData = tab === "trips" ? await getTripsReport({ ...days, ...scope }) : null;
+  // PM review 2026-10-27 P1-2: an unrestricted viewer (ADMIN) sees each
+  // asset's full cross-plant total with its per-plant breakdown; a
+  // site-pinned role sees only its own site's contribution, and the tab
+  // labels it as such. Same rule for incentives below.
+  const siteRestricted = effectiveSiteId(user);
+  const equipmentData = tab === "equipment" ? await getEquipmentProductivityReport(siteRestricted === null ? days : { ...days, siteId: siteRestricted }) : null;
+  const equipmentScope = siteRestricted === null ? "company" : "site";
+  const workersData = tab === "workers" ? await getWorkerProductivityReport({ ...days, ...scope }) : null;
+  const profitability = tab === "profitability" ? await getProfitabilityReport({ ...days, ...scope }) : null;
+  const qualityData = tab === "quality" ? await getQualityReport({ ...days, ...scope }) : null;
   // No plantId narrowing — see getMaintenanceReport's own comment.
-  const maintenanceData = tab === "maintenance" ? await getMaintenanceReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
+  const maintenanceData = tab === "maintenance" ? await getMaintenanceReport({ ...days, siteId }) : null;
 
   // --- Finance, Sales, Purchasing, Warehouses — site-only scope, no
   // plantId narrowing (see each query function's own comment for why). ---
-  const arAgingData = tab === "arAging" ? await getArAgingReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const apAgingData = tab === "apAging" ? await getApAgingReport({ to: rangeEnd, siteId }) : null;
-  const cashLedgerData = tab === "cashLedger" ? await getCashLedgerReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
-  const salesPipelineData = tab === "salesPipeline" ? await getSalesPipelineReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
-  const quotesData = tab === "quotes" ? await getQuotesReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
-  const purchaseOrdersData = tab === "purchaseOrders" ? await getPurchaseOrdersReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
-  const supplierPerformanceData = tab === "supplierPerformance" ? await getSupplierPerformanceReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
+  const arAgingData = tab === "arAging" ? await getArAgingReport({ ...days, ...scope }) : null;
+  const apAgingData = tab === "apAging" ? await getApAgingReport({ ...days, siteId }) : null;
+  const cashLedgerData = tab === "cashLedger" ? await getCashLedgerReport({ ...days, siteId }) : null;
+  const salesPipelineData = tab === "salesPipeline" ? await getSalesPipelineReport({ ...days, siteId }) : null;
+  const quotesData = tab === "quotes" ? await getQuotesReport({ ...days, siteId }) : null;
+  const purchaseOrdersData = tab === "purchaseOrders" ? await getPurchaseOrdersReport({ ...days, siteId }) : null;
+  const supplierPerformanceData = tab === "supplierPerformance" ? await getSupplierPerformanceReport({ ...days, siteId }) : null;
   // --- Employees — scoped through Employee.plantId, so both siteId and
   // plantId apply here, same as the production-side reports above. ---
-  const attendanceData = tab === "attendance" ? await getAttendanceReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const leaveData = tab === "leave" ? await getLeaveReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const payrollCostData = tab === "payrollCost" ? await getPayrollCostReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
-  const sparePartsData = tab === "spareParts" ? await getSparePartsReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
-  const finishedGoodsData = tab === "finishedGoods" ? await getFinishedGoodsReport({ from: rangeStart, to: rangeEnd, siteId }) : null;
-  const factoryPerformanceData = tab === "factoryPerformance" ? await getFactoryPerformanceReport({ from: rangeStart, to: rangeEnd, ...scope }) : null;
+  const attendanceData = tab === "attendance" ? await getAttendanceReport({ ...days, ...scope }) : null;
+  const leaveData = tab === "leave" ? await getLeaveReport({ ...days, ...scope }) : null;
+  const payrollCostData = tab === "payrollCost" ? await getPayrollCostReport({ ...days, ...scope }) : null;
+  const sparePartsData = tab === "spareParts" ? await getSparePartsReport({ ...days, siteId }) : null;
+  const finishedGoodsData = tab === "finishedGoods" ? await getFinishedGoodsReport({ ...days, siteId }) : null;
+  const factoryPerformanceData = tab === "factoryPerformance" ? await getFactoryPerformanceReport({ ...days, ...scope }) : null;
 
-  const incentivesData = tab === "incentives" ? await getIncentivesReport(rangeStart, rangeEnd) : null;
+  const incentivesData = tab === "incentives" ? await getIncentivesReport(rangeFrom, rangeTo, incentiveVisibility(siteRestricted)) : null;
 
   // Everything a tab needs beyond its own data. Built once and handed to
   // each of them, so a new shared value is added here rather than at
@@ -293,7 +300,7 @@ export default async function ReportsPage({
 
       {tab === "trips" && tripsData && <TripsTab tripsData={tripsData} ctx={ctx} />}
 
-      {tab === "equipment" && equipmentData && <EquipmentTab equipmentData={equipmentData} ctx={ctx} />}
+      {tab === "equipment" && equipmentData && <EquipmentTab equipmentData={equipmentData} scope={equipmentScope} ctx={ctx} />}
 
       {tab === "workers" && workersData && <WorkersTab workersData={workersData} ctx={ctx} workerRole={workerRole} siteId={siteId} plantId={plantId} fromRaw={fromRaw} toRaw={toRaw} />}
 

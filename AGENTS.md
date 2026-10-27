@@ -129,6 +129,14 @@ round to 2 decimals **when persisting**, never only at display. Unrounded subtot
 break ZATCA XML validation, and residual float dust keeps fully-paid invoices out of
 `PAID` forever.
 
+The rule is in `src/lib/money.ts`: an amount an operator types goes through
+`parseMoneyInput` (a third decimal is refused, never rounded); an amount the
+system derives goes through `roundMoney` (half away from zero) at the point it is
+stored. Invoices use `priceInvoice` (`src/lib/billing.ts`): round each line, sum the
+stored lines exactly, tax the subtotal once. `postJournalEntry` refuses any line
+that is not a whole minor unit, so a forgotten rounding fails loudly instead of
+reaching the ledger.
+
 Physical quantities (`volumeM3`, `currentLevelTons`, `actualMassKg`) stay `Float` —
 `inventoryLedger.ts` depends on epsilon comparisons. **Money → Decimal, physics → Float.**
 
@@ -158,6 +166,16 @@ locale's Arabic-Indic digits break. `tests/datetime.test.ts` fails the build if 
 
 `Number.prototype.toLocaleString` is a different method that shares the name — it
 formats money and is deliberately out of scope here (see the `Float` rule above).
+
+**Day boundaries are the plant's too.** A "day", "today" or "this month" in a
+query is a calendar day at the plant where the work happened, never
+`new Date("YYYY-MM-DDT00:00:00")`, `setHours(0, 0, 0, 0)` or
+`toISOString().slice(0, 10)` (all three are the server's UTC day on Vercel). Use
+`src/lib/plantDay.ts`: `zonedDayRange` gives a half-open `[start, end)` — filter
+with `gte`/`lt`, never `lte 23:59:59` — and a report over several plants applies
+each plant's own window (`reportWindows` in `src/lib/reportQueries.ts`) and adds
+the results. Screens outside Reports/Incentives/Payroll still use the old UTC
+day; they are listed in the 2026-10-26 audit PR.
 
 ## Financial paths need transactions
 
@@ -228,10 +246,14 @@ right.
    `tests/indexCoverage.test.ts`. What remains uncovered is the long tail
    of FKs no measured query filters on — add those the same way, from a
    real shape with `EXPLAIN` evidence, never 178 single-column ones blindly.
-3. SCADA/telematics payloads carry no device timestamp, sequence or
-   idempotency key, so a delayed old reading can overwrite a newer one,
-   and neither route is rate limited. `lastUsedAt` is no longer written
-   per request.
+3. SCADA/telematics payloads may carry an optional device timestamp
+   (`observedAt`, validated in `src/lib/telemetry.ts`); gateways that do not
+   send it still get the server's receive time, and there is no sequence or
+   idempotency key, so a delayed old reading from such a gateway can still
+   overwrite a newer one. The only rate control is an in-process burst guard
+   (`allowTelemetryBurst`): on serverless each instance has its own window,
+   so it is not a distributed rate limit. `lastUsedAt` is no longer written
+   per request. (Corrected 2026-10-26 against the code.)
 4. No `script-src`/`style-src` CSP — it needs a per-request nonce and
    there is no middleware; the root layout's inline accent `<style>` is
    the specific blocker. See the comment in `next.config.ts`.

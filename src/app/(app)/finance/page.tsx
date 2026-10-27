@@ -19,7 +19,9 @@ import {
   importBankStatement,
 } from "./actions";
 import { generateInvoiceForProject } from "../billing/actions";
-import { getDateFormatters } from "@/lib/displayTimeZone";
+import { getDateFormatters, getDisplayTimeZone } from "@/lib/displayTimeZone";
+import { formatByCurrency, mergeByCurrency, negateByCurrency, sumByCurrency } from "@/lib/currencyTotals";
+import { isIsoDay, zonedDayRange, zonedDayStart, zonedIsoDay } from "@/lib/plantDay";
 
 const FINANCE_TABS = ["overview", "billing", "payable", "cash", "aging", "reconciliation", "ledger", "vat"] as const;
 type FinanceTab = (typeof FINANCE_TABS)[number];
@@ -108,51 +110,60 @@ async function OverviewTab({
   m: Awaited<ReturnType<typeof getDictionary>>["dict"]["modules"]["finance"];
   siteScope: Record<string, unknown>;
 }) {
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
+  // "This month" starts on the 1st on the page's plant clock, not the
+  // server's UTC day (PM review 2026-10-27 P2-2).
+  const zone = await getDisplayTimeZone();
+  const monthStart = zonedDayStart(`${zonedIsoDay(new Date(), zone).slice(0, 8)}01`, zone);
 
   const [invoices, bills, cashThisMonth, paymentsThisMonth, supplierPaymentsThisMonth] = await Promise.all([
-    prisma.invoice.findMany({ where: { status: { notIn: ["DRAFT", "CANCELLED"] }, ...(siteScope.siteId ? { plant: { siteId: (siteScope as { siteId: string }).siteId } } : {}) }, select: { total: true, payments: { select: { amount: true } }, creditNotes: { select: { amount: true } } } }),
-    prisma.supplierBill.findMany({ where: { status: { notIn: ["CANCELLED"] }, ...siteScope }, select: { total: true, payments: { select: { amount: true } } } }),
-    prisma.cashTransaction.findMany({ where: { occurredAt: { gte: monthStart }, ...siteScope }, select: { direction: true, amount: true } }),
+    prisma.invoice.findMany({ where: { status: { notIn: ["DRAFT", "CANCELLED"] }, ...(siteScope.siteId ? { plant: { siteId: (siteScope as { siteId: string }).siteId } } : {}) }, select: { total: true, currency: true, payments: { select: { amount: true } }, creditNotes: { select: { amount: true } } } }),
+    prisma.supplierBill.findMany({ where: { status: { notIn: ["CANCELLED"] }, ...siteScope }, select: { total: true, currency: true, payments: { select: { amount: true } } } }),
+    prisma.cashTransaction.findMany({ where: { occurredAt: { gte: monthStart }, ...siteScope }, select: { direction: true, amount: true, currency: true } }),
     prisma.payment.findMany({
       where: { paidAt: { gte: monthStart }, ...(siteScope.siteId ? { invoice: { plant: { siteId: (siteScope as { siteId: string }).siteId } } } : {}) },
-      select: { amount: true },
+      select: { amount: true, invoice: { select: { currency: true } } },
     }),
     prisma.supplierPayment.findMany({
       where: { paidAt: { gte: monthStart }, ...(siteScope.siteId ? { supplierBill: { siteId: (siteScope as { siteId: string }).siteId } } : {}) },
-      select: { amount: true },
+      select: { amount: true, supplierBill: { select: { currency: true } } },
     }),
   ]);
 
-  const arOutstanding = invoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
-  const apOutstanding = bills.reduce((sum, b) => sum + Math.max(0, b.total - b.payments.reduce((s, p) => s + p.amount, 0)), 0);
-  const cashIn = cashThisMonth.filter((t) => t.direction === "IN").reduce((s, t) => s + t.amount, 0) + paymentsThisMonth.reduce((s, p) => s + p.amount, 0);
-  const cashOut = cashThisMonth.filter((t) => t.direction === "OUT").reduce((s, t) => s + t.amount, 0) + supplierPaymentsThisMonth.reduce((s, p) => s + p.amount, 0);
-  const net = cashIn - cashOut;
+  // Per currency (PM review 2026-10-27 P1-1). A payment takes its invoice's
+  // currency and a supplier payment its bill's.
+  const arOutstanding = sumByCurrency(invoices, (inv) => invoiceAmountDue(inv), (inv) => inv.currency);
+  const apOutstanding = sumByCurrency(bills, (b) => Math.max(0, b.total - b.payments.reduce((s, p) => s + p.amount, 0)), (b) => b.currency);
+  const cashIn = mergeByCurrency(
+    sumByCurrency(cashThisMonth.filter((t) => t.direction === "IN"), (t) => t.amount, (t) => t.currency),
+    sumByCurrency(paymentsThisMonth, (p) => p.amount, (p) => p.invoice.currency),
+  );
+  const cashOut = mergeByCurrency(
+    sumByCurrency(cashThisMonth.filter((t) => t.direction === "OUT"), (t) => t.amount, (t) => t.currency),
+    sumByCurrency(supplierPaymentsThisMonth, (p) => p.amount, (p) => p.supplierBill.currency),
+  );
+  const net = mergeByCurrency(cashIn, negateByCurrency(cashOut));
 
   return (
     <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
       <div className={ui.card}>
         <div className="text-xs text-ink-muted">{m.overview.arOutstanding}</div>
-        <div className="mt-1 font-mono text-2xl font-semibold">{arOutstanding.toFixed(0)}</div>
+        <div className="mt-1 font-mono text-2xl font-semibold">{formatByCurrency(arOutstanding, 0)}</div>
       </div>
       <div className={ui.card}>
         <div className="text-xs text-ink-muted">{m.overview.apOutstanding}</div>
-        <div className="mt-1 font-mono text-2xl font-semibold">{apOutstanding.toFixed(0)}</div>
+        <div className="mt-1 font-mono text-2xl font-semibold">{formatByCurrency(apOutstanding, 0)}</div>
       </div>
       <div className={ui.card}>
         <div className="text-xs text-ink-muted">{m.overview.cashInMonth}</div>
-        <div className="mt-1 font-mono text-2xl font-semibold text-good">{cashIn.toFixed(0)}</div>
+        <div className="mt-1 font-mono text-2xl font-semibold text-good">{formatByCurrency(cashIn, 0)}</div>
       </div>
       <div className={ui.card}>
         <div className="text-xs text-ink-muted">{m.overview.cashOutMonth}</div>
-        <div className="mt-1 font-mono text-2xl font-semibold text-critical">{cashOut.toFixed(0)}</div>
+        <div className="mt-1 font-mono text-2xl font-semibold text-critical">{formatByCurrency(cashOut, 0)}</div>
       </div>
       <div className={ui.card}>
         <div className="text-xs text-ink-muted">{m.overview.netMonth}</div>
-        <div className={`mt-1 font-mono text-2xl font-semibold ${net >= 0 ? "text-good" : "text-critical"}`}>{net.toFixed(0)}</div>
+        <div className={`mt-1 font-mono text-2xl font-semibold ${net.every((p) => p.amount >= 0) ? "text-good" : "text-critical"}`}>{formatByCurrency(net, 0)}</div>
       </div>
     </div>
   );
@@ -1123,29 +1134,27 @@ async function VatReturnTab({
   fromRaw?: string;
   toRaw?: string;
 }) {
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const defaultFrom = (() => {
-    const d = new Date();
-    d.setDate(1);
-    return d.toISOString().slice(0, 10);
-  })();
-  const rangeFrom = fromRaw || defaultFrom;
-  const rangeTo = toRaw || todayIso;
-  const rangeStart = new Date(`${rangeFrom}T00:00:00`);
-  const rangeEnd = new Date(`${rangeTo}T23:59:59`);
+  // Calendar days on the page's plant clock, half-open (PM review
+  // 2026-10-27 P2-2).
+  const zone = await getDisplayTimeZone();
+  const todayIso = zonedIsoDay(new Date(), zone);
+  const defaultFrom = `${todayIso.slice(0, 8)}01`;
+  const rangeFrom = isIsoDay(fromRaw) ? fromRaw : defaultFrom;
+  const rangeTo = isIsoDay(toRaw) ? toRaw : todayIso;
+  const { start: rangeStart, end: rangeEnd } = zonedDayRange(rangeFrom, rangeTo, zone);
   const siteId = (siteScope as { siteId?: string }).siteId;
 
   const [invoices, creditNotes, bills] = await Promise.all([
     prisma.invoice.findMany({
-      where: { status: { not: "CANCELLED" }, issueDate: { gte: rangeStart, lte: rangeEnd }, ...(siteId ? { plant: { siteId } } : {}) },
+      where: { status: { not: "CANCELLED" }, issueDate: { gte: rangeStart, lt: rangeEnd }, ...(siteId ? { plant: { siteId } } : {}) },
       select: { subtotal: true, taxAmount: true, currency: true },
     }),
     prisma.creditNote.findMany({
-      where: { createdAt: { gte: rangeStart, lte: rangeEnd }, ...(siteId ? { invoice: { plant: { siteId } } } : {}) },
+      where: { createdAt: { gte: rangeStart, lt: rangeEnd }, ...(siteId ? { invoice: { plant: { siteId } } } : {}) },
       include: { invoice: { select: { taxRatePct: true, currency: true } } },
     }),
     prisma.supplierBill.findMany({
-      where: { status: { not: "CANCELLED" }, billDate: { gte: rangeStart, lte: rangeEnd }, ...(siteId ? { siteId } : {}) },
+      where: { status: { not: "CANCELLED" }, billDate: { gte: rangeStart, lt: rangeEnd }, ...(siteId ? { siteId } : {}) },
       select: { subtotal: true, taxAmount: true, currency: true },
     }),
   ]);

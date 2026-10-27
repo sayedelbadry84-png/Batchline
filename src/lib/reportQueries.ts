@@ -2,6 +2,16 @@ import { prisma } from "@/lib/prisma";
 import { type PumpOperatorTrips } from "@/lib/incentives";
 import { invoiceAmountDue } from "@/lib/billing";
 import { AGING_BUCKETS, agingBucket, type AgingBucketKey } from "@/lib/aging";
+import { coveringRange, isIsoDay, plantWindows, zonedDayRange, type PlantWindow, type UtcRange } from "@/lib/plantDay";
+import { FALLBACK_TIME_ZONE } from "@/lib/datetime";
+import { formatByCurrency, mergeByCurrency, negateByCurrency, sumByCurrency, type CurrencyAmount } from "@/lib/currencyTotals";
+
+// Plant.currency's own schema default, for a site with no plant.
+const DEFAULT_PLANT_CURRENCY = "EGP";
+const siteCurrencyOf = (w: ReportWindows) => {
+  const bySite = new Map(w.sites.map((x) => [x.siteId, x.currency]));
+  return (siteId: string) => bySite.get(siteId) ?? DEFAULT_PLANT_CURRENCY;
+};
 
 // One function per exportable report in the Reports module — each takes a
 // plain date range plus an optional scope: siteId rolls up every
@@ -13,27 +23,93 @@ import { AGING_BUCKETS, agingBucket, type AgingBucketKey } from "@/lib/aging";
 // the on-screen table and (eventually) any other consumer without
 // re-deriving the aggregation logic.
 
-export type ReportFilter = { from: Date; to: Date; siteId?: string; plantId?: string };
-
-// For models with their own plantId scalar (BatchTicket, MaterialReceipt,
-// Silo, ...).
-function plantScopeWhere(siteId?: string, plantId?: string) {
-  if (plantId) return { plantId };
-  if (siteId) return { plant: { siteId } };
-  return {};
-}
+// Audit 2026-10-26 P1-C: a report range is a pair of CALENDAR DAYS
+// (YYYY-MM-DD), not two server-zone instants. Each plant in scope gets its
+// own [local midnight of fromDay, local midnight after toDay) from
+// Plant.timezone (see plantDay.ts), and a record counts when its timestamp
+// falls inside the window of the plant where the work happened. A report
+// over several plants therefore applies each plant's own day and adds the
+// results up; nothing is double-counted because each record has exactly
+// one plant. Site-level records (cash, sales, purchasing, warehouses) use
+// their site's zone, taken from the site's plants.
+export type ReportFilter = { fromDay: string; toDay: string; siteId?: string; plantId?: string };
 
 // For Trip, which has no plantId of its own — its "site" is whichever
-// plant released the batch ticket it's fulfilling.
+// plant released the batch ticket it's fulfilling. Still used for the
+// date-less "pending fate" list in the Returns report.
 function tripPlantScopeWhere(siteId?: string, plantId?: string) {
   if (plantId) return { batchTicket: { plantId } };
   if (siteId) return { batchTicket: { plant: { siteId } } };
   return {};
 }
 
-export async function getProductionReport({ from, to, siteId, plantId }: ReportFilter) {
+type SiteWindow = UtcRange & { siteId: string; timeZone: string; currency: string };
+export type ReportWindows = {
+  plants: PlantWindow[];
+  sites: SiteWindow[];
+  cover: UtcRange | null;
+  // Sites whose plants disagree on time zone or currency. Their site-level
+  // records use the earliest plant's, and a report that touches one says so.
+  inconsistentSiteIds: string[];
+};
+
+// The windows for a filter: one per in-scope plant, and one per in-scope
+// site. A plant filter scopes site-level data to that plant's site, as
+// before.
+//
+// PM review 2026-10-27 P2-2: Site has no time zone or currency of its own,
+// so site-level records (cash, purchasing, maintenance, warehouses) take
+// them from the site's EARLIEST-CREATED plant. That is stable: renaming a
+// plant no longer changes which day or currency a site's records fall in
+// (the first version picked the first plant by name). A site whose plants
+// disagree is reported in inconsistentSiteIds rather than silently
+// resolved; scripts/audit-2026-10/site_zone_currency_readonly.sql lists
+// them. A durable fix is a Site.timezone/currency column, which is a schema
+// change for the owner to decide. A site with no plant falls back to the
+// schema defaults.
+export async function reportWindows({ fromDay, toDay, siteId, plantId }: ReportFilter): Promise<ReportWindows> {
+  if (!isIsoDay(fromDay) || !isIsoDay(toDay)) throw new RangeError(`Report days must be YYYY-MM-DD, got ${fromDay}..${toDay}`);
+  const plantRows = await prisma.plant.findMany({
+    where: plantId ? { id: plantId } : siteId ? { siteId } : {},
+    select: { id: true, siteId: true, timezone: true },
+    orderBy: { name: "asc" },
+  });
+  const siteIds = plantId ? [...new Set(plantRows.map((p) => p.siteId))] : siteId ? [siteId] : undefined;
+  const siteRows = await prisma.site.findMany({
+    where: siteIds ? { id: { in: siteIds } } : {},
+    select: { id: true, plants: { select: { timezone: true, currency: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] } },
+  });
+  const plants = plantWindows(plantRows, fromDay, toDay);
+  const sites = siteRows.map((s) => {
+    const timeZone = s.plants[0]?.timezone ?? FALLBACK_TIME_ZONE;
+    const currency = s.plants[0]?.currency ?? DEFAULT_PLANT_CURRENCY;
+    return { siteId: s.id, timeZone, currency, ...zonedDayRange(fromDay, toDay, timeZone) };
+  });
+  const inconsistentSiteIds = siteRows
+    .filter((s) => new Set(s.plants.map((p) => p.timezone)).size > 1 || new Set(s.plants.map((p) => p.currency)).size > 1)
+    .map((s) => s.id);
+  return { plants, sites, cover: coveringRange([...plants, ...sites]), inconsistentSiteIds };
+}
+
+type Range = { gte: Date; lt: Date };
+const range = (w: UtcRange): Range => ({ gte: w.start, lt: w.end });
+// Each builder returns the per-window OR plus, at the top level, the one
+// range covering every window: the OR is the filter, the covering range is
+// there so the existing (…, date) indexes still drive the scan (see
+// tests/indexCoverage.test.ts). An OR over no windows matches nothing,
+// which is the right answer for a scope with no plants.
+function windowed<F extends string>(cover: UtcRange | null, field: F, branches: object[]) {
+  return cover ? { [field]: range(cover), OR: branches } : { OR: branches };
+}
+const onPlant = <F extends string>(w: ReportWindows, field: F) => windowed(w.cover, field, w.plants.map((p) => ({ plantId: p.plantId, [field]: range(p) })));
+const onTripPlant = <F extends string>(w: ReportWindows, field: F) => windowed(w.cover, field, w.plants.map((p) => ({ batchTicket: { plantId: p.plantId }, [field]: range(p) })));
+const onEmployeePlant = <F extends string>(w: ReportWindows, field: F) => windowed(w.cover, field, w.plants.map((p) => ({ employee: { plantId: p.plantId }, [field]: range(p) })));
+const onSite = <F extends string>(w: ReportWindows, field: F) => windowed(w.cover, field, w.sites.map((s) => ({ siteId: s.siteId, [field]: range(s) })));
+
+export async function getProductionReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const tickets = await prisma.batchTicket.findMany({
-    where: { releasedAt: { gte: from, lte: to }, ...plantScopeWhere(siteId, plantId) },
+    where: onPlant(w, "releasedAt"),
     include: { mix: true, reservation: { include: { project: { include: { customer: true } } } }, plant: true },
     orderBy: { releasedAt: "asc" },
   });
@@ -42,9 +118,10 @@ export async function getProductionReport({ from, to, siteId, plantId }: ReportF
   return { rows: tickets, totalVolumeM3, ticketCount: tickets.length, completedCount };
 }
 
-export async function getIncomingReport({ from, to, siteId, plantId }: ReportFilter) {
+export async function getIncomingReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const receipts = await prisma.materialReceipt.findMany({
-    where: { receivedAt: { gte: from, lte: to }, ...plantScopeWhere(siteId, plantId) },
+    where: onPlant(w, "receivedAt"),
     include: { supplier: true, material: true, plant: true, driver: true },
     orderBy: { receivedAt: "asc" },
   });
@@ -52,9 +129,10 @@ export async function getIncomingReport({ from, to, siteId, plantId }: ReportFil
   return { rows: receipts, totalNetKg, receiptCount: receipts.length };
 }
 
-export async function getConsumptionReport({ from, to, siteId, plantId }: ReportFilter) {
+export async function getConsumptionReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const tickets = await prisma.batchTicket.findMany({
-    where: { status: "COMPLETE", batchCompletedAt: { gte: from, lte: to }, ...plantScopeWhere(siteId, plantId) },
+    where: { status: "COMPLETE", ...onPlant(w, "batchCompletedAt") },
     include: { components: { include: { material: true } } },
   });
 
@@ -77,54 +155,51 @@ export async function getConsumptionReport({ from, to, siteId, plantId }: Report
 // uses Material.lastUnitCost — a manually-maintained standard cost, not
 // tied to any specific receipt — so this prices historical volume at
 // today's standard cost, not what was actually paid at the time.
-export async function getProfitabilityReport({ from, to, siteId, plantId }: ReportFilter) {
+export async function getProfitabilityReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const tickets = await prisma.batchTicket.findMany({
-    where: { status: "COMPLETE", batchCompletedAt: { gte: from, lte: to }, ...plantScopeWhere(siteId, plantId) },
-    include: { components: { include: { material: true } } },
+    where: { status: "COMPLETE", ...onPlant(w, "batchCompletedAt") },
+    include: { components: { include: { material: true } }, plant: { select: { currency: true } } },
   });
   const totalVolumeM3 = tickets.reduce((sum, t) => sum + t.volumeM3, 0);
 
-  let materialCost = 0;
+  // PM review 2026-10-27 P1-1: everything below is kept per currency. A
+  // margin of EGP revenue against SAR cost would be meaningless without an
+  // approved conversion, which does not exist.
+  //
+  // Material.lastUnitCost carries no currency of its own (Material has no
+  // plant or site), so a component is priced in the currency of the plant
+  // that batched it. That is an assumption, surfaced to the screen as
+  // materialCostCurrencyAssumed, not a fact.
+  const materialRows: { currency: string; amount: number }[] = [];
   let pricedComponents = 0;
   let unpricedComponents = 0;
   for (const t of tickets) {
     for (const c of t.components) {
       const massKg = c.actualMassKg ?? c.targetMassKg;
       if (c.material.lastUnitCost != null) {
-        materialCost += massKg * c.material.lastUnitCost;
+        materialRows.push({ currency: t.plant.currency, amount: massKg * c.material.lastUnitCost });
         pricedComponents += 1;
       } else {
         unpricedComponents += 1;
       }
     }
   }
+  const materialCost = sumByCurrency(materialRows, (r) => r.amount, (r) => r.currency);
+  const volumeByCurrency = sumByCurrency(tickets, (t) => t.volumeM3, (t) => t.plant.currency);
 
   // Revenue — real issued invoices in the period, same filter shape as the
   // Overview tab's invoicedThisMonth (reports/page.tsx).
   const invoices = await prisma.invoice.findMany({
-    where: {
-      issueDate: { gte: from, lte: to },
-      status: { notIn: ["DRAFT", "CANCELLED"] },
-      ...(plantId ? { plantId } : siteId ? { plant: { siteId } } : {}),
-    },
+    where: { status: { notIn: ["DRAFT", "CANCELLED"] }, ...onPlant(w, "issueDate") },
   });
-  const revenue = invoices.reduce((sum, inv) => sum + inv.total, 0);
+  const revenue = sumByCurrency(invoices, (inv) => inv.total, (inv) => inv.currency);
 
   // CashTransaction has no plantId of its own (it's a site-level ledger) —
-  // a plantId filter still resolves up to that plant's own site, since a
-  // single production line's own cash movements aren't tracked separately
-  // from the rest of its site.
-  let cashSiteId = siteId;
-  if (plantId && !cashSiteId) {
-    const plant = await prisma.plant.findUnique({ where: { id: plantId }, select: { siteId: true } });
-    cashSiteId = plant?.siteId;
-  }
-  const cashWhere = (category: string) => ({
-    direction: "OUT",
-    category,
-    occurredAt: { gte: from, lte: to },
-    ...(cashSiteId ? { siteId: cashSiteId } : {}),
-  });
+  // a plantId filter still resolves up to that plant's own site (the site
+  // windows do that), since a single production line's own cash movements
+  // aren't tracked separately from the rest of its site.
+  const cashWhere = (category: string) => ({ direction: "OUT", category, ...onSite(w, "occurredAt") });
   const [laborTxns, maintenanceTxns, fuelTxns, utilitiesTxns, operatingTxns, otherTxns] = await Promise.all([
     prisma.cashTransaction.findMany({ where: cashWhere("PAYROLL") }),
     prisma.cashTransaction.findMany({ where: cashWhere("MAINTENANCE") }),
@@ -133,43 +208,61 @@ export async function getProfitabilityReport({ from, to, siteId, plantId }: Repo
     prisma.cashTransaction.findMany({ where: cashWhere("OPERATING_EXPENSE") }),
     prisma.cashTransaction.findMany({ where: cashWhere("OTHER") }),
   ]);
-  const sumAmount = (rows: { amount: number }[]) => rows.reduce((sum, r) => sum + r.amount, 0);
-  const laborCost = sumAmount(laborTxns);
-  const maintenanceCost = sumAmount(maintenanceTxns);
-  const fuelCost = sumAmount(fuelTxns);
-  const utilitiesCost = sumAmount(utilitiesTxns);
-  const otherCost = sumAmount(operatingTxns) + sumAmount(otherTxns);
+  const byTxnCurrency = (rows: { amount: number; currency: string }[]) => sumByCurrency(rows, (r) => r.amount, (r) => r.currency);
+  const laborCost = byTxnCurrency(laborTxns);
+  const maintenanceCost = byTxnCurrency(maintenanceTxns);
+  const fuelCost = byTxnCurrency(fuelTxns);
+  const utilitiesCost = byTxnCurrency(utilitiesTxns);
+  const otherCost = byTxnCurrency([...operatingTxns, ...otherTxns]);
+  const totalCost = mergeByCurrency(materialCost, laborCost, maintenanceCost, fuelCost, utilitiesCost, otherCost);
+  const margin = mergeByCurrency(revenue, negateByCurrency(totalCost));
 
-  const totalCost = materialCost + laborCost + maintenanceCost + fuelCost + utilitiesCost + otherCost;
-  const margin = revenue - totalCost;
-  const marginPct = revenue > 0 ? (margin / revenue) * 100 : null;
-
-  const perM3 = (n: number) => (totalVolumeM3 > 0 ? n / totalVolumeM3 : null);
+  // One section per currency. Per-m³ figures divide by the volume batched
+  // at plants that bill in that currency.
+  const currencies = [...new Set([...revenue, ...totalCost, ...volumeByCurrency].map((x) => x.currency))].sort();
+  const pick = (list: CurrencyAmount[], c: string) => list.find((x) => x.currency === c)?.amount ?? 0;
+  const byCurrency = currencies.map((currency) => {
+    const volumeM3 = pick(volumeByCurrency, currency);
+    const rev = pick(revenue, currency);
+    const cost = pick(totalCost, currency);
+    const perM3 = (n: number) => (volumeM3 > 0 ? n / volumeM3 : null);
+    return {
+      currency,
+      volumeM3,
+      revenue: rev,
+      materialCost: pick(materialCost, currency),
+      laborCost: pick(laborCost, currency),
+      maintenanceCost: pick(maintenanceCost, currency),
+      fuelCost: pick(fuelCost, currency),
+      utilitiesCost: pick(utilitiesCost, currency),
+      otherCost: pick(otherCost, currency),
+      totalCost: cost,
+      margin: rev - cost,
+      marginPct: rev > 0 ? ((rev - cost) / rev) * 100 : null,
+      revenuePerM3: perM3(rev),
+      costPerM3: perM3(cost),
+      marginPerM3: perM3(rev - cost),
+    };
+  });
 
   return {
     totalVolumeM3,
+    byCurrency,
     revenue,
-    materialCost,
-    laborCost,
-    maintenanceCost,
-    fuelCost,
-    utilitiesCost,
-    otherCost,
     totalCost,
     margin,
-    marginPct,
-    revenuePerM3: perM3(revenue),
-    costPerM3: perM3(totalCost),
-    marginPerM3: perM3(margin),
+    materialCostCurrencyAssumed: pricedComponents > 0,
     pricedComponents,
     unpricedComponents,
   };
 }
 
-export async function getReturnsReport({ from, to, siteId, plantId }: ReportFilter) {
+export async function getReturnsReport(filter: ReportFilter) {
+  const { siteId, plantId } = filter;
   const scope = tripPlantScopeWhere(siteId, plantId);
+  const w = await reportWindows(filter);
   const returns = await prisma.drumReturn.findMany({
-    where: { trip: { dischargeEnd: { gte: from, lte: to }, ...scope } },
+    where: { trip: onTripPlant(w, "dischargeEnd") },
     include: {
       trip: { include: { truck: true, driver: true, batchTicket: { include: { mix: true, reservation: { include: { project: { include: { customer: true } } } } } } } },
       wasteMemo: { include: { approvedBy: true } },
@@ -201,7 +294,7 @@ export async function getReturnsReport({ from, to, siteId, plantId }: ReportFilt
   // Trip.reclaimedVolumeM3, set by startTrip via getAvailableReclaimForTruck),
   // i.e. materials that never had to be freshly batched at all.
   const reclaimedAndReusedTrips = await prisma.trip.findMany({
-    where: { reclaimedVolumeM3: { not: null }, dischargeEnd: { gte: from, lte: to }, ...tripPlantScopeWhere(siteId, plantId) },
+    where: { reclaimedVolumeM3: { not: null }, ...onTripPlant(w, "dischargeEnd") },
     select: { reclaimedVolumeM3: true },
   });
   const reclaimedAndReusedM3 = reclaimedAndReusedTrips.reduce((sum, t) => sum + (t.reclaimedVolumeM3 ?? 0), 0);
@@ -237,9 +330,10 @@ function minutesBetween(from: Date | null, to: Date | null): number | null {
   return (to.getTime() - from.getTime()) / 60000;
 }
 
-export async function getTripsReport({ from, to, siteId, plantId }: ReportFilter) {
+export async function getTripsReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const trips = await prisma.trip.findMany({
-    where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripPlantScopeWhere(siteId, plantId) },
+    where: { status: "CLOSED", ...onTripPlant(w, "dischargeEnd") },
     include: { truck: true, driver: true, pump: true, batchTicket: { include: { mix: true, reservation: { include: { project: { include: { customer: true } } } } } } },
     orderBy: { dischargeEnd: "asc" },
   });
@@ -291,15 +385,27 @@ export async function getTripsReport({ from, to, siteId, plantId }: ReportFilter
   return { rows: trips, totalDeliveredM3, tripCount: trips.length, avgCycleTimeMin, byProject };
 }
 
-// Deliberately ignores the siteId/plantId scope every other report here
-// takes — a truck or pump is grouped by its own CODE (below), and that
-// code's productivity is meant to read as one number for the asset across
-// wherever it actually worked, not fragmented by whichever plant a filter
-// happens to be narrowed to.
-export async function getEquipmentProductivityReport({ from, to }: Pick<ReportFilter, "from" | "to">) {
+// A truck or pump is grouped by its own CODE (below), and that code's
+// productivity reads as one number for the asset across every plant it
+// worked at that day (owner decision, 2026-10-26: mixers and pumps move
+// between plants, sometimes within one day, and their totals are the sum
+// of all of it). Each trip counts at the plant that released its batch
+// ticket, on that plant's local day (audit P1-C); `byPlant` shows those
+// contributions and always sums to the asset's total.
+//
+// Audit 2026-10-26 P1-A: the filter's site/plant scope is honoured when it
+// is given. A caller that must show the company-wide total (the Reports
+// page, for now, pending the owner's viewing decision) passes no scope; a
+// caller bound to one site (a site-scoped REPORTS API key) passes its site
+// and gets only that site's contributions, never the company total.
+export type EquipmentPlantContribution = { plantId: string; plantName: string; tripCount: number; volumeM3: number };
+export type EquipmentProductivityRow = { code: string; tripCount: number; volumeM3: number; byPlant: EquipmentPlantContribution[] };
+
+export async function getEquipmentProductivityReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const trips = await prisma.trip.findMany({
-    where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to } },
-    include: { truck: true, pump: true },
+    where: { status: "CLOSED", ...onTripPlant(w, "dischargeEnd") },
+    include: { truck: true, pump: true, batchTicket: { select: { plantId: true, plant: { select: { name: true } } } } },
   });
 
   // Grouped by equipment CODE, not the underlying row id — a truck/pump
@@ -309,55 +415,61 @@ export async function getEquipmentProductivityReport({ from, to }: Pick<ReportFi
   // treats it as one thing. No unique constraint on Truck/Pump.code today,
   // so this is a deliberate merge-by-business-identity, not a DB-enforced
   // one.
-  const byTruck = new Map<string, { code: string; tripCount: number; volumeM3: number }>();
-  const byPump = new Map<string, { code: string; tripCount: number; volumeM3: number }>();
-  for (const t of trips) {
+  const add = (map: Map<string, EquipmentProductivityRow>, code: string, t: (typeof trips)[number]) => {
     const vol = t.volumeDeliveredM3 ?? 0;
-    const truckEntry = byTruck.get(t.truck.code) ?? { code: t.truck.code, tripCount: 0, volumeM3: 0 };
-    truckEntry.tripCount += 1;
-    truckEntry.volumeM3 += vol;
-    byTruck.set(t.truck.code, truckEntry);
-
-    if (t.pumpId && t.pump) {
-      const pumpEntry = byPump.get(t.pump.code) ?? { code: t.pump.code, tripCount: 0, volumeM3: 0 };
-      pumpEntry.tripCount += 1;
-      pumpEntry.volumeM3 += vol;
-      byPump.set(t.pump.code, pumpEntry);
+    const entry = map.get(code) ?? { code, tripCount: 0, volumeM3: 0, byPlant: [] };
+    entry.tripCount += 1;
+    entry.volumeM3 += vol;
+    let plant = entry.byPlant.find((c) => c.plantId === t.batchTicket.plantId);
+    if (!plant) {
+      plant = { plantId: t.batchTicket.plantId, plantName: t.batchTicket.plant.name, tripCount: 0, volumeM3: 0 };
+      entry.byPlant.push(plant);
     }
-  }
-
-  return {
-    trucks: Array.from(byTruck.values()).sort((a, b) => b.volumeM3 - a.volumeM3),
-    pumps: Array.from(byPump.values()).sort((a, b) => b.volumeM3 - a.volumeM3),
+    plant.tripCount += 1;
+    plant.volumeM3 += vol;
+    map.set(code, entry);
   };
+  const byTruck = new Map<string, EquipmentProductivityRow>();
+  const byPump = new Map<string, EquipmentProductivityRow>();
+  for (const t of trips) {
+    add(byTruck, t.truck.code, t);
+    if (t.pumpId && t.pump) add(byPump, t.pump.code, t);
+  }
+  const sorted = (map: Map<string, EquipmentProductivityRow>) =>
+    Array.from(map.values())
+      .map((r) => ({ ...r, byPlant: r.byPlant.sort((a, b) => b.volumeM3 - a.volumeM3) }))
+      .sort((a, b) => b.volumeM3 - a.volumeM3);
+
+  return { trucks: sorted(byTruck), pumps: sorted(byPump) };
 }
 
 // Every role that physically moves material, in one activity report — not
 // payout-focused (see the Incentives module for that), just "who did how
 // much" across all five roles' own source of trips/deliveries.
-export async function getWorkerProductivityReport({ from, to, siteId, plantId }: ReportFilter) {
-  const tripScope = tripPlantScopeWhere(siteId, plantId);
-  const receiptScope = plantScopeWhere(siteId, plantId);
+export async function getWorkerProductivityReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
+  const tripScope = onTripPlant(w, "dischargeEnd");
+  const receiptScope = onPlant(w, "receivedAt");
 
   const [driverTrips, operatorTrips, assistantTrips, bulkerReceipts, waterReceipts] = await Promise.all([
     prisma.trip.findMany({
-      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripScope },
+      where: { status: "CLOSED", ...tripScope },
       select: { driverId: true, driver: { select: { name: true, code: true } }, volumeDeliveredM3: true },
     }),
     prisma.trip.findMany({
-      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, pumpOperatorId: { not: null }, ...tripScope },
+      where: { status: "CLOSED", pumpOperatorId: { not: null }, ...tripScope },
       select: { pumpOperatorId: true, pumpOperatorCrew: { select: { name: true, code: true } }, volumeDeliveredM3: true },
     }),
     prisma.trip.findMany({
-      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, pumpAssistantId: { not: null }, ...tripScope },
+      where: { status: "CLOSED", pumpAssistantId: { not: null }, ...tripScope },
       select: { pumpAssistantId: true, pumpAssistantCrew: { select: { name: true, code: true } }, volumeDeliveredM3: true },
     }),
     prisma.materialReceipt.findMany({
-      where: { receivedAt: { gte: from, lte: to }, material: { type: "CEMENT" }, ...receiptScope },
+      where: { material: { type: "CEMENT" }, ...receiptScope },
       select: { driverId: true, driverName: true, driver: { select: { name: true, code: true } }, netWeightKg: true },
     }),
     prisma.materialReceipt.findMany({
-      where: { receivedAt: { gte: from, lte: to }, material: { type: "WATER" }, ...receiptScope },
+      where: { material: { type: "WATER" }, ...receiptScope },
       select: { driverId: true, driverName: true, driver: { select: { name: true, code: true } }, netWeightKg: true },
     }),
   ]);
@@ -415,7 +527,8 @@ export async function getWorkerProductivityReport({ from, to, siteId, plantId }:
 // month-scoped, not range-scoped), kept separate rather than shared since
 // the two callers' time windows don't line up. Covers all five incentive
 // roles, not just PUMP_OPERATOR, since any of them can now use this method.
-export async function getVolumeTripDetailsForRole(role: string, { from, to, siteId, plantId }: ReportFilter): Promise<PumpOperatorTrips[]> {
+export async function getVolumeTripDetailsForRole(role: string, filter: ReportFilter): Promise<PumpOperatorTrips[]> {
+  const w = await reportWindows(filter);
   const byId = new Map<string, PumpOperatorTrips>();
   const push = (id: string | null | undefined, name: string | null | undefined, volumeM3: number, reachM: number | null) => {
     if (!id || !name) return;
@@ -423,19 +536,19 @@ export async function getVolumeTripDetailsForRole(role: string, { from, to, site
     entry.trips.push({ volumeM3, reachM });
     byId.set(id, entry);
   };
-  const tripScope = tripPlantScopeWhere(siteId, plantId);
-  const receiptScope = plantScopeWhere(siteId, plantId);
+  const tripScope = onTripPlant(w, "dischargeEnd");
+  const receiptScope = onPlant(w, "receivedAt");
 
   if (role === "MIXER_DRIVER") {
     const trips = await prisma.trip.findMany({
-      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, ...tripScope },
+      where: { status: "CLOSED", ...tripScope },
       select: { driverId: true, driver: { select: { name: true } }, volumeDeliveredM3: true },
     });
     for (const t of trips) push(t.driverId, t.driver.name, t.volumeDeliveredM3 ?? 0, null);
   } else if (role === "PUMP_OPERATOR" || role === "PUMP_ASSISTANT") {
     const crewField = role === "PUMP_OPERATOR" ? "pumpOperatorId" : "pumpAssistantId";
     const trips = await prisma.trip.findMany({
-      where: { status: "CLOSED", dischargeEnd: { gte: from, lte: to }, [crewField]: { not: null }, ...tripScope },
+      where: { status: "CLOSED", [crewField]: { not: null }, ...tripScope },
       select: {
         pumpOperatorId: true,
         pumpAssistantId: true,
@@ -453,7 +566,7 @@ export async function getVolumeTripDetailsForRole(role: string, { from, to, site
   } else if (role === "BULKER_DRIVER" || role === "WATER_TANKER_DRIVER") {
     const materialType = role === "BULKER_DRIVER" ? "CEMENT" : "WATER";
     const receipts = await prisma.materialReceipt.findMany({
-      where: { receivedAt: { gte: from, lte: to }, material: { type: materialType }, ...receiptScope },
+      where: { material: { type: materialType }, ...receiptScope },
       select: { driverId: true, driverName: true, driver: { select: { name: true } }, netWeightKg: true },
     });
     for (const r of receipts) {
@@ -474,12 +587,10 @@ export async function getVolumeTripDetailsForRole(role: string, { from, to, site
 // just excluded from the summary pass-rate figure.
 const FINAL_STRENGTH_AGE_DAYS = 28;
 
-export async function getQualityReport({ from, to, siteId, plantId }: ReportFilter) {
+export async function getQualityReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const results = await prisma.labResult.findMany({
-    where: {
-      testedOn: { gte: from, lte: to },
-      testBatch: { trip: tripPlantScopeWhere(siteId, plantId) },
-    },
+    where: { OR: w.plants.map((p) => ({ testedOn: range(p), testBatch: { trip: { batchTicket: { plantId: p.plantId } } } })) },
     include: {
       testBatch: { include: { trip: { include: { batchTicket: { include: { mix: true, reservation: { include: { project: { include: { customer: true } } } } } } } } } },
     },
@@ -499,18 +610,23 @@ export async function getQualityReport({ from, to, siteId, plantId }: ReportFilt
 // getEquipmentProductivityReport's own comment explains for why it
 // ignores scope entirely; this one at least has a real siteId scalar to
 // filter by.
-export async function getMaintenanceReport({ from, to, siteId }: Pick<ReportFilter, "from" | "to" | "siteId">) {
+export async function getMaintenanceReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const tickets = await prisma.maintenanceTicket.findMany({
-    where: { createdAt: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+    where: onSite(w, "createdAt"),
     include: { assignedTo: { select: { name: true } } },
     orderBy: { createdAt: "asc" },
   });
 
   const openCount = tickets.filter((t) => t.status === "OPEN" || t.status === "IN_PROGRESS").length;
   const totalDowntimeHours = tickets.reduce((sum, t) => sum + (t.downtimeHours ?? 0), 0);
-  const totalCost = tickets.reduce((sum, t) => sum + (t.laborCost ?? 0) + (t.partsCost ?? 0), 0);
+  // Ticket costs carry no currency; a site's tickets are costed in its
+  // site's currency (see reportWindows).
+  const siteCurrency = siteCurrencyOf(w);
+  const totalCost = sumByCurrency(tickets, (t) => (t.laborCost ?? 0) + (t.partsCost ?? 0), (t) => siteCurrency(t.siteId));
+  const rows = tickets.map((t) => ({ ...t, currency: siteCurrency(t.siteId) }));
 
-  return { rows: tickets, ticketCount: tickets.length, openCount, totalDowntimeHours, totalCost };
+  return { rows, ticketCount: tickets.length, openCount, totalDowntimeHours, totalCost };
 }
 
 // ---------------------------------------------------------------------------
@@ -522,8 +638,10 @@ export async function getMaintenanceReport({ from, to, siteId }: Pick<ReportFilt
 // reports/page.tsx stays uniform.
 // ---------------------------------------------------------------------------
 
-function emptyBucketTotals(): Record<AgingBucketKey, number> {
-  return Object.fromEntries(AGING_BUCKETS.map((b) => [b.key, 0])) as Record<AgingBucketKey, number>;
+function bucketsByCurrency<T extends { bucket: AgingBucketKey; amountDue: number }>(rows: T[], currency: (r: T) => string): Record<AgingBucketKey, CurrencyAmount[]> {
+  return Object.fromEntries(
+    AGING_BUCKETS.map((b) => [b.key, sumByCurrency(rows.filter((r) => r.bucket === b.key), (r) => r.amountDue, currency)]),
+  ) as Record<AgingBucketKey, CurrencyAmount[]>;
 }
 
 // Every SENT invoice still owed anything, as of `to` — same amount-due math
@@ -534,19 +652,23 @@ function emptyBucketTotals(): Record<AgingBucketKey, number> {
 // PAID ones are excluded by the amountDue > 0 filter rather than by status,
 // so an invoice marked PAID that still somehow carries a balance still
 // surfaces here instead of silently vanishing.
-export async function getArAgingReport({ to, siteId, plantId }: ReportFilter) {
+export async function getArAgingReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
+  // "As of toDay" is the end of that local day at each invoice's plant.
+  const asOf = new Map(w.plants.map((p) => [p.plantId, new Date(p.end.getTime() - 1)]));
   const invoices = await prisma.invoice.findMany({
-    where: { status: "SENT", issueDate: { lte: to }, ...plantScopeWhere(siteId, plantId) },
+    where: { status: "SENT", OR: w.plants.map((p) => ({ plantId: p.plantId, issueDate: { lt: p.end } })) },
     include: { payments: true, creditNotes: true, customer: true, project: true },
   });
   const rows = invoices
-    .map((inv) => ({ ...inv, amountDue: invoiceAmountDue(inv), bucket: agingBucket(inv.dueDate, to) }))
+    .map((inv) => ({ ...inv, amountDue: invoiceAmountDue(inv), bucket: agingBucket(inv.dueDate, asOf.get(inv.plantId!)!) }))
     .filter((inv) => inv.amountDue > 0.01)
     .sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
 
-  const byBucket = emptyBucketTotals();
-  for (const r of rows) byBucket[r.bucket] += r.amountDue;
-  const totalOutstanding = rows.reduce((sum, r) => sum + r.amountDue, 0);
+  // Per currency (PM review 2026-10-27 P1-1): an EGP and a SAR receivable
+  // are never one number.
+  const byBucket = bucketsByCurrency(rows, (r) => r.currency);
+  const totalOutstanding = sumByCurrency(rows, (r) => r.amountDue, (r) => r.currency);
 
   return { rows, byBucket, totalOutstanding, invoiceCount: rows.length };
 }
@@ -555,23 +677,24 @@ export async function getArAgingReport({ to, siteId, plantId }: ReportFilter) {
 // bucketed the same way. No plantId scope: SupplierBill (like every other
 // Finance model here) is site-level, not per-line — see getMaintenanceReport's
 // own comment for the same reasoning.
-export async function getApAgingReport({ to, siteId }: Pick<ReportFilter, "to" | "siteId">) {
+export async function getApAgingReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
+  const asOf = new Map(w.sites.map((s) => [s.siteId, new Date(s.end.getTime() - 1)]));
   const bills = await prisma.supplierBill.findMany({
-    where: { status: { in: ["UNPAID", "PARTIALLY_PAID"] }, billDate: { lte: to }, ...(siteId ? { siteId } : {}) },
+    where: { status: { in: ["UNPAID", "PARTIALLY_PAID"] }, OR: w.sites.map((s) => ({ siteId: s.siteId, billDate: { lt: s.end } })) },
     include: { payments: true, supplier: true, purchaseOrder: { select: { poNumber: true } } },
   });
   const rows = bills
     .map((bill) => {
       const paid = bill.payments.reduce((sum, p) => sum + p.amount, 0);
       const amountDue = Math.max(0, bill.total - paid);
-      return { ...bill, amountDue, bucket: agingBucket(bill.dueDate, to) };
+      return { ...bill, amountDue, bucket: agingBucket(bill.dueDate, asOf.get(bill.siteId)!) };
     })
     .filter((bill) => bill.amountDue > 0.01)
     .sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
 
-  const byBucket = emptyBucketTotals();
-  for (const r of rows) byBucket[r.bucket] += r.amountDue;
-  const totalOutstanding = rows.reduce((sum, r) => sum + r.amountDue, 0);
+  const byBucket = bucketsByCurrency(rows, (r) => r.currency);
+  const totalOutstanding = sumByCurrency(rows, (r) => r.amountDue, (r) => r.currency);
 
   return { rows, byBucket, totalOutstanding, billCount: rows.length };
 }
@@ -579,32 +702,36 @@ export async function getApAgingReport({ to, siteId }: Pick<ReportFilter, "to" |
 // Every cash movement in the period — the same CashTransaction rows the
 // Finance module's own Cash tab shows on screen, here as a dated, exportable
 // list with category totals. No plantId scope, same reasoning as AP aging.
-export async function getCashLedgerReport({ from, to, siteId }: Pick<ReportFilter, "from" | "to" | "siteId">) {
+export async function getCashLedgerReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const rows = await prisma.cashTransaction.findMany({
-    where: { occurredAt: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+    where: onSite(w, "occurredAt"),
     include: { site: { select: { name: true } }, createdBy: { select: { name: true } } },
     orderBy: { occurredAt: "asc" },
   });
-  const totalIn = rows.filter((t) => t.direction === "IN").reduce((sum, t) => sum + t.amount, 0);
-  const totalOut = rows.filter((t) => t.direction === "OUT").reduce((sum, t) => sum + t.amount, 0);
+  const totalIn = sumByCurrency(rows.filter((t) => t.direction === "IN"), (t) => t.amount, (t) => t.currency);
+  const totalOut = sumByCurrency(rows.filter((t) => t.direction === "OUT"), (t) => t.amount, (t) => t.currency);
 
-  const byCategory = new Map<string, { category: string; in: number; out: number }>();
+  // One row per (category, currency).
+  const byCategory = new Map<string, { category: string; currency: string; in: number; out: number }>();
   for (const t of rows) {
-    const entry = byCategory.get(t.category) ?? { category: t.category, in: 0, out: 0 };
+    const key = `${t.category}::${t.currency}`;
+    const entry = byCategory.get(key) ?? { category: t.category, currency: t.currency, in: 0, out: 0 };
     if (t.direction === "IN") entry.in += t.amount; else entry.out += t.amount;
-    byCategory.set(t.category, entry);
+    byCategory.set(key, entry);
   }
 
-  return { rows, totalIn, totalOut, net: totalIn - totalOut, byCategory: Array.from(byCategory.values()), txnCount: rows.length };
+  return { rows, totalIn, totalOut, net: mergeByCurrency(totalIn, negateByCurrency(totalOut)), byCategory: Array.from(byCategory.values()), txnCount: rows.length };
 }
 
 // The sales funnel for opportunities opened within the period — a period
 // view of the same pipeline the Sales dashboard shows live, plus a WON/LOST
 // win rate. No plantId: Opportunity is booked at the site level (see that
 // model's own comment — the specific line is a production-time decision).
-export async function getSalesPipelineReport({ from, to, siteId }: Pick<ReportFilter, "from" | "to" | "siteId">) {
+export async function getSalesPipelineReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const rows = await prisma.opportunity.findMany({
-    where: { createdAt: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+    where: onSite(w, "createdAt"),
     include: { customer: true, owner: { select: { name: true } }, mix: { select: { code: true } } },
     orderBy: { createdAt: "asc" },
   });
@@ -634,9 +761,10 @@ export async function getSalesPipelineReport({ from, to, siteId }: Pick<ReportFi
 // accepted (see convertQuoteLineToReservation), so this is the sales
 // module's own close-rate figure. Same site-only scope as the pipeline
 // report above.
-export async function getQuotesReport({ from, to, siteId }: Pick<ReportFilter, "from" | "to" | "siteId">) {
+export async function getQuotesReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const rows = await prisma.quote.findMany({
-    where: { createdAt: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+    where: onSite(w, "createdAt"),
     include: { customer: true, preparedBy: { select: { name: true } } },
     orderBy: { createdAt: "asc" },
   });
@@ -644,8 +772,8 @@ export async function getQuotesReport({ from, to, siteId }: Pick<ReportFilter, "
   const declinedCount = rows.filter((q) => q.status === "DECLINED").length;
   const respondedCount = acceptedCount + declinedCount;
   const conversionRate = respondedCount > 0 ? (acceptedCount / respondedCount) * 100 : null;
-  const totalValue = rows.reduce((sum, q) => sum + q.total, 0);
-  const acceptedValue = rows.filter((q) => q.status === "ACCEPTED").reduce((sum, q) => sum + q.total, 0);
+  const totalValue = sumByCurrency(rows, (q) => q.total, (q) => q.currency);
+  const acceptedValue = sumByCurrency(rows.filter((q) => q.status === "ACCEPTED"), (q) => q.total, (q) => q.currency);
 
   return { rows, quoteCount: rows.length, acceptedCount, declinedCount, conversionRate, totalValue, acceptedValue };
 }
@@ -655,25 +783,28 @@ export async function getQuotesReport({ from, to, siteId }: Pick<ReportFilter, "
 // screen doesn't have (its "Incoming" counterpart in this same module only
 // covers what's actually been received). Site-only, same as PurchaseOrder's
 // own scalar.
-export async function getPurchaseOrdersReport({ from, to, siteId }: Pick<ReportFilter, "from" | "to" | "siteId">) {
+export async function getPurchaseOrdersReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const rows = await prisma.purchaseOrder.findMany({
-    where: { orderDate: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+    where: onSite(w, "orderDate"),
     include: { supplier: true, createdBy: { select: { name: true } } },
     orderBy: { orderDate: "asc" },
   });
-  const totalValue = rows.reduce((sum, o) => sum + o.total, 0);
+  const totalValue = sumByCurrency(rows, (o) => o.total, (o) => o.currency);
   const openCount = rows.filter((o) => o.status === "SENT" || o.status === "PARTIALLY_RECEIVED").length;
   const nowMs = Date.now();
   const overdueCount = rows.filter(
     (o) => o.expectedDate && o.expectedDate.getTime() < nowMs && o.status !== "RECEIVED" && o.status !== "CANCELLED",
   ).length;
 
-  const bySupplierMap = new Map<string, { supplierName: string; orderCount: number; value: number }>();
+  // One row per (supplier, currency).
+  const bySupplierMap = new Map<string, { supplierName: string; currency: string; orderCount: number; value: number }>();
   for (const o of rows) {
-    const entry = bySupplierMap.get(o.supplierId) ?? { supplierName: o.supplier.name, orderCount: 0, value: 0 };
+    const key = `${o.supplierId}::${o.currency}`;
+    const entry = bySupplierMap.get(key) ?? { supplierName: o.supplier.name, currency: o.currency, orderCount: 0, value: 0 };
     entry.orderCount += 1;
     entry.value += o.total;
-    bySupplierMap.set(o.supplierId, entry);
+    bySupplierMap.set(key, entry);
   }
 
   return {
@@ -695,9 +826,10 @@ export async function getPurchaseOrdersReport({ from, to, siteId }: Pick<ReportF
 // honest-default disclosures (see e.g. carbon.ts). Supplier.leadTimeDays and
 // rejectionRatePct are surfaced alongside as the two numbers already kept on
 // file for each supplier, not recomputed here.
-export async function getSupplierPerformanceReport({ from, to, siteId }: Pick<ReportFilter, "from" | "to" | "siteId">) {
+export async function getSupplierPerformanceReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const orders = await prisma.purchaseOrder.findMany({
-    where: { orderDate: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+    where: onSite(w, "orderDate"),
     include: { supplier: true },
   });
 
@@ -707,7 +839,7 @@ export async function getSupplierPerformanceReport({ from, to, siteId }: Pick<Re
     leadTimeDaysOnFile: number | null;
     rejectionRatePct: number;
     orderCount: number;
-    totalValue: number;
+    totalValue: CurrencyAmount[];
     receivedCount: number;
     onTimeCount: number;
   };
@@ -721,12 +853,12 @@ export async function getSupplierPerformanceReport({ from, to, siteId }: Pick<Re
         leadTimeDaysOnFile: o.supplier.leadTimeDays,
         rejectionRatePct: o.supplier.rejectionRatePct,
         orderCount: 0,
-        totalValue: 0,
+        totalValue: [],
         receivedCount: 0,
         onTimeCount: 0,
       } satisfies Row);
     entry.orderCount += 1;
-    entry.totalValue += o.total;
+    entry.totalValue = mergeByCurrency(entry.totalValue, [{ currency: o.currency, amount: o.total }]);
     if (o.status === "RECEIVED") {
       entry.receivedCount += 1;
       if (!o.expectedDate || o.updatedAt.getTime() <= o.expectedDate.getTime()) entry.onTimeCount += 1;
@@ -736,7 +868,8 @@ export async function getSupplierPerformanceReport({ from, to, siteId }: Pick<Re
 
   const rows = Array.from(bySupplier.values())
     .map((e) => ({ ...e, onTimeRatePct: e.receivedCount > 0 ? (e.onTimeCount / e.receivedCount) * 100 : null }))
-    .sort((a, b) => b.totalValue - a.totalValue);
+    // Ranked by order count: values in different currencies are not compared.
+    .sort((a, b) => b.orderCount - a.orderCount);
 
   return { rows, supplierCount: rows.length };
 }
@@ -745,12 +878,10 @@ export async function getSupplierPerformanceReport({ from, to, siteId }: Pick<Re
 // Employee.plantId (Employee has no siteId scalar of its own), same nested
 // filter shape plantScopeWhere already uses for models with a direct
 // plantId.
-export async function getAttendanceReport({ from, to, siteId, plantId }: ReportFilter) {
+export async function getAttendanceReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const rows = await prisma.attendanceRecord.findMany({
-    where: {
-      date: { gte: from, lte: to },
-      employee: plantId ? { plantId } : siteId ? { plant: { siteId } } : {},
-    },
+    where: onEmployeePlant(w, "date"),
     include: { employee: { select: { name: true, code: true, role: true } } },
     orderBy: { date: "asc" },
   });
@@ -764,12 +895,10 @@ export async function getAttendanceReport({ from, to, siteId, plantId }: ReportF
 
 // Leave requests starting within the period — same employee scope as
 // Attendance above.
-export async function getLeaveReport({ from, to, siteId, plantId }: ReportFilter) {
+export async function getLeaveReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const rows = await prisma.leaveRequest.findMany({
-    where: {
-      startDate: { gte: from, lte: to },
-      employee: plantId ? { plantId } : siteId ? { plant: { siteId } } : {},
-    },
+    where: onEmployeePlant(w, "startDate"),
     include: { employee: { select: { name: true, code: true, role: true } }, approvedBy: { select: { name: true } } },
     orderBy: { startDate: "asc" },
   });
@@ -791,12 +920,14 @@ export async function getLeaveReport({ from, to, siteId, plantId }: ReportFilter
 // markPayrollRunPaid's own real-cash-cost definition: net pay plus the
 // employer's own GOSI share — the employee's own GOSI is already netted out
 // of netPay, so adding it again here would double-count it.
-export async function getPayrollCostReport({ from, to, siteId, plantId }: ReportFilter) {
+export async function getPayrollCostReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
+  const byPlant = new Map(w.plants.map((p) => [p.plantId, p]));
   const runs = await prisma.payrollRun.findMany({
-    where: { periodStart: { gte: from, lte: to } },
+    where: { periodStart: w.cover ? range(w.cover) : { lt: new Date(0) } },
     include: {
       lines: {
-        include: { employee: { select: { name: true, code: true, role: true, plantId: true, plant: { select: { siteId: true } } } } },
+        include: { employee: { select: { name: true, code: true, role: true, plantId: true, plant: { select: { siteId: true, currency: true } } } } },
       },
     },
     orderBy: { periodStart: "asc" },
@@ -804,17 +935,26 @@ export async function getPayrollCostReport({ from, to, siteId, plantId }: Report
 
   const rows = runs.flatMap((run) =>
     run.lines
-      .filter((l) => (plantId ? l.employee.plantId === plantId : siteId ? l.employee.plant.siteId === siteId : true))
-      .map((l) => ({ ...l, runNumber: run.runNumber, runStatus: run.status, periodStart: run.periodStart, periodEnd: run.periodEnd })),
+      .filter((l) => {
+        const p = byPlant.get(l.employee.plantId);
+        return !!p && run.periodStart >= p.start && run.periodStart < p.end;
+      })
+      .map((l) => ({ ...l, currency: l.employee.plant.currency, runNumber: run.runNumber, runStatus: run.status, periodStart: run.periodStart, periodEnd: run.periodEnd })),
   );
 
-  const totalGross = rows.reduce((sum, l) => sum + l.grossPay, 0);
-  const totalNet = rows.reduce((sum, l) => sum + l.netPay, 0);
-  const totalEmployerGosi = rows.reduce((sum, l) => sum + l.employerGosi, 0);
-  const totalIncentives = rows.reduce((sum, l) => sum + l.incentiveAmount, 0);
-  const totalCost = totalNet + totalEmployerGosi;
+  // PayrollLine stores no currency: a line is shown in its employee's
+  // plant's currency AS OF NOW. markPayrollRunPaid posts per site in the
+  // site's currency, so this matches the ledger unless an employee changed
+  // plant or a plant changed currency after the run; a currency snapshot on
+  // PayrollLine would make it exact and is listed as a follow-up.
+  const by = (amount: (l: (typeof rows)[number]) => number) => sumByCurrency(rows, amount, (l) => l.currency);
+  const totalGross = by((l) => l.grossPay);
+  const totalNet = by((l) => l.netPay);
+  const totalEmployerGosi = by((l) => l.employerGosi);
+  const totalIncentives = by((l) => l.incentiveAmount);
+  const totalCost = by((l) => l.netPay + l.employerGosi);
 
-  return { rows, lineCount: rows.length, totalGross, totalNet, totalEmployerGosi, totalIncentives, totalCost };
+  return { rows, lineCount: rows.length, totalGross, totalNet, totalEmployerGosi, totalIncentives, totalCost, currencyFromCurrentPlant: true };
 }
 
 // Spare-parts receipts and issuances within the period, plus each touched
@@ -826,20 +966,21 @@ export async function getPayrollCostReport({ from, to, siteId, plantId }: Report
 // keyed by sparePartId+site; see that tab's own comment), computed here
 // rather than imported since the tab's version isn't date-ranged. No
 // plantId: spare parts are a site-level warehouse, not per-line.
-export async function getSparePartsReport({ from, to, siteId }: Pick<ReportFilter, "from" | "to" | "siteId">) {
+export async function getSparePartsReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const [receipts, orderIssuances, directIssuances, allReceiptsForBalance, allOrderIssuancesForBalance, allDirectIssuancesForBalance] = await Promise.all([
     prisma.sparePartReceipt.findMany({
-      where: { receivedAt: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+      where: onSite(w, "receivedAt"),
       include: { sparePart: true, site: { select: { name: true } }, supplier: { select: { name: true } }, receivedBy: { select: { name: true } } },
       orderBy: { receivedAt: "asc" },
     }),
     prisma.maintenanceOrderPart.findMany({
-      where: { issuedAt: { gte: from, lte: to } },
+      where: { OR: w.sites.map((s) => ({ issuedAt: range(s), order: { ticket: { siteId: s.siteId } } })) },
       include: { sparePart: true, order: { include: { ticket: { select: { siteId: true } } } }, issuedBy: { select: { name: true } } },
       orderBy: { issuedAt: "asc" },
     }),
     prisma.sparePartIssuance.findMany({
-      where: { issuedAt: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+      where: onSite(w, "issuedAt"),
       include: { sparePart: true, site: { select: { name: true } }, issuedBy: { select: { name: true } } },
       orderBy: { issuedAt: "asc" },
     }),
@@ -847,7 +988,8 @@ export async function getSparePartsReport({ from, to, siteId }: Pick<ReportFilte
     prisma.maintenanceOrderPart.findMany({ select: { sparePartId: true, quantity: true, order: { select: { ticket: { select: { siteId: true } } } } } }),
     prisma.sparePartIssuance.findMany({ select: { sparePartId: true, siteId: true, quantity: true } }),
   ]);
-  const orderIssuancesInScope = siteId ? orderIssuances.filter((i) => i.order.ticket.siteId === siteId) : orderIssuances;
+  // Already limited to the in-scope sites by the windows above.
+  const orderIssuancesInScope = orderIssuances;
 
   const inQty = new Map<string, number>();
   for (const r of allReceiptsForBalance) inQty.set(`${r.sparePartId}::${r.siteId}`, (inQty.get(`${r.sparePartId}::${r.siteId}`) ?? 0) + r.quantity);
@@ -874,22 +1016,29 @@ export async function getSparePartsReport({ from, to, siteId }: Pick<ReportFilte
     return { key, partCode: part?.code ?? sparePartId, partName: part?.name ?? "", balance: (inQty.get(key) ?? 0) - (outQty.get(key) ?? 0) };
   }).sort((a, b) => a.partCode.localeCompare(b.partCode));
 
-  const totalReceivedValue = receipts.reduce((sum, r) => sum + r.quantity * r.unitCost, 0);
-  const totalIssuedValue = orderIssuancesInScope.reduce((sum, i) => sum + i.lineTotal, 0) + directIssuances.reduce((sum, i) => sum + i.quantity * i.unitCost, 0);
+  // Spare-part costs carry no currency; a site's warehouse is valued in its
+  // site's currency (see reportWindows).
+  const siteCurrency = siteCurrencyOf(w);
+  const totalReceivedValue = sumByCurrency(receipts, (r) => r.quantity * r.unitCost, (r) => siteCurrency(r.siteId));
+  const totalIssuedValue = mergeByCurrency(
+    sumByCurrency(orderIssuancesInScope, (i) => i.lineTotal, (i) => siteCurrency(i.order.ticket.siteId)),
+    sumByCurrency(directIssuances, (i) => i.quantity * i.unitCost, (i) => siteCurrency(i.siteId)),
+  );
   const issuanceCount = orderIssuancesInScope.length + directIssuances.length;
   const lowStockCount = balances.filter((b) => b.balance <= 0).length;
 
-  return { receipts, issuances: orderIssuancesInScope, directIssuances, balances, receiptCount: receipts.length, issuanceCount, totalReceivedValue, totalIssuedValue, lowStockCount };
+  return { receipts, issuances: orderIssuancesInScope, directIssuances, balances, receiptCount: receipts.length, issuanceCount, totalReceivedValue, totalIssuedValue, lowStockCount, siteCurrencyById: Object.fromEntries(w.sites.map((x) => [x.siteId, x.currency])) };
 }
 
 // The Finished Goods equivalent of the Spare Parts report above — IN
 // (produced) vs OUT (shipped/sold/consumed) movements in the period, plus
 // each touched product's all-time balance as of `to`, same derived-balance
 // convention as the Warehouses module's own Finished Goods tab.
-export async function getFinishedGoodsReport({ from, to, siteId }: Pick<ReportFilter, "from" | "to" | "siteId">) {
+export async function getFinishedGoodsReport(filter: ReportFilter) {
+  const w = await reportWindows(filter);
   const [movements, allMovementsForBalance] = await Promise.all([
     prisma.finishedProductMovement.findMany({
-      where: { occurredAt: { gte: from, lte: to }, ...(siteId ? { siteId } : {}) },
+      where: onSite(w, "occurredAt"),
       include: { product: true, site: { select: { name: true } }, recordedBy: { select: { name: true } } },
       orderBy: { occurredAt: "asc" },
     }),
@@ -925,27 +1074,30 @@ export async function getFinishedGoodsReport({ from, to, siteId }: Pick<ReportFi
 // Attendance reports instead of recomputing any of their logic — a
 // convenience quarterly summary, not a compliance record, so nothing here
 // is persisted.
-export async function getFactoryPerformanceReport({ from, to, siteId, plantId }: ReportFilter) {
-  const quarters: { label: string; start: Date; end: Date }[] = [];
-  let cursor = new Date(from.getFullYear(), Math.floor(from.getMonth() / 3) * 3, 1);
-  while (cursor <= to) {
-    const quarterEnd = new Date(cursor.getFullYear(), cursor.getMonth() + 3, 0, 23, 59, 59, 999);
-    const start = cursor.getTime() > from.getTime() ? cursor : from;
-    const end = quarterEnd.getTime() < to.getTime() ? quarterEnd : to;
-    const q = Math.floor(cursor.getMonth() / 3) + 1;
-    quarters.push({ label: `${cursor.getFullYear()} Q${q}`, start, end });
-    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 3, 1);
+export async function getFactoryPerformanceReport({ fromDay, toDay, siteId, plantId }: ReportFilter) {
+  // Calendar quarters as calendar days, clipped to the requested range;
+  // each quarter's reports then apply each plant's own local day.
+  const quarters: { label: string; fromDay: string; toDay: string }[] = [];
+  let y = Number(fromDay.slice(0, 4));
+  let m = Math.floor((Number(fromDay.slice(5, 7)) - 1) / 3) * 3;
+  for (;;) {
+    const qStart = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+    if (qStart > toDay) break;
+    const qEnd = new Date(Date.UTC(y, m + 3, 0)).toISOString().slice(0, 10);
+    quarters.push({ label: `${y} Q${m / 3 + 1}`, fromDay: qStart < fromDay ? fromDay : qStart, toDay: qEnd > toDay ? toDay : qEnd });
+    m += 3;
+    if (m >= 12) { m = 0; y += 1; }
   }
 
   const rows = await Promise.all(
     quarters.map(async (q) => {
-      const range = { from: q.start, to: q.end, siteId, plantId };
+      const quarterFilter = { fromDay: q.fromDay, toDay: q.toDay, siteId, plantId };
       const [profitability, production, returns, finishedGoods, attendance] = await Promise.all([
-        getProfitabilityReport(range),
-        getProductionReport(range),
-        getReturnsReport(range),
-        getFinishedGoodsReport({ from: q.start, to: q.end, siteId }),
-        getAttendanceReport(range),
+        getProfitabilityReport(quarterFilter),
+        getProductionReport(quarterFilter),
+        getReturnsReport(quarterFilter),
+        getFinishedGoodsReport(quarterFilter),
+        getAttendanceReport(quarterFilter),
       ]);
       const customerIds = new Set(
         production.rows.map((t) => t.reservation?.project?.customer?.id).filter((id): id is string => !!id),
@@ -955,6 +1107,7 @@ export async function getFactoryPerformanceReport({ from, to, siteId, plantId }:
       return {
         label: q.label,
         productionCost: profitability.totalCost,
+        productionCostLabel: formatByCurrency(profitability.totalCost),
         concreteVolumeM3: production.totalVolumeM3,
         finishedGoodsShippedQty: finishedGoods.shippedQty,
         returnedVolumeM3: returns.totalReturnedM3,

@@ -148,6 +148,12 @@ driver app (`/driver`) automatically instead of the back office.
   dashboard override) — real endpoints, tested directly with `curl`, not
   mocked UI. Results surface on the Fleet and Silos screens (last position,
   "sensor 9:47 PM" vs "no sensor feed").
+- **Report export API** — `GET /api/reports/<production|incoming|consumption|returns|trips|equipment|workers>?from=YYYY-MM-DD&to=YYYY-MM-DD`
+  with a REPORTS-scoped key. `from` and `to` are both required (400 otherwise):
+  each is a calendar day applied as the local day of each plant in scope,
+  `[local midnight, next local midnight)`, so there is no single "today" to
+  default to across plants in different zones. A site-scoped key gets only its
+  site's data; the response carries `scope` ("site" or "company").
 - **Reports & KPIs** (`/reports`) — daily/7-day production volume, average
   batch deviation, cylinder pass rate, slump conformance, return rate,
   average truck cycle time, and silo days-of-cover, all computed live from
@@ -810,17 +816,21 @@ real scale readout). Financial reporting now covers invoiced revenue and AR
 aging (Phase 6, above); revenue *per m³* and material cost variance still
 need a cost-accounting layer (standard vs. actual material cost per batch)
 that hasn't been built — the Reports page says so explicitly rather than
-showing a fabricated number. Invoices also have no cancel/edit path yet
-(see Phase 6's known limitation). Multi-currency exists at the data level
+showing a fabricated number. An invoice can be cancelled (`cancelInvoice`,
+with a reversing journal entry) only while it has no payment, credit note or
+ZATCA document; there is still no edit path for an issued invoice — a
+correction is a credit note. Multi-currency exists at the data level
 (`Plant.currency`, and invoices inherit their project's plant currency) but
-nothing converts between currencies or displays a consolidated multi-plant
-total yet.
+nothing converts between currencies; totals that span plants in different
+currencies (the Incentives report, for one) are shown per currency, never
+summed. (README corrected 2026-10-26 against the code; see the audit PR.)
 
 A few simplifications worth knowing about: batch completion picks the
 *first* matching silo/hopper for a material type rather than an
 operator-chosen one (Reports' silo days-of-cover inherits the same
 limitation when two silos share a material type); delivered volume before a
 return is the reservation's requested volume rather than a measured
-unit-weight test; and the delivery photo is stored as a base64 data URL in
-the database (fine for demo volumes — swap for real object storage, e.g.
-S3-compatible, before production traffic).
+unit-weight test. Delivery photos are stored in private Vercel Blob storage
+(`src/lib/blob.ts`, `access: "private"`) and served through the
+authenticated `/api/files` route; only the blob's path is kept in the
+database.

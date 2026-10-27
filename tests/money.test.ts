@@ -42,3 +42,65 @@ test("an amount too large to hold exactly in minor units is refused", () => {
   assert.equal(parseMoneyInput("900719925474099.91"), null, "beyond safe minor units must not enter the ledger");
   assert.equal(parseMoneyInput("99999999999999999999.99"), null);
 });
+
+// Audit 2026-10-26 P1-B: the rounding policy for derived amounts.
+test("derived amounts round to the minor unit, half away from zero", async () => {
+  const { roundMoney, roundMoneyMinor } = await import("../src/lib/money");
+  assert.equal(1.1 * 100.01, 110.01100000000001, "the unrounded product the invoice used to store");
+  assert.equal(roundMoney(1.1 * 100.01), 110.01);
+  assert.equal(roundMoney(1.005), 1.01, "binary noise must not push a half down");
+  assert.equal(roundMoney(51.0045), 51);
+  assert.equal(roundMoney(51.005), 51.01);
+  assert.equal(roundMoney(-1.005), -1.01);
+  assert.equal(roundMoney(1000 / 3), 333.33);
+  assert.equal(roundMoneyMinor(2000 * (2 / 3)), 133333);
+  assert.equal(Object.is(roundMoney(-0.001), -0), false, "no negative zero");
+  assert.throws(() => roundMoney(Number.NaN), RangeError);
+  assert.throws(() => roundMoney(Number.POSITIVE_INFINITY), RangeError);
+});
+
+test("whole minor units are recognised; fractions of one are not", async () => {
+  const { isWholeMinorUnits } = await import("../src/lib/money");
+  for (const ok of [0, 0.3, 0.1 + 0.2, 110.01, 391.03, 1e9]) assert.equal(isWholeMinorUnits(ok), true, String(ok));
+  for (const bad of [110.011, 1.1 * 100.01, 1000 / 3, Number.NaN, Number.POSITIVE_INFINITY]) assert.equal(isWholeMinorUnits(bad), false, String(bad));
+});
+
+test("an invoice is priced per line, summed exactly, then taxed once", async () => {
+  const { priceInvoice } = await import("../src/lib/billing");
+  const priced = priceInvoice([{ volumeM3: 1.1, unitPrice: 100.01 }, { volumeM3: 2.3, unitPrice: 100.01 }], 15);
+  assert.deepEqual(priced.lines.map((l) => l.lineTotal), [110.01, 230.02]);
+  assert.equal(priced.subtotal, 340.03);
+  assert.equal(priced.taxAmount, 51);
+  assert.equal(priced.total, 391.03);
+  // Rounding each line first can differ from rounding the raw sum: three
+  // lines of 0.005 are 0.01 each (0.03), while their raw sum 0.015 rounds
+  // to 0.02. The stored lines are what the customer sees, so they win.
+  const many = priceInvoice([{ volumeM3: 1, unitPrice: 0.005 }, { volumeM3: 1, unitPrice: 0.005 }, { volumeM3: 1, unitPrice: 0.005 }], 0);
+  assert.equal(many.subtotal, 0.03);
+  assert.equal(priceInvoice([{ volumeM3: 3, unitPrice: 100 }], 0).taxAmount, 0);
+});
+
+test("end-of-service payable is a whole minor unit", async () => {
+  const { calculateEndOfServiceEntitlement } = await import("../src/lib/endOfService");
+  const result = calculateEndOfServiceEntitlement({
+    hireDate: new Date("2020-01-01T00:00:00Z"),
+    terminationDate: new Date("2023-01-01T00:00:00Z"),
+    terminationType: "RESIGNATION",
+    basicMonthlySalary: 10000.01,
+  });
+  assert.equal(Math.round(result.payableAmount * 100) / 100, result.payableAmount);
+});
+
+// PM review 2026-10-27 P1-1: money is added up within one currency only.
+test("per-currency totals never add SAR to EGP", async () => {
+  const { sumByCurrency, mergeByCurrency, negateByCurrency, formatByCurrency, amountIn } = await import("../src/lib/currencyTotals");
+  const rows = [{ c: "SAR", a: 100 }, { c: "EGP", a: 250 }, { c: "SAR", a: 50.5 }];
+  const totals = sumByCurrency(rows, (r) => r.a, (r) => r.c);
+  assert.deepEqual(totals, [{ currency: "EGP", amount: 250 }, { currency: "SAR", amount: 150.5 }]);
+  assert.equal(amountIn(totals, "SAR"), 150.5);
+  const net = mergeByCurrency(totals, negateByCurrency([{ currency: "SAR", amount: 200 }]));
+  assert.deepEqual(net, [{ currency: "EGP", amount: 250 }, { currency: "SAR", amount: -49.5 }]);
+  assert.equal(formatByCurrency(totals), "250.00 EGP + 150.50 SAR");
+  assert.equal(formatByCurrency([]), "0");
+  assert.ok(!formatByCurrency(totals).includes("400.5"), "the cross-currency sum appears nowhere");
+});

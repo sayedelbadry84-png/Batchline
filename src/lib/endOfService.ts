@@ -5,6 +5,8 @@
 // before relying on this for a real settlement — this computes the
 // statutory floor, not necessarily what a specific contract promises.
 
+import { roundMoney } from "./money";
+
 export const TERMINATION_TYPES = ["RESIGNATION", "TERMINATED_BY_EMPLOYER", "END_OF_CONTRACT", "SPECIAL_CASE"] as const;
 export type TerminationType = (typeof TERMINATION_TYPES)[number];
 
@@ -62,6 +64,9 @@ export function calculateEndOfServiceEntitlement({ hireDate, terminationDate, te
     yearsOfService,
     grossEntitlement,
     resignationMultiplier: multiplier,
-    payableAmount: grossEntitlement * multiplier,
+    // Rounded to the minor unit here, where the settlement amount is
+    // decided (audit 2026-10-26 P1-B): a resignation multiplier of 1/3
+    // otherwise stores and posts a fraction of a halala.
+    payableAmount: roundMoney(grossEntitlement * multiplier),
   };
 }

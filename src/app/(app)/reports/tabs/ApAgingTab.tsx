@@ -9,6 +9,7 @@ import { ExportBar, type ReportTabContext } from "../reportUi";
 import { AGING_BUCKETS } from "@/lib/aging";
 import { getApAgingReport } from "@/lib/reportQueries";
 import { ui } from "@/lib/ui";
+import { formatByCurrency } from "@/lib/currencyTotals";
 
 export function ApAgingTab({ apAgingData, ctx }: {
   apAgingData: NonNullable<Awaited<ReturnType<typeof getApAgingReport>>>;
@@ -23,9 +24,9 @@ export function ApAgingTab({ apAgingData, ctx }: {
           tab="apAging"
           from={rangeFrom}
           to={rangeTo}
-          message={`${dict.modules.finance.aging.apTitle} — ${rangeTo}\n${m.apAgingReport.billCount(apAgingData.billCount)}\n${m.apAgingReport.totalOutstanding(apAgingData.totalOutstanding.toFixed(2))}`}
+          message={`${dict.modules.finance.aging.apTitle} — ${rangeTo}\n${m.apAgingReport.billCount(apAgingData.billCount)}\n${m.apAgingReport.totalOutstanding(formatByCurrency(apAgingData.totalOutstanding))}`}
           filenameBase={`ap-aging-${rangeTo}`}
-          headers={["Bill", "Supplier", "PO", "Bill date", "Due date", "Bucket", "Amount due"]}
+          headers={["Bill", "Supplier", "PO", "Bill date", "Due date", "Bucket", "Amount due", "Currency"]}
           rows={apAgingData.rows.map((bill) => [
             bill.billNumber,
             bill.supplier.name,
@@ -34,13 +35,14 @@ export function ApAgingTab({ apAgingData, ctx }: {
             new Date(bill.dueDate).toISOString(),
             bill.bucket,
             bill.amountDue,
+            bill.currency,
           ])}
         />
         <p className="text-sm text-ink-muted">{m.apAgingReport.intro}</p>
         <div className="flex flex-wrap gap-4">
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{apAgingData.totalOutstanding.toFixed(2)}</div>
-            <div className="mt-1 text-sm text-ink-muted">{m.apAgingReport.totalOutstanding(apAgingData.totalOutstanding.toFixed(2))}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(apAgingData.totalOutstanding)}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.apAgingReport.totalOutstanding(formatByCurrency(apAgingData.totalOutstanding))}</div>
           </div>
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{apAgingData.billCount}</div>
@@ -48,7 +50,7 @@ export function ApAgingTab({ apAgingData, ctx }: {
           </div>
           {AGING_BUCKETS.map((b) => (
             <div key={b.key} className={ui.card}>
-              <div className="font-mono text-xl tabular">{apAgingData.byBucket[b.key].toFixed(0)}</div>
+              <div className="font-mono text-xl tabular">{formatByCurrency(apAgingData.byBucket[b.key], 0)}</div>
               <div className="mt-1 text-sm text-ink-muted">{dict.modules.finance.aging.bucketLabel[b.key]}</div>
             </div>
           ))}

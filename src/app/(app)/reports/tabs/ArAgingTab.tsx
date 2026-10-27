@@ -9,6 +9,7 @@ import { ExportBar, type ReportTabContext } from "../reportUi";
 import { AGING_BUCKETS } from "@/lib/aging";
 import { getArAgingReport } from "@/lib/reportQueries";
 import { ui } from "@/lib/ui";
+import { formatByCurrency } from "@/lib/currencyTotals";
 
 export function ArAgingTab({ arAgingData, ctx }: {
   arAgingData: NonNullable<Awaited<ReturnType<typeof getArAgingReport>>>;
@@ -23,9 +24,9 @@ export function ArAgingTab({ arAgingData, ctx }: {
           tab="arAging"
           from={rangeFrom}
           to={rangeTo}
-          message={`${dict.modules.finance.aging.arTitle} — ${rangeTo}\n${m.arAgingReport.invoiceCount(arAgingData.invoiceCount)}\n${m.arAgingReport.totalOutstanding(arAgingData.totalOutstanding.toFixed(2))}`}
+          message={`${dict.modules.finance.aging.arTitle} — ${rangeTo}\n${m.arAgingReport.invoiceCount(arAgingData.invoiceCount)}\n${m.arAgingReport.totalOutstanding(formatByCurrency(arAgingData.totalOutstanding))}`}
           filenameBase={`ar-aging-${rangeTo}`}
-          headers={["Invoice", "Customer", "Project", "Issue date", "Due date", "Bucket", "Amount due"]}
+          headers={["Invoice", "Customer", "Project", "Issue date", "Due date", "Bucket", "Amount due", "Currency"]}
           rows={arAgingData.rows.map((inv) => [
             inv.invoiceNumber,
             inv.customer.legalName,
@@ -34,13 +35,14 @@ export function ArAgingTab({ arAgingData, ctx }: {
             new Date(inv.dueDate).toISOString(),
             inv.bucket,
             inv.amountDue,
+            inv.currency,
           ])}
         />
         <p className="text-sm text-ink-muted">{m.arAgingReport.intro}</p>
         <div className="flex flex-wrap gap-4">
           <div className={ui.card}>
-            <div className="font-mono text-2xl tabular">{arAgingData.totalOutstanding.toFixed(2)}</div>
-            <div className="mt-1 text-sm text-ink-muted">{m.arAgingReport.totalOutstanding(arAgingData.totalOutstanding.toFixed(2))}</div>
+            <div className="font-mono text-2xl tabular">{formatByCurrency(arAgingData.totalOutstanding)}</div>
+            <div className="mt-1 text-sm text-ink-muted">{m.arAgingReport.totalOutstanding(formatByCurrency(arAgingData.totalOutstanding))}</div>
           </div>
           <div className={ui.card}>
             <div className="font-mono text-2xl tabular">{arAgingData.invoiceCount}</div>
@@ -48,7 +50,7 @@ export function ArAgingTab({ arAgingData, ctx }: {
           </div>
           {AGING_BUCKETS.map((b) => (
             <div key={b.key} className={ui.card}>
-              <div className="font-mono text-xl tabular">{arAgingData.byBucket[b.key].toFixed(0)}</div>
+              <div className="font-mono text-xl tabular">{formatByCurrency(arAgingData.byBucket[b.key], 0)}</div>
               <div className="mt-1 text-sm text-ink-muted">{dict.modules.finance.aging.bucketLabel[b.key]}</div>
             </div>
           ))}

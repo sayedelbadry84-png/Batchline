@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { isWholeMinorUnits, toMinorUnits } from "./money";
 
 // Every function here takes its Prisma client as the first argument rather
 // than importing the module-level singleton directly — the caller is
@@ -90,13 +91,21 @@ export async function postJournalEntry(
     lines: { account: AccountRef; debit?: number; credit?: number }[];
   },
 ): Promise<void> {
-  const totalDebit = params.lines.reduce((sum, l) => sum + (l.debit ?? 0), 0);
-  const totalCredit = params.lines.reduce((sum, l) => sum + (l.credit ?? 0), 0);
   if (params.lines.some(l => !Number.isFinite(l.debit ?? 0) || !Number.isFinite(l.credit ?? 0) || (l.debit ?? 0) < 0 || (l.credit ?? 0) < 0)) {
     throw new Error("Journal amounts must be finite and non-negative.");
   }
-  if (Math.abs(totalDebit - totalCredit) > 0.01) {
-    throw new Error(`Unbalanced journal entry for ${params.sourceModule}/${params.sourceRecordId}: debit ${totalDebit} != credit ${totalCredit}`);
+  // Audit 2026-10-26 P1-B: a journal line is a whole number of minor units
+  // or it is refused. The 0.01 tolerance this replaces let 110.011 be
+  // posted, and the books then held a fraction of a halala that no printed
+  // document shows. Callers round derived amounts with roundMoney before
+  // persisting the source record; this is the backstop, not the policy.
+  if (params.lines.some(l => !isWholeMinorUnits(l.debit ?? 0) || !isWholeMinorUnits(l.credit ?? 0))) {
+    throw new Error(`Journal amounts for ${params.sourceModule}/${params.sourceRecordId} must be whole minor units.`);
+  }
+  const totalDebit = params.lines.reduce((sum, l) => sum + toMinorUnits(l.debit ?? 0), 0);
+  const totalCredit = params.lines.reduce((sum, l) => sum + toMinorUnits(l.credit ?? 0), 0);
+  if (totalDebit !== totalCredit) {
+    throw new Error(`Unbalanced journal entry for ${params.sourceModule}/${params.sourceRecordId}: debit ${totalDebit / 100} != credit ${totalCredit / 100}`);
   }
 
   // JE numbers are global, including across unrelated sites/accounts.
@@ -112,7 +121,7 @@ export async function postJournalEntry(
           sourceRecordId: params.sourceRecordId,
           memo: params.memo,
           lines: {
-            create: params.lines.map((l, i) => ({ accountId: accountIds[i], debit: l.debit ?? 0, credit: l.credit ?? 0, siteId: params.siteId, currency: params.currency })),
+            create: params.lines.map((l, i) => ({ accountId: accountIds[i], debit: toMinorUnits(l.debit ?? 0) / 100, credit: toMinorUnits(l.credit ?? 0) / 100, siteId: params.siteId, currency: params.currency })),
           },
         };
   });

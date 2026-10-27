@@ -9,6 +9,7 @@ import { buildZatcaQrPayload, zatcaTimestamp } from "./qr";
 import { buildZatcaInvoiceXml } from "./invoiceXml";
 import { hashInvoiceXml, signInvoiceXml } from "./sign";
 import { getNextZatcaChainPosition, lockSiteChain } from "./chain";
+import { roundMoneyMinor, toMinorUnits } from "@/lib/money";
 
 // A credit note is the only legal way to amend an already-issued
 // invoice, so ZATCA requires it to go through the same QR/XML generation
@@ -46,8 +47,13 @@ export async function generateZatcaCreditNoteDocuments(creditNoteId: string, act
     const { icv, previousHash: previousInvoiceHash, generatedAt } = await getNextZatcaChainPosition(tx, creditNote.invoice.plant.siteId);
 
     const taxRatePct = creditNote.invoice.taxRatePct;
-    const subtotal = taxRatePct > 0 ? creditNote.amount / (1 + taxRatePct / 100) : creditNote.amount;
-    const taxAmount = creditNote.amount - subtotal;
+    // The split of a VAT-inclusive amount is rounded to the minor unit so
+    // the document carries exactly subtotal + tax = amount (audit
+    // 2026-10-26 P1-B); before, both halves were fractions of a halala.
+    const amountMinor = toMinorUnits(creditNote.amount);
+    const subtotalMinor = taxRatePct > 0 ? roundMoneyMinor(creditNote.amount / (1 + taxRatePct / 100)) : amountMinor;
+    const subtotal = subtotalMinor / 100;
+    const taxAmount = (amountMinor - subtotalMinor) / 100;
 
     const uuid = randomUUID();
     const issueDate = creditNote.createdAt;

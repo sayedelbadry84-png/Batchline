@@ -1,3 +1,5 @@
+import { roundMoney, roundMoneyMinor, toMinorUnits } from "./money";
+
 const DEFAULT_NET_DAYS = 30;
 
 // Discount terms contain several numbers: "2/10 Net 30" is due in 30
@@ -24,3 +26,24 @@ export function invoiceAmountDue(invoice: { total: number; payments: { amount: n
   return Math.max(0, invoice.total - paid - credited);
 }
 
+
+// Audit 2026-10-26 P1-B: the invoice rounding policy in one place, so the
+// action, its tests and any read-only check apply the same rule. Each line
+// is volume × unit price rounded to the minor unit; the subtotal is the
+// exact sum of those stored lines; tax is the subtotal × rate, rounded
+// once; the total is subtotal + tax. Every value returned is a whole
+// number of minor units, which is what postInvoice now requires.
+export function priceInvoice<L extends { volumeM3: number; unitPrice: number }>(
+  lines: L[],
+  taxRatePct: number,
+): { lines: (L & { lineTotal: number })[]; subtotal: number; taxAmount: number; total: number } {
+  const priced = lines.map((l) => ({ ...l, lineTotal: roundMoney(l.volumeM3 * l.unitPrice) }));
+  const subtotalMinor = priced.reduce((sum, l) => sum + toMinorUnits(l.lineTotal), 0);
+  const taxMinor = roundMoneyMinor((subtotalMinor / 100) * (taxRatePct / 100));
+  return {
+    lines: priced,
+    subtotal: subtotalMinor / 100,
+    taxAmount: taxMinor / 100,
+    total: (subtotalMinor + taxMinor) / 100,
+  };
+}

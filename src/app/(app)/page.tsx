@@ -6,12 +6,15 @@ import { canAccessModule } from "@/lib/permissions";
 import { getDictionary } from "@/lib/i18n";
 import { detectAnomalies, type DeviationSample } from "@/lib/anomaly";
 import { groupReservationsByDay, computeWeekdayAverages } from "@/lib/demand";
+import { formatByCurrency, sumByCurrency } from "@/lib/currencyTotals";
 import { flagMaintenanceDue } from "@/lib/maintenance";
 import { DemandOutlookStrip } from "@/components/DemandOutlookStrip";
 import { DrumTimer } from "@/components/DrumTimer";
 import { getActiveSiteId, plantScopeWhere, reservationSiteScopeWhere, tripPlantScopeWhere } from "@/lib/siteScope";
 import { sumAcceptedVolumeM3 } from "@/lib/reservations";
 import { invoiceAmountDue } from "@/lib/billing";
+import { addDays, wallClockDayStart, zonedDayStart, zonedIsoDay } from "@/lib/plantDay";
+import { getDisplayTimeZone } from "@/lib/displayTimeZone";
 
 const SEVEN_DAYS = 7;
 const OUTLOOK_DAYS = 7;
@@ -35,10 +38,15 @@ export default async function DashboardPage() {
 
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
-  const todayStart = new Date(nowMs);
-  todayStart.setHours(0, 0, 0, 0);
-  const outlookEnd = new Date(todayStart);
-  outlookEnd.setDate(outlookEnd.getDate() + OUTLOOK_DAYS);
+  // PM review 2026-10-27 P2-2: days are the plant's local days on the
+  // page's clock. batchCompletedAt is a real instant (zoned windows);
+  // pourWindowStart is stored as plant wall-clock time, so its window and
+  // buckets are UTC midnights of the local date (see wallClockDayStart).
+  const zone = await getDisplayTimeZone();
+  const todayIso = zonedIsoDay(new Date(nowMs), zone);
+  const todayStart = zonedDayStart(todayIso, zone);
+  const pourTodayStart = wallClockDayStart(todayIso);
+  const outlookEnd = wallClockDayStart(addDays(todayIso, OUTLOOK_DAYS));
 
   const [
     plants,
@@ -79,7 +87,7 @@ export default async function DashboardPage() {
       include: { components: { include: { material: true } } },
     }),
     prisma.reservation.findMany({
-      where: { status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] }, pourWindowStart: { gte: todayStart, lt: outlookEnd }, ...reservationSiteScopeWhere(siteId) },
+      where: { status: { in: ["REQUESTED", "CONFIRMED", "IN_PRODUCTION"] }, pourWindowStart: { gte: pourTodayStart, lt: outlookEnd }, ...reservationSiteScopeWhere(siteId) },
       include: { batchTickets: { where: { status: { not: "CANCELLED" } }, select: { volumeM3: true, trip: { select: { volumeDeliveredM3: true } } } } },
     }),
     prisma.reservation.findMany({ where: { status: "ON_HOLD", ...reservationSiteScopeWhere(siteId) }, include: { project: true } }),
@@ -101,8 +109,7 @@ export default async function DashboardPage() {
   // --- Cement days-of-cover KPI — same derivation as the Silos report tab
   // (reports/page.tsx): last-7-days consumption rate against what's on
   // hand right now, for CEMENT specifically (not every silo material). ---
-  const since7d = new Date(todayStart);
-  since7d.setDate(since7d.getDate() - SEVEN_DAYS);
+  const since7d = zonedDayStart(addDays(todayIso, -SEVEN_DAYS), zone);
   const cementConsumedKg7d = completedTickets
     .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= since7d)
     .flatMap((t) => t.components)
@@ -156,10 +163,9 @@ export default async function DashboardPage() {
   // used for anomaly detection below — one query, two views. ---
   const sparklineDays: { date: Date; volumeM3: number }[] = [];
   for (let i = SEVEN_DAYS - 1; i >= 0; i--) {
-    const dayStart = new Date(todayStart);
-    dayStart.setDate(dayStart.getDate() - i);
-    const dayEnd = new Date(dayStart);
-    dayEnd.setDate(dayEnd.getDate() + 1);
+    const day = addDays(todayIso, -i);
+    const dayStart = zonedDayStart(day, zone);
+    const dayEnd = zonedDayStart(addDays(day, 1), zone);
     const volumeM3 = completedTickets
       .filter((t) => t.batchCompletedAt && t.batchCompletedAt >= dayStart && t.batchCompletedAt < dayEnd)
       .reduce((sum, t) => sum + t.volumeM3, 0);
@@ -174,8 +180,8 @@ export default async function DashboardPage() {
 
   // Reservations whose pour window falls today specifically, out of the
   // already-fetched 7-day outlook window.
-  const tomorrowStart = new Date(todayStart.getTime() + 86400000);
-  const reservationsPourToday = upcomingReservations.filter((res) => res.pourWindowStart >= todayStart && res.pourWindowStart < tomorrowStart).length;
+  const tomorrowStart = wallClockDayStart(addDays(todayIso, 1));
+  const reservationsPourToday = upcomingReservations.filter((res) => res.pourWindowStart >= pourTodayStart && res.pourWindowStart < tomorrowStart).length;
 
   // --- Anomaly detection — same method as Reports (src/lib/anomaly.ts). ---
   const byMaterial = new Map<string, { materialName: string; samples: DeviationSample[] }>();
@@ -197,6 +203,7 @@ export default async function DashboardPage() {
     completedTickets.filter((t) => t.batchCompletedAt).map((t) => ({ date: t.batchCompletedAt!, volumeM3: t.volumeM3 })),
     WEEKS_BACK_FOR_WEEKDAY_AVG,
     todayStart,
+    zone,
   );
   const demandOutlook = groupReservationsByDay(
     upcomingReservations.map((res) => ({
@@ -204,8 +211,9 @@ export default async function DashboardPage() {
       remainingVolumeM3: res.requestedVolumeM3 - sumAcceptedVolumeM3(res.batchTickets),
     })),
     OUTLOOK_DAYS,
-    todayStart,
+    pourTodayStart,
     weekdayAverages,
+    "UTC",
   );
 
   // --- AR / quality KPIs, only computed (and shown) for roles that can
@@ -237,9 +245,10 @@ export default async function DashboardPage() {
       ])
     : [[], []];
 
+  // Per currency (PM review 2026-10-27 P1-1).
   const arOutstanding = canSeeBilling
-    ? sentInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0)
-    : 0;
+    ? sumByCurrency(sentInvoices, (inv) => invoiceAmountDue(inv), (inv) => inv.currency)
+    : [];
   const overdueInvoiceCount = canSeeBilling ? sentInvoices.filter((inv) => inv.dueDate.getTime() < nowMs).length : 0;
 
   // --- Unified alert feed: every warning scattered across Silos, Trips,
@@ -373,7 +382,7 @@ export default async function DashboardPage() {
           </Link>
           {canSeeBilling && (
             <Link href="/finance?tab=billing" className={`${ui.card} kpi-glow block`} style={{ "--glow": "var(--critical)" } as React.CSSProperties}>
-              <div className="font-mono text-2xl tabular" dir="ltr">{arOutstanding.toLocaleString()}</div>
+              <div className="font-mono text-2xl tabular" dir="ltr">{formatByCurrency(arOutstanding, 0)}</div>
               <div className="mt-1 text-sm text-ink-muted">{d.kpiArOutstanding}</div>
               {overdueInvoiceCount > 0 && <div className="mt-1 text-xs text-critical">{r.arOverdue}: {overdueInvoiceCount}</div>}
             </Link>
